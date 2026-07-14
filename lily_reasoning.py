@@ -152,6 +152,7 @@ class LilyReasoning:
         prompt: str,
         thinking_level: str,
         system_instruction: Optional[str] = None,
+        response_mime_type: Optional[str] = None,
     ) -> str:
         config = genai_types.GenerateContentConfig(
             # Default sampling params — never override temperature/top_p/top_k
@@ -162,6 +163,7 @@ class LilyReasoning:
             safety_settings=_SAFETY_SETTINGS,
             max_output_tokens=lily_config.vocal_max_output_tokens(),
             system_instruction=system_instruction,
+            response_mime_type=response_mime_type,
         )
         response = await asyncio.to_thread(
             self._client.models.generate_content,
@@ -203,18 +205,38 @@ class LilyReasoning:
             mode=mode,
             avoid_block=avoid_block,
         )
-        raw = await self._generate(self._model, prompt, REASONING_THINKING_LEVEL)
-        return lily_parse_question_json(raw)
+        raw = await self._generate(
+            self._model,
+            prompt,
+            REASONING_THINKING_LEVEL,
+            response_mime_type="application/json",
+        )
+        parsed = lily_parse_question_json(raw)
+        if parsed is None:
+            logger.warning(
+                "LILY_REASONING | QUESTION_PARSE_FAILED | raw_prefix=%r",
+                (raw or "")[:400],
+            )
+        return parsed
 
     async def verify_question(self, question: dict) -> tuple[bool, str]:
         """Verification at prefetch time on the 3.1 Pro node."""
         prompt = _VERIFICATION_PROMPT.format(
             question_json=json.dumps(question, ensure_ascii=False)
         )
-        raw = await self._generate(self._model, prompt, REASONING_THINKING_LEVEL)
+        raw = await self._generate(
+            self._model,
+            prompt,
+            REASONING_THINKING_LEVEL,
+            response_mime_type="application/json",
+        )
         try:
             data = json.loads(_strip_fences(raw))
         except (json.JSONDecodeError, ValueError):
+            logger.warning(
+                "LILY_REASONING | VERIFY_PARSE_FAILED | raw_prefix=%r",
+                (raw or "")[:400],
+            )
             return False, "verifier returned unparseable output"
         if data.get("verdict") == "pass":
             return True, data.get("reason") or "verified"
