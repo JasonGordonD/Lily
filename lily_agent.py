@@ -390,6 +390,31 @@ class LilyGame:
                     self.sk.clear_status_notes()
             if question is not None:
                 self.next_question = question
+                # Auto-advance (frozen-reveal deadlock fix): when the reveal
+                # consumed the previous question BEFORE this prefetch landed,
+                # arm_next_question() at reveal time returned False and no
+                # later code path arms or asks — Lily only takes a turn when
+                # someone speaks, so a quiet table stares at a stale reveal
+                # forever. If the game is live and idle, arm and nudge now.
+                if (
+                    self.game_started
+                    and not self.game_over
+                    and self.armed_question is None
+                    and not self.sk.answer_window_open
+                    and not self._adjudicating
+                ):
+                    if self.arm_next_question() and self.session is not None:
+                        logger.info(
+                            "LILY_STATE | PREFETCH_AUTO_ADVANCE | session=%s q=%d",
+                            self.sk.session_id, self.sk.question_number,
+                        )
+                        self.session.generate_reply(
+                            instructions=(
+                                "The next question just landed in the state "
+                                "block. Bridge in one short beat and ask it "
+                                "now, word for word."
+                            )
+                        )
             self.publish_attributes_nowait()
 
         self._prefetch_task = asyncio.ensure_future(_prefetch())
@@ -1664,6 +1689,17 @@ class LilyAgent(Agent):
             player_name: The rostered player receiving the point.
             reason: One short line on why (spoken back and shown on screen).
         """
+        # Gate: bonuses are scoring events on a live round. Before the
+        # arm/ask/adjudicate loop has engaged (game_started=False) every
+        # award would silently backfill players[name].score and disguise a
+        # stalled loop as a working game — exactly what the 2026-07-14 rows
+        # showed. Refuse loudly so Lily's LLM adapts and any future stall
+        # surfaces as empty scores instead of ghost bonuses.
+        if not self._game.game_started:
+            return (
+                "Bonus points can only be awarded once a round is underway. "
+                "Call lily_begin_round first or wait for auto-start."
+            )
         name = (player_name or "").strip()
         if name not in self._game.sk.players:
             return f"No rostered player named {name!r} — no point awarded."
