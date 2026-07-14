@@ -189,3 +189,88 @@ def session_log_dir() -> Optional[str]:
 def job_memory_limit_mb() -> float:
     """Explicit worker memory limit (1.6.4 memory-monitor hardening)."""
     return _get_float("LILY_JOB_MEMORY_LIMIT_MB", 2048.0)
+
+
+# ---------------------------------------------------------------------------
+# Audeering devAIce acoustic pipeline (WO-LILY-AUDEERING-001)
+# ---------------------------------------------------------------------------
+# Billing is audio-seconds, not per-module (JRVS Probe-C Q1 finding): the full
+# module set costs 1× quota. All tunables are STARTING POINTS.
+
+def audeering_api_key() -> Optional[str]:
+    """Missing key opens the circuit breaker (best-effort pipeline; the
+    session runs unaffected). Never required at boot."""
+    raw = _get("AUDEERING_API_KEY")
+    if raw is None:
+        return None
+    return raw.strip().strip('"').strip("'") or None
+
+
+def audeering_max_uploads_per_session() -> int:
+    """Hard cap on per-session uploads. 240 captures × 5s window / 60 =
+    20 minutes of billable audio even on a runaway session (same 20-minute
+    ceiling rationale as the JRVS donor cap)."""
+    return _get_int("AUDEERING_MAX_UPLOADS_PER_SESSION", 240)
+
+
+def audeering_window_seconds() -> float:
+    """Capture window. MUST stay >=5s — the devAIce scene model is
+    optimized for windows longer than 5 seconds (doc finding)."""
+    return max(5.0, _get_float("AUDEERING_WINDOW_SECONDS_F", 5.0))
+
+
+def audeering_capture_interval_seconds() -> float:
+    return _get_float("AUDEERING_CAPTURE_INTERVAL_SECONDS", 5.0)
+
+
+def audeering_min_snr_db() -> float:
+    """Reliability gate: affect lines are suppressed under this SNR."""
+    return _get_float("AUDEERING_MIN_SNR_DB", 12.0)
+
+
+def audeering_snr_transit_adjust() -> float:
+    """Transit scenes loosen the SNR bar (JRVS D2b pattern — scene feeds
+    the reliability gate)."""
+    return _get_float("AUDEERING_SNR_TRANSIT_ADJUST", -2.0)
+
+
+def audeering_avd_smooth_window() -> int:
+    """Rolling window (segments) for the room-level AVD smoother.
+    Descriptors only — safety triggers run OUTSIDE the smoother."""
+    return max(1, _get_int("AUDEERING_AVD_SMOOTH_WINDOW", 4))
+
+
+def audeering_avd_neutral_band() -> float:
+    """Per-axis neutral band: all axes inside it -> inject NOTHING."""
+    return _get_float("AUDEERING_AVD_NEUTRAL_BAND", 0.15)
+
+
+def audeering_child_halt_threshold_high() -> float:
+    return _get_float("AUDEERING_CHILD_HALT_THRESHOLD_HIGH", 0.85)
+
+
+def audeering_child_halt_threshold_borderline() -> float:
+    return _get_float("AUDEERING_CHILD_HALT_THRESHOLD_BORDERLINE", 0.5)
+
+
+def audeering_child_halt_sustained_n() -> int:
+    return max(1, _get_int("AUDEERING_CHILD_HALT_SUSTAINED_N", 2))
+
+
+def _get_bool(name: str, default: bool) -> bool:
+    raw = _get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "off", "no", "")
+
+
+def audeering_child_halt_enabled() -> bool:
+    """Lily default TRUE (JRVS shipped these false pending an action
+    surface; Lily HAS the action surface — the adult-mode veto — so the
+    ladder ships armed)."""
+    return _get_bool("AUDEERING_CHILD_HALT_ENABLED", True)
+
+
+def audeering_child_step_up_enabled() -> bool:
+    """Borderline tier — also TRUE for Lily (veto-only, both tiers)."""
+    return _get_bool("AUDEERING_CHILD_STEP_UP_ENABLED", True)

@@ -324,6 +324,41 @@ async def lily_update_addressee_label(
 
 
 # ---------------------------------------------------------------------------
+# Acoustic trajectories (WO-LILY-AUDEERING-001 Task 6)
+# ---------------------------------------------------------------------------
+
+async def lily_write_acoustic_trajectory(
+    supabase: SupabaseClient,
+    session_id: str,
+    turn_index: int,
+    snapshot: Optional[dict],
+) -> None:
+    """One lily_acoustic_trajectories row per user turn — the LATEST devAIce
+    capture at the moment the turn finalized. Fire-and-forget via to_thread;
+    silent on failure (debug log only — telemetry must never surface into
+    the live session). No row is written when no snapshot exists (breaker
+    open / nothing captured yet) — the trajectory table records signal, the
+    addressee log records the explicit-null health state."""
+    if supabase is None or not snapshot:
+        return
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_acoustic_trajectories").insert({
+                "session_id": session_id,
+                "turn_index": turn_index,
+                "category": snapshot.get("category") or {},
+                "dimension": snapshot.get("dimension") or {},
+                "prosody": snapshot.get("prosody") or {},
+                "features": snapshot.get("features") or {},
+                "audio_quality": snapshot.get("audio_quality") or {},
+                "scene": snapshot.get("scene"),
+            }).execute()
+        )
+    except Exception as e:
+        logger.debug("lily_write_acoustic_trajectory error: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Session reports (B3 — Lovebirds call_reports shape, WRITE side only)
 # ---------------------------------------------------------------------------
 

@@ -139,8 +139,13 @@ lily_memory.py       persistent cross-session memory: session summaries, the
                      [RETURNING TABLE] block, KB-bank adult-mode guard (stdlib-only)
 lily_tts.py          ElevenLabs v3 wrapper (lbs_tts lift; byte-alignment carry, 5K split)
 lily_config.py       ALL env access lives here
+lily_audeering_client.py     devAIce Web API client + room-audio capture pipeline
+                             (native lift of mjrvs_audeering_client + pipeline)
+lily_audeering_consumers.py  gates, room-read banding, child-signal ladder, scene,
+                             rubric loader + import-time zero-scalar lint, state store
 prompts/lily_system.txt      the whole character (incl. <tts_guidelines>, <voice_output>)
 prompts/layer_lily_adult.md  additive adult layer (register shift; group-directed only)
+prompts/lily_room_read_rubric.txt  room-read rubric (loader-appended; zero-scalar linted)
 migrations/001_lily_schema.sql          six lily_ tables (no pgvector)
 migrations/002_lily_questions_seed.sql  30 curated questions (demo insurance)
 migrations/003_lily_memory.sql          lily_memories + lily_questions.adult guard column
@@ -148,7 +153,9 @@ migrations/004_lily_questions_expansion.sql  200 curated_v2 bank questions
 migrations/005_lily_addressee_log.sql   addressee-label corpus (applied to production 2026-07-14)
 migrations/006_lily_session_reports.sql lily_session_reports (write side; assessment filled later)
 migrations/007_lily_memories_player_names.sql  lily_memories.player_names audit column (+GIN index)
-tests/               146 tests, run with plain `python -m pytest tests/` — no livekit, no network
+migrations/008_lily_acoustic_trajectories.sql  per-turn acoustic snapshots + addressee
+                                               acoustic_snapshot column
+tests/               211 tests, run with plain `python -m pytest tests/` — no livekit, no network
 ```
 
 ## Persistent memory (rematch)
@@ -280,6 +287,137 @@ Labels land three ways (`label_source`):
   "talking to him") → `label=deliberation`; unparseable → `label=unknown`.
   The reply parser is pure and offline-tested (`lily_addressee.py`).
 
+## Acoustic pipeline (Audeering devAIce)
+
+Lily reads the ROOM, not the transcript: rolling ≥5s windows of room audio
+are uploaded to the audEERING devAIce Web API (v4.9.0) and consumed as
+natural-language hosting signals plus one safety-critical action surface.
+Native lift of the JRVS canary (`mjrvs_audeering_client.py` /
+`mjrvs_audeering_consumers.py`, WO-JRVS-AUDEERING-MODULES-D-001) — Lily
+files are `lily_audeering_client.py` (HTTP client + capture pipeline) and
+`lily_audeering_consumers.py` (gates, banding, ladder, rubric, state store).
+
+**Modules requested** (exact upload config; billing is audio-seconds — JRVS
+Probe-C confirmed per-second, not per-module, so this full set is 1× quota):
+
+```json
+{"expression": {"expressionModel": "large"}, "prosody": {}, "audioQuality": {},
+ "aed": {}, "scene": {"outputSubScene": true},
+ "speakerAttributes": {"speakerAttributesModel": "large"}}
+```
+
+`asr` and `speakerVerification` are EXCLUDED. `speakerAttributesModel`
+"large" is MANDATORY (the small model returns null child scores on short
+segments and would starve the safety ladder). The capture window is floored
+at 5s in `lily_config` — the scene model is optimized for >5s windows, one
+classification per window (no continuous sub-windowing).
+
+**Capture wiring (the Tijoux lesson):** the `track_subscribed` handler is
+registered AFTER `session.start()` returns (handlers registered earlier fire
+into a half-initialized session), and a safety-net scan attaches
+already-subscribed tracks that landed during the start window. Multi-mic
+tables attach every non-agent audio track.
+
+**D-cross rules (JRVS, carried verbatim):**
+
+1. **Zero scalars in the prompt.** The LLM never sees `arousal=0.71` — only
+   `[room read: agitated / on edge]`. The rubric
+   (`prompts/lily_room_read_rubric.txt`, appended to `lily_system.txt` at
+   loader level) is a PHRASE LIST ONLY, and an import-time lint in
+   `lily_audeering_consumers` raises on ANY digit in it — a scalar in the
+   rubric fails the container at boot.
+2. **Quality gate first.** `audioQuality.snr < AUDEERING_MIN_SNR_DB`
+   (default 12) suppresses all affect lines for that window. Doc caveat
+   encoded in the gate: the SNR model is strong on background noise
+   (CCC 0.94) and weak on speech-distortion (CCC 0.38) — it is a
+   background-noise gate only; do not tighten it chasing distortion.
+   Transit scenes loosen the bar by `AUDEERING_SNR_TRANSIT_ADJUST`
+   (default −2; the JRVS D2b scene→gate pattern).
+3. **AED gate:** music co-active with speech suppresses affect reads
+   (party rooms — singing must never read as an emotional event). AED
+   thresholds ride the doc defaults (applied server-side).
+4. **Baseline-relative reads / smoothing on descriptors ONLY.** The
+   room-level AVD (`expression.dimension`, −1..1; `category` scores are NOT
+   consumed) is smoothed over `AUDEERING_AVD_SMOOTH_WINDOW` (default 4)
+   bounded deques, banded into descriptors, injected as
+   `[room read: ...]` lines in the `[GAME STATE]` block. All axes inside
+   `AUDEERING_AVD_NEUTRAL_BAND` → inject NOTHING.
+5. **Safety triggers run OUTSIDE the smoother.** The child ladder keeps its
+   own per-segment streak counters — widening the smooth window cannot
+   delay it (regression-pinned in `tests/test_audeering.py`).
+6. **Never block a turn.** Uploads are fire-and-forget; the agent reads the
+   latest state synchronously in `build_state_block`.
+7. **Consumer exceptions never stop raw-signal recording.**
+8. **Circuit breaker on missing `AUDEERING_API_KEY`** — best-effort: one
+   structured `LILY_AUDEERING_BREAKER` log line, uploads disabled, the
+   session runs unaffected.
+
+**Room read → hosting moves** (rubric mapping): "flat / low energy" →
+easier question + spotlight move; "hot / riding high" → tighten and ride
+it; "valence sagging" (on a hard-question streak) → drop a gimme;
+"agitated / on edge" → cool it down. Scene sub-labels map to hosting
+calibration: small indoor → living-room intimacy, large indoor → bar
+energy, transport → shorter questions + more repetition tolerance — as a
+low-priority `[env: ...]` line, at most once per state-block refresh.
+
+**Child-signal ladder → adult-mode veto (SAFETY-CRITICAL; ships with the
+pipeline, never after).** Signal: `speakerAttributes.gender.child`
+(schema `{gender: {female, male, child}` summing to 1, `age: number|null}`),
+one result per VAD speech segment — a young voice produces its own
+segment-level scores, and the sustained-N streak counts segments.
+Tiers: HIGH ≥ `AUDEERING_CHILD_HALT_THRESHOLD_HIGH` (0.85) sustained N=2;
+BORDERLINE ≥ `AUDEERING_CHILD_HALT_THRESHOLD_BORDERLINE` (0.5) sustained
+N=2. HIGH segments also advance the borderline streak (JRVS ladder fix —
+oscillation around the high threshold cannot evade both tiers).
+**Null-safe:** a null child score (too-short segment) neither advances NOR
+resets a streak. The ladder runs BEFORE the quality/music gates — a child
+on noisy audio or a child singing is never a blind spot. Enable flags
+default ON for Lily (`AUDEERING_CHILD_HALT_ENABLED`,
+`AUDEERING_CHILD_STEP_UP_ENABLED`; JRVS shipped them false pending an
+action surface — Lily has one).
+
+Actions (veto-only, BOTH tiers):
+
+- **Adult mode ACTIVE + ladder trips** → exit through the SAME sticky-flag
+  path as the spoken "back to normal": `sk.set_mode("general")` +
+  attribute publish + deterministic revert flow (`LilyGame.on_child_signal`,
+  wired as the acoustic state's `on_child_signal` callback). Instant,
+  in-character line WITHOUT explaining the mechanism, general category next.
+- **Adult mode REQUESTED while tripped** → the `lily_enter_adult_mode` tool
+  checks `acoustic.child_veto_active()` and refuses, telling Lily to keep
+  the general deck with a light in-character deflection.
+
+Framing, stamped doc-verbatim at every emit site
+(`lily_audeering_consumers.PERCEIVED_FRAMING`): the module estimates "how
+the speaker sounds, not necessarily the actual attributes of the speaker";
+age MAE is ±8.46yr — the signal can EXIT or BLOCK adult mode, NEVER
+authorize it; whole-room verbal consensus remains necessary and is no
+longer sufficient. Age/gender are otherwise telemetry-only, stamped
+`PERCEIVED_NOT_VERIFIED`, never spoken, never in the prompt.
+
+**Persistence (migration 008):** one `lily_acoustic_trajectories` row per
+finalized user turn (fire-and-forget, `to_thread`) carrying the latest
+capture's `category` / `dimension` / `prosody` / `features` jsonb (index on
+`session_id, turn_index`; drt_acoustic_trajectories clone). Every
+`lily_addressee_log` row now also carries `acoustic_snapshot` — non-null
+jsonb when the pipeline is healthy, an EXPLICIT SQL null (key always set,
+never absent) when the breaker is open.
+
+**Env** (all via `lily_config`; also threaded through
+`.github/workflows/deploy.yml` — key from secrets, tunables from vars):
+`AUDEERING_API_KEY`, `AUDEERING_MAX_UPLOADS_PER_SESSION` (default 240 —
+20 min billable ceiling), `AUDEERING_WINDOW_SECONDS_F` (default 5, floored
+at 5), `AUDEERING_CAPTURE_INTERVAL_SECONDS` (5),
+`AUDEERING_MIN_SNR_DB` (12), `AUDEERING_SNR_TRANSIT_ADJUST` (−2),
+`AUDEERING_AVD_SMOOTH_WINDOW` (4), `AUDEERING_AVD_NEUTRAL_BAND` (0.15),
+`AUDEERING_CHILD_HALT_THRESHOLD_HIGH` (0.85),
+`AUDEERING_CHILD_HALT_THRESHOLD_BORDERLINE` (0.5),
+`AUDEERING_CHILD_HALT_SUSTAINED_N` (2), `AUDEERING_CHILD_HALT_ENABLED`
+(true), `AUDEERING_CHILD_STEP_UP_ENABLED` (true).
+
+Out of scope (deliberate): per-speaker AVD attribution, the `asr` module,
+speaker verification, Hume, any gender-conditional behavior.
+
 ## Frontend seam (prmpt_ui `(lily)` route group)
 
 - **Participant attributes** (LWW, per question beat): `phase`
@@ -311,7 +449,9 @@ Labels land three ways (`label_source`):
 `LILY_AUTO_START_MIN_PLAYERS` / `LILY_AUTO_START_LOBBY_GRACE_SECONDS`
 (lobby auto-start safety net), `LILY_GROUP_ID` (group-identity override),
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
-`LILY_JOB_MEMORY_LIMIT_MB`. No secrets in this repo — configure via the deployment
+`LILY_JOB_MEMORY_LIMIT_MB` · acoustic pipeline: `AUDEERING_API_KEY` plus the
+`AUDEERING_*` tunables listed in the acoustic-pipeline section (missing key =
+breaker open, session unaffected). No secrets in this repo — configure via the deployment
 secrets manager (`lk agent update-secrets` with an explicit `--id`; `--overwrite`
 is banned in the shared project — LuvByrds is production tenancy).
 
