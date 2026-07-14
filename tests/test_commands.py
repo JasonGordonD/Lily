@@ -1,0 +1,109 @@
+"""Tests for sticky player-command detection — deterministic, period and
+fragment proof (spec §11.4)."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from lily_scorekeeper import LilyScorekeeper, lily_detect_control_command
+
+
+def make_sk():
+    sk = LilyScorekeeper(session_id="test-room")
+    sk.bind_speaker("S1", "Sarah")
+    return sk
+
+
+# ---------------------------------------------------------------------------
+# Direct detection — punctuation-proof
+# ---------------------------------------------------------------------------
+
+def test_back_to_normal_plain():
+    assert lily_detect_control_command("back to normal") == "back_to_normal"
+
+
+def test_back_to_normal_period_proof():
+    assert lily_detect_control_command("Back. To normal.") == "back_to_normal"
+    assert lily_detect_control_command("back to... normal") == "back_to_normal"
+    assert lily_detect_control_command("BACK TO NORMAL!") == "back_to_normal"
+
+
+def test_back_to_normal_in_sentence():
+    assert (
+        lily_detect_control_command("okay can we go back to normal please")
+        == "back_to_normal"
+    )
+
+
+def test_skip_standalone():
+    assert lily_detect_control_command("skip") == "skip"
+    assert lily_detect_control_command("Skip!") == "skip"
+    assert lily_detect_control_command("can we skip this one") == "skip"
+
+
+def test_skip_not_inside_words():
+    assert lily_detect_control_command("the skipper of the boat") is None
+    assert lily_detect_control_command("skipping stones") is None
+
+
+def test_back_to_normal_wins_over_skip():
+    assert (
+        lily_detect_control_command("skip it, back to normal")
+        == "back_to_normal"
+    )
+
+
+def test_no_command_in_ordinary_speech():
+    assert lily_detect_control_command("Tungsten") is None
+    assert lily_detect_control_command("that was a normal question") is None
+    assert lily_detect_control_command("") is None
+
+
+# ---------------------------------------------------------------------------
+# Fragment-proof across segments (scorekeeper 2s join)
+# ---------------------------------------------------------------------------
+
+def test_command_across_fragmented_finals():
+    sk = make_sk()
+    r1 = sk.on_transcript_segment(text="Back to.", speaker_label="S1", now=100.0)
+    assert r1["control_command"] is None
+    r2 = sk.on_transcript_segment(text="Normal.", speaker_label="S1", now=101.0)
+    assert r2["control_command"] == "back_to_normal"
+
+
+def test_fragments_do_not_join_across_gap():
+    sk = make_sk()
+    sk.on_transcript_segment(text="Back to.", speaker_label="S1", now=100.0)
+    r2 = sk.on_transcript_segment(text="Normal.", speaker_label="S1", now=104.0)
+    assert r2["control_command"] is None
+
+
+def test_fragments_do_not_join_across_speakers():
+    sk = make_sk()
+    sk.bind_speaker("S2", "Dave")
+    sk.on_transcript_segment(text="Back to.", speaker_label="S1", now=100.0)
+    r2 = sk.on_transcript_segment(text="Normal.", speaker_label="S2", now=100.5)
+    assert r2["control_command"] is None
+
+
+def test_command_not_recorded_as_answer_candidate():
+    sk = make_sk()
+    sk.start_question({"prompt": "q", "canonical_answer": "Tungsten"})
+    sk.open_answer_window(now=100.0)
+    result = sk.on_transcript_segment(
+        text="skip", speaker_label="S1", now=101.0, segment_start_time=101.0
+    )
+    assert result["control_command"] == "skip"
+    assert result["candidate_recorded"] is False
+    assert sk.answer_candidates == {}
+
+
+def test_command_detection_survives_repeat():
+    """The fragment buffer clears after a command fires so the same
+    fragments don't double-fire."""
+    sk = make_sk()
+    r1 = sk.on_transcript_segment(text="back to normal", speaker_label="S1", now=100.0)
+    assert r1["control_command"] == "back_to_normal"
+    r2 = sk.on_transcript_segment(text="thanks", speaker_label="S1", now=100.5)
+    assert r2["control_command"] is None

@@ -1,0 +1,678 @@
+"""
+lily_scorekeeper.py — LILY Scorekeeper (descendant of Lovebirds Loop 1).
+
+Runs on every Speechmatics transcript segment. Zero LLM calls, pure local
+state, no livekit imports — importable anywhere (tests run without the
+agents framework installed).
+
+Owns:
+  - the N-player roster and per-player state (score/streak/talk-time/quiet)
+  - the system-directed classifier (vocative "Lily" — those turns must
+    never count as answer attempts)
+  - the answer-window state: opens on TTS playback completion, bounded
+    duration, finals-only, one candidate per player (first final wins),
+    order decided by STT segment timestamps — never by an LLM
+  - unrostered-speaker detection (LILY_STATE | UNROSTERED_SPEAKER,
+    open-floor fallback)
+  - sticky player-command detection ("back to normal", "skip") —
+    period/fragment-proof, enforced deterministically at the
+    transcript-event layer (the prompt is texture, not the mechanism)
+  - the compact state block injected before each Lily turn
+
+The scorekeeper owns ORDER; the LLM owns CORRECTNESS.
+"""
+
+import logging
+import re as _re
+import time
+from datetime import datetime, timezone
+from typing import Optional
+
+logger = logging.getLogger("lily_scorekeeper")
+
+TRANSCRIPT_BUFFER_SIZE = 30
+DEFAULT_ANSWER_WINDOW_SECONDS = 15.0
+FRAGMENT_JOIN_WINDOW_SECONDS = 2.0  # ASR fragment accumulation for commands
+
+# ---------------------------------------------------------------------------
+# System-directed turn classifier — lifted verbatim from lbs_scorekeeper
+# (lbs_is_system_directed) with the vocative swapped to "Lily".
+# Utterances addressed to the host, not answers. These MUST NOT be recorded
+# as answer candidates during an open answer window.
+# ---------------------------------------------------------------------------
+
+_SYSTEM_DIRECTED_PHRASES = (
+    "are you there",
+    "are you listening",
+    "can you hear",
+    "are you functioning",
+    "are you working",
+    "are you doing",
+    "are you broken",
+    "are you alive",
+    "are you with us",
+)
+
+# Standalone "hello" variants — entire utterance is just hello/hello?/hello.
+_SYSTEM_DIRECTED_HELLO_RE = _re.compile(
+    r"^\s*hello\s*[?.!,]*\s*$",
+    _re.IGNORECASE,
+)
+
+# Vocative "Lily" as standalone (e.g. "Lily." / "Lily?" / "Lily, are you there")
+# — matches when Lily is the first standalone token, followed by punctuation
+# and either nothing else or a system-directed continuation. (The Lovebirds
+# original made only the closing bracket of the diarization tag optional; the
+# whole tag is optional here because Lily strips tags before classification.)
+_VOCATIVE_LILY_RE = _re.compile(
+    r"^\s*(?:\[S\d+\]\s*)?lily\s*[?.,!]+",
+    _re.IGNORECASE,
+)
+
+
+def _strip_diarization_tag(text: str) -> str:
+    return _re.sub(r"^\s*\[S\d+\]\s*", "", text).strip()
+
+
+def lily_is_system_directed(text: str) -> tuple[bool, Optional[str]]:
+    """
+    Classify whether an utterance is addressed to the host (Lily) rather
+    than being game content / an answer attempt.
+
+    Returns (is_system_directed, matched_pattern). matched_pattern is the
+    pattern string that fired (for logging) or None.
+
+    Conservative heuristic — keyword/regex only, no LLM. Only fires on
+    high-confidence vocative addresses, not casual mentions of "Lily"
+    in table talk.
+    """
+    if not text:
+        return False, None
+    raw = text
+    stripped = _strip_diarization_tag(text)
+    lower = stripped.lower()
+
+    # Standalone "Hello?" / "Hello." / "Hello"
+    if _SYSTEM_DIRECTED_HELLO_RE.match(stripped):
+        return True, "standalone_hello"
+
+    # Vocative Lily at start: "Lily." "Lily?" "Lily, ..."
+    if _VOCATIVE_LILY_RE.match(raw):
+        return True, "vocative_lily"
+
+    # Diagnostic phrases — typically directed at the agent
+    for phrase in _SYSTEM_DIRECTED_PHRASES:
+        if phrase in lower:
+            return True, f"phrase:{phrase}"
+
+    return False, None
+
+
+# ---------------------------------------------------------------------------
+# Sticky player commands — deterministic detection (spec §11.4).
+# "back to normal" (adult-mode revert) and "skip" are enforced in code at
+# the transcript-event layer; detection is period/fragment-proof against
+# ASR fragmentation ("Back. To normal."). Cross-segment fragments are
+# handled by the scorekeeper's per-speaker fragment join below.
+# ---------------------------------------------------------------------------
+
+_COMMAND_NORMALIZE_RE = _re.compile(r"[^a-z0-9\s]+")
+
+
+def _normalize_command_text(text: str) -> str:
+    stripped = _strip_diarization_tag(text or "")
+    lowered = stripped.lower()
+    cleaned = _COMMAND_NORMALIZE_RE.sub(" ", lowered)
+    return _re.sub(r"\s+", " ", cleaned).strip()
+
+
+def lily_detect_control_command(text: str) -> Optional[str]:
+    """
+    Detect a sticky player command in an utterance.
+    Returns "back_to_normal", "skip", or None.
+
+    Punctuation-proof: "Back. To normal." and "back to... normal" both fire.
+    "skip" fires as a standalone word ("skip", "can we skip this one"),
+    never inside other words ("skipper" does not fire).
+    """
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return None
+    if "back to normal" in normalized:
+        return "back_to_normal"
+    if _re.search(r"\bskip\b", normalized):
+        return "skip"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Scorekeeper
+# ---------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class LilyScorekeeper:
+    """Pure local game state for one Lily session."""
+
+    def __init__(
+        self,
+        session_id: str,
+        answer_window_seconds: float = DEFAULT_ANSWER_WINDOW_SECONDS,
+    ) -> None:
+        self.session_id = session_id
+        self.answer_window_seconds = answer_window_seconds
+
+        # Roster: player_name -> per-player state (spec Part II §2.1)
+        self.players: dict[str, dict] = {}
+
+        # Game-level state
+        self.phase: str = "lobby"          # lobby | round | final | wrapup
+        self.round: int = 0
+        self.mode: str = "general"         # general | adult (sticky flag)
+        self.category: Optional[str] = None
+        self.question_number: int = 0
+        self.questions_per_round: int = 6
+        self.current_question: Optional[dict] = None
+        self.current_answer: Optional[str] = None
+
+        # Answer window
+        self.answer_window_open: bool = False
+        self.answer_window_opened_at: Optional[float] = None
+        self.answer_window_deadline: Optional[float] = None
+        # player_name (or "unrostered:<label>") -> candidate dict
+        self.answer_candidates: dict[str, dict] = {}
+
+        # Rolling tagged transcript buffer (last 30 lines)
+        self.transcript_buffer: list[dict] = []
+
+        # Honest-failure status notes (spec §11.2) — reasoning-node failures
+        # land here and surface in the state block.
+        self.status_notes: list[str] = []
+
+        # Per-speaker recent finals for fragment-joined command detection
+        self._recent_fragments: dict[str, list[tuple[float, str]]] = {}
+
+        # Log-only unrostered speaker sightings
+        self.unrostered_labels: dict[str, int] = {}
+
+    # -- roster ------------------------------------------------------------
+
+    def bind_speaker(
+        self,
+        speaker_label: str,
+        player_name: str,
+        speaker_id: Optional[str] = None,
+        lobby_fact: Optional[str] = None,
+    ) -> dict:
+        """
+        Bind a diarization label to a player name (lily_bind_speaker tool).
+        Re-binding an existing player updates their label (late-session
+        label drift resolves through the same path).
+        """
+        name = player_name.strip()
+        # If this label was bound to someone else, release it there.
+        for other_name, state in self.players.items():
+            if other_name != name and state.get("speaker_label") == speaker_label:
+                state["speaker_label"] = None
+                logger.info(
+                    "LILY_STATE | LABEL_REBOUND | session=%s label=%s from=%s to=%s",
+                    self.session_id, speaker_label, other_name, name,
+                )
+        player = self.players.setdefault(name, {
+            "speaker_label": None,
+            "speaker_id": None,
+            "score": 0,
+            "streak": 0,
+            "talk_time_s": 0.0,
+            "answers_attempted": 0,
+            "last_correct_category": None,
+            "questions_since_spoke": 0,
+            "lobby_fact": None,
+            "lifeline_available": True,
+        })
+        player["speaker_label"] = speaker_label
+        if speaker_id:
+            player["speaker_id"] = speaker_id
+        if lobby_fact:
+            player["lobby_fact"] = lobby_fact
+        self.unrostered_labels.pop(speaker_label, None)
+        logger.info(
+            "LILY_STATE | SPEAKER_BOUND | session=%s label=%s name=%s",
+            self.session_id, speaker_label, name,
+        )
+        return player
+
+    def set_lobby_fact(self, player_name: str, fact: str) -> None:
+        if player_name in self.players:
+            self.players[player_name]["lobby_fact"] = fact
+
+    def roster_size(self) -> int:
+        return len(self.players)
+
+    # -- attribution -------------------------------------------------------
+
+    def resolve_speaker(
+        self,
+        speaker_id: Optional[str],
+        speaker_label: Optional[str],
+        speaker_name: Optional[str],
+        text: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Resolve an utterance to a rostered player.
+
+        Generalized from lbs_attribute_partner_b — same priority order,
+        keyed on the roster instead of hardcoded partner B:
+          1. speaker_id match against a bound speaker_id
+          2. diarization label match against a bound speaker_label
+          3. exact (case-insensitive) name match on speaker_name
+          4. self-introduction word-boundary match inside the utterance
+             ("my name is Jack" / "I'm Jack" / "this is Jack") — cue-gated
+             so a trivia ANSWER containing a rostered name never
+             misattributes.
+
+        Returns (player_name, attribution_method) or (None, None).
+        """
+        # Path 1: bound speaker_id
+        if speaker_id:
+            for name, state in self.players.items():
+                if state.get("speaker_id") and state["speaker_id"] == speaker_id:
+                    return name, "speaker_id"
+
+        # Path 2: diarization label
+        if speaker_label:
+            for name, state in self.players.items():
+                if state.get("speaker_label") == speaker_label:
+                    return name, "label_match"
+
+        # Path 3: exact name match
+        if speaker_name:
+            wanted = str(speaker_name).strip().lower()
+            for name in self.players:
+                if name.strip().lower() == wanted:
+                    return name, "name_match"
+
+        # Path 4: self-introduction inside utterance text
+        if text:
+            lowered = text.lower()
+            for name in self.players:
+                lname = name.strip().lower()
+                if not lname or len(lname) < 2:
+                    continue
+                pattern = (
+                    r"\b(?:my name is|i am|i'm|im|this is|call me|it's)\s+"
+                    + _re.escape(lname) + r"\b"
+                )
+                if _re.search(pattern, lowered):
+                    return name, "self_introduction"
+
+        return None, None
+
+    # -- answer window -----------------------------------------------------
+
+    def open_answer_window(
+        self,
+        duration: Optional[float] = None,
+        now: Optional[float] = None,
+        reset_candidates: bool = True,
+    ) -> None:
+        """Open the answer window (called on TTS playback-completion).
+        reset_candidates=False reopens for a steal window: prior candidates
+        are kept so one-candidate-per-player still holds and only new
+        players can commit."""
+        t = now if now is not None else time.time()
+        self.answer_window_open = True
+        self.answer_window_opened_at = t
+        self.answer_window_deadline = t + (
+            duration if duration is not None else self.answer_window_seconds
+        )
+        if reset_candidates:
+            self.answer_candidates = {}
+        logger.info(
+            "LILY_STATE | ANSWER_WINDOW_OPEN | session=%s q=%d deadline_in=%.1fs",
+            self.session_id, self.question_number,
+            (self.answer_window_deadline - t),
+        )
+
+    def close_answer_window(self) -> None:
+        if self.answer_window_open:
+            logger.info(
+                "LILY_STATE | ANSWER_WINDOW_CLOSED | session=%s q=%d candidates=%d",
+                self.session_id, self.question_number, len(self.answer_candidates),
+            )
+        self.answer_window_open = False
+        self.answer_window_opened_at = None
+        self.answer_window_deadline = None
+
+    def is_window_open(self, now: Optional[float] = None) -> bool:
+        if not self.answer_window_open:
+            return False
+        t = now if now is not None else time.time()
+        if self.answer_window_deadline is not None and t > self.answer_window_deadline:
+            return False
+        return True
+
+    def ordered_candidates(self) -> list[dict]:
+        """Candidates ordered by STT segment start time — first answer wins.
+        Timestamp comparison, never an LLM judgment."""
+        return sorted(
+            self.answer_candidates.values(),
+            key=lambda c: c["segment_start_time"],
+        )
+
+    # -- transcript ingestion ----------------------------------------------
+
+    def on_transcript_segment(
+        self,
+        text: str,
+        speaker_label: Optional[str] = None,
+        speaker_id: Optional[str] = None,
+        speaker_name: Optional[str] = None,
+        is_final: bool = True,
+        segment_start_time: Optional[float] = None,
+        segment_end_time: Optional[float] = None,
+        now: Optional[float] = None,
+        timestamp: Optional[str] = None,
+    ) -> dict:
+        """
+        Process one transcript segment. Called on every STT event.
+        Partials display, finals score — never the reverse.
+
+        Returns an event dict for the agent layer:
+          {
+            "player": resolved name or None,
+            "attribution": method or None,
+            "system_directed": bool,
+            "control_command": "skip" | "back_to_normal" | None,
+            "candidate_recorded": bool,
+            "unrostered": bool,
+          }
+        """
+        t = now if now is not None else time.time()
+        ts = timestamp or _now_iso()
+        result = {
+            "player": None,
+            "attribution": None,
+            "system_directed": False,
+            "control_command": None,
+            "candidate_recorded": False,
+            "unrostered": False,
+        }
+
+        if not text or not text.strip():
+            return result
+
+        if not is_final:
+            # Partials never score and never mutate state.
+            return result
+
+        clean = text.strip()
+        player, method = self.resolve_speaker(
+            speaker_id, speaker_label, speaker_name, clean
+        )
+        result["player"] = player
+        result["attribution"] = method
+
+        # System-directed classification — "Lily, are you there?" must not
+        # count as an answer attempt during an open window.
+        is_sys, pattern = lily_is_system_directed(clean)
+        result["system_directed"] = is_sys
+        if is_sys:
+            logger.info(
+                "LILY_INTENT | SYSTEM_DIRECTED | session=%s speaker=%s pattern=%s",
+                self.session_id, player or speaker_label, pattern,
+            )
+
+        # Sticky command detection — fragment-joined per speaker
+        # (2s accumulation, so "back to" + "normal" across finals fires).
+        frag_key = player or speaker_label or "unknown"
+        frags = self._recent_fragments.setdefault(frag_key, [])
+        frags.append((t, clean))
+        self._recent_fragments[frag_key] = [
+            (ft, ftext) for ft, ftext in frags
+            if t - ft <= FRAGMENT_JOIN_WINDOW_SECONDS
+        ]
+        joined = " ".join(ftext for _, ftext in self._recent_fragments[frag_key])
+        command = lily_detect_control_command(joined)
+        if command:
+            result["control_command"] = command
+            self._recent_fragments[frag_key] = []
+            logger.info(
+                "LILY_INTENT | CONTROL_COMMAND | session=%s speaker=%s command=%s",
+                self.session_id, player or speaker_label, command,
+            )
+
+        # Per-player bookkeeping
+        duration = 0.0
+        if segment_start_time is not None and segment_end_time is not None:
+            duration = max(0.0, segment_end_time - segment_start_time)
+        if duration <= 0:
+            duration = len(clean.split()) * 0.4
+
+        if player:
+            state = self.players[player]
+            state["talk_time_s"] += duration
+            state["questions_since_spoke"] = 0
+        elif speaker_label:
+            self.unrostered_labels[speaker_label] = (
+                self.unrostered_labels.get(speaker_label, 0) + 1
+            )
+            result["unrostered"] = True
+            logger.info(
+                "LILY_STATE | UNROSTERED_SPEAKER | session=%s label=%s text=%r",
+                self.session_id, speaker_label, clean[:80],
+            )
+
+        # Transcript buffer (rolling)
+        self.transcript_buffer.append({
+            "speaker": player or speaker_label or "?",
+            "speaker_label": speaker_label,
+            "text": clean,
+            "timestamp": ts,
+            "duration": duration,
+        })
+        if len(self.transcript_buffer) > TRANSCRIPT_BUFFER_SIZE:
+            self.transcript_buffer = self.transcript_buffer[-TRANSCRIPT_BUFFER_SIZE:]
+
+        # Answer-window candidate recording: finals only, window open,
+        # not system-directed, not a control command. Segments outside an
+        # open window are game-inert — they reach Lily conversationally but
+        # never the scoring path.
+        if (
+            self.is_window_open(now=t)
+            and not is_sys
+            and not command
+        ):
+            seg_start = (
+                segment_start_time if segment_start_time is not None else t
+            )
+            if player:
+                key = player
+            else:
+                # Open-floor fallback: unrostered answer is never silently
+                # attributed — recorded under its label for Lily to resolve
+                # in character ("great answer — and you are?").
+                key = f"unrostered:{speaker_label or 'UU'}"
+            if key not in self.answer_candidates:  # first final wins
+                self.answer_candidates[key] = {
+                    "player": player,
+                    "speaker_label": speaker_label,
+                    "text": clean,
+                    "segment_start_time": seg_start,
+                    "timestamp": ts,
+                    "unrostered": player is None,
+                }
+                result["candidate_recorded"] = True
+                if player:
+                    self.players[player]["answers_attempted"] += 1
+                logger.info(
+                    "LILY_STATE | ANSWER_CANDIDATE | session=%s q=%d key=%s t=%.3f text=%r",
+                    self.session_id, self.question_number, key, seg_start, clean[:80],
+                )
+
+        return result
+
+    # -- game flow ---------------------------------------------------------
+
+    def start_question(self, question: Optional[dict] = None) -> None:
+        """Advance to the next question. Resets candidates; window opens
+        separately on the TTS playback-completion event."""
+        self.question_number += 1
+        self.current_question = question
+        self.current_answer = (question or {}).get("canonical_answer")
+        self.answer_candidates = {}
+        self.close_answer_window()
+        if question and question.get("category"):
+            self.category = question["category"]
+        for state in self.players.values():
+            state["questions_since_spoke"] += 1
+
+    def record_result(
+        self,
+        player_name: str,
+        correct: bool,
+        points: int = 1,
+        category: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Commit an adjudicated result. Event-bound truth: Lily never
+        announces a score change that hasn't landed here first."""
+        state = self.players.get(player_name)
+        if state is None:
+            logger.warning(
+                "LILY_STATE | SCORE_FOR_UNKNOWN_PLAYER | session=%s name=%s",
+                self.session_id, player_name,
+            )
+            return None
+        if correct:
+            state["score"] += points
+            state["streak"] += 1
+            if category or self.category:
+                state["last_correct_category"] = category or self.category
+        else:
+            state["streak"] = 0
+        logger.info(
+            "LILY_STATE | SCORE_COMMIT | session=%s player=%s correct=%s points=%d score=%d streak=%d",
+            self.session_id, player_name, correct, points if correct else 0,
+            state["score"], state["streak"],
+        )
+        return state
+
+    def award_bonus(self, player_name: str, points: int = 1) -> None:
+        """Bonus point (e.g. best wrong answer of the round)."""
+        state = self.players.get(player_name)
+        if state is not None:
+            state["score"] += points
+
+    def use_lifeline(self, player_name: str) -> bool:
+        state = self.players.get(player_name)
+        if state is not None and state.get("lifeline_available", False):
+            state["lifeline_available"] = False
+            return True
+        return False
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in ("general", "adult"):
+            return
+        if mode != self.mode:
+            logger.info(
+                "LILY_STATE | MODE_CHANGE | session=%s from=%s to=%s",
+                self.session_id, self.mode, mode,
+            )
+        self.mode = mode
+
+    def set_phase(self, phase: str) -> None:
+        if phase in ("lobby", "round", "final", "wrapup"):
+            self.phase = phase
+
+    # -- honest failure notes (§11.2) ----------------------------------------
+
+    def set_status_note(self, note: str) -> None:
+        if note not in self.status_notes:
+            self.status_notes.append(note)
+            self.status_notes = self.status_notes[-5:]
+
+    def clear_status_notes(self) -> None:
+        self.status_notes = []
+
+    # -- state block ---------------------------------------------------------
+
+    def build_state_block(self, now: Optional[float] = None) -> str:
+        """Compact state block injected before each Lily turn."""
+        lines = ["[GAME STATE]"]
+        lines.append(
+            f"phase={self.phase} round={self.round} mode={self.mode} "
+            f"question={self.question_number}/{self.questions_per_round} "
+            f"category={self.category or '-'}"
+        )
+        if self.players:
+            for name, s in sorted(
+                self.players.items(), key=lambda kv: -kv[1]["score"]
+            ):
+                bits = [f"{name}: score={s['score']} streak={s['streak']}"]
+                if s.get("questions_since_spoke", 0) >= 3:
+                    bits.append(f"quiet for {s['questions_since_spoke']} questions")
+                if s.get("lobby_fact"):
+                    bits.append(f"fact: {s['lobby_fact']}")
+                if not s.get("lifeline_available", True):
+                    bits.append("lifeline used")
+                lines.append("  " + " | ".join(bits))
+        else:
+            lines.append("  (no players bound yet)")
+        if self.current_question:
+            q = self.current_question
+            lines.append(
+                f"current_question: {q.get('prompt', '-')!r} "
+                f"answer={q.get('canonical_answer', '-')!r}"
+            )
+        window = "open" if self.is_window_open(now=now) else "closed"
+        lines.append(f"answer_window={window} candidates={len(self.answer_candidates)}")
+        if self.answer_candidates:
+            for c in self.ordered_candidates():
+                who = c["player"] or f"unbound voice {c['speaker_label']}"
+                lines.append(f"  answered: {who}: {c['text']!r}")
+        if self.unrostered_labels:
+            labels = ", ".join(sorted(self.unrostered_labels))
+            lines.append(f"unbound voices heard: {labels}")
+        for note in self.status_notes:
+            lines.append(f"note: {note}")
+        return "\n".join(lines)
+
+    # -- checkpoint snapshot ---------------------------------------------------
+
+    def snapshot(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "phase": self.phase,
+            "round": self.round,
+            "mode": self.mode,
+            "category": self.category,
+            "question_number": self.question_number,
+            "questions_per_round": self.questions_per_round,
+            "current_question": self.current_question,
+            "players": {name: dict(s) for name, s in self.players.items()},
+            "unrostered_labels": dict(self.unrostered_labels),
+            "status_notes": list(self.status_notes),
+        }
+
+    def rehydrate(self, snap: dict) -> None:
+        """Restore scores and round position from a checkpoint snapshot."""
+        if not snap:
+            return
+        self.phase = snap.get("phase", self.phase)
+        self.round = snap.get("round", self.round)
+        self.mode = snap.get("mode", self.mode)
+        self.category = snap.get("category", self.category)
+        self.question_number = snap.get("question_number", self.question_number)
+        self.questions_per_round = snap.get(
+            "questions_per_round", self.questions_per_round
+        )
+        self.current_question = snap.get("current_question")
+        self.current_answer = (self.current_question or {}).get("canonical_answer")
+        for name, s in (snap.get("players") or {}).items():
+            self.players[name] = dict(s)
+        logger.info(
+            "LILY_STATE | REHYDRATED | session=%s players=%d phase=%s round=%d",
+            self.session_id, len(self.players), self.phase, self.round,
+        )
