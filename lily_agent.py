@@ -1353,6 +1353,18 @@ async def entrypoint(ctx: JobContext) -> None:
                 "then pick the game back up."
             )
         )
+    else:
+        # Fresh room: Lily speaks FIRST (M1 gate — silence is her failure
+        # mode). Short lobby landing, then conversational name-fishing.
+        session.generate_reply(
+            instructions=(
+                "The room just opened — this is your landing line. Greet the "
+                "table as Lily: two or three short, warm, excited sentences. "
+                "Tell them the deal (you host, they shout answers, the screen "
+                "keeps score) and ask who you've got at the table tonight — "
+                "conversationally, no roll-call. Bind names as people speak."
+            )
+        )
 
 
 if __name__ == "__main__":
