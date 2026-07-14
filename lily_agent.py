@@ -77,6 +77,14 @@ CATEGORY_FAMILIES = ["academic", "pop culture", "wordplay", "lifestyle-potpourri
 
 EVENTS_TOPIC = "lily.events"
 
+# Contract-note packet-kind spellings for the `event` discriminator alias
+# (seam contract: bind / reveal / callout / finale).
+_EVENT_CONTRACT_ALIAS = {
+    "player_bind": "bind",
+    "best_wrong_answer": "callout",
+    "biggest_comeback": "callout",
+}
+
 
 def _chat_items(chat_ctx) -> list:
     # ChatContext._items confirmed at 1.6.4 (fleet injection pattern).
@@ -233,7 +241,15 @@ class LilyGame:
             # Payload spreads first so the packet discriminator can never be
             # clobbered by a payload key (the callout payload carries its own
             # kind under "callout_type" for the same reason).
-            packet = {**payload, "type": event_type, "ts": int(time.time() * 1000)}
+            # Dual discriminators: the shipped parser generation reads `type`
+            # first, the contract-note generation reads `event` first — carry
+            # both so either frontend parses every packet.
+            packet = {
+                **payload,
+                "type": event_type,
+                "event": _EVENT_CONTRACT_ALIAS.get(event_type, event_type),
+                "ts": int(time.time() * 1000),
+            }
             await self.ctx.room.local_participant.publish_data(
                 json.dumps(packet).encode("utf-8"),
                 reliable=True,
