@@ -880,7 +880,7 @@ class LilyAgent(Agent):
     # -- tools ------------------------------------------------------------------
 
     @function_tool()
-    def lily_bind_speaker(
+    async def lily_bind_speaker(
         self, context: RunContext, speaker_label: str, player_name: str
     ) -> str:
         """Bind a diarization speaker label to a player's name the moment
