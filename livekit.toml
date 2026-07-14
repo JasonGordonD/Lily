@@ -2,5 +2,4 @@
   subdomain = "lovebirds-uu4jd927"
 
 [agent]
-  name = "Lily"
-  entry = "lily_agent.py"
+  id = "CA_PZnMvvie5VoJ"
