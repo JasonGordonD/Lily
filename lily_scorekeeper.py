@@ -127,7 +127,7 @@ def _normalize_command_text(text: str) -> str:
 
 
 # Spoken game-start phrases — deterministic, so start_game engages from the
-# spoken path too (not just the lily_start_game tool / lily_control.start
+# spoken path too (not just the lily_begin_round tool / lily_control.start
 # RPC). Conservative set; "let s" is "let's" after punctuation stripping.
 _START_GAME_RE = _re.compile(
     r"\b(?:"
