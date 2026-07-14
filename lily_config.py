@@ -138,6 +138,12 @@ def rounds_total() -> int:
     return _get_int("LILY_ROUNDS", 3)
 
 
+def kb_only() -> bool:
+    """Demo-day fallback: flip question supply to the curated bank only
+    (runbook: 'flip to KB-bank-only via the state block')."""
+    return (_get("LILY_KB_ONLY", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def questions_per_round() -> int:
     return _get_int("LILY_QUESTIONS_PER_ROUND", 6)
 

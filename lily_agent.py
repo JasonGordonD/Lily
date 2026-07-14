@@ -143,6 +143,7 @@ class LilyGame:
         self.game_started = False
         self.game_over = False
         self.finale_sent = False
+        self.prewager_standings: list[dict] | None = None
 
         self.next_question: dict | None = None      # prefetched N+1
         self.armed_question: dict | None = None     # in state block, awaiting ask
@@ -227,7 +228,10 @@ class LilyGame:
     async def send_event(self, event_type: str, payload: dict) -> None:
         """Reliable ordered data packet on topic lily.events (<=15KiB)."""
         try:
-            packet = {"type": event_type, "ts": int(time.time() * 1000), **payload}
+            # Payload spreads first so the packet discriminator can never be
+            # clobbered by a payload key (the callout payload carries its own
+            # kind under "callout_type" for the same reason).
+            packet = {**payload, "type": event_type, "ts": int(time.time() * 1000)}
             await self.ctx.room.local_participant.publish_data(
                 json.dumps(packet).encode("utf-8"),
                 reliable=True,
@@ -272,12 +276,30 @@ class LilyGame:
 
         async def _prefetch() -> None:
             rnd = self._round_for_next_question()
+            category = self._category_for_round(rnd)
+            tier = self._difficulty_for_round(rnd)
+
+            # Runbook fallback: LILY_KB_ONLY flips supply to the curated
+            # bank; bank questions bypass verification (§4.5).
+            from_bank = None
+            if lily_config.kb_only() and self.supabase is not None:
+                from_bank = await lily_persistence.lily_fetch_bank_question(
+                    self.supabase, category, tier, self.used_prompts
+                )
             question = await self.reasoning.prefetch_question(
                 self.sk,
-                category=self._category_for_round(rnd),
-                difficulty_tier=self._difficulty_for_round(rnd),
+                category=category,
+                difficulty_tier=tier,
                 avoid_questions=self.used_prompts,
+                from_bank=from_bank,
             )
+            if question is None and self.supabase is not None:
+                # Generation failed — curated bank is the insurance policy.
+                question = await lily_persistence.lily_fetch_bank_question(
+                    self.supabase, category, tier, self.used_prompts
+                )
+                if question is not None:
+                    self.sk.clear_status_notes()
             if question is not None:
                 self.next_question = question
             self.publish_attributes_nowait()
@@ -302,6 +324,12 @@ class LilyGame:
             (self.sk.question_number - 1) // self.sk.questions_per_round + 1,
         )
         if self.sk.round > self.rounds_total:
+            if self.prewager_standings is None:
+                # Entering the wager round: freeze standings so the finale
+                # can detect a comeback (winner ≠ pre-wager leader).
+                self.prewager_standings = sorted(
+                    self._players_payload(), key=lambda p: -p["score"]
+                )
             self.sk.set_phase("final")
         else:
             self.sk.set_phase("round")
@@ -713,6 +741,20 @@ class LilyGame:
         standings = sorted(
             self._players_payload(), key=lambda p: -p["score"]
         )
+        # Comeback callout: the wager round flipped the leaderboard.
+        if (
+            standings
+            and self.prewager_standings
+            and standings[0]["name"] != self.prewager_standings[0]["name"]
+        ):
+            await self.send_event(
+                "callout",
+                {
+                    "callout_type": "biggest_comeback",
+                    "name": standings[0]["name"],
+                    "text": "Took the crown on the final wager.",
+                },
+            )
         if not self.finale_sent:
             self.finale_sent = True
             await self.send_event("finale", {"standings": standings})
@@ -845,6 +887,33 @@ class LilyAgent(Agent):
         # the deterministic "back to normal" path or a fresh consensus.
         await self._game.publish_attributes()
         return "Adult mode is ON (sticky). The layer is active; same house rules."
+
+    @function_tool()
+    async def lily_award_bonus(
+        self, context: RunContext, player_name: str, reason: str
+    ) -> str:
+        """Award one bonus point for a great moment — best wrong answer of
+        the round, or a similar table-delighting play. Use occasionally,
+        never as a pity point.
+
+        Args:
+            player_name: The rostered player receiving the point.
+            reason: One short line on why (spoken back and shown on screen).
+        """
+        name = (player_name or "").strip()
+        if name not in self._game.sk.players:
+            return f"No rostered player named {name!r} — no point awarded."
+        self._game.sk.award_bonus(name)
+        self._game.send_event_nowait(
+            "callout",
+            {
+                "callout_type": "best_wrong_answer",
+                "name": name,
+                "text": (reason or "").strip()[:200] or None,
+            },
+        )
+        await self._game.publish_attributes()
+        return f"Bonus point to {name}."
 
     # -- node overrides ------------------------------------------------------------
 

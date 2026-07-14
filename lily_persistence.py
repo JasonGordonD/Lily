@@ -264,6 +264,54 @@ async def lily_write_answer(
 
 
 # ---------------------------------------------------------------------------
+# Curated question bank (demo-day insurance; runbook KB-only fallback)
+# ---------------------------------------------------------------------------
+
+async def lily_fetch_bank_question(
+    supabase: SupabaseClient,
+    category: str,
+    difficulty_tier: int,
+    exclude_prompts: list[str],
+) -> Optional[dict]:
+    """Pull one unused curated question from lily_questions, preferring the
+    requested category/tier, falling back to any unused row. Returns the
+    §4.2 structured shape or None."""
+    try:
+        rows = await asyncio.to_thread(
+            lambda: supabase.table("lily_questions")
+            .select("*")
+            .execute()
+        )
+        candidates = [
+            r for r in (rows.data or [])
+            if r.get("question") and r["question"] not in exclude_prompts
+        ]
+        if not candidates:
+            return None
+        preferred = [
+            r for r in candidates
+            if r.get("category") == category
+            and r.get("difficulty_tier") == difficulty_tier
+        ] or [r for r in candidates if r.get("category") == category] or candidates
+        row = preferred[0]
+        acceptable = row.get("acceptable_answers")
+        if not isinstance(acceptable, list) or not acceptable:
+            acceptable = [str(row.get("answer", "")).lower()]
+        return {
+            "id": f"kb_{row.get('id', 0)}",
+            "category": row.get("category") or category,
+            "difficulty_tier": row.get("difficulty_tier") or difficulty_tier,
+            "prompt": row["question"],
+            "canonical_answer": row.get("answer", ""),
+            "acceptable_answers": acceptable,
+            "reveal_color": row.get("reveal_color") or "",
+        }
+    except Exception as e:
+        logger.error("lily_fetch_bank_question error: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Group facts (lobby facts / running-bit material, persisted for rematches)
 # ---------------------------------------------------------------------------
 
