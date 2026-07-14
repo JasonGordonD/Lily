@@ -26,6 +26,7 @@ from postgrest.exceptions import APIError as PostgrestAPIError
 from supabase import Client as SupabaseClient, create_client as create_supabase_client
 
 import lily_config
+import lily_memory
 
 logger = logging.getLogger("lily_persistence")
 
@@ -272,18 +273,23 @@ async def lily_fetch_bank_question(
     category: str,
     difficulty_tier: int,
     exclude_prompts: list[str],
+    mode: str = "general",
 ) -> Optional[dict]:
     """Pull one unused curated question from lily_questions, preferring the
     requested category/tier, falling back to any unused row. Returns the
-    §4.2 structured shape or None."""
+    §4.2 structured shape or None.
+
+    Mode guard (consent-safety): adult=true bank rows are returned ONLY
+    when mode == 'adult' — general mode hard-excludes them."""
     try:
         rows = await asyncio.to_thread(
             lambda: supabase.table("lily_questions")
             .select("*")
             .execute()
         )
+        pool = lily_memory.lily_bank_mode_filter(rows.data or [], mode)
         candidates = [
-            r for r in (rows.data or [])
+            r for r in pool
             if r.get("question") and r["question"] not in exclude_prompts
         ]
         if not candidates:

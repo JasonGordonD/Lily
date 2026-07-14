@@ -57,14 +57,47 @@ lily_binding.py      lily_bind_speaker name extraction (2s fragment accumulation
 lily_evaluation.py   Tier-1 matcher + Tier-2 judge contract
 lily_reasoning.py    background node: prefetch + verification + judge transport
 lily_persistence.py  Supabase: sessions, transcripts, answers audit, voiceprints, KB bank
+lily_memory.py       persistent cross-session memory: session summaries, the
+                     [RETURNING TABLE] block, KB-bank adult-mode guard (stdlib-only)
 lily_tts.py          ElevenLabs v3 wrapper (lbs_tts lift; byte-alignment carry, 5K split)
 lily_config.py       ALL env access lives here
 prompts/lily_system.txt      the whole character (incl. <tts_guidelines>, <voice_output>)
 prompts/layer_lily_adult.md  additive adult layer (register shift; group-directed only)
 migrations/001_lily_schema.sql          six lily_ tables (no pgvector)
 migrations/002_lily_questions_seed.sql  30 curated questions (demo insurance)
-tests/               64 tests, run with plain `python -m pytest tests/` — no livekit, no network
+migrations/003_lily_memory.sql          lily_memories + lily_questions.adult guard column
+tests/               82 tests, run with plain `python -m pytest tests/` — no livekit, no network
 ```
+
+## Persistent memory (rematch)
+
+Lily remembers a table across sessions, keyed on a stable **group identity**
+resolved at job start (logged as `LILY_MEMORY | GROUP_ID | source=...`):
+
+1. `lily_group_id` from the first non-agent participant's token metadata —
+   the frontend passes a device-scoped UUID as JSON
+   `{"lily_group_id": "<uuid>"}` (absent/unparseable metadata is tolerated);
+2. `LILY_GROUP_ID` env override;
+3. room name (legacy fallback — random per session, so nothing re-keys on it).
+
+**Tables:** `lily_memories` (one row per session, upserted idempotently on
+`session_id` from both `finish_game` and the shutdown callback: final
+`players [{name,score,streak}]`, `winner`, `question_count`, `highlights`
+callouts, and a deterministic template `summary` — no LLM call) plus the
+existing `lily_group_facts` (running-bit material) and
+`lily_speaker_voiceprints` (which now re-key correctly across sessions for
+instant returning-voice recognition).
+
+**What Lily remembers:** on a returning group, the last 3 games + group facts
+are compiled into a compact `[RETURNING TABLE]` system block (~600 chars max,
+injected in `llm_node` the same additive way as the adult layer): returning
+player names, who won last time, running bits, total games — so she greets
+players back by name and does callbacks with rematch energy.
+
+**Adult-column guard (consent-safety):** `lily_questions.adult` marks
+adult-register bank rows; `lily_fetch_bank_question` takes the session `mode`
+and hard-excludes `adult=true` rows unless `mode == 'adult'` — an adult
+question can never surface at a general-mode table.
 
 ## Frontend seam (prmpt_ui `(lily)` route group)
 

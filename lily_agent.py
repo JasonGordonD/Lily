@@ -57,6 +57,7 @@ from livekit.plugins.speechmatics import (
 
 import lily_config
 import lily_evaluation
+import lily_memory
 import lily_persistence
 from lily_binding import (
     LilyFragmentAccumulator,
@@ -168,6 +169,12 @@ class LilyGame:
         self._last_assistant_text = ""
         self._enroll_started = False
 
+        # Persistent cross-session memory (rematch): the [RETURNING TABLE]
+        # block loaded at session start, and this session's callouts
+        # collected for the lily_memories highlights column.
+        self.memory_block: str = ""
+        self.highlights: list[dict] = []
+
     # -- state transport (seam contract) ------------------------------------
 
     def _players_payload(self) -> list[dict]:
@@ -239,6 +246,14 @@ class LilyGame:
 
     async def send_event(self, event_type: str, payload: dict) -> None:
         """Reliable ordered data packet on topic lily.events (<=15KiB)."""
+        if event_type in ("best_wrong_answer", "biggest_comeback"):
+            # Callouts double as session-memory highlights (lily_memories).
+            self.highlights.append({
+                "type": event_type,
+                "player": payload.get("player"),
+                "detail": payload.get("detail") or payload.get("answer"),
+            })
+            self.highlights = self.highlights[-lily_memory.MEMORY_HIGHLIGHTS_CAP:]
         try:
             # Payload spreads first so the packet discriminator can never be
             # clobbered by a payload key (the callout payload carries its own
@@ -304,7 +319,8 @@ class LilyGame:
             from_bank = None
             if lily_config.kb_only() and self.supabase is not None:
                 from_bank = await lily_persistence.lily_fetch_bank_question(
-                    self.supabase, category, tier, self.used_prompts
+                    self.supabase, category, tier, self.used_prompts,
+                    mode=self.sk.mode,
                 )
             question = await self.reasoning.prefetch_question(
                 self.sk,
@@ -316,7 +332,8 @@ class LilyGame:
             if question is None and self.supabase is not None:
                 # Generation failed — curated bank is the insurance policy.
                 question = await lily_persistence.lily_fetch_bank_question(
-                    self.supabase, category, tier, self.used_prompts
+                    self.supabase, category, tier, self.used_prompts,
+                    mode=self.sk.mode,
                 )
                 if question is not None:
                     self.sk.clear_status_notes()
@@ -787,6 +804,12 @@ class LilyGame:
             asyncio.ensure_future(lily_persistence.lily_checkpoint(
                 self.supabase, self.sk, final_standings=standings,
             ))
+            # Session memory — idempotent (session_id upsert), so the
+            # shutdown callback writing again is safe.
+            asyncio.ensure_future(lily_memory.lily_write_session_memory(
+                self.supabase, self.group_id, self.sk.session_id,
+                standings, self.sk.question_number, self.highlights,
+            ))
 
     # -- state block --------------------------------------------------------------
 
@@ -970,6 +993,18 @@ class LilyAgent(Agent):
         elif self._game.sk.mode != "adult" and adult_idx is not None:
             items.pop(adult_idx)  # removing the layer fully reverts her
 
+        # Returning-table memory: one persistent [RETURNING TABLE] system
+        # block, injected the same additive way as the adult layer
+        # (re-inserted if history trimming ever drops it).
+        if self._game.memory_block and not any(
+            getattr(m, "role", None) == "system"
+            and lily_memory.MEMORY_BLOCK_MARKER in _message_text(m)
+            for m in items
+        ):
+            items.insert(
+                0, ChatMessage(role="system", content=[self._game.memory_block])
+            )
+
         # State block: replace the previous injection, then append fresh.
         for i in range(len(items) - 1, -1, -1):
             m = items[i]
@@ -1077,9 +1112,41 @@ async def entrypoint(ctx: JobContext) -> None:
     room_name = ctx.room.name or "unknown"
     _setup_session_log(room_name)
 
+    # --- Group identity resolution (persistent memory / voiceprint re-key).
+    # Priority: (a) lily_group_id from the first non-agent remote
+    # participant's token metadata (stable device-scoped UUID passed by the
+    # frontend — the user is already in the room at job start, but absent
+    # participants and unparseable metadata are tolerated), (b) LILY_GROUP_ID
+    # env override, (c) room name (legacy fallback — random per session, so
+    # memory and voiceprints never re-key on it).
+    group_id: str | None = None
+    group_id_source = None
+    try:
+        for participant in ctx.room.remote_participants.values():
+            if (
+                getattr(participant, "kind", None)
+                == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+            ):
+                continue
+            candidate = lily_memory.lily_parse_group_id_from_metadata(
+                getattr(participant, "metadata", None)
+            )
+            if candidate:
+                group_id, group_id_source = candidate, "participant_metadata"
+                break
+    except Exception as e:
+        logger.warning("LILY_MEMORY | GROUP_ID | participant scan failed: %s", e)
+    if group_id is None and lily_config.group_id_override():
+        group_id, group_id_source = lily_config.group_id_override(), "env_override"
+    if group_id is None:
+        group_id, group_id_source = room_name, "room_name"
+    logger.info(
+        "LILY_MEMORY | GROUP_ID | source=%s group_id=%s",
+        group_id_source, group_id,
+    )
+
     # --- Session-init hardening: fail-fast on unpersistable rooms ---
     supabase = lily_persistence.lily_create_supabase_client()
-    group_id = lily_config.group_id_override() or room_name
     lily_persistence.lily_init_session(supabase, room_name, group_id)
 
     scorekeeper = LilyScorekeeper(
@@ -1099,6 +1166,17 @@ async def entrypoint(ctx: JobContext) -> None:
     reasoning = LilyReasoning()
     transcripts = lily_persistence.LilyTranscriptBatcher(supabase, room_name)
     game = LilyGame(ctx, scorekeeper, reasoning, supabase, transcripts, group_id)
+
+    # Returning-table memory: last games + group facts -> [RETURNING TABLE]
+    # system block (injected in llm_node alongside the adult layer).
+    group_memory = await lily_memory.lily_load_group_memory(supabase, group_id)
+    game.memory_block = lily_memory.lily_build_memory_block(group_memory)
+    if game.memory_block:
+        logger.info(
+            "LILY_MEMORY | BLOCK_READY | group=%s chars=%d total_games=%s",
+            group_id, len(game.memory_block),
+            (group_memory or {}).get("total_games"),
+        )
 
     # Returning group: stored voiceprints -> known_speakers (instant
     # recognition on rematch). Loaded before STT construction so the
@@ -1299,6 +1377,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     supabase, scorekeeper,
                     final_standings=standings, metadata=metadata,
                 )
+                # Session memory — idempotent with the finish_game write
+                # (upsert on session_id); this path also covers sessions
+                # that end without reaching the final question.
+                await lily_memory.lily_write_session_memory(
+                    supabase, group_id, scorekeeper.session_id,
+                    standings, scorekeeper.question_number, game.highlights,
+                )
                 asyncio.ensure_future(lily_persistence.lily_enroll_voiceprints(
                     stt, supabase, group_id, scorekeeper
                 ))
@@ -1367,15 +1452,20 @@ async def entrypoint(ctx: JobContext) -> None:
     else:
         # Fresh room: Lily speaks FIRST (M1 gate — silence is her failure
         # mode). Short lobby landing, then conversational name-fishing.
-        session.generate_reply(
-            instructions=(
-                "The room just opened — this is your landing line. Greet the "
-                "table as Lily: two or three short, warm, excited sentences. "
-                "Tell them the deal (you host, they shout answers, the screen "
-                "keeps score) and ask who you've got at the table tonight — "
-                "conversationally, no roll-call. Bind names as people speak."
-            )
+        greeting = (
+            "The room just opened — this is your landing line. Greet the "
+            "table as Lily: two or three short, warm, excited sentences. "
+            "Tell them the deal (you host, they shout answers, the screen "
+            "keeps score) and ask who you've got at the table tonight — "
+            "conversationally, no roll-call. Bind names as people speak."
         )
+        if game.memory_block:
+            greeting += (
+                " This is a RETURNING table — the [RETURNING TABLE] context "
+                "has who they are. Greet them back by name, reference last "
+                "game's winner, and lean into the rematch energy."
+            )
+        session.generate_reply(instructions=greeting)
 
 
 if __name__ == "__main__":
