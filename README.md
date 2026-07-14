@@ -91,7 +91,7 @@ tests/               64 tests, run with plain `python -m pytest tests/` — no l
 `ELEVEN_API_KEY` (never `ELEVENLABS_API_KEY`) · `LILY_VOICE_ID` (falls back to
 `RAVEN_VOICE_ID`) · `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` · optional:
 `LILY_KB_ONLY=1` (curated-bank-only question supply — the demo-day fallback),
-`LILY_ANSWER_WINDOW_SECONDS`, `LILY_ROUNDS_TOTAL`, `LILY_QUESTIONS_PER_ROUND`,
+`LILY_ANSWER_WINDOW_SECONDS`, `LILY_ROUNDS`, `LILY_QUESTIONS_PER_ROUND`,
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
 `LILY_JOB_MEMORY_LIMIT_MB`. No secrets in this repo — configure via the deployment
 secrets manager (`lk agent update-secrets` with an explicit `--id`; `--overwrite`
