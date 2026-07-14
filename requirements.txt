@@ -1,0 +1,10 @@
+livekit-agents==1.6.4
+livekit-plugins-speechmatics==1.6.4
+livekit-plugins-google==1.6.4
+livekit-plugins-silero==1.6.4
+livekit-plugins-noise-cancellation==0.2.6
+google-genai>=2.0.0
+supabase>=2.27.2
+httpx>=0.27.0
+aiohttp>=3.10.0
+python-dotenv>=1.2.1

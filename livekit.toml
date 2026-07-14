@@ -1,0 +1,6 @@
+[project]
+  subdomain = "lovebirds-uu4jd927"
+
+[agent]
+  name = "Lily"
+  entry = "lily_agent.py"
