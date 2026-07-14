@@ -174,6 +174,7 @@ class LilyScorekeeper:
         self.category: Optional[str] = None
         self.question_number: int = 0
         self.questions_per_round: int = 6
+        self.rounds_total: int = 3
         self.current_question: Optional[dict] = None
         self.current_answer: Optional[str] = None
 
@@ -601,9 +602,20 @@ class LilyScorekeeper:
     def build_state_block(self, now: Optional[float] = None) -> str:
         """Compact state block injected before each Lily turn."""
         lines = ["[GAME STATE]"]
+        # question is shown WITHIN-ROUND (1..questions_per_round): the raw
+        # cumulative count rendered against per-round size ("question=7/6")
+        # read as overtime and steered the host toward wrapping the game.
+        q_in_round = (
+            ((self.question_number - 1) % self.questions_per_round) + 1
+            if self.question_number > 0 else 0
+        )
+        total_questions = self.rounds_total * self.questions_per_round
         lines.append(
-            f"phase={self.phase} round={self.round} mode={self.mode} "
-            f"question={self.question_number}/{self.questions_per_round} "
+            f"phase={self.phase} round={self.round}/{self.rounds_total} "
+            f"mode={self.mode} "
+            f"question={q_in_round}/{self.questions_per_round} in this round "
+            f"(#{self.question_number} of {total_questions} total, "
+            f"then one final wager question) "
             f"category={self.category or '-'}"
         )
         if self.players:
@@ -650,6 +662,7 @@ class LilyScorekeeper:
             "category": self.category,
             "question_number": self.question_number,
             "questions_per_round": self.questions_per_round,
+            "rounds_total": self.rounds_total,
             "current_question": self.current_question,
             "players": {name: dict(s) for name, s in self.players.items()},
             "unrostered_labels": dict(self.unrostered_labels),
@@ -668,6 +681,7 @@ class LilyScorekeeper:
         self.questions_per_round = snap.get(
             "questions_per_round", self.questions_per_round
         )
+        self.rounds_total = snap.get("rounds_total", self.rounds_total)
         self.current_question = snap.get("current_question")
         self.current_answer = (self.current_question or {}).get("canonical_answer")
         for name, s in (snap.get("players") or {}).items():

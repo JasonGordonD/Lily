@@ -145,9 +145,14 @@ async def lily_checkpoint(
             "updated_at": datetime.now(timezone.utc).isoformat(),
             **extra_fields,
         }
-        supabase.table("lily_sessions").upsert(
-            payload, on_conflict="session_id"
-        ).execute()
+        # to_thread: the postgrest client is synchronous — running it inline
+        # blocks the event loop (and therefore the live audio pipeline) for a
+        # full cross-region HTTP round trip on every score change.
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_sessions")
+            .upsert(payload, on_conflict="session_id")
+            .execute()
+        )
     except Exception as e:
         logger.error("lily_checkpoint error: %s", e)
 

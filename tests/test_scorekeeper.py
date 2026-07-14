@@ -307,3 +307,20 @@ def test_snapshot_rehydrate_roundtrip():
     assert sk2.question_number == sk.question_number
     assert sk2.players["Dave"]["score"] == 3
     assert sk2.current_answer == "42"
+
+
+def test_state_block_question_counter_is_within_round():
+    """Regression: the cumulative counter rendered against per-round size
+    ("question=7/6") read as overtime and steered the host toward ending
+    the game after round one."""
+    sk = make_sk()
+    sk.rounds_total = 3
+    sk.questions_per_round = 6
+    sk.round = 2
+    for _ in range(7):
+        sk.start_question({"prompt": "q", "canonical_answer": "a"})
+    block = sk.build_state_block()
+    assert "question=7/6" not in block
+    assert "question=1/6 in this round" in block
+    assert "(#7 of 18 total" in block
+    assert "round=2/3" in block

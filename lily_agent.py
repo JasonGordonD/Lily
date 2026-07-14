@@ -147,6 +147,7 @@ class LilyGame:
         self.fragments = LilyFragmentAccumulator()
         self.rounds_total = lily_config.rounds_total()
         self.sk.questions_per_round = lily_config.questions_per_round()
+        self.sk.rounds_total = self.rounds_total
 
         # UI phase per the seam contract:
         # lobby | question | answering | reveal | scores | final
