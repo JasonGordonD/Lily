@@ -1561,6 +1561,17 @@ class LilyAgent(Agent):
             player_name: The rostered player receiving the point.
             reason: One short line on why (spoken back and shown on screen).
         """
+        # Gate: bonuses are scoring events on a live round. Before the
+        # arm/ask/adjudicate loop has engaged (game_started=False) every
+        # award would silently backfill players[name].score and disguise a
+        # stalled loop as a working game — exactly what the 2026-07-14 rows
+        # showed. Refuse loudly so Lily's LLM adapts and any future stall
+        # surfaces as empty scores instead of ghost bonuses.
+        if not self._game.game_started:
+            return (
+                "Bonus points can only be awarded once a round is underway. "
+                "Call lily_begin_round first or wait for auto-start."
+            )
         name = (player_name or "").strip()
         if name not in self._game.sk.players:
             return f"No rostered player named {name!r} — no point awarded."
