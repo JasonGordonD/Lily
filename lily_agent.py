@@ -66,7 +66,7 @@ from lily_binding import (
 )
 from lily_reasoning import LilyReasoning
 from lily_scorekeeper import LilyScorekeeper
-from lily_tts import LilyTTS
+from lily_tts import LilyTTS, lily_prewarm_tts_connection
 
 logger = logging.getLogger("lily_agent")
 
@@ -163,6 +163,7 @@ class LilyGame:
         self._prefetch_task: asyncio.Task | None = None
         self._window_timer: asyncio.Task | None = None
         self._judged_keys: set[str] = set()
+        self._spec_judge: dict[str, asyncio.Task] = {}
         self._adjudicating = False
         self._bed_handle = None
         self._pending_reveal_event: dict | None = None
@@ -373,6 +374,10 @@ class LilyGame:
             self.sk.set_phase("round")
         self.used_prompts.append(self.armed_question.get("prompt", ""))
         self._judged_keys = set()
+        for _task in self._spec_judge.values():
+            if not _task.done():
+                _task.cancel()
+        self._spec_judge = {}
         self._set_ui_phase("question")
         asyncio.ensure_future(
             self.publish_metadata(self.armed_question.get("prompt", ""))
@@ -488,6 +493,46 @@ class LilyGame:
                     )
                     if t1["verdict"] == "correct":
                         asyncio.ensure_future(self.adjudicate(steal_allowed=False))
+                        return
+            # Speculative Tier-2: judge ambiguous candidates DURING the
+            # window so the verdict is cached by reveal time — the judge
+            # round trip comes off the reveal path (prefetch trick, applied
+            # to judging).
+            if acceptable:
+                for cand in ordered:
+                    key = cand["player"] or f"unrostered:{cand['speaker_label']}"
+                    if key in self._spec_judge or cand.get("text") != text:
+                        continue
+                    t1 = lily_evaluation.lily_tier1_evaluate(cand["text"], acceptable)
+                    if t1["verdict"] != "correct":
+                        self._spec_judge[key] = asyncio.ensure_future(
+                            self._speculative_judge(question, cand["text"], key)
+                        )
+
+    async def _speculative_judge(
+        self, question: dict, attempt_text: str, key: str
+    ) -> dict | None:
+        """One single-attempt Tier-2 call, fired mid-window. Returns the
+        parsed verdict dict or None. Never raises."""
+        try:
+            raw = await self.reasoning.judge(
+                lily_evaluation.LILY_JUDGE_INSTRUCTIONS,
+                lily_evaluation.lily_build_judge_prompt(
+                    question.get("prompt", ""),
+                    str(question.get("canonical_answer", "")),
+                    [(key, attempt_text)],
+                    acceptable_answers=question.get("acceptable_answers") or [],
+                ),
+            )
+            verdict = lily_evaluation.lily_parse_judge_response(raw)
+            logger.info(
+                "LILY_JUDGE | SPECULATIVE | key=%s verdict=%s",
+                key, (verdict or {}).get("verdict"),
+            )
+            return verdict
+        except Exception as e:
+            logger.warning("LILY_JUDGE | speculative failed key=%s: %s", key, e)
+            return None
 
     async def skip_question(self, source: str) -> None:
         """Skip: identical for spoken 'skip' and the RPC tap — no comment,
@@ -556,36 +601,61 @@ class LilyGame:
                 uncertain.append(cand)
 
             if winner_candidate is None and uncertain:
-                # Tier 2 — one non-spoken LLM turn on the vocal model.
-                attempts = [
-                    (c["player"] or f"unbound voice {c['speaker_label']}", c["text"])
-                    for c in uncertain
-                ]
-                try:
-                    raw = await self.reasoning.judge(
-                        lily_evaluation.LILY_JUDGE_INSTRUCTIONS,
-                        lily_evaluation.lily_build_judge_prompt(
-                            question.get("prompt", ""),
-                            str(question.get("canonical_answer", "")),
-                            attempts,
-                            acceptable_answers=acceptable,
-                        ),
-                    )
-                    verdict = lily_evaluation.lily_parse_judge_response(raw)
-                except Exception as e:
-                    logger.error("LILY_JUDGE | call failed: %s", e)
-                    verdict = None
-                if verdict and verdict["verdict"] in ("correct", "partial"):
-                    eval_tier = 2
-                    judge_reason = verdict.get("reason", "")
-                    jwinner = verdict.get("winner")
-                    for c in uncertain:
-                        cname = c["player"] or f"unbound voice {c['speaker_label']}"
-                        if jwinner and cname == jwinner:
-                            winner_candidate = c
-                            break
-                    if winner_candidate is None:
-                        winner_candidate = uncertain[0]
+                # Tier 2. Prefer verdicts cached by speculative mid-window
+                # judging (zero added reveal latency); order stays decided
+                # by scorekeeper timestamps — earliest correct/partial wins.
+                consumed_speculative = False
+                for c in uncertain:
+                    key = c["player"] or f"unrostered:{c['speaker_label']}"
+                    task = self._spec_judge.get(key)
+                    if task is None:
+                        continue
+                    try:
+                        verdict = await asyncio.wait_for(
+                            asyncio.shield(task), timeout=4.0
+                        )
+                    except (asyncio.TimeoutError, Exception):
+                        verdict = None
+                    consumed_speculative = True
+                    if verdict and verdict["verdict"] in ("correct", "partial"):
+                        eval_tier = 2
+                        judge_reason = verdict.get("reason", "")
+                        winner_candidate = c
+                        break
+
+                if winner_candidate is None and not consumed_speculative:
+                    # Fallback: one batched non-spoken LLM turn at reveal
+                    # time (speculation unavailable, e.g. window closed
+                    # before any final landed).
+                    attempts = [
+                        (c["player"] or f"unbound voice {c['speaker_label']}", c["text"])
+                        for c in uncertain
+                    ]
+                    try:
+                        raw = await self.reasoning.judge(
+                            lily_evaluation.LILY_JUDGE_INSTRUCTIONS,
+                            lily_evaluation.lily_build_judge_prompt(
+                                question.get("prompt", ""),
+                                str(question.get("canonical_answer", "")),
+                                attempts,
+                                acceptable_answers=acceptable,
+                            ),
+                        )
+                        verdict = lily_evaluation.lily_parse_judge_response(raw)
+                    except Exception as e:
+                        logger.error("LILY_JUDGE | call failed: %s", e)
+                        verdict = None
+                    if verdict and verdict["verdict"] in ("correct", "partial"):
+                        eval_tier = 2
+                        judge_reason = verdict.get("reason", "")
+                        jwinner = verdict.get("winner")
+                        for c in uncertain:
+                            cname = c["player"] or f"unbound voice {c['speaker_label']}"
+                            if jwinner and cname == jwinner:
+                                winner_candidate = c
+                                break
+                        if winner_candidate is None:
+                            winner_candidate = uncertain[0]
 
             points = (
                 5 if self.sk.round > self.rounds_total else max(1, self.sk.round)
@@ -1428,9 +1498,23 @@ async def entrypoint(ctx: JobContext) -> None:
     await background_audio.start(room=ctx.room, agent_session=session)
     game.background_audio = background_audio
 
-    # Heartbeat checkpoint loop (60s).
+    # Prewarm the ElevenLabs connection so the greeting's first synthesis
+    # skips the TCP+TLS handshake.
+    asyncio.ensure_future(lily_prewarm_tts_connection())
+
+    def _latency_metadata() -> dict:
+        return {
+            "pipeline_latency": {
+                k: (round(sum(v) / len(v), 1) if v else None)
+                for k, v in metrics_raw.items()
+            }
+        }
+
+    # Heartbeat checkpoint loop (60s) — carries rolling latency averages so
+    # "is she lagging" is a SQL query mid-game, not a post-mortem.
     asyncio.ensure_future(lily_persistence.lily_heartbeat(
-        supabase, scorekeeper, heartbeat_stop
+        supabase, scorekeeper, heartbeat_stop,
+        metadata_provider=_latency_metadata,
     ))
 
     # Initial truth for late joiners / reconnect snap-restore.

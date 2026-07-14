@@ -47,6 +47,32 @@ do-not-touch: no imports, no vendoring).
 - **Event-bound truth:** she never announces a score the scorekeeper hasn't
   committed, never claims the next question is ready unless prefetch landed.
 
+## Latency discipline
+
+Nothing blocking runs on the event loop's hot path, and slow calls are moved
+off the reveal moment:
+
+- **Checkpoints are threaded** (`asyncio.to_thread`) — the synchronous
+  Supabase client on the event loop stalled the live audio pipeline a full
+  cross-region round trip per score change before this.
+- **Speculative Tier-2 judging:** ambiguous answers are judged in the
+  background DURING the answer window (single-attempt calls, cached per
+  candidate); the reveal consumes cached verdicts, so the judge round trip
+  is off the reveal path. The batched at-reveal call survives only as a
+  fallback when no speculation ran. Order stays timestamp-decided either way.
+- **TTS connection pre-warm** at session start — the greeting's first
+  synthesis skips the TCP+TLS handshake to ElevenLabs.
+- **Rolling latency telemetry:** per-turn `llm_node_ttft` / `tts_node_ttfb` /
+  `e2e_latency` averages ride the 60s heartbeat into
+  `lily_sessions.metadata.pipeline_latency` (and the final row at close), so
+  lag is a SQL query mid-game:
+  `select session_id, updated_at, metadata->'pipeline_latency' from
+  lily_sessions order by updated_at desc limit 10;`
+- Known remaining baseline: ElevenLabs v3 sentence-chunked HTTP synthesis is
+  the fleet standard (the low-latency model families don't support the v3
+  audio tags her register depends on; the dialogue endpoint stays off per
+  the fleet revert).
+
 ## Files
 
 ```

@@ -253,3 +253,20 @@ class LilyChunkedStream(tts.ChunkedStream):
             raise
         except Exception as e:
             raise APIConnectionError() from e
+
+
+async def lily_prewarm_tts_connection() -> None:
+    """Establish the pooled TCP+TLS connection to ElevenLabs at session
+    start so the FIRST synthesis request of the session skips the full
+    handshake (~100-250ms off first-greeting TTFB). Any response status is
+    fine — the connection in the shared keep-alive pool is the product.
+    Fire-and-forget; never raises."""
+    try:
+        session = utils.http_context.http_session()
+        async with session.get(
+            f"{ELEVENLABS_API_BASE}/models",
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            logger.info("TTS | prewarm connection status=%s", resp.status)
+    except Exception as e:
+        logger.debug("TTS | prewarm skipped: %s", e)

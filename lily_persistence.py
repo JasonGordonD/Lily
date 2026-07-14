@@ -162,14 +162,23 @@ async def lily_heartbeat(
     scorekeeper,
     stop_event: asyncio.Event,
     interval: Optional[float] = None,
+    metadata_provider=None,
 ) -> None:
-    """Background task: checkpoint every `interval` seconds while live."""
+    """Background task: checkpoint every `interval` seconds while live.
+    metadata_provider (optional zero-arg callable) contributes a metadata
+    dict per beat — used for rolling latency averages (§11.6)."""
     delay = interval if interval is not None else lily_config.checkpoint_interval_seconds()
     while not stop_event.is_set():
         await asyncio.sleep(delay)
         if stop_event.is_set():
             break
-        await lily_checkpoint(supabase, scorekeeper)
+        extra = {}
+        if metadata_provider is not None:
+            try:
+                extra["metadata"] = metadata_provider()
+            except Exception as e:
+                logger.debug("heartbeat metadata_provider failed: %s", e)
+        await lily_checkpoint(supabase, scorekeeper, **extra)
         logger.debug("Heartbeat checkpoint — phase=%s", scorekeeper.phase)
 
 
