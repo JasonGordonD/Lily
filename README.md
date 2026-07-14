@@ -73,12 +73,15 @@ tests/               64 tests, run with plain `python -m pytest tests/` — no l
   `mode` (`general|adult`, sticky), `players` (JSON `[{name,score,streak,leader}]`),
   `answer_window` (JSON `{open,duration_ms,opened_at}`), `last_active_at`
   (epoch-seconds heartbeat).
-- **Room metadata**: current question + reveal `{answer,winner,correct}` via
-  `ctx.api.room.update_room_metadata` (rtc has no room-metadata setter).
-- **`lily.events`** reliable packets (discriminator key `type`): `bind`
-  `{name,speaker_label}`; `reveal` `{correct,winner}` keyed to TTS playback;
-  `callout` `{callout_type,name,text?}`; `finale` `{standings}` — fired at or
-  before the `phase=final` flip.
+- **Room metadata**: `{question, reveal:{answer,winner,correct}, wager}` via
+  `ctx.api.room.update_room_metadata` (rtc has no room-metadata setter);
+  `wager` drives the frontend's final-round palette shift.
+- **`lily.events`** reliable packets (discriminator key `type`, matched to the
+  shipped prmpt_ui parser — kind-name drift from the original contract note is
+  deliberate): `player_bind` `{player:{name},name,speaker_label}`; `reveal`
+  `{correct,winner}` keyed to TTS playback; `best_wrong_answer`
+  `{player,answer}`; `biggest_comeback` `{player,detail}`; `finale`
+  `{standings}` — fired at or before the `phase=final` flip.
 - **RPCs registered**: `lily_control.start`, `lily_control.skip` (identical to the
   spoken "skip": no commentary, no spotlight — the adult-mode consent affordance).
 

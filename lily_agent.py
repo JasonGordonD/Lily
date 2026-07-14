@@ -215,6 +215,8 @@ class LilyGame:
                 "question": question_text or "",
                 "reveal": reveal
                 or {"answer": "", "winner": None, "correct": False},
+                # Drives the frontend's high-contrast wager palette shift.
+                "wager": self.sk.phase == "final",
             })
             # Room metadata has no rtc-side setter — server API only.
             await self.ctx.api.room.update_room_metadata(
@@ -748,9 +750,11 @@ class LilyGame:
             and standings[0]["name"] != self.prewager_standings[0]["name"]
         ):
             await self.send_event(
-                "callout",
+                "biggest_comeback",
                 {
-                    "callout_type": "biggest_comeback",
+                    "player": standings[0]["name"],
+                    "detail": "Took the crown on the final wager.",
+                    # Contract-note spellings, tolerated as extra fields:
                     "name": standings[0]["name"],
                     "text": "Took the crown on the final wager.",
                 },
@@ -817,8 +821,17 @@ class LilyGame:
             "LILY_STT | roster=%d (max_speakers fixed at construction)",
             self.sk.roster_size(),
         )
+        # Packet kind `player_bind` per the shipped frontend parser
+        # (contract note said `bind`; the canonical prmpt_ui parser accepts
+        # chip_bind/name_chip/player_bind — drift recorded for Rami).
+        # Contract-spelled fields ride along for any contract-faithful client.
         self.send_event_nowait(
-            "bind", {"name": player_name, "speaker_label": speaker_label}
+            "player_bind",
+            {
+                "player": {"name": player_name},
+                "name": player_name,
+                "speaker_label": speaker_label,
+            },
         )
         self.publish_attributes_nowait()
         return note
@@ -904,12 +917,15 @@ class LilyAgent(Agent):
         if name not in self._game.sk.players:
             return f"No rostered player named {name!r} — no point awarded."
         self._game.sk.award_bonus(name)
+        clean_reason = (reason or "").strip()[:200] or None
         self._game.send_event_nowait(
-            "callout",
+            "best_wrong_answer",
             {
-                "callout_type": "best_wrong_answer",
+                "player": name,
+                "answer": clean_reason,
+                # Contract-note spellings, tolerated as extra fields:
                 "name": name,
-                "text": (reason or "").strip()[:200] or None,
+                "text": clean_reason,
             },
         )
         await self._game.publish_attributes()
