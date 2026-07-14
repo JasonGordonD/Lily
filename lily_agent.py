@@ -1326,16 +1326,16 @@ async def entrypoint(ctx: JobContext) -> None:
         game=game,
         instructions=LILY_SYSTEM_PROMPT,
     )
-    from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions
-    await session.start(
-        room=ctx.room,
-        agent=agent,
-        room_options=RoomOptions(
-            audio_input=AudioInputOptions(
-                noise_cancellation=noise_cancellation.NC()
-            ),
-        ),
-    )
+    # NOTE: `noise_cancellation.NC()` aborts the worker at Krisp init on
+    # livekit-agents==1.6.4 + livekit-plugins-noise-cancellation==0.2.6 —
+    # SIGABRT with `NcSession::initSession: Input and output sample rates
+    # must be equal`. Every job accept died 2s in until this was dropped.
+    # BVC() would ship but is designed to isolate the primary speaker and
+    # would clip other players at the table; Lily is multi-mic-per-table
+    # by design. Speechmatics ENHANCED already does its own denoise
+    # server-side, so no NC on the client audio path is the safe default
+    # until upstream fixes the NC model or exposes matching I/O rates.
+    await session.start(room=ctx.room, agent=agent)
 
     # SFX: thinking bed + stingers ride BackgroundAudioPlayer.
     background_audio = BackgroundAudioPlayer(stream_timeout_ms=10000)
