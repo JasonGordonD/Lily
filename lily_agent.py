@@ -56,6 +56,8 @@ from livekit.plugins.speechmatics import (
 )
 
 import lily_addressee
+import lily_audeering_client
+import lily_audeering_consumers
 import lily_config
 import lily_evaluation
 import lily_memory
@@ -73,7 +75,14 @@ from lily_tts import LilyTTS, lily_prewarm_tts_connection
 logger = logging.getLogger("lily_agent")
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
-LILY_SYSTEM_PROMPT = (_PROMPTS_DIR / "lily_system.txt").read_text(encoding="utf-8")
+# Loader-level rubric append (WO-LILY-AUDEERING-001 Task 3): the room-read
+# rubric is a separate prompt file, zero-scalar-linted at import of
+# lily_audeering_consumers, appended here so lily_system.txt itself stays
+# untouched.
+LILY_SYSTEM_PROMPT = (
+    (_PROMPTS_DIR / "lily_system.txt").read_text(encoding="utf-8")
+    + lily_audeering_consumers.lily_audeering_rubric_block()
+)
 LILY_ADULT_LAYER = (_PROMPTS_DIR / "layer_lily_adult.md").read_text(encoding="utf-8")
 _ADULT_LAYER_MARKER = "# ADULT MODE"
 _STATE_BLOCK_MARKER = "[GAME STATE]"
@@ -207,6 +216,13 @@ class LilyGame:
         # label UPDATE at adjudication commit.
         self.pending_clarify: dict[str, dict] = {}
         self._addressee_rows: dict[str, asyncio.Task] = {}
+
+        # Acoustic pipeline (WO-LILY-AUDEERING-001): room-read state store +
+        # per-user-turn trajectory counter. The entrypoint passes the fresh
+        # per-session state; the default keeps offline construction working.
+        self.acoustic = lily_audeering_consumers.lily_get_acoustic_state()
+        self.audeering_pipeline = None
+        self._user_turn_index = 0
 
     # -- state transport (seam contract) ------------------------------------
 
@@ -410,6 +426,31 @@ class LilyGame:
                     self.sk.clear_status_notes()
             if question is not None:
                 self.next_question = question
+                # Auto-advance (frozen-reveal deadlock fix): when the reveal
+                # consumed the previous question BEFORE this prefetch landed,
+                # arm_next_question() at reveal time returned False and no
+                # later code path arms or asks — Lily only takes a turn when
+                # someone speaks, so a quiet table stares at a stale reveal
+                # forever. If the game is live and idle, arm and nudge now.
+                if (
+                    self.game_started
+                    and not self.game_over
+                    and self.armed_question is None
+                    and not self.sk.answer_window_open
+                    and not self._adjudicating
+                ):
+                    if self.arm_next_question() and self.session is not None:
+                        logger.info(
+                            "LILY_STATE | PREFETCH_AUTO_ADVANCE | session=%s q=%d",
+                            self.sk.session_id, self.sk.question_number,
+                        )
+                        self.session.generate_reply(
+                            instructions=(
+                                "The next question just landed in the state "
+                                "block. Bridge in one short beat and ask it "
+                                "now, word for word."
+                            )
+                        )
             self.publish_attributes_nowait()
 
         self._prefetch_task = asyncio.ensure_future(_prefetch())
@@ -603,6 +644,11 @@ class LilyGame:
             "agent_action": agent_action,
             "label": None,
             "label_source": None,
+            # Task 6 addressee synergy: the key is ALWAYS present — a dict
+            # when the pipeline is healthy, an explicit SQL null (not an
+            # absent column) when the circuit breaker is open or nothing
+            # has been captured.
+            "acoustic_snapshot": self.acoustic.addressee_snapshot(),
         }
 
     def _log_addressee_segment(
@@ -755,6 +801,10 @@ class LilyGame:
         # B1 corpus row — logged BEFORE command handling so skipped-on and
         # system-directed segments are captured too (fire-and-forget).
         self._log_addressee_segment(result, text, speaker_label, ts)
+
+        # Task 6: one acoustic-trajectory row per finalized user turn
+        # (fire-and-forget; no-op when no capture has landed).
+        self.log_acoustic_trajectory()
 
         # B1 explicit ground truth: a pending clarify is resolved by the
         # NEXT finalized segment from that player, whatever it says.
@@ -1352,6 +1402,14 @@ class LilyGame:
     def build_state_block(self) -> str:
         block = self.sk.build_state_block()
         extra = []
+        # Room-temperature read (WO-LILY-AUDEERING-001 Task 3): NL descriptor
+        # lines only — zero scalars; neutral room injects NOTHING. The [env:]
+        # line appears at most once per refresh. Synchronous read — never
+        # blocks the turn.
+        try:
+            extra.extend(self.acoustic.state_block_lines())
+        except Exception:
+            pass  # acoustic read is enrichment; never breaks the state block
         if self.armed_question is not None and not self.sk.answer_window_open:
             extra.append(
                 "NEXT QUESTION (perform it when the table is ready, "
@@ -1378,6 +1436,56 @@ class LilyGame:
         if extra:
             block += "\n" + "\n".join(extra)
         return block
+
+    # -- acoustic pipeline: child-signal veto + trajectory rows -----------------------
+
+    def on_child_signal(self, event: dict) -> None:
+        """SAFETY-CRITICAL adult-mode VETO (WO-LILY-AUDEERING-001 Task 4).
+
+        Veto-only, BOTH tiers (high_halt and borderline_step_up): the
+        child signal can EXIT or BLOCK adult mode, NEVER authorize it —
+        whole-room verbal consensus remains necessary and is no longer
+        sufficient. The module estimates how the speaker SOUNDS, not
+        necessarily the actual attributes of the speaker (age MAE ±8.46yr).
+
+        Adult mode ACTIVE + ladder trips -> exit through the SAME sticky-flag
+        path as the spoken "back to normal" command: sk.set_mode("general")
+        + attribute publish + deterministic revert flow. Instant, in-character
+        line, no explanation of the mechanism, general category next.
+        """
+        if self.sk.mode != "adult":
+            return
+        logger.warning(
+            "LILY_AUDEERING_VETO | ADULT_MODE_EXIT | session=%s tier=%s %s",
+            self.sk.session_id, event.get("tier"),
+            lily_audeering_consumers.PERCEIVED_FRAMING,
+        )
+        self.sk.set_mode("general")  # sticky flag flips instantly, in code
+        self.publish_attributes_nowait()
+        if self.session is not None:
+            self.session.generate_reply(
+                instructions=(
+                    "Adult mode is now OFF — committed, in code. Switch back "
+                    "to the regular deck instantly with a light, in-character "
+                    "pivot line. Do NOT explain why, do NOT mention any "
+                    "system, audio, detection, or safety mechanism — just "
+                    "change gears like a host reading the room. Ask a "
+                    "general-category question next."
+                )
+            )
+
+    def log_acoustic_trajectory(self) -> None:
+        """One lily_acoustic_trajectories row per finalized user turn —
+        fire-and-forget (to_thread inside the persistence helper)."""
+        self._user_turn_index += 1
+        if self.supabase is None:
+            return
+        snapshot = self.acoustic.latest_snapshot()
+        if snapshot is None:
+            return
+        asyncio.ensure_future(lily_persistence.lily_write_acoustic_trajectory(
+            self.supabase, self.sk.session_id, self._user_turn_index, snapshot,
+        ))
 
     # -- binding side-effects --------------------------------------------------------
 
@@ -1558,8 +1666,28 @@ class LilyAgent(Agent):
         """Switch the game to the adult deck. Call ONLY after the whole
         table has verbally agreed — you asked the room directly and got a
         yes from the table, not one enthusiast."""
+        # WO-LILY-AUDEERING-001 Task 4 decline gate: the child-signal ladder
+        # VETOES entry. The acoustic signal can EXIT or BLOCK adult mode,
+        # NEVER authorize it — whole-room verbal consensus remains necessary
+        # and is no longer sufficient. The module estimates how the speaker
+        # sounds, not necessarily the actual attributes of the speaker
+        # (age MAE ±8.46yr).
+        if self._game.acoustic.child_veto_active():
+            logger.warning(
+                "LILY_AUDEERING_VETO | ADULT_MODE_DECLINED | session=%s %s",
+                self._game.sk.session_id,
+                lily_audeering_consumers.PERCEIVED_FRAMING,
+            )
+            return (
+                "Adult mode is NOT available right now — keep the general "
+                "deck. Deflect lightly and in character ('let's keep it "
+                "classy tonight') and move on. Do NOT explain why, do NOT "
+                "mention any system, audio, detection, or safety mechanism, "
+                "and do not retry this tool this round."
+            )
         self._game.sk.set_mode("adult")  # sticky flag — reverts only via
-        # the deterministic "back to normal" path or a fresh consensus.
+        # the deterministic "back to normal" path, a fresh consensus, or the
+        # child-signal ladder veto (on_child_signal — same sticky path).
         await self._game.publish_attributes()
         return "Adult mode is ON (sticky). The layer is active; same house rules."
 
@@ -1983,6 +2111,13 @@ async def entrypoint(ctx: JobContext) -> None:
         group_id, group_id_source=group_id_source,
     )
 
+    # Acoustic pipeline state (WO-LILY-AUDEERING-001): fresh per session.
+    # The child-signal veto callback is wired BEFORE any capture can land —
+    # the safety action ships with the pipeline, never after.
+    acoustic_state = lily_audeering_consumers.lily_reset_acoustic_state()
+    game.acoustic = acoustic_state
+    acoustic_state.on_child_signal = game.on_child_signal
+
     # Late-arrival upgrade hook: if the initial resolution fell through to a
     # weak id (room name / name-set hash) and a participant with
     # lily_group_id metadata joins later, upgrade to it — the metadata UUID
@@ -2206,6 +2341,11 @@ async def entrypoint(ctx: JobContext) -> None:
         async def _persist() -> None:
             try:
                 heartbeat_stop.set()
+                if game.audeering_pipeline is not None:
+                    try:
+                        await game.audeering_pipeline.stop()
+                    except Exception as e:
+                        logger.warning("LILY_AUDEERING | stop failed: %s", e)
                 await transcripts.flush()
                 standings = sorted(
                     game._players_payload(), key=lambda p: -p["score"]
@@ -2282,6 +2422,46 @@ async def entrypoint(ctx: JobContext) -> None:
     # server-side, so no NC on the client audio path is the safe default
     # until upstream fixes the NC model or exposes matching I/O rates.
     await session.start(room=ctx.room, agent=agent)
+
+    # --- Acoustic pipeline: room audio -> devAIce (WO-LILY-AUDEERING-001) ---
+    # Missing AUDEERING_API_KEY -> pipeline is None (breaker open, one
+    # structured log line) and the session runs unaffected.
+    audeering_pipeline = await lily_audeering_client.lily_start_audeering_pipeline(
+        acoustic_state
+    )
+    game.audeering_pipeline = audeering_pipeline
+    if audeering_pipeline is not None:
+        def _on_track_subscribed(track, publication=None, participant=None) -> None:
+            try:
+                if (
+                    getattr(participant, "kind", None)
+                    == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+                ):
+                    return
+                if getattr(track, "kind", None) != rtc.TrackKind.KIND_AUDIO:
+                    return
+                asyncio.ensure_future(
+                    lily_audeering_client.lily_audeering_audio_fork(
+                        track, audeering_pipeline
+                    )
+                )
+            except Exception as e:
+                logger.warning("LILY_AUDEERING | track hook failed: %s", e)
+
+        # Tijoux wiring lesson (JRVS): register the handler AFTER
+        # session.start() returns — handlers registered earlier fire into a
+        # half-initialized session during the start window — AND run a
+        # safety-net scan over ALREADY-subscribed tracks, which the handler
+        # alone would miss.
+        ctx.room.on("track_subscribed", _on_track_subscribed)
+        try:
+            for _participant in ctx.room.remote_participants.values():
+                for _pub in _participant.track_publications.values():
+                    _track = getattr(_pub, "track", None)
+                    if _track is not None:
+                        _on_track_subscribed(_track, _pub, _participant)
+        except Exception as e:
+            logger.warning("LILY_AUDEERING | already-subscribed scan failed: %s", e)
 
     # SFX: thinking bed + stingers ride BackgroundAudioPlayer.
     background_audio = BackgroundAudioPlayer(stream_timeout_ms=10000)
