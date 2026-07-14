@@ -47,6 +47,56 @@ do-not-touch: no imports, no vendoring).
 - **Event-bound truth:** she never announces a score the scorekeeper hasn't
   committed, never claims the next question is ready unless prefetch landed.
 
+## Loop engagement (2026-07-14 persistence-audit root-cause fix)
+
+The live audit found every session with `round=0` / `question_number=0`,
+`lily_answers` empty, and scores committed only through `lily_award_bonus`:
+**the deterministic pipeline (start_game → arm → ask → window → adjudicate)
+never engaged** — `start_game` was RPC-only and Lily freestyled the quiz.
+The pipeline now has four entry points, in order of preference:
+
+1. **`lily_begin_round` function tool** — Lily calls this the moment the
+   lobby has real energy (first genuine group laugh). This is the primary
+   in-character way to flip out of the lobby; the prompt contract tells
+   her the engine only runs through it.
+2. **Deterministic spoken path** — "start the game" / "start the quiz" /
+   "start the trivia" / "let's start" / "let's play" / "start round one"
+   fire a fragment-proof `start_game` control command at the
+   transcript-event layer (ignored once running).
+3. **`lily_control.start` RPC** — the frontend "start" button. Kept for
+   any UI that wants an explicit host-side gate.
+4. **Auto-start safety net** — if ≥2 speakers are bound
+   (`LILY_AUTO_START_MIN_PLAYERS`), the first question is prefetched, and
+   the lobby grace window has elapsed
+   (`LILY_AUTO_START_LOBBY_GRACE_SECONDS`, default 60s), the game starts
+   automatically. This exists so a voice-only table that never calls the
+   tool AND never touches the UI still reaches question one — the exact
+   failure class that produced 15+ 2026-07-14 sessions with
+   `lily_sessions.round=0` and `question_number=0` despite hours of
+   audio and populated `final_standings`.
+
+The question-spoken gate (which decides "did Lily just perform the armed
+question, so open the answer window?") is now a tiered preference, not a
+hard gate (`lily_evaluation.lily_question_spoken_ratio`, logged as
+`LILY_WINDOW | OPEN | reason=... ratio=...`): ≥0.6 distinctive-token
+overlap opens as `verbatim`, ≥0.3 as `paraphrase` (both with a floor of
+two matched tokens so a single incidental word never opens it), and after
+2 finished agent turns with a question armed in phase `question` the
+window opens as `fallback_any_agent_speech` (warning-logged) — the
+pipeline can never again stall on Lily's phrasing. The old 60% hard gate
+blocked the window on her paraphrase habit and left the game running
+through `lily_award_bonus` only. The prompt now also requires her to
+perform the NEXT QUESTION word-for-word and never to invent questions
+mid-game (the old "generating questions" section is scoped to the
+broken-question-machine fallback only).
+
+With the pipeline engaged, `lily_answers` rows (one per adjudicated
+attempt, schema `(session_id, player_name, question_id, question_index,
+transcript, verdict, eval_tier, awarded_points, ts)`) and real
+`question_count` values in `lily_memories` (read straight off
+`scorekeeper.question_number`) flow from the existing write paths.
+Tests: `tests/test_round_loop.py`.
+
 ## Latency discipline
 
 Nothing blocking runs on the event loop's hot path, and slow calls are moved
@@ -98,39 +148,8 @@ migrations/004_lily_questions_expansion.sql  200 curated_v2 bank questions
 migrations/005_lily_addressee_log.sql   addressee-label corpus (applied to production 2026-07-14)
 migrations/006_lily_session_reports.sql lily_session_reports (write side; assessment filled later)
 migrations/007_lily_memories_player_names.sql  lily_memories.player_names audit column (+GIN index)
-tests/               132 tests, run with plain `python -m pytest tests/` — no livekit, no network
+tests/               146 tests, run with plain `python -m pytest tests/` — no livekit, no network
 ```
-
-## Game-pipeline engagement (2026-07-14 persistence-audit root-cause fix)
-
-The live audit found every session with `question_number=0`, `lily_answers`
-empty, and scores committed only through `lily_award_bonus`: **the
-deterministic pipeline (start_game → arm → ask → window → adjudicate) never
-engaged**. Two causes, both fixed:
-
-1. **`start_game` was RPC-only.** Lily's prompt told her round one begins on
-   the first group laugh, but she had no way to begin it — so she freestyled
-   the quiz conversationally. Now the game starts three ways:
-   the **`lily_start_game` function tool** (the prompt contract tells her the
-   engine only runs through it), the deterministic **spoken path** ("start
-   the game" / "start the quiz" / "let's start" / "let's play" / "start round
-   one" — fragment-proof, ignored once running), and the existing
-   `lily_control.start` RPC.
-2. **The answer window had a hard verbatim gate.** It only opened when an
-   agent turn contained ≥60% of the armed question's distinctive tokens — a
-   paraphrased question left the window shut forever. Token overlap is now a
-   preference, not a gate (`LILY_WINDOW | OPEN | reason=...`): ≥0.6 opens as
-   `verbatim`, ≥0.3 as `paraphrase`, and after 2 finished agent turns with a
-   question armed in phase `question` it opens as `fallback_any_agent_speech`
-   (logged as a warning). The prompt now also requires her to perform the
-   NEXT QUESTION word-for-word and never to invent questions mid-game
-   (the old "generating questions" section is scoped to the broken-question-
-   machine fallback only).
-
-With the pipeline engaged, `lily_answers` rows (one per adjudicated attempt,
-schema `(session_id, player_name, question_id, question_index, transcript,
-verdict, eval_tier, awarded_points, ts)`) and real `question_count` values in
-`lily_memories` flow from the existing write paths.
 
 ## Persistent memory (rematch)
 
@@ -289,6 +308,8 @@ Labels land three ways (`label_source`):
 `RAVEN_VOICE_ID`) · `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` · optional:
 `LILY_KB_ONLY=1` (curated-bank-only question supply — the demo-day fallback),
 `LILY_ANSWER_WINDOW_SECONDS`, `LILY_ROUNDS`, `LILY_QUESTIONS_PER_ROUND`,
+`LILY_AUTO_START_MIN_PLAYERS` / `LILY_AUTO_START_LOBBY_GRACE_SECONDS`
+(lobby auto-start safety net), `LILY_GROUP_ID` (group-identity override),
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
 `LILY_JOB_MEMORY_LIMIT_MB`. No secrets in this repo — configure via the deployment
 secrets manager (`lk agent update-secrets` with an explicit `--id`; `--overwrite`

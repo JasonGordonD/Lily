@@ -107,14 +107,14 @@ def _message_text(msg) -> str:
     return str(content or "")
 
 
-# Answer-window opening tiers (persistence-audit root-cause fix): the old
-# hard >=60% token-overlap gate meant a paraphrased question NEVER opened
-# the window and the whole deterministic pipeline stalled. Overlap is now a
-# preference, not a gate: verbatim opens immediately, a paraphrase opens at
-# a lower bar, and after WINDOW_FALLBACK_AGENT_TURNS finished agent turns
-# with a question armed in phase=question the window opens regardless.
-QUESTION_SPOKEN_VERBATIM_RATIO = 0.6
-QUESTION_SPOKEN_PARAPHRASE_RATIO = 0.3
+# Answer-window opening (persistence-audit root-cause fix): the old hard
+# >=60% token-overlap gate meant a paraphrased question NEVER opened the
+# window and the whole deterministic pipeline stalled. Overlap is now a
+# preference, not a gate — the tiers (verbatim / paraphrase, with a min-2
+# matched-token guard against incidental single-word hits) live in
+# lily_evaluation.lily_question_spoken_ratio; after
+# WINDOW_FALLBACK_AGENT_TURNS finished agent turns with a question armed
+# in phase=question the window opens regardless.
 WINDOW_FALLBACK_AGENT_TURNS = 2
 
 # Group-id sources that are already stable — never overridden by the
@@ -439,9 +439,9 @@ class LilyGame:
             ratio = lily_evaluation.lily_question_spoken_ratio(
                 self.armed_question.get("prompt", ""), spoken_text
             )
-            if ratio >= QUESTION_SPOKEN_VERBATIM_RATIO:
+            if ratio >= lily_evaluation.QUESTION_SPOKEN_VERBATIM_RATIO:
                 reason = "verbatim"
-            elif ratio >= QUESTION_SPOKEN_PARAPHRASE_RATIO:
+            elif ratio >= lily_evaluation.QUESTION_SPOKEN_PARAPHRASE_RATIO:
                 reason = "paraphrase"
             else:
                 # Overlap is a preference, not a gate: after N finished
@@ -742,10 +742,17 @@ class LilyGame:
             return
         if command == "start_game":
             # Spoken start path — the deterministic pipeline must engage
-            # even if Lily never calls the lily_start_game tool.
+            # even if Lily never calls the lily_begin_round tool.
             if not self.game_started:
                 asyncio.ensure_future(self.start_game(source="voice"))
             return
+
+        # Safety-net auto-start: cheap gate check on every user segment so
+        # the game can start off the ambient chatter of a settled lobby —
+        # useful for tables that never touched the UI start button and
+        # where Lily hasn't yet called lily_begin_round.
+        if not self.game_started and not self.game_over:
+            self._maybe_auto_start_after_lobby()
 
         # Instant Tier-1 path: a clean earliest answer scores immediately.
         if result.get("candidate_recorded") and self.sk.answer_window_open:
@@ -1382,7 +1389,40 @@ class LilyGame:
             },
         )
         self.publish_attributes_nowait()
+        # Safety-net auto-start: if the lobby has settled into a real table
+        # (>=2 speakers bound, next question is prefetched, lobby grace
+        # window elapsed) and neither Lily nor the UI has kicked off the
+        # game, fire start_game so the tiered loop can engage. Without
+        # this net the arm/ask/adjudicate pipeline never runs and Lily
+        # freestyles bonus points forever.
+        self._maybe_auto_start_after_lobby()
         return note
+
+    # -- auto-start safety net --------------------------------------------------------
+
+    def _maybe_auto_start_after_lobby(self) -> None:
+        """Kick off round one when the lobby has clearly settled but no
+        one — neither Lily via lily_begin_round nor the UI via
+        lily_control.start — has actually started the game. Guards ensure
+        we never start while there is only one voice, before the first
+        question has been prefetched, or before the lobby grace period."""
+        if self.game_started or self.game_over:
+            return
+        if self.sk.roster_size() < lily_config.auto_start_min_players():
+            return
+        if self.next_question is None:
+            # Try again once prefetch completes.
+            self.start_prefetch()
+            return
+        grace = lily_config.auto_start_lobby_grace_seconds()
+        if time.time() - self.session_started_at < grace:
+            return
+        logger.info(
+            "LILY_STATE | AUTO_START | session=%s roster=%d elapsed=%.1fs",
+            self.sk.session_id, self.sk.roster_size(),
+            time.time() - self.session_started_at,
+        )
+        asyncio.ensure_future(self.start_game(source="auto_after_lobby"))
 
 
 # ---------------------------------------------------------------------------
@@ -1440,21 +1480,6 @@ class LilyAgent(Agent):
         return f"Bound: voice {label} is {name}.{note}"
 
     @function_tool()
-    async def lily_start_game(self, context: RunContext) -> str:
-        """Start round one. Call this the moment the table is ready to play
-        — the first genuine group laugh, or anyone asking to start. The game
-        engine (pre-written questions, the answer window, the scorekeeper)
-        only runs AFTER this call: until you call it, nothing anyone says
-        can score. Call it exactly once."""
-        if self._game.game_started:
-            return "The game is already running — keep hosting."
-        await self._game.start_game(source="tool")
-        return (
-            "Game ON. The state block now carries the next question — "
-            "perform it word-for-word when the table is ready."
-        )
-
-    @function_tool()
     async def lily_note_fact(
         self, context: RunContext, player_name: str, fact: str
     ) -> str:
@@ -1508,6 +1533,21 @@ class LilyAgent(Agent):
         # the deterministic "back to normal" path or a fresh consensus.
         await self._game.publish_attributes()
         return "Adult mode is ON (sticky). The layer is active; same house rules."
+
+    @function_tool()
+    async def lily_begin_round(self, context: RunContext) -> str:
+        """Kick off round one and open the tiered question loop. Call this
+        the moment the lobby has real energy — a genuine group laugh, or a
+        clear "let's play" from the table. Once called, the state block
+        starts serving [NEXT QUESTION] and the answer window opens on your
+        first ask. No-op if the game is already running."""
+        if self._game.game_started:
+            return "Already running — the next question is in the state block."
+        await self._game.start_game(source="host_tool")
+        return (
+            "Round one is armed. The next question is in the state block; "
+            "perform it faithfully."
+        )
 
     @function_tool()
     async def lily_award_bonus(
@@ -2146,7 +2186,7 @@ async def entrypoint(ctx: JobContext) -> None:
             "keeps score) and ask who you've got at the table tonight — "
             "conversationally, no roll-call. Bind names as people speak. "
             "When the table feels ready — the first genuine group laugh — "
-            "call lily_start_game to open round one; nothing scores until "
+            "call lily_begin_round to open round one; nothing scores until "
             "you do."
         )
         if game.memory_block:

@@ -148,6 +148,20 @@ def questions_per_round() -> int:
     return _get_int("LILY_QUESTIONS_PER_ROUND", 6)
 
 
+def auto_start_min_players() -> int:
+    """Roster size at or above which the lobby auto-start safety net can
+    fire. Guards single-voice tune-ups from being flipped into game mode."""
+    return max(1, _get_int("LILY_AUTO_START_MIN_PLAYERS", 2))
+
+
+def auto_start_lobby_grace_seconds() -> float:
+    """Wall-clock grace inside the lobby before the auto-start safety net
+    is allowed to fire. Long enough for names + one lobby fact per player;
+    short enough that a table that never touches the UI start button still
+    reaches question one."""
+    return _get_float("LILY_AUTO_START_LOBBY_GRACE_SECONDS", 60.0)
+
+
 def group_id_override() -> Optional[str]:
     """Stable group id for voiceprint rematch (v2); defaults to room name."""
     return _get("LILY_GROUP_ID")

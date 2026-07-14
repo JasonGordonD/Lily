@@ -91,12 +91,29 @@ def lily_normalize_answer(text: str) -> str:
     return " ".join(words)
 
 
-def lily_question_spoken_ratio(question_prompt: str, spoken_text: str) -> float:
+# Answer-window opening tiers: >= VERBATIM opens as a faithful ask,
+# >= PARAPHRASE opens as a reworded ask; below that the agent's
+# any-agent-speech fallback (lily_agent.WINDOW_FALLBACK_AGENT_TURNS)
+# guarantees the window still opens. MIN_HITS guards the loosened
+# thresholds: one bare incidental word overlap on a long prompt must not
+# open the window.
+QUESTION_SPOKEN_VERBATIM_RATIO = 0.6
+QUESTION_SPOKEN_PARAPHRASE_RATIO = 0.3
+QUESTION_SPOKEN_MIN_HITS = 2
+
+
+def lily_question_spoken_ratio(
+    question_prompt: str,
+    spoken_text: str,
+    min_hits: int = QUESTION_SPOKEN_MIN_HITS,
+) -> float:
     """How much of the armed question did this agent turn actually perform?
     Fraction of the prompt's distinctive tokens (len > 3) present in the
-    spoken text, 0.0..1.0. Pure — used by the answer-window opener with a
-    tiered threshold (verbatim / paraphrase / any-speech fallback) so a
-    paraphrased question can never leave the window shut forever."""
+    spoken text, 0.0..1.0 — but 0.0 when fewer than `min_hits` tokens
+    matched (single incidental hits never count as evidence). Pure — used
+    by the answer-window opener with tiered thresholds (verbatim /
+    paraphrase / any-speech fallback) so a paraphrased question can never
+    leave the window shut forever."""
     if not question_prompt or not spoken_text:
         return 0.0
     strip = lambda s: re.sub(r"[^a-z0-9\s]", " ", s.lower())
@@ -104,7 +121,10 @@ def lily_question_spoken_ratio(question_prompt: str, spoken_text: str) -> float:
     if not q_tokens:
         return 0.0
     spoken = set(strip(spoken_text).split())
-    return sum(1 for t in q_tokens if t in spoken) / len(q_tokens)
+    hits = sum(1 for t in q_tokens if t in spoken)
+    if hits < min(min_hits, len(q_tokens)):
+        return 0.0
+    return hits / len(q_tokens)
 
 
 def _soundex(word: str) -> str:
