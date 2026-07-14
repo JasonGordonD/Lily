@@ -29,8 +29,10 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=False)
 from livekit import rtc, api
 from livekit.agents import (
     AutoSubscribe,
+    InterruptionOptions,
     JobContext,
     RunContext,
+    TurnHandlingOptions,
     WorkerOptions,
     WorkerType,
     cli,
@@ -1111,6 +1113,11 @@ async def entrypoint(ctx: JobContext) -> None:
     ]
 
     # --- STT: Speechmatics multi-speaker fleet profile (Part II §1.1) ---
+    # NOTE: livekit-plugins-speechmatics 1.6.4 does not expose a `model=`
+    # kwarg — `operating_point` is the only path to select ENHANCED, and the
+    # SDK-level deprecation warning about `TranscriptionConfig.operating_point`
+    # is emitted from inside the plugin wrapper. Fix requires an upstream
+    # plugin bump; no fleet member has migrated yet. Keep as-is.
     stt = SpeechmaticsSTT(
         language="en",
         operating_point=OperatingPoint.ENHANCED,
@@ -1157,8 +1164,12 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
         tts=LilyTTS(),  # Raven's voice via LILY_VOICE_ID/RAVEN_VOICE_ID
         vad=silero.VAD.load(),  # barge-in enabled; no STT gating during TTS
-        min_interruption_words=1,
-        min_interruption_duration=0.8,
+        turn_handling=TurnHandlingOptions(
+            interruption=InterruptionOptions(
+                min_words=1,
+                min_duration=0.8,
+            ),
+        ),
     )
     game.session = session
 
