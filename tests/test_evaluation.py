@@ -133,3 +133,35 @@ def test_parse_judge_response_invalid_verdict_is_none():
 def test_parse_judge_response_junk_is_none():
     assert lily_parse_judge_response("total nonsense") is None
     assert lily_parse_judge_response("") is None
+
+
+# ---------------------------------------------------------------------------
+# Question-spoken ratio (answer-window opener tiers)
+# ---------------------------------------------------------------------------
+
+def test_spoken_ratio_verbatim_is_high():
+    from lily_evaluation import lily_question_spoken_ratio
+    q = "Which chemical element has the highest melting point of them all?"
+    spoken = "Round two! Which chemical element has the highest melting point of them all?"
+    assert lily_question_spoken_ratio(q, spoken) >= 0.6
+
+
+def test_spoken_ratio_paraphrase_is_partial():
+    from lily_evaluation import lily_question_spoken_ratio
+    q = "Which chemical element has the highest melting point of them all?"
+    spoken = "Okay table — what element melts at the highest temperature?"
+    ratio = lily_question_spoken_ratio(q, spoken)
+    assert 0.0 < ratio < 0.6
+
+
+def test_spoken_ratio_unrelated_is_zero_or_tiny():
+    from lily_evaluation import lily_question_spoken_ratio
+    q = "Which chemical element has the highest melting point of them all?"
+    assert lily_question_spoken_ratio(q, "Sarah takes the lead!") < 0.3
+
+
+def test_spoken_ratio_empty_inputs():
+    from lily_evaluation import lily_question_spoken_ratio
+    assert lily_question_spoken_ratio("", "anything") == 0.0
+    assert lily_question_spoken_ratio("a question", "") == 0.0
+    assert lily_question_spoken_ratio("a an of it", "a an of it") == 0.0

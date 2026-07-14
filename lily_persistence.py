@@ -443,24 +443,52 @@ async def lily_write_group_fact(
 async def lily_enroll_voiceprints(
     stt,
     supabase: SupabaseClient,
-    group_id: str,
+    group_id,
     scorekeeper,
-) -> None:
-    """Background task: capture Speechmatics speaker identifiers for every
-    bound player and upsert to lily_speaker_voiceprints keyed on group_id
-    (unique on (group_id, speaker_label))."""
+    trigger: str = "unspecified",
+) -> bool:
+    """Background task: capture Speechmatics speaker identifiers for this
+    session's voices and upsert to lily_speaker_voiceprints keyed on
+    group_id (unique on (group_id, speaker_label)).
+
+    Fires after the first binding commits, at game start, on a group-id
+    upgrade, and (awaited) at session close for late binders — the upsert is
+    idempotent, so repeat calls refresh rather than duplicate.
+
+    `group_id` may be a plain string OR a zero-arg callable returning the
+    CURRENT group id: callers pass a callable so the write always lands
+    under the latest RESOLVED id even when the task was scheduled before a
+    mid-session upgrade.
+
+    No-silent-crash rule: every failure path writes a structured
+    `LILY_ENROLL | FAILED | reason=...` line. Returns True only when rows
+    were actually written."""
     try:
+        if supabase is None:
+            logger.error(
+                "LILY_ENROLL | FAILED | trigger=%s reason=no_supabase_client", trigger
+            )
+            return False
         get_ids = getattr(stt, "get_speaker_ids", None)
         if get_ids is None:
-            logger.info("VOICEPRINT | stt has no get_speaker_ids — skipping enrollment")
-            return
+            logger.error(
+                "LILY_ENROLL | FAILED | trigger=%s reason=no_get_speaker_ids_api "
+                "(plugin drift vs livekit-plugins-speechmatics 1.6.4)", trigger
+            )
+            return False
         # get_speaker_ids() is ASYNC at 1.6.4 and needs ~5 spoken words per
         # speaker before it returns useful identifiers — this task stays in
-        # the background and tolerates empty results.
-        speaker_ids = await get_ids()
+        # the background and tolerates (but LOGS) empty results. Awaitable
+        # check kept defensive in case a plugin bump makes it synchronous.
+        speaker_ids = get_ids()
+        if asyncio.iscoroutine(speaker_ids) or isinstance(speaker_ids, asyncio.Future):
+            speaker_ids = await speaker_ids
         if not speaker_ids:
-            logger.info("VOICEPRINT | no speaker identifiers available yet")
-            return
+            logger.error(
+                "LILY_ENROLL | FAILED | trigger=%s reason=no_speaker_ids_yet "
+                "(Speechmatics needs ~5 spoken words per speaker)", trigger
+            )
+            return False
         # Return shape is list[SpeakerIdentifier] (or a nested list) —
         # flatten defensively.
         flat = []
@@ -470,6 +498,7 @@ async def lily_enroll_voiceprints(
             else:
                 flat.append(entry)
 
+        gid = group_id() if callable(group_id) else group_id
         label_to_name = {
             state.get("speaker_label"): name
             for name, state in scorekeeper.players.items()
@@ -486,24 +515,113 @@ async def lily_enroll_voiceprints(
             if not label:
                 continue
             rows.append({
-                "group_id": group_id,
+                "group_id": gid,
                 "speaker_label": label,
-                "player_name": label_to_name.get(label),
+                # Speechmatics may already return the enrolled player name as
+                # the label on a rematch (known_speakers are injected with
+                # player-name labels) — keep the roster mapping as fallback.
+                "player_name": label_to_name.get(label)
+                or (label if label in scorekeeper.players else None),
                 "speaker_identifiers": identifiers,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
         if not rows:
-            return
+            logger.error(
+                "LILY_ENROLL | FAILED | trigger=%s reason=no_usable_identifiers "
+                "entries=%d", trigger, len(flat)
+            )
+            return False
         await asyncio.to_thread(
             lambda: supabase.table("lily_speaker_voiceprints").upsert(
                 rows, on_conflict="group_id,speaker_label"
             ).execute()
         )
         logger.info(
-            "VOICEPRINT | enrolled %d speakers for group=%s", len(rows), group_id
+            "LILY_ENROLL | OK | trigger=%s group=%s speakers=%d bound=%d",
+            trigger, gid, len(rows),
+            sum(1 for r in rows if r["player_name"]),
         )
+        return True
     except Exception as e:
-        logger.error("lily_enroll_voiceprints error: %s", e)
+        logger.error(
+            "LILY_ENROLL | FAILED | trigger=%s reason=exception error_class=%s error=%s",
+            trigger, type(e).__name__, e,
+        )
+        return False
+
+
+async def lily_load_voiceprints_by_players(
+    supabase: SupabaseClient,
+    player_names: list,
+) -> list:
+    """Candidate voiceprints for group-identity resolution step (b): every
+    stored row whose player_name matches one of this session's roster names
+    (exact or lowercase spelling). Returns raw dicts
+    [{group_id, player_name, speaker_label, speaker_identifiers}] for
+    lily_memory.lily_match_group_by_voiceprints."""
+    names = sorted({
+        variant
+        for n in player_names or []
+        if str(n or "").strip()
+        for variant in (str(n).strip(), str(n).strip().lower(),
+                        str(n).strip().capitalize())
+    })
+    if not names:
+        return []
+    try:
+        result = await asyncio.to_thread(
+            lambda: supabase.table("lily_speaker_voiceprints")
+            .select("group_id, player_name, speaker_label, speaker_identifiers")
+            .in_("player_name", names)
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        logger.error("lily_load_voiceprints_by_players error: %s", e)
+        return []
+
+
+async def lily_rekey_group(
+    supabase: SupabaseClient,
+    old_group_id: str,
+    new_group_id: str,
+    session_id: str,
+) -> None:
+    """Mid-session group-id upgrade: move rows written under the provisional
+    id to the RESOLVED id. Scoped conservatively — lily_sessions and
+    lily_group_facts by THIS session; lily_speaker_voiceprints only when the
+    provisional id was the room-random session id (never merges two real
+    groups). Each table update tolerates failure independently."""
+    if not old_group_id or not new_group_id or old_group_id == new_group_id:
+        return
+    updates = [
+        ("lily_sessions",
+         lambda: supabase.table("lily_sessions")
+         .update({"group_id": new_group_id}).eq("session_id", session_id).execute()),
+        ("lily_group_facts",
+         lambda: supabase.table("lily_group_facts")
+         .update({"group_id": new_group_id})
+         .eq("source_session_id", session_id).execute()),
+    ]
+    if old_group_id == session_id:
+        updates.append(
+            ("lily_speaker_voiceprints",
+             lambda: supabase.table("lily_speaker_voiceprints")
+             .update({"group_id": new_group_id})
+             .eq("group_id", old_group_id).execute())
+        )
+    for table, call in updates:
+        try:
+            await asyncio.to_thread(call)
+            logger.info(
+                "LILY_MEMORY | REKEY | table=%s session=%s old=%s new=%s",
+                table, session_id, old_group_id, new_group_id,
+            )
+        except Exception as e:
+            logger.error(
+                "LILY_MEMORY | REKEY_FAILED | table=%s session=%s error=%s",
+                table, session_id, e,
+            )
 
 
 async def lily_load_voiceprints(

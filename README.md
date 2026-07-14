@@ -97,33 +97,123 @@ migrations/003_lily_memory.sql          lily_memories + lily_questions.adult gua
 migrations/004_lily_questions_expansion.sql  200 curated_v2 bank questions
 migrations/005_lily_addressee_log.sql   addressee-label corpus (applied to production 2026-07-14)
 migrations/006_lily_session_reports.sql lily_session_reports (write side; assessment filled later)
-tests/               110 tests, run with plain `python -m pytest tests/` — no livekit, no network
+migrations/007_lily_memories_player_names.sql  lily_memories.player_names audit column (+GIN index)
+tests/               132 tests, run with plain `python -m pytest tests/` — no livekit, no network
 ```
+
+## Game-pipeline engagement (2026-07-14 persistence-audit root-cause fix)
+
+The live audit found every session with `question_number=0`, `lily_answers`
+empty, and scores committed only through `lily_award_bonus`: **the
+deterministic pipeline (start_game → arm → ask → window → adjudicate) never
+engaged**. Two causes, both fixed:
+
+1. **`start_game` was RPC-only.** Lily's prompt told her round one begins on
+   the first group laugh, but she had no way to begin it — so she freestyled
+   the quiz conversationally. Now the game starts three ways:
+   the **`lily_start_game` function tool** (the prompt contract tells her the
+   engine only runs through it), the deterministic **spoken path** ("start
+   the game" / "start the quiz" / "let's start" / "let's play" / "start round
+   one" — fragment-proof, ignored once running), and the existing
+   `lily_control.start` RPC.
+2. **The answer window had a hard verbatim gate.** It only opened when an
+   agent turn contained ≥60% of the armed question's distinctive tokens — a
+   paraphrased question left the window shut forever. Token overlap is now a
+   preference, not a gate (`LILY_WINDOW | OPEN | reason=...`): ≥0.6 opens as
+   `verbatim`, ≥0.3 as `paraphrase`, and after 2 finished agent turns with a
+   question armed in phase `question` it opens as `fallback_any_agent_speech`
+   (logged as a warning). The prompt now also requires her to perform the
+   NEXT QUESTION word-for-word and never to invent questions mid-game
+   (the old "generating questions" section is scoped to the broken-question-
+   machine fallback only).
+
+With the pipeline engaged, `lily_answers` rows (one per adjudicated attempt,
+schema `(session_id, player_name, question_id, question_index, transcript,
+verdict, eval_tier, awarded_points, ts)`) and real `question_count` values in
+`lily_memories` flow from the existing write paths.
 
 ## Persistent memory (rematch)
 
-Lily remembers a table across sessions, keyed on a stable **group identity**
-resolved at job start (logged as `LILY_MEMORY | GROUP_ID | source=...`):
+Lily remembers a table across sessions, keyed on a stable **group identity**.
+The resolution chain (every step observable — `LILY_MEMORY | GROUP_ID |
+source=... group_id=...` is logged every session, upgrades as
+`LILY_MEMORY | GROUP_ID_UPGRADE | source=... old=... new=...`):
 
-1. `lily_group_id` from the first non-agent participant's token metadata —
-   the frontend passes a device-scoped UUID as JSON
-   `{"lily_group_id": "<uuid>"}` (absent/unparseable metadata is tolerated);
-2. `LILY_GROUP_ID` env override;
-3. room name (legacy fallback — random per session, so nothing re-keys on it).
+1. **(a) `lily_group_id` metadata** — strongest signal. Read from BOTH the
+   dispatch/job metadata (`ctx.job.metadata`; the token route mirrors
+   participant metadata into `RoomAgentDispatch`, available immediately) and
+   the first non-agent participant's token metadata (JSON
+   `{"lily_group_id": "<uuid>"}`). Live evidence showed the participant is
+   often NOT in `remote_participants` yet when `ctx.connect()` returns, so
+   the scan polls up to 3s for the first participant, and a
+   `participant_connected` hook upgrades a weak id if a metadata-carrying
+   participant joins later (`source=participant_metadata_late`).
+2. **(b) voiceprint match** (at game start, roster stabilized): this
+   session's `stt.get_speaker_ids()` identifiers are matched by exact string
+   overlap against `lily_speaker_voiceprints` rows loaded by roster
+   player-name — a hit reuses that prior `group_id`
+   (`source=voiceprint_match`). Best-effort: it only hits when Speechmatics
+   returns stable identifier strings for a returning voice.
+3. **(c) name-set hash fallback**: `grp_` + sha1 of the normalized sorted
+   player-name set joined with `|` (e.g. `sha1("carly|kali|rami")`) —
+   deterministic, so the same table of names re-keys to the same group every
+   night (`source=name_set_hash`). This resolves only after names bind, so
+   it runs as a **mid-session upgrade at game start**: the session begins
+   under the room name, re-resolves when `start_game` fires, re-keys this
+   session's rows already written (`lily_sessions`, this session's
+   `lily_group_facts`, and — only when upgrading off the room-random id —
+   `lily_speaker_voiceprints`; `LILY_MEMORY | REKEY | table=...`), reloads
+   the `[RETURNING TABLE]` memory if no questions have been played, and
+   re-fires enrollment so voiceprints land under the resolved id.
+4. **(d)** `LILY_GROUP_ID` env override, then room name (random per session
+   — nothing re-keys on it; the upgrade path exists exactly to escape it).
 
 **Tables:** `lily_memories` (one row per session, upserted idempotently on
 `session_id` from both `finish_game` and the shutdown callback: final
-`players [{name,score,streak}]`, `winner`, `question_count`, `highlights`
-callouts, and a deterministic template `summary` — no LLM call) plus the
-existing `lily_group_facts` (running-bit material) and
-`lily_speaker_voiceprints` (which now re-key correctly across sessions for
-instant returning-voice recognition).
+`players [{name,score,streak}]`, `winner`, `question_count` — read straight
+off `scorekeeper.question_number` — `highlights` callouts, a deterministic
+template `summary`, and `player_names`, the normalized sorted name-set audit
+column from migration 007; if production hasn't applied 007 yet the write
+retries once without the column) plus `lily_group_facts` (running-bit
+material) and `lily_speaker_voiceprints`.
+
+**Group facts now have writers:** the `lily_note_fact(player_name, fact)`
+tool (the prompt tells Lily to log each player's lobby fact and any
+callback-worthy detail) and `best_wrong_answer` callouts both persist to
+`lily_group_facts` under the RESOLVED group id (deduped per session,
+fire-and-forget, `LILY_MEMORY | GROUP_FACT`); `lily_load_group_memory`
+already reads them back into the `[RETURNING TABLE]` block on the next
+night.
+
+**Voiceprint enrollment** (`lily_speaker_voiceprints`) fires the moment the
+FIRST binding commits, again at game start / group-id upgrade, and once more
+— awaited, inside the shutdown gate, so teardown can't race it — at session
+close for late binders. The upsert is idempotent on
+`(group_id, speaker_label)`, and the group id is read at write time (a
+callable), so a mid-session upgrade re-keys in-flight enrollments too.
+No-silent-crash: every failure path logs a structured
+`LILY_ENROLL | FAILED | reason=...` (no client, plugin API drift, no
+identifiers yet, no usable rows, exception); success logs
+`LILY_ENROLL | OK | trigger=... group=... speakers=...`.
+**1.6.4 API notes:** `stt.get_speaker_ids()` is **async** at
+`livekit-plugins-speechmatics 1.6.4` and returns useful identifiers only
+after ~5 spoken words per speaker (the multi-trigger schedule exists
+precisely so an early empty result self-heals); the code tolerates a future
+plugin making it synchronous, and logs `reason=no_get_speaker_ids_api` if a
+bump removes it. On a rematch, injected `known_speakers` carry player-name
+labels, so returning voices may surface with the player name as the label —
+the enrollment row mapper handles both spellings.
 
 **What Lily remembers:** on a returning group, the last 3 games + group facts
 are compiled into a compact `[RETURNING TABLE]` system block (~600 chars max,
 injected in `llm_node` the same additive way as the adult layer): returning
 player names, who won last time, running bits, total games — so she greets
-players back by name and does callbacks with rematch energy.
+players back by name and does callbacks with rematch energy. A block that
+arrives via the mid-session group-id upgrade injects on her next turn the
+same way. **Neutral-greeting rule:** with no memory data she is instructed
+never to claim she remembers the table AND never to announce it's their
+first time — history is referenced only when a `[RETURNING TABLE]` block
+actually exists.
 
 **Adult-column guard (consent-safety):** `lily_questions.adult` marks
 adult-register bank rows; `lily_fetch_bank_question` takes the session `mode`

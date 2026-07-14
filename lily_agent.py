@@ -107,18 +107,25 @@ def _message_text(msg) -> str:
     return str(content or "")
 
 
-def _question_was_spoken(question_prompt: str, spoken_text: str) -> bool:
-    """Heuristic: did this agent turn perform the armed question? Token
-    overlap on distinctive words (>= 60% of prompt tokens present)."""
-    if not question_prompt or not spoken_text:
-        return False
-    strip = lambda s: re.sub(r"[^a-z0-9\s]", " ", s.lower())
-    q_tokens = [t for t in strip(question_prompt).split() if len(t) > 3]
-    if not q_tokens:
-        return False
-    spoken = set(strip(spoken_text).split())
-    hits = sum(1 for t in q_tokens if t in spoken)
-    return hits / len(q_tokens) >= 0.6
+# Answer-window opening tiers (persistence-audit root-cause fix): the old
+# hard >=60% token-overlap gate meant a paraphrased question NEVER opened
+# the window and the whole deterministic pipeline stalled. Overlap is now a
+# preference, not a gate: verbatim opens immediately, a paraphrase opens at
+# a lower bar, and after WINDOW_FALLBACK_AGENT_TURNS finished agent turns
+# with a question armed in phase=question the window opens regardless.
+QUESTION_SPOKEN_VERBATIM_RATIO = 0.6
+QUESTION_SPOKEN_PARAPHRASE_RATIO = 0.3
+WINDOW_FALLBACK_AGENT_TURNS = 2
+
+# Group-id sources that are already stable — never overridden by the
+# mid-session (voiceprint / name-set) upgrade path. Late participant
+# metadata is the strongest signal and MAY override a name-set hash.
+_STRONG_GROUP_SOURCES = (
+    "participant_metadata",
+    "participant_metadata_late",
+    "dispatch_metadata",
+    "env_override",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +142,7 @@ class LilyGame:
         supabase,
         transcript_batcher,
         group_id: str,
+        group_id_source: str = "room_name",
     ) -> None:
         self.ctx = ctx
         self.sk = scorekeeper
@@ -142,6 +150,7 @@ class LilyGame:
         self.supabase = supabase
         self.transcripts = transcript_batcher
         self.group_id = group_id
+        self.group_id_source = group_id_source
 
         self.session: AgentSession | None = None
         self.background_audio: BackgroundAudioPlayer | None = None
@@ -173,6 +182,8 @@ class LilyGame:
         self._pending_unbound_award: dict | None = None
         self._last_assistant_text = ""
         self._enroll_started = False
+        self._armed_speech_misses = 0  # agent turns finished w/o performing q
+        self._group_facts_written: set = set()  # per-session fact dedupe
 
         # Persistent cross-session memory (rematch): the [RETURNING TABLE]
         # block loaded at session start, and this session's callouts
@@ -270,6 +281,14 @@ class LilyGame:
                 "detail": payload.get("detail") or payload.get("answer"),
             })
             self.highlights = self.highlights[-lily_memory.MEMORY_HIGHLIGHTS_CAP:]
+            # Best wrong answers double as persistent running-bit material
+            # (lily_group_facts) — callback fuel for the next night.
+            if event_type == "best_wrong_answer":
+                detail = payload.get("detail") or payload.get("answer")
+                if payload.get("player") and detail:
+                    self.record_group_fact(
+                        payload["player"], f"best wrong answer: {detail}"
+                    )
         try:
             # Payload spreads first so the packet discriminator can never be
             # clobbered by a payload key (the callout payload carries its own
@@ -387,6 +406,7 @@ class LilyGame:
         else:
             self.sk.set_phase("round")
         self.used_prompts.append(self.armed_question.get("prompt", ""))
+        self._armed_speech_misses = 0
         self._judged_keys = set()
         self._addressee_rows = {}  # B1: row-id tasks are per-question
         for _task in self._spec_judge.values():
@@ -415,10 +435,34 @@ class LilyGame:
             self.armed_question is not None
             and not self.sk.answer_window_open
             and not self._adjudicating
-            and _question_was_spoken(
+        ):
+            ratio = lily_evaluation.lily_question_spoken_ratio(
                 self.armed_question.get("prompt", ""), spoken_text
             )
-        ):
+            if ratio >= QUESTION_SPOKEN_VERBATIM_RATIO:
+                reason = "verbatim"
+            elif ratio >= QUESTION_SPOKEN_PARAPHRASE_RATIO:
+                reason = "paraphrase"
+            else:
+                # Overlap is a preference, not a gate: after N finished
+                # agent turns with a question armed in phase=question, open
+                # anyway — the pipeline must never stall on phrasing.
+                self._armed_speech_misses += 1
+                if (
+                    self._armed_speech_misses < WINDOW_FALLBACK_AGENT_TURNS
+                    or self.ui_phase != "question"
+                ):
+                    return
+                reason = "fallback_any_agent_speech"
+                logger.warning(
+                    "LILY_WINDOW | FALLBACK_OPEN | session=%s q=%d ratio=%.2f "
+                    "— question likely paraphrased beyond recognition",
+                    self.sk.session_id, self.sk.question_number, ratio,
+                )
+            logger.info(
+                "LILY_WINDOW | OPEN | session=%s q=%d reason=%s ratio=%.2f",
+                self.sk.session_id, self.sk.question_number, reason, ratio,
+            )
             self.open_window()
 
     def open_window(
@@ -695,6 +739,12 @@ class LilyGame:
             return
         if command == "skip":
             asyncio.ensure_future(self.skip_question(source="voice"))
+            return
+        if command == "start_game":
+            # Spoken start path — the deterministic pipeline must engage
+            # even if Lily never calls the lily_start_game tool.
+            if not self.game_started:
+                asyncio.ensure_future(self.start_game(source="voice"))
             return
 
         # Instant Tier-1 path: a clean earliest answer scores immediately.
@@ -1048,6 +1098,117 @@ class LilyGame:
             )
         return " ".join(parts)
 
+    # -- group identity (persistent memory re-key) -------------------------------
+
+    def record_group_fact(self, player_name: str, fact: str) -> None:
+        """Persist one lily_group_facts row under the CURRENT (resolved)
+        group id — lobby facts via the lily_note_fact tool, best-wrong-answer
+        callouts via send_event. Deduped per session, fire-and-forget; a
+        later group-id upgrade re-keys this session's rows."""
+        fact = (fact or "").strip()
+        name = (player_name or "").strip()
+        if not fact or self.supabase is None:
+            return
+        key = (name.lower(), fact.lower())
+        if key in self._group_facts_written:
+            return
+        self._group_facts_written.add(key)
+        logger.info(
+            "LILY_MEMORY | GROUP_FACT | session=%s group=%s player=%s fact=%r",
+            self.sk.session_id, self.group_id, name or None, fact[:80],
+        )
+        asyncio.ensure_future(lily_persistence.lily_write_group_fact(
+            self.supabase, self.group_id, name or None, fact,
+            self.sk.session_id,
+        ))
+
+    def fire_enrollment(self, trigger: str) -> None:
+        """Voiceprint enrollment, fire-and-forget. group_id is passed as a
+        callable so the upsert lands under whatever id is resolved by the
+        time Speechmatics returns identifiers."""
+        if self.supabase is None or self.stt is None:
+            return
+        asyncio.ensure_future(lily_persistence.lily_enroll_voiceprints(
+            self.stt, self.supabase, lambda: self.group_id, self.sk,
+            trigger=trigger,
+        ))
+
+    async def upgrade_group_id(self, new_group_id: str, source: str) -> None:
+        """Mid-session group-id upgrade: re-key this session's rows to the
+        resolved id, reload the [RETURNING TABLE] memory when the game
+        hasn't effectively started (no questions played), and re-enroll
+        voiceprints under the resolved id."""
+        old = self.group_id
+        if not new_group_id or new_group_id == old:
+            return
+        self.group_id = new_group_id
+        self.group_id_source = source
+        logger.info(
+            "LILY_MEMORY | GROUP_ID_UPGRADE | session=%s source=%s old=%s new=%s",
+            self.sk.session_id, source, old, new_group_id,
+        )
+        if self.supabase is None:
+            return
+        await lily_persistence.lily_rekey_group(
+            self.supabase, old, new_group_id, self.sk.session_id
+        )
+        if self.sk.question_number == 0:
+            memory = await lily_memory.lily_load_group_memory(
+                self.supabase, new_group_id
+            )
+            block = lily_memory.lily_build_memory_block(memory)
+            if block:
+                self.memory_block = block  # llm_node injects it next turn
+                logger.info(
+                    "LILY_MEMORY | BLOCK_READY | group=%s chars=%d "
+                    "total_games=%s (post-upgrade)",
+                    new_group_id, len(block),
+                    (memory or {}).get("total_games"),
+                )
+        self.fire_enrollment("group_id_upgrade")
+
+    async def resolve_group_identity(self, trigger: str) -> None:
+        """Re-resolve the group id once the roster has stabilized (game
+        start). Only runs when the current id is weak (room-random or a
+        prior name-set hash). Order: (b) stored-voiceprint identifier match
+        -> (c) normalized sorted player-name-set hash -> keep current."""
+        if self.group_id_source in _STRONG_GROUP_SOURCES:
+            return
+        names = list(self.sk.players.keys())
+        if not names:
+            logger.info(
+                "LILY_MEMORY | GROUP_ID_RESOLVE | trigger=%s no players bound "
+                "— keeping %s", trigger, self.group_id,
+            )
+            return
+        new_id, source = None, None
+        # (b) voiceprint identifier match against prior groups
+        try:
+            get_ids = getattr(self.stt, "get_speaker_ids", None)
+            if get_ids is not None and self.supabase is not None:
+                current = await asyncio.wait_for(get_ids(), timeout=3.0)
+                if current:
+                    stored = await lily_persistence.lily_load_voiceprints_by_players(
+                        self.supabase, names
+                    )
+                    matched = lily_memory.lily_match_group_by_voiceprints(
+                        current, stored
+                    )
+                    if matched and matched != self.sk.session_id:
+                        new_id, source = matched, "voiceprint_match"
+        except Exception as e:
+            logger.warning(
+                "LILY_MEMORY | GROUP_ID_RESOLVE | voiceprint match failed: %s", e
+            )
+        # (c) name-set hash fallback — deterministic across sessions
+        if new_id is None:
+            hashed = lily_memory.lily_name_set_group_id(names)
+            if hashed:
+                new_id, source = hashed, "name_set_hash"
+        if new_id is None or new_id == self.group_id:
+            return
+        await self.upgrade_group_id(new_id, source)
+
     # -- game lifecycle ---------------------------------------------------------
 
     async def start_game(self, source: str) -> None:
@@ -1056,24 +1217,34 @@ class LilyGame:
         self.game_started = True
         logger.info("LILY_STATE | GAME_START | session=%s source=%s",
                     self.sk.session_id, source)
+        # Roster is as stable as it gets — resolve the durable group id
+        # BEFORE the first question so memories/facts/voiceprints key on it
+        # (and reload memory for a returning table while there's still a
+        # greeting moment to use it in).
+        try:
+            await self.resolve_group_identity(trigger="game_start")
+        except Exception as e:
+            logger.warning("LILY_MEMORY | GROUP_ID_RESOLVE | failed: %s", e)
         self.sk.set_phase("round")
         self.start_prefetch()
         self.arm_next_question()
         await self.publish_attributes()
-        if not self._enroll_started and self.supabase is not None and self.stt is not None:
-            self._enroll_started = True
-            asyncio.ensure_future(lily_persistence.lily_enroll_voiceprints(
-                self.stt, self.supabase, self.group_id, self.sk
-            ))
+        self._enroll_started = True
+        self.fire_enrollment("game_start")
         if self.session is not None:
-            self.session.generate_reply(
-                instructions=(
-                    "The table is ready to start. Kick off round one with "
-                    "energy. If the state block has the next question, set "
-                    "the round's category and ask it now; if it does not, "
-                    "banter for a beat — it is on its way."
-                )
+            instructions = (
+                "The table is ready to start. Kick off round one with "
+                "energy. If the state block has the next question, set "
+                "the round's category and ask it now; if it does not, "
+                "banter for a beat — it is on its way."
             )
+            if self.memory_block:
+                instructions += (
+                    " The [RETURNING TABLE] context shows this table has "
+                    "played with you before — one quick welcome-back beat "
+                    "if you haven't done one yet, then into the game."
+                )
+            self.session.generate_reply(instructions=instructions)
 
     async def finish_game(self) -> None:
         """Finale: event fires AT OR BEFORE the phase=final attribute flip,
@@ -1191,6 +1362,13 @@ class LilyGame:
             "LILY_STT | roster=%d (max_speakers fixed at construction)",
             self.sk.roster_size(),
         )
+        # Voiceprint enrollment fires the moment the FIRST binding commits
+        # (the speaker has spoken; Speechmatics needs ~5 words per voice —
+        # re-fired at game start, group-id upgrade, and session close for
+        # late binders, so an early empty result self-heals).
+        if not self._enroll_started:
+            self._enroll_started = True
+            self.fire_enrollment("first_bind")
         # Packet kind `player_bind` per the shipped frontend parser
         # (contract note said `bind`; the canonical prmpt_ui parser accepts
         # chip_bind/name_chip/player_bind — drift recorded for Rami).
@@ -1260,6 +1438,44 @@ class LilyAgent(Agent):
         self._game.sk.bind_speaker(label, name)
         note = self._game.on_speaker_bound(label, name)
         return f"Bound: voice {label} is {name}.{note}"
+
+    @function_tool()
+    async def lily_start_game(self, context: RunContext) -> str:
+        """Start round one. Call this the moment the table is ready to play
+        — the first genuine group laugh, or anyone asking to start. The game
+        engine (pre-written questions, the answer window, the scorekeeper)
+        only runs AFTER this call: until you call it, nothing anyone says
+        can score. Call it exactly once."""
+        if self._game.game_started:
+            return "The game is already running — keep hosting."
+        await self._game.start_game(source="tool")
+        return (
+            "Game ON. The state block now carries the next question — "
+            "perform it word-for-word when the table is ready."
+        )
+
+    @function_tool()
+    async def lily_note_fact(
+        self, context: RunContext, player_name: str, fact: str
+    ) -> str:
+        """Log a player's lobby fact or running-bit material the moment it
+        lands — one short line ("owns 40 typewriters"). Call it when a
+        player gives you their lobby fact, and for any detail worth a
+        callback on a future night; it persists across sessions for this
+        table.
+
+        Args:
+            player_name: The player the fact belongs to.
+            fact: One short line, third person.
+        """
+        name = (player_name or "").strip()
+        clean = (fact or "").strip()[:300]
+        if not clean:
+            return "No fact given — nothing logged."
+        if name in self._game.sk.players:
+            self._game.sk.set_lobby_fact(name, clean)
+        self._game.record_group_fact(name, clean)
+        return f"Noted for this table's file: {name} — {clean}."
 
     @function_tool()
     async def lily_log_clarify(
@@ -1458,39 +1674,98 @@ def _setup_session_log(room_name: str) -> None:
         logger.warning("session log setup failed: %s", e)
 
 
+# How long the entrypoint waits for the first non-agent participant (and
+# their token metadata) to appear in remote_participants. Live evidence
+# (2026-07-14 audit): at ctx.connect() return the joining participant is
+# often NOT in remote_participants yet, which silently dropped the
+# lily_group_id metadata and fell through to the room-random id.
+PARTICIPANT_METADATA_WAIT_SECONDS = 3.0
+
+
+async def _resolve_initial_group_id(ctx: JobContext, room_name: str) -> tuple[str, str]:
+    """Group identity at job start (persistent memory / voiceprint re-key).
+    Priority: (a) lily_group_id from dispatch/job metadata (the token route
+    mirrors participant metadata into RoomAgentDispatch — available
+    immediately), then from the first non-agent remote participant's token
+    metadata (short poll: the participant may join AFTER ctx.connect
+    returns); (b) LILY_GROUP_ID env override; (c) room name (legacy fallback
+    — random per session; the mid-session upgrade path re-keys off it).
+    Always returns (group_id, source) — the caller logs the mandatory
+    LILY_MEMORY | GROUP_ID | source=... line."""
+    # (a1) dispatch/job metadata — strongest immediately-available signal.
+    try:
+        job_meta = getattr(getattr(ctx, "job", None), "metadata", None)
+        candidate = lily_memory.lily_parse_group_id_from_metadata(job_meta)
+        if candidate:
+            return candidate, "dispatch_metadata"
+        if job_meta:
+            logger.info(
+                "LILY_MEMORY | GROUP_ID | dispatch metadata present but "
+                "unparseable: %r", str(job_meta)[:120],
+            )
+    except Exception as e:
+        logger.warning("LILY_MEMORY | GROUP_ID | dispatch metadata read failed: %s", e)
+
+    # (a2) participant token metadata, with a short poll for late arrival.
+    def _scan() -> tuple[str | None, int]:
+        non_agents = 0
+        try:
+            for participant in ctx.room.remote_participants.values():
+                if (
+                    getattr(participant, "kind", None)
+                    == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+                ):
+                    continue
+                non_agents += 1
+                meta = getattr(participant, "metadata", None)
+                candidate = lily_memory.lily_parse_group_id_from_metadata(meta)
+                if candidate:
+                    return candidate, non_agents
+                if meta:
+                    logger.info(
+                        "LILY_MEMORY | GROUP_ID | participant %s metadata "
+                        "present but unparseable: %r",
+                        getattr(participant, "identity", "?"), str(meta)[:120],
+                    )
+        except Exception as e:
+            logger.warning("LILY_MEMORY | GROUP_ID | participant scan failed: %s", e)
+        return None, non_agents
+
+    deadline = time.time() + PARTICIPANT_METADATA_WAIT_SECONDS
+    while True:
+        candidate, non_agents = _scan()
+        if candidate:
+            return candidate, "participant_metadata"
+        if non_agents > 0:
+            # A human is here with no usable metadata — waiting won't help
+            # (token metadata is fixed at join). Late joiners WITH metadata
+            # are handled by the participant_connected upgrade hook.
+            logger.info(
+                "LILY_MEMORY | GROUP_ID | %d participant(s) present, no "
+                "lily_group_id metadata", non_agents,
+            )
+            break
+        if time.time() >= deadline:
+            logger.info(
+                "LILY_MEMORY | GROUP_ID | no non-agent participant within "
+                "%.1fs of connect", PARTICIPANT_METADATA_WAIT_SECONDS,
+            )
+            break
+        await asyncio.sleep(0.25)
+
+    if lily_config.group_id_override():
+        return lily_config.group_id_override(), "env_override"
+    return room_name, "room_name"
+
+
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     room_name = ctx.room.name or "unknown"
     _setup_session_log(room_name)
 
-    # --- Group identity resolution (persistent memory / voiceprint re-key).
-    # Priority: (a) lily_group_id from the first non-agent remote
-    # participant's token metadata (stable device-scoped UUID passed by the
-    # frontend — the user is already in the room at job start, but absent
-    # participants and unparseable metadata are tolerated), (b) LILY_GROUP_ID
-    # env override, (c) room name (legacy fallback — random per session, so
-    # memory and voiceprints never re-key on it).
-    group_id: str | None = None
-    group_id_source = None
-    try:
-        for participant in ctx.room.remote_participants.values():
-            if (
-                getattr(participant, "kind", None)
-                == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
-            ):
-                continue
-            candidate = lily_memory.lily_parse_group_id_from_metadata(
-                getattr(participant, "metadata", None)
-            )
-            if candidate:
-                group_id, group_id_source = candidate, "participant_metadata"
-                break
-    except Exception as e:
-        logger.warning("LILY_MEMORY | GROUP_ID | participant scan failed: %s", e)
-    if group_id is None and lily_config.group_id_override():
-        group_id, group_id_source = lily_config.group_id_override(), "env_override"
-    if group_id is None:
-        group_id, group_id_source = room_name, "room_name"
+    # --- Group identity resolution (observable: this line MUST appear
+    # every session) ---
+    group_id, group_id_source = await _resolve_initial_group_id(ctx, room_name)
     logger.info(
         "LILY_MEMORY | GROUP_ID | source=%s group_id=%s",
         group_id_source, group_id,
@@ -1516,7 +1791,35 @@ async def entrypoint(ctx: JobContext) -> None:
 
     reasoning = LilyReasoning()
     transcripts = lily_persistence.LilyTranscriptBatcher(supabase, room_name)
-    game = LilyGame(ctx, scorekeeper, reasoning, supabase, transcripts, group_id)
+    game = LilyGame(
+        ctx, scorekeeper, reasoning, supabase, transcripts,
+        group_id, group_id_source=group_id_source,
+    )
+
+    # Late-arrival upgrade hook: if the initial resolution fell through to a
+    # weak id (room name / name-set hash) and a participant with
+    # lily_group_id metadata joins later, upgrade to it — the metadata UUID
+    # is the strongest signal.
+    def _on_participant_connected(participant) -> None:
+        try:
+            if game.group_id_source in _STRONG_GROUP_SOURCES:
+                return
+            if (
+                getattr(participant, "kind", None)
+                == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+            ):
+                return
+            candidate = lily_memory.lily_parse_group_id_from_metadata(
+                getattr(participant, "metadata", None)
+            )
+            if candidate and candidate != game.group_id:
+                asyncio.ensure_future(
+                    game.upgrade_group_id(candidate, "participant_metadata_late")
+                )
+        except Exception as e:
+            logger.warning("LILY_MEMORY | GROUP_ID | late-join scan failed: %s", e)
+
+    ctx.room.on("participant_connected", _on_participant_connected)
 
     # Returning-table memory: last games + group facts -> [RETURNING TABLE]
     # system block (injected in llm_node alongside the adult layer).
@@ -1733,8 +2036,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 # Session memory — idempotent with the finish_game write
                 # (upsert on session_id); this path also covers sessions
                 # that end without reaching the final question.
+                # game.group_id (not the entrypoint local): a mid-session
+                # upgrade may have re-keyed the group.
                 await lily_memory.lily_write_session_memory(
-                    supabase, group_id, scorekeeper.session_id,
+                    supabase, game.group_id, scorekeeper.session_id,
                     standings, scorekeeper.question_number, game.highlights,
                 )
                 # B3 session report — one row per session, idempotent upsert
@@ -1744,13 +2049,17 @@ async def entrypoint(ctx: JobContext) -> None:
                 await lily_persistence.lily_write_session_report(
                     supabase,
                     session_id=scorekeeper.session_id,
-                    group_id=group_id,
+                    group_id=game.group_id,
                     transcript=list(scorekeeper.transcript_buffer),
                     game_stats=game.build_game_stats(standings),
                 )
-                asyncio.ensure_future(lily_persistence.lily_enroll_voiceprints(
-                    stt, supabase, group_id, scorekeeper
-                ))
+                # Late-binder voiceprint enrollment — AWAITED (not
+                # fire-and-forget) so the shutdown gate can't tear the
+                # process down mid-write; failures log LILY_ENROLL | FAILED.
+                await lily_persistence.lily_enroll_voiceprints(
+                    stt, supabase, lambda: game.group_id, scorekeeper,
+                    trigger="session_close",
+                )
             except Exception as e:
                 logger.error("SESSION_CLOSE | persistence error: %s", e)
             finally:
@@ -1835,13 +2144,26 @@ async def entrypoint(ctx: JobContext) -> None:
             "table as Lily: two or three short, warm, excited sentences. "
             "Tell them the deal (you host, they shout answers, the screen "
             "keeps score) and ask who you've got at the table tonight — "
-            "conversationally, no roll-call. Bind names as people speak."
+            "conversationally, no roll-call. Bind names as people speak. "
+            "When the table feels ready — the first genuine group laugh — "
+            "call lily_start_game to open round one; nothing scores until "
+            "you do."
         )
         if game.memory_block:
             greeting += (
                 " This is a RETURNING table — the [RETURNING TABLE] context "
                 "has who they are. Greet them back by name, reference last "
                 "game's winner, and lean into the rematch energy."
+            )
+        else:
+            # Neutral-history rule: without memory data, never claim OR deny
+            # prior contact (memory may still resolve mid-lobby via a
+            # group-id upgrade).
+            greeting += (
+                " You have no memory of this table right now — do not claim "
+                "you remember them, and do not announce it's their first "
+                "time either. If a [RETURNING TABLE] block appears later, "
+                "you may reference it from then on."
             )
         session.generate_reply(instructions=greeting)
 

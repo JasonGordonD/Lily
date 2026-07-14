@@ -16,6 +16,7 @@ never raise into the session.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 from typing import Optional
@@ -49,6 +50,85 @@ def lily_parse_group_id_from_metadata(metadata) -> Optional[str]:
     if isinstance(group_id, str) and group_id.strip():
         return group_id.strip()
     return None
+
+
+# ---------------------------------------------------------------------------
+# Group identity — name-set hash fallback + voiceprint matching (pure)
+# ---------------------------------------------------------------------------
+
+NAME_SET_GROUP_PREFIX = "grp_"
+
+
+def lily_normalize_player_names(names) -> list:
+    """Normalized sorted player-name set: lowercase, stripped, deduped,
+    sorted. The canonical roster spelling for both the name-set group hash
+    and the lily_memories.player_names audit column."""
+    seen = set()
+    for n in names or []:
+        s = str(n or "").strip().lower()
+        if s:
+            seen.add(s)
+    return sorted(seen)
+
+
+def lily_name_set_group_id(names) -> Optional[str]:
+    """Fallback group id (resolution step c): sha1 of the normalized sorted
+    player-name set joined with '|' (e.g. "carly|kali|rami"), prefixed
+    "grp_". Deterministic — the same table of names re-keys to the same
+    group across sessions. Returns None when no usable names exist."""
+    norm = lily_normalize_player_names(names)
+    if not norm:
+        return None
+    digest = hashlib.sha1("|".join(norm).encode("utf-8")).hexdigest()
+    return NAME_SET_GROUP_PREFIX + digest
+
+
+def _identifier_strings(value) -> set:
+    """Flatten any voiceprint-identifier shape (str, list, nested list,
+    dict values, SpeakerIdentifier-like objects) into a set of identifier
+    strings."""
+    out: set = set()
+    if value is None:
+        return out
+    if isinstance(value, str):
+        if value.strip():
+            out.add(value.strip())
+        return out
+    if isinstance(value, dict):
+        for v in value.values():
+            out |= _identifier_strings(v)
+        return out
+    if isinstance(value, (list, tuple, set)):
+        for v in value:
+            out |= _identifier_strings(v)
+        return out
+    ids = getattr(value, "speaker_identifiers", None)
+    if ids is not None:
+        out |= _identifier_strings(ids)
+    return out
+
+
+def lily_match_group_by_voiceprints(current_identifiers, stored_rows) -> Optional[str]:
+    """Resolution step (b): match this session's Speechmatics speaker
+    identifiers against stored lily_speaker_voiceprints rows
+    ([{group_id, speaker_identifiers}]). Returns the group_id with the most
+    exact identifier-string overlap (ties broken lexicographically for
+    determinism), or None when nothing overlaps."""
+    current = _identifier_strings(current_identifiers)
+    if not current:
+        return None
+    counts: dict = {}
+    for row in stored_rows or []:
+        gid = (row or {}).get("group_id")
+        if not gid:
+            continue
+        overlap = len(current & _identifier_strings(row.get("speaker_identifiers")))
+        if overlap:
+            counts[gid] = counts.get(gid, 0) + overlap
+    if not counts:
+        return None
+    best = max(counts.values())
+    return sorted(g for g, c in counts.items() if c == best)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -127,13 +207,35 @@ async def lily_write_session_memory(
         "question_count": int(question_count or 0),
         "highlights": list(highlights or [])[-MEMORY_HIGHLIGHTS_CAP:],
         "summary": lily_build_session_summary(standings, winner, question_count),
+        # Name-set audit column (migration 007): the normalized sorted
+        # roster this memory was written under.
+        "player_names": lily_normalize_player_names(
+            p.get("name") for p in standings
+        ),
     }
-    try:
-        await asyncio.to_thread(
-            lambda: supabase.table("lily_memories")
-            .upsert(payload, on_conflict="session_id")
+
+    def _upsert(p):
+        return (
+            supabase.table("lily_memories")
+            .upsert(p, on_conflict="session_id")
             .execute()
         )
+
+    try:
+        try:
+            await asyncio.to_thread(_upsert, payload)
+        except Exception as e:
+            # Migration-lag tolerance: if production hasn't applied 007 yet
+            # (player_names column missing), the memory row must still land.
+            if "player_names" in str(e):
+                logger.warning(
+                    "LILY_MEMORY | WRITE_RETRY_WITHOUT_PLAYER_NAMES | "
+                    "session=%s (apply migrations/007): %s", session_id, e,
+                )
+                payload = {k: v for k, v in payload.items() if k != "player_names"}
+                await asyncio.to_thread(_upsert, payload)
+            else:
+                raise
         logger.info(
             "LILY_MEMORY | WRITE | session=%s group=%s winner=%s players=%d q=%d",
             session_id, group_id, winner, len(players), int(question_count or 0),

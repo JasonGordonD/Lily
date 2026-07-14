@@ -126,14 +126,28 @@ def _normalize_command_text(text: str) -> str:
     return _re.sub(r"\s+", " ", cleaned).strip()
 
 
+# Spoken game-start phrases — deterministic, so start_game engages from the
+# spoken path too (not just the lily_start_game tool / lily_control.start
+# RPC). Conservative set; "let s" is "let's" after punctuation stripping.
+_START_GAME_RE = _re.compile(
+    r"\b(?:"
+    r"start the (?:game|quiz|trivia)"
+    r"|let\s?s (?:start|play)"
+    r"|start round one"
+    r")\b"
+)
+
+
 def lily_detect_control_command(text: str) -> Optional[str]:
     """
     Detect a sticky player command in an utterance.
-    Returns "back_to_normal", "skip", or None.
+    Returns "back_to_normal", "skip", "start_game", or None.
 
     Punctuation-proof: "Back. To normal." and "back to... normal" both fire.
     "skip" fires as a standalone word ("skip", "can we skip this one"),
-    never inside other words ("skipper" does not fire).
+    never inside other words ("skipper" does not fire). "start the game" /
+    "let's start" / "let's play" / "start round one" fire "start_game"
+    (the agent layer ignores it once the game is running).
     """
     normalized = _normalize_command_text(text)
     if not normalized:
@@ -142,6 +156,8 @@ def lily_detect_control_command(text: str) -> Optional[str]:
         return "back_to_normal"
     if _re.search(r"\bskip\b", normalized):
         return "skip"
+    if _START_GAME_RE.search(normalized):
+        return "start_game"
     return None
 
 

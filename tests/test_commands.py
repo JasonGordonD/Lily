@@ -60,6 +60,34 @@ def test_no_command_in_ordinary_speech():
     assert lily_detect_control_command("") is None
 
 
+def test_start_game_phrases():
+    assert lily_detect_control_command("start the game") == "start_game"
+    assert lily_detect_control_command("Start the quiz!") == "start_game"
+    assert lily_detect_control_command("okay let's start") == "start_game"
+    assert lily_detect_control_command("Let's play.") == "start_game"
+    assert lily_detect_control_command("lets play") == "start_game"
+    assert lily_detect_control_command("can we start round one") == "start_game"
+
+
+def test_start_game_not_in_ordinary_speech():
+    assert lily_detect_control_command("the game was great") is None
+    assert lily_detect_control_command("we started late") is None
+    assert lily_detect_control_command("I play tennis") is None
+    assert lily_detect_control_command("start") is None
+
+
+def test_skip_wins_over_start():
+    assert lily_detect_control_command("skip it and start the game") == "skip"
+
+
+def test_start_game_fragment_proof():
+    sk = make_sk()
+    r1 = sk.on_transcript_segment(text="Let's.", speaker_label="S1", now=100.0)
+    assert r1["control_command"] is None
+    r2 = sk.on_transcript_segment(text="Start!", speaker_label="S1", now=101.0)
+    assert r2["control_command"] == "start_game"
+
+
 # ---------------------------------------------------------------------------
 # Fragment-proof across segments (scorekeeper 2s join)
 # ---------------------------------------------------------------------------

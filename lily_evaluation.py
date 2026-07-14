@@ -91,6 +91,22 @@ def lily_normalize_answer(text: str) -> str:
     return " ".join(words)
 
 
+def lily_question_spoken_ratio(question_prompt: str, spoken_text: str) -> float:
+    """How much of the armed question did this agent turn actually perform?
+    Fraction of the prompt's distinctive tokens (len > 3) present in the
+    spoken text, 0.0..1.0. Pure — used by the answer-window opener with a
+    tiered threshold (verbatim / paraphrase / any-speech fallback) so a
+    paraphrased question can never leave the window shut forever."""
+    if not question_prompt or not spoken_text:
+        return 0.0
+    strip = lambda s: re.sub(r"[^a-z0-9\s]", " ", s.lower())
+    q_tokens = [t for t in strip(question_prompt).split() if len(t) > 3]
+    if not q_tokens:
+        return 0.0
+    spoken = set(strip(spoken_text).split())
+    return sum(1 for t in q_tokens if t in spoken) / len(q_tokens)
+
+
 def _soundex(word: str) -> str:
     """Soundex-style phonetic key. Unlike classic Soundex, the FIRST letter
     is also encoded by its consonant group, so STT manglings that swap
