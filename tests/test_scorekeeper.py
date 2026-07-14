@@ -262,6 +262,26 @@ def test_record_result_score_and_streak():
     assert sk.players["Sarah"]["streak"] == 0
 
 
+def test_record_result_counts_answers_correct():
+    sk = make_sk()
+    sk.record_result("Sarah", correct=True, points=2)
+    sk.record_result("Sarah", correct=False, points=0)
+    sk.record_result("Sarah", correct=True, points=1)
+    assert sk.players["Sarah"]["answers_correct"] == 2
+
+
+def test_set_mode_records_mode_changes():
+    sk = make_sk()
+    sk.set_mode("adult")
+    sk.set_mode("adult")  # no-op: not a change
+    sk.set_mode("general")
+    sk.set_mode("bogus")  # rejected: not a change
+    assert sk.mode_changes == [
+        {"from": "general", "to": "adult", "at_question": 0},
+        {"from": "adult", "to": "general", "at_question": 0},
+    ]
+
+
 def test_state_block_contents():
     sk = make_sk()
     sk.set_phase("round")

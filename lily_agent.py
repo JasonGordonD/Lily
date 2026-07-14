@@ -55,6 +55,7 @@ from livekit.plugins.speechmatics import (
     TurnDetectionMode,
 )
 
+import lily_addressee
 import lily_config
 import lily_evaluation
 import lily_memory
@@ -86,6 +87,8 @@ _EVENT_CONTRACT_ALIAS = {
     "player_bind": "bind",
     "best_wrong_answer": "callout",
     "biggest_comeback": "callout",
+    # 2026-07-14 amendment: clarify carries `clarify` on BOTH discriminators.
+    "clarify": "clarify",
 }
 
 
@@ -176,6 +179,17 @@ class LilyGame:
         # collected for the lily_memories highlights column.
         self.memory_block: str = ""
         self.highlights: list[dict] = []
+
+        # B3 session report: wall-clock duration baseline.
+        self.session_started_at = time.time()
+
+        # B1 addressee-label corpus: players awaiting a clarify reply
+        # (player_name -> {"row_task": Task|None returning the logged row
+        # id}), and the insert task per answer candidate this question
+        # (candidate key -> Task returning row id) kept for the implicit
+        # label UPDATE at adjudication commit.
+        self.pending_clarify: dict[str, dict] = {}
+        self._addressee_rows: dict[str, asyncio.Task] = {}
 
     # -- state transport (seam contract) ------------------------------------
 
@@ -374,6 +388,7 @@ class LilyGame:
             self.sk.set_phase("round")
         self.used_prompts.append(self.armed_question.get("prompt", ""))
         self._judged_keys = set()
+        self._addressee_rows = {}  # B1: row-id tasks are per-question
         for _task in self._spec_judge.values():
             if not _task.done():
                 _task.cancel()
@@ -457,10 +472,212 @@ class LilyGame:
         except Exception as e:
             logger.warning("LILY_SFX | stinger failed: %s", e)
 
+    # -- addressee-label corpus (B1) ----------------------------------------------
+
+    def _addressee_row(
+        self,
+        text: str,
+        speaker_label: str | None,
+        player: str | None,
+        segment_ts: float,
+        agent_action: str,
+        system_directed: bool,
+    ) -> dict:
+        """Build one lily_addressee_log row. fuzzy_matched_answer is the
+        Tier-1 verdict against the LIVE question's acceptable_answers (null
+        when no live question); seconds_into_window comes off the
+        scorekeeper's window opened_at."""
+        question = self.sk.current_question or {}
+        acceptable = question.get("acceptable_answers") or []
+        fuzzy = None
+        if self.sk.current_question is not None and acceptable:
+            fuzzy = (
+                lily_evaluation.lily_tier1_evaluate(text, acceptable)["verdict"]
+                == "correct"
+            )
+        window_open = self.sk.is_window_open(now=segment_ts)
+        return {
+            "session_id": self.sk.session_id,
+            "utterance_ts": datetime.datetime.fromtimestamp(
+                segment_ts, datetime.timezone.utc
+            ).isoformat(),
+            "speaker_label": speaker_label,
+            "player_name": player,
+            "transcript": text,
+            "is_final": True,  # finals only reach this layer
+            "phase": self.ui_phase,
+            "answer_window_open": window_open,
+            "seconds_into_window": (
+                lily_addressee.lily_seconds_into_window(
+                    self.sk.answer_window_opened_at, segment_ts
+                )
+                if window_open
+                else None
+            ),
+            "fuzzy_matched_answer": fuzzy,
+            "system_directed_hit": bool(system_directed),
+            "agent_action": agent_action,
+            "label": None,
+            "label_source": None,
+        }
+
+    def _log_addressee_segment(
+        self,
+        result: dict,
+        text: str,
+        speaker_label: str | None,
+        segment_ts: float,
+    ) -> None:
+        """B1: one insert per finalized segment while an answer window is
+        open, plus any finalized segment the agent acts on (scored,
+        skipped-on, system-directed). All writes fire-and-forget via
+        asyncio.to_thread inside the persistence helper — zero hot-path
+        cost. Clarified rows are inserted by mark_pending_clarify."""
+        if self.supabase is None:
+            return
+        window_open = self.sk.is_window_open(now=segment_ts)
+        acted_on = (
+            result.get("candidate_recorded")
+            or result.get("control_command")
+            or result.get("system_directed")
+        )
+        if not window_open and not acted_on:
+            return
+        if result.get("candidate_recorded"):
+            action = lily_addressee.AGENT_ACTION_SCORED
+        elif result.get("control_command"):
+            # Skipped-on / mode-revert segments: acted on, not scored.
+            action = lily_addressee.AGENT_ACTION_ADJUDICATED_OTHER
+        else:
+            action = lily_addressee.AGENT_ACTION_IGNORED
+        row = self._addressee_row(
+            text=text,
+            speaker_label=speaker_label,
+            player=result.get("player"),
+            segment_ts=segment_ts,
+            agent_action=action,
+            system_directed=result.get("system_directed", False),
+        )
+        task = asyncio.ensure_future(
+            lily_persistence.lily_log_addressee(self.supabase, row)
+        )
+        if result.get("candidate_recorded"):
+            # Keep the row-id task so adjudication commit can UPDATE the
+            # label instead of double-inserting.
+            key = result.get("player") or f"unrostered:{speaker_label or 'UU'}"
+            self._addressee_rows[key] = task
+
+    def _apply_addressee_label(
+        self, key: str, label: str, label_source: str
+    ) -> None:
+        """UPDATE the earlier corpus row for a candidate (matched by the
+        row id kept at insert time). Fire-and-forget."""
+        task = self._addressee_rows.get(key)
+        if task is None or self.supabase is None:
+            return
+
+        async def _apply() -> None:
+            try:
+                row_id = await asyncio.shield(task)
+            except Exception:
+                row_id = None
+            if row_id is not None:
+                await lily_persistence.lily_update_addressee_label(
+                    self.supabase, row_id, label, label_source
+                )
+
+        asyncio.ensure_future(_apply())
+
+    def mark_pending_clarify(self, player_name: str) -> None:
+        """The clarify moment (lily_log_clarify tool): mark the player
+        pending-clarify, emit the `clarify` packet, and log the clarified
+        utterance row with agent_action=clarified. The player's NEXT
+        finalized segment resolves the label (explicit ground truth)."""
+        # The utterance being clarified: their committed answer candidate
+        # if one exists, else their most recent transcript-buffer line.
+        cand = self.sk.answer_candidates.get(player_name)
+        if cand is not None:
+            clarified_text = cand["text"]
+            clarified_label = cand.get("speaker_label")
+            clarified_ts = cand.get("segment_start_time") or time.time()
+        else:
+            clarified_text, clarified_label, clarified_ts = None, None, time.time()
+            for entry in reversed(self.sk.transcript_buffer):
+                if entry.get("speaker") == player_name:
+                    clarified_text = entry.get("text")
+                    clarified_label = entry.get("speaker_label")
+                    break
+        row_task = None
+        if self.supabase is not None and clarified_text:
+            row = self._addressee_row(
+                text=clarified_text,
+                speaker_label=clarified_label,
+                player=player_name,
+                segment_ts=clarified_ts,
+                agent_action=lily_addressee.AGENT_ACTION_CLARIFIED,
+                system_directed=False,
+            )
+            row_task = asyncio.ensure_future(
+                lily_persistence.lily_log_addressee(self.supabase, row)
+            )
+        self.pending_clarify[player_name] = {"row_task": row_task}
+        self.send_event_nowait("clarify", {"name": player_name})
+        logger.info(
+            "LILY_CLARIFY | PENDING | session=%s player=%s utterance=%r",
+            self.sk.session_id, player_name, (clarified_text or "")[:80],
+        )
+
+    def _resolve_clarify(self, player_name: str, reply_text: str) -> None:
+        """The clarified player's next finalized segment: parse the reply
+        (pure, lily_addressee) and UPDATE the clarified row's label with
+        label_source=explicit_clarify, then clear pending."""
+        pending = self.pending_clarify.pop(player_name, None)
+        if pending is None:
+            return
+        label = lily_addressee.lily_parse_clarify_reply(reply_text)
+        logger.info(
+            "LILY_CLARIFY | RESOLVED | session=%s player=%s label=%s reply=%r",
+            self.sk.session_id, player_name, label, reply_text[:80],
+        )
+        row_task = pending.get("row_task")
+        if row_task is None or self.supabase is None:
+            return
+
+        async def _apply() -> None:
+            try:
+                row_id = await asyncio.shield(row_task)
+            except Exception:
+                row_id = None
+            if row_id is not None:
+                await lily_persistence.lily_update_addressee_label(
+                    self.supabase, row_id, label,
+                    lily_addressee.LABEL_SOURCE_EXPLICIT_CLARIFY,
+                )
+
+        asyncio.ensure_future(_apply())
+
     # -- transcript-event layer --------------------------------------------------
 
-    def on_transcript_event(self, result: dict, text: str) -> None:
+    def on_transcript_event(
+        self,
+        result: dict,
+        text: str,
+        speaker_label: str | None = None,
+        segment_ts: float | None = None,
+    ) -> None:
         """Deterministic enforcement layer (§11.4) — runs on every final."""
+        ts = segment_ts if segment_ts is not None else time.time()
+
+        # B1 corpus row — logged BEFORE command handling so skipped-on and
+        # system-directed segments are captured too (fire-and-forget).
+        self._log_addressee_segment(result, text, speaker_label, ts)
+
+        # B1 explicit ground truth: a pending clarify is resolved by the
+        # NEXT finalized segment from that player, whatever it says.
+        player = result.get("player")
+        if player and player in self.pending_clarify:
+            self._resolve_clarify(player, text)
+
         command = result.get("control_command")
         if command == "back_to_normal":
             if self.sk.mode == "adult":
@@ -692,6 +909,24 @@ class LilyGame:
                         points if is_winner else 0,
                     ))
 
+            # B1 implicit weak labels at adjudication commit: the winning
+            # utterance and every scored-incorrect utterance were treated as
+            # answers -> label=host_directed, source=implicit_scored_unappealed
+            # (UPDATE on the row id kept at insert time — never a second
+            # insert). If an appeal path ever re-enters Tier-2 and overturns
+            # an attribution, the corrected label goes through the same
+            # _apply_addressee_label with LABEL_SOURCE_IMPLICIT_APPEALED —
+            # today appeals are handled in-prompt with no code path, so this
+            # is the documented hook.
+            winner_key = (
+                lily_addressee.lily_candidate_key(winner_candidate)
+                if winner_candidate is not None else None
+            )
+            for key, (label, source) in lily_addressee.lily_labels_for_adjudication(
+                ordered, winner_key
+            ).items():
+                self._apply_addressee_label(key, label, source)
+
             missed = winner_candidate is None
             if missed and ordered and steal_allowed and not self.game_over:
                 # Missed question opens a 5-second steal window.
@@ -882,6 +1117,29 @@ class LilyGame:
                 standings, self.sk.question_number, self.highlights,
             ))
 
+    # -- session report (B3) --------------------------------------------------------
+
+    def build_game_stats(self, standings: list[dict]) -> dict:
+        """game_stats jsonb for lily_session_reports: final standings,
+        rounds/questions played, per-player answers attempted/correct,
+        mode changes, callouts, duration."""
+        per_player = {
+            name: {
+                "answers_attempted": s.get("answers_attempted", 0),
+                "answers_correct": s.get("answers_correct", 0),
+            }
+            for name, s in self.sk.players.items()
+        }
+        return {
+            "final_standings": standings,
+            "rounds_played": self.sk.round,
+            "questions_played": self.sk.question_number,
+            "per_player": per_player,
+            "mode_changes": list(self.sk.mode_changes),
+            "callouts": list(self.highlights),
+            "duration_s": round(time.time() - self.session_started_at, 1),
+        }
+
     # -- state block --------------------------------------------------------------
 
     def build_state_block(self) -> str:
@@ -1002,6 +1260,28 @@ class LilyAgent(Agent):
         self._game.sk.bind_speaker(label, name)
         note = self._game.on_speaker_bound(label, name)
         return f"Bound: voice {label} is {name}.{note}"
+
+    @function_tool()
+    async def lily_log_clarify(
+        self, context: RunContext, player_name: str
+    ) -> str:
+        """Log a clarify moment. Call this WHENEVER you ask a player whether
+        what they just said was an answer or thinking out loud — e.g.
+        "Sarah, is that your answer or are you two still arguing?". Call it
+        the moment you ask; their next reply resolves it automatically, so
+        just ask the question naturally and keep hosting.
+
+        Args:
+            player_name: The rostered player you are asking to clarify.
+        """
+        name = (player_name or "").strip()
+        if name not in self._game.sk.players:
+            return f"No rostered player named {name!r} — clarify not logged."
+        self._game.mark_pending_clarify(name)
+        return (
+            f"Clarify logged for {name}. Their next reply settles it — "
+            "no follow-up tool call needed."
+        )
 
     @function_tool()
     async def lily_enter_adult_mode(self, context: RunContext) -> str:
@@ -1394,7 +1674,9 @@ async def entrypoint(ctx: JobContext) -> None:
             speaker_name=player,
             segment_start=seg_ts,
         )
-        game.on_transcript_event(result, text)
+        game.on_transcript_event(
+            result, text, speaker_label=speaker_label, segment_ts=seg_ts
+        )
 
     # --- Answer window opens on TTS playback completion (per-utterance
     # precise via SpeechHandle.wait_for_playout; no dedicated
@@ -1454,6 +1736,17 @@ async def entrypoint(ctx: JobContext) -> None:
                 await lily_memory.lily_write_session_memory(
                     supabase, group_id, scorekeeper.session_id,
                     standings, scorekeeper.question_number, game.highlights,
+                )
+                # B3 session report — one row per session, idempotent upsert
+                # on session_id. Transcript is what's retained in memory (the
+                # scorekeeper's rolling buffer) — never re-queried from the DB;
+                # assessment is filled later by the clinical desk.
+                await lily_persistence.lily_write_session_report(
+                    supabase,
+                    session_id=scorekeeper.session_id,
+                    group_id=group_id,
+                    transcript=list(scorekeeper.transcript_buffer),
+                    game_stats=game.build_game_stats(standings),
                 )
                 asyncio.ensure_future(lily_persistence.lily_enroll_voiceprints(
                     stt, supabase, group_id, scorekeeper

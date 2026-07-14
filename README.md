@@ -80,6 +80,8 @@ lily_agent.py        entrypoint + LilyAgent + LilyGame (windows, prefetch, publi
 lily_scorekeeper.py  N-player roster, per-player state, answer windows, system-directed
                      classifier, state-block builder — pure local state, zero LLM calls
 lily_binding.py      lily_bind_speaker name extraction (2s fragment accumulation, stopwords)
+lily_addressee.py    addressee-label corpus (B1) pure logic: clarify-reply parser,
+                     seconds-into-window, implicit label derivation (stdlib-only)
 lily_evaluation.py   Tier-1 matcher + Tier-2 judge contract
 lily_reasoning.py    background node: prefetch + verification + judge transport
 lily_persistence.py  Supabase: sessions, transcripts, answers audit, voiceprints, KB bank
@@ -92,7 +94,10 @@ prompts/layer_lily_adult.md  additive adult layer (register shift; group-directe
 migrations/001_lily_schema.sql          six lily_ tables (no pgvector)
 migrations/002_lily_questions_seed.sql  30 curated questions (demo insurance)
 migrations/003_lily_memory.sql          lily_memories + lily_questions.adult guard column
-tests/               82 tests, run with plain `python -m pytest tests/` — no livekit, no network
+migrations/004_lily_questions_expansion.sql  200 curated_v2 bank questions
+migrations/005_lily_addressee_log.sql   addressee-label corpus (applied to production 2026-07-14)
+migrations/006_lily_session_reports.sql lily_session_reports (write side; assessment filled later)
+tests/               110 tests, run with plain `python -m pytest tests/` — no livekit, no network
 ```
 
 ## Persistent memory (rematch)
@@ -125,6 +130,47 @@ adult-register bank rows; `lily_fetch_bank_question` takes the session `mode`
 and hard-excludes `adult=true` rows unless `mode == 'adult'` — an adult
 question can never surface at a general-mode table.
 
+**Session reports:** one `lily_session_reports` row per session at close
+(idempotent upsert on `session_id`): the in-memory transcript (the
+scorekeeper's rolling buffer — never re-queried from the DB) plus `game_stats`
+(final standings, rounds/questions played, per-player answers
+attempted/correct, mode changes, callouts, `duration_s`); `report_status`
+stays `'pending'` and `assessment` is filled later by the clinical desk,
+never by agent code.
+
+### Addressee-label corpus (B1)
+
+The training-data flywheel for "was that an answer or table talk?":
+`lily_addressee_log` gets one row per **finalized** segment while an answer
+window is open, plus any finalized segment the agent acts on (scored,
+skipped-on, clarified, system-directed). Every write is fire-and-forget via
+`asyncio.to_thread` — zero hot-path cost. Each row carries the context a
+future classifier needs: `phase`, `answer_window_open`,
+`seconds_into_window` (off the scorekeeper's window `opened_at`),
+`fuzzy_matched_answer` (Tier-1 verdict against the live question's
+`acceptable_answers`; null with no live question), `system_directed_hit`
+(the existing vocative-"Lily" classifier), and
+`agent_action ∈ scored|ignored|clarified|adjudicated_other`.
+
+Labels land three ways (`label_source`):
+
+- **`implicit_scored_unappealed`** — at adjudication commit, the winning
+  utterance and every scored-incorrect utterance get `label=host_directed`
+  (an UPDATE on the row id kept at insert time, never a double insert).
+- **`implicit_appealed`** — the documented hook for an appeal that re-enters
+  Tier-2 and overturns an attribution: the corrected label replaces the
+  implicit one (appeals are currently handled in-prompt; no code path yet).
+- **`explicit_clarify`** — ground truth from the clarify moment: the
+  `lily_log_clarify(player_name)` tool fires whenever Lily asks a player
+  "is that your answer or are you thinking out loud?". It marks the player
+  pending-clarify, emits the `clarify` `{name}` packet on `lily.events`
+  (frontend pulses that player's chip), and logs the clarified utterance
+  with `agent_action=clarified`. The player's NEXT finalized segment
+  resolves it: affirmative ("yes", "that's my answer", "final answer") →
+  `label=host_directed`; negative/thinking ("no", "just thinking",
+  "talking to him") → `label=deliberation`; unparseable → `label=unknown`.
+  The reply parser is pure and offline-tested (`lily_addressee.py`).
+
 ## Frontend seam (prmpt_ui `(lily)` route group)
 
 - **Participant attributes** (LWW, per question beat): `phase`
@@ -140,7 +186,9 @@ question can never surface at a general-mode table.
   deliberate): `player_bind` `{player:{name},name,speaker_label}`; `reveal`
   `{correct,winner}` keyed to TTS playback; `best_wrong_answer`
   `{player,answer}`; `biggest_comeback` `{player,detail}`; `finale`
-  `{standings}` — fired at or before the `phase=final` flip.
+  `{standings}` — fired at or before the `phase=final` flip; `clarify`
+  `{name}` when Lily asks the "answer or thinking out loud?" question
+  (2026-07-14 amendment — carries `clarify` on both discriminators).
 - **RPCs registered**: `lily_control.start`, `lily_control.skip` (identical to the
   spoken "skip": no commentary, no spotlight — the adult-mode consent affordance).
 

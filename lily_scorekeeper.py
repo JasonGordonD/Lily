@@ -192,6 +192,9 @@ class LilyScorekeeper:
         # land here and surface in the state block.
         self.status_notes: list[str] = []
 
+        # Mode changes recorded for the session report (B3 game_stats).
+        self.mode_changes: list[dict] = []
+
         # Per-speaker recent finals for fragment-joined command detection
         self._recent_fragments: dict[str, list[tuple[float, str]]] = {}
 
@@ -228,6 +231,7 @@ class LilyScorekeeper:
             "streak": 0,
             "talk_time_s": 0.0,
             "answers_attempted": 0,
+            "answers_correct": 0,
             "last_correct_category": None,
             "questions_since_spoke": 0,
             "lobby_fact": None,
@@ -549,6 +553,7 @@ class LilyScorekeeper:
         if correct:
             state["score"] += points
             state["streak"] += 1
+            state["answers_correct"] = state.get("answers_correct", 0) + 1
             if category or self.category:
                 state["last_correct_category"] = category or self.category
         else:
@@ -581,6 +586,11 @@ class LilyScorekeeper:
                 "LILY_STATE | MODE_CHANGE | session=%s from=%s to=%s",
                 self.session_id, self.mode, mode,
             )
+            self.mode_changes.append({
+                "from": self.mode,
+                "to": mode,
+                "at_question": self.question_number,
+            })
         self.mode = mode
 
     def set_phase(self, phase: str) -> None:
@@ -667,6 +677,7 @@ class LilyScorekeeper:
             "players": {name: dict(s) for name, s in self.players.items()},
             "unrostered_labels": dict(self.unrostered_labels),
             "status_notes": list(self.status_notes),
+            "mode_changes": list(self.mode_changes),
         }
 
     def rehydrate(self, snap: dict) -> None:
@@ -684,6 +695,7 @@ class LilyScorekeeper:
         self.rounds_total = snap.get("rounds_total", self.rounds_total)
         self.current_question = snap.get("current_question")
         self.current_answer = (self.current_question or {}).get("canonical_answer")
+        self.mode_changes = list(snap.get("mode_changes") or [])
         for name, s in (snap.get("players") or {}).items():
             self.players[name] = dict(s)
         logger.info(

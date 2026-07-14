@@ -279,6 +279,83 @@ async def lily_write_answer(
 
 
 # ---------------------------------------------------------------------------
+# Addressee-label corpus (B1 training-data flywheel)
+# ---------------------------------------------------------------------------
+
+async def lily_log_addressee(
+    supabase: SupabaseClient,
+    row: dict,
+) -> Optional[int]:
+    """Fire-and-forget insert into lily_addressee_log. Returns the new row
+    id when available (kept by the caller for the later label UPDATE).
+    Tolerates failures silently — corpus logging must never surface into
+    the live session (debug log only)."""
+    try:
+        result = await asyncio.to_thread(
+            lambda: supabase.table("lily_addressee_log").insert(row).execute()
+        )
+        data = getattr(result, "data", None) or []
+        if data and isinstance(data[0], dict):
+            return data[0].get("id")
+        return None
+    except Exception as e:
+        logger.debug("lily_log_addressee error: %s", e)
+        return None
+
+
+async def lily_update_addressee_label(
+    supabase: SupabaseClient,
+    row_id: int,
+    label: str,
+    label_source: str,
+) -> None:
+    """Fire-and-forget label UPDATE on an earlier lily_addressee_log row
+    (implicit labels at adjudication commit, appeal corrections, explicit
+    clarify resolutions). Silent on failure (debug log only)."""
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_addressee_log")
+            .update({"label": label, "label_source": label_source})
+            .eq("id", row_id)
+            .execute()
+        )
+    except Exception as e:
+        logger.debug("lily_update_addressee_label error: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Session reports (B3 — Lovebirds call_reports shape, WRITE side only)
+# ---------------------------------------------------------------------------
+
+async def lily_write_session_report(
+    supabase: SupabaseClient,
+    session_id: str,
+    group_id: str,
+    transcript: list,
+    game_stats: dict,
+) -> None:
+    """One lily_session_reports row at session close — idempotent upsert on
+    session_id (Lovebirds call-report pattern). WRITE side only: the payload
+    deliberately omits report_status and assessment, so report_status keeps
+    its 'pending' default on insert and the clinical desk's later assessment
+    fill is never clobbered by a re-run."""
+    if supabase is None:
+        return
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_session_reports").upsert({
+                "session_id": session_id,
+                "group_id": group_id,
+                "transcript": transcript,
+                "game_stats": game_stats,
+            }, on_conflict="session_id").execute()
+        )
+        logger.info("LILY_REPORT | WRITE | session=%s group=%s", session_id, group_id)
+    except Exception as e:
+        logger.error("lily_write_session_report error: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Curated question bank (demo-day insurance; runbook KB-only fallback)
 # ---------------------------------------------------------------------------
 
