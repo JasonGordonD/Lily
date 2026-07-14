@@ -1,0 +1,80 @@
+name: Deploy to LiveKit Cloud
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy agent
+        run: |
+          docker run --rm \
+            -e INPUT_OPERATION="deploy" \
+            -e INPUT_WORKING_DIRECTORY="." \
+            -e INPUT_TIMEOUT="5m" \
+            -e LIVEKIT_URL="${LIVEKIT_URL}" \
+            -e LIVEKIT_API_KEY="${LIVEKIT_API_KEY}" \
+            -e LIVEKIT_API_SECRET="${LIVEKIT_API_SECRET}" \
+            -e ELEVEN_API_KEY="${ELEVEN_API_KEY}" \
+            -e LILY_VOICE_ID="${LILY_VOICE_ID}" \
+            -e RAVEN_VOICE_ID="${RAVEN_VOICE_ID}" \
+            -e GOOGLE_API_KEY="${GOOGLE_API_KEY}" \
+            -e SPEECHMATICS_API_KEY="${SPEECHMATICS_API_KEY}" \
+            -e SUPABASE_URL="${SUPABASE_URL}" \
+            -e SUPABASE_SERVICE_ROLE_KEY="${SUPABASE_SERVICE_ROLE_KEY}" \
+            -e LILY_VOCAL_MODEL="${LILY_VOCAL_MODEL}" \
+            -e LILY_REASONING_MODEL="${LILY_REASONING_MODEL}" \
+            -e LILY_MAX_OUTPUT_TOKENS="${LILY_MAX_OUTPUT_TOKENS}" \
+            -e LILY_ANSWER_WINDOW_SECONDS="${LILY_ANSWER_WINDOW_SECONDS}" \
+            -e LILY_STEAL_WINDOW_SECONDS="${LILY_STEAL_WINDOW_SECONDS}" \
+            -e LILY_CHECKPOINT_INTERVAL_SECONDS="${LILY_CHECKPOINT_INTERVAL_SECONDS}" \
+            -e LILY_SHUTDOWN_TIMEOUT_SECONDS="${LILY_SHUTDOWN_TIMEOUT_SECONDS}" \
+            -e LILY_ROUNDS="${LILY_ROUNDS}" \
+            -e LILY_QUESTIONS_PER_ROUND="${LILY_QUESTIONS_PER_ROUND}" \
+            -e LILY_KB_ONLY="${LILY_KB_ONLY}" \
+            -e LILY_THINKING_BED_PATH="${LILY_THINKING_BED_PATH}" \
+            -e LILY_STINGER_CORRECT_PATH="${LILY_STINGER_CORRECT_PATH}" \
+            -e LILY_STINGER_INCORRECT_PATH="${LILY_STINGER_INCORRECT_PATH}" \
+            -e LILY_JOB_MEMORY_LIMIT_MB="${LILY_JOB_MEMORY_LIMIT_MB}" \
+            -e LILY_SESSION_LOG_DIR="${LILY_SESSION_LOG_DIR}" \
+            -e LILY_GROUP_ID="${LILY_GROUP_ID}" \
+            -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -v "${{ github.workspace }}:/workspace" \
+            -w "/workspace" \
+            docker.io/livekit/cloud-agents-github-plugin:v2.12.1
+        env:
+          LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
+          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
+          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+          ELEVEN_API_KEY: ${{ secrets.ELEVEN_API_KEY }}
+          LILY_VOICE_ID: ${{ secrets.LILY_VOICE_ID }}
+          RAVEN_VOICE_ID: ${{ secrets.RAVEN_VOICE_ID }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          SPEECHMATICS_API_KEY: ${{ secrets.SPEECHMATICS_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LILY_VOCAL_MODEL: ${{ vars.LILY_VOCAL_MODEL }}
+          LILY_REASONING_MODEL: ${{ vars.LILY_REASONING_MODEL }}
+          LILY_MAX_OUTPUT_TOKENS: ${{ vars.LILY_MAX_OUTPUT_TOKENS }}
+          LILY_ANSWER_WINDOW_SECONDS: ${{ vars.LILY_ANSWER_WINDOW_SECONDS }}
+          LILY_STEAL_WINDOW_SECONDS: ${{ vars.LILY_STEAL_WINDOW_SECONDS }}
+          LILY_CHECKPOINT_INTERVAL_SECONDS: ${{ vars.LILY_CHECKPOINT_INTERVAL_SECONDS }}
+          LILY_SHUTDOWN_TIMEOUT_SECONDS: ${{ vars.LILY_SHUTDOWN_TIMEOUT_SECONDS }}
+          LILY_ROUNDS: ${{ vars.LILY_ROUNDS }}
+          LILY_QUESTIONS_PER_ROUND: ${{ vars.LILY_QUESTIONS_PER_ROUND }}
+          LILY_KB_ONLY: ${{ vars.LILY_KB_ONLY }}
+          LILY_THINKING_BED_PATH: ${{ vars.LILY_THINKING_BED_PATH }}
+          LILY_STINGER_CORRECT_PATH: ${{ vars.LILY_STINGER_CORRECT_PATH }}
+          LILY_STINGER_INCORRECT_PATH: ${{ vars.LILY_STINGER_INCORRECT_PATH }}
+          LILY_JOB_MEMORY_LIMIT_MB: ${{ vars.LILY_JOB_MEMORY_LIMIT_MB }}
+          LILY_SESSION_LOG_DIR: ${{ vars.LILY_SESSION_LOG_DIR }}
+          LILY_GROUP_ID: ${{ vars.LILY_GROUP_ID }}
