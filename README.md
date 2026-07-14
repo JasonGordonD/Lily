@@ -42,6 +42,19 @@ do-not-touch: no imports, no vendoring).
   sticky `mode` flag — removal fully reverts her.
 - **tts_node punctuation-flush guard is mandatory** — suspense holds ("The answer
   is…") deadlock the SegmentSynchronizer without it.
+- **Outbound speech passes the say gate** (`lily_say_gate.py`, P4): a
+  deterministic markdown/emoji strip runs in tts_node before the punctuation
+  guard — emphasis asterisks, backticks, headers, bullets and emoji never reach
+  the synthesizer, while `[bracket]` audio tags (ElevenLabs v3 controls) pass
+  through verbatim. Emoji-only turns strip to empty and fall into the
+  empty-candidate retry. The module is the designated choke point for all
+  outbound speech hygiene (the say-gate WO extends it).
+- **Reasoning-node calls are structured output** (P1): generation and
+  verification set `response_mime_type="application/json"` **and** a
+  `response_schema` (question schema carries current + reserved fields:
+  `choices`, `image_url`/`image_source`, `proposed_category`), so the output is
+  parsed with a plain `json.loads` — the regex/fence-stripping path
+  (`lily_parse_question_json`) is retired to a defensive last resort.
 - **Honest failure:** prefetch/verification failures write a status note into the
   state block; Lily reports the breakage in character rather than confabulating.
 - **Event-bound truth:** she never announces a score the scorekeeper hasn't
@@ -112,6 +125,25 @@ off the reveal moment:
   fallback when no speculation ran. Order stays timestamp-decided either way.
 - **TTS connection pre-warm** at session start — the greeting's first
   synthesis skips the TCP+TLS handshake to ElevenLabs.
+- **Preemptive generation repair (P2):** the state-block/adult-layer/memory
+  injections moved from `llm_node` into `on_user_turn_completed`, applied to
+  both the turn context and the persistent context with stable item ids and
+  rewrite-only-on-change — so 1.6.4's equivalence check validates the
+  preemptive LLM run whenever game state held still across the turn boundary
+  (previously every run was discarded: 13 "chat context changed" warnings per
+  session, double LLM cost). `llm_node` keeps one documented injection for
+  instruction-driven turns (reveal/skip/steal/start — they bypass the hook and
+  must see the just-armed question); those turns also pause preemptive
+  generation (`LilyGame.instructed_reply`) instead of paying for runs that are
+  dead by construction, resuming on playout completion.
+- **Dedicated reasoning-node token budget (P1 truncation root cause):** on
+  Gemini 3.x thinking tokens count toward `max_output_tokens`; the reasoning
+  node shared the vocal node's 800-token budget and 3.1-pro's medium thinking
+  starved the question JSON into mid-object truncation. Generation and
+  verification now run on `LILY_REASONING_MAX_OUTPUT_TOKENS` (default 4096 —
+  prefetch is off the hot path), the Tier-2 judge on
+  `LILY_JUDGE_MAX_OUTPUT_TOKENS` (default 1024 — latency-relevant, small
+  verdict).
 - **Rolling latency telemetry:** per-turn `llm_node_ttft` / `tts_node_ttfb` /
   `e2e_latency` averages ride the 60s heartbeat into
   `lily_sessions.metadata.pipeline_latency` (and the final row at close), so
@@ -137,6 +169,8 @@ lily_reasoning.py    background node: prefetch + verification + judge transport
 lily_persistence.py  Supabase: sessions, transcripts, answers audit, voiceprints, KB bank
 lily_memory.py       persistent cross-session memory: session summaries, the
                      [RETURNING TABLE] block, KB-bank adult-mode guard (stdlib-only)
+lily_say_gate.py     outbound-speech hygiene gate: markdown/emoji strip, [tag]-preserving
+                     (the designated choke point — the say-gate WO extends it; stdlib-only)
 lily_tts.py          ElevenLabs v3 wrapper (lbs_tts lift; byte-alignment carry, 5K split)
 lily_config.py       ALL env access lives here
 prompts/lily_system.txt      the whole character (incl. <tts_guidelines>, <voice_output>)
@@ -148,7 +182,8 @@ migrations/004_lily_questions_expansion.sql  200 curated_v2 bank questions
 migrations/005_lily_addressee_log.sql   addressee-label corpus (applied to production 2026-07-14)
 migrations/006_lily_session_reports.sql lily_session_reports (write side; assessment filled later)
 migrations/007_lily_memories_player_names.sql  lily_memories.player_names audit column (+GIN index)
-tests/               146 tests, run with plain `python -m pytest tests/` — no livekit, no network
+tests/               207 tests, run with `python -m pytest tests/` — no network
+                     (test_award_gate.py / test_context_blocks.py import livekit)
 ```
 
 ## Persistent memory (rematch)
@@ -311,7 +346,9 @@ Labels land three ways (`label_source`):
 `LILY_AUTO_START_MIN_PLAYERS` / `LILY_AUTO_START_LOBBY_GRACE_SECONDS`
 (lobby auto-start safety net), `LILY_GROUP_ID` (group-identity override),
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
-`LILY_JOB_MEMORY_LIMIT_MB`. No secrets in this repo — configure via the deployment
+`LILY_JOB_MEMORY_LIMIT_MB`, `LILY_REASONING_MAX_OUTPUT_TOKENS` (default 4096) /
+`LILY_JUDGE_MAX_OUTPUT_TOKENS` (default 1024) — dedicated reasoning/judge budgets
+(thinking tokens count toward `max_output_tokens` on Gemini 3.x). No secrets in this repo — configure via the deployment
 secrets manager (`lk agent update-secrets` with an explicit `--id`; `--overwrite`
 is banned in the shared project — LuvByrds is production tenancy).
 

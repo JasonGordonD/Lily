@@ -60,6 +60,7 @@ import lily_config
 import lily_evaluation
 import lily_memory
 import lily_persistence
+import lily_say_gate
 from lily_binding import (
     LilyFragmentAccumulator,
     lily_extract_name_from_fragments,
@@ -153,8 +154,13 @@ class LilyGame:
         self.group_id_source = group_id_source
 
         self.session: AgentSession | None = None
+        self.agent: "LilyAgent | None" = None  # set at entrypoint start
         self.background_audio: BackgroundAudioPlayer | None = None
         self.stt: SpeechmaticsSTT | None = None
+        # P2 preemptive repair: True while a deterministic between-turn
+        # instruction speech (reveal/steal/skip/start/mode-revert) is in
+        # flight — preemptive generation is paused for those turns.
+        self._preemptive_paused = False
 
         self.fragments = LilyFragmentAccumulator()
         self.rounds_total = lily_config.rounds_total()
@@ -318,6 +324,36 @@ class LilyGame:
             self.ui_phase = phase
             self.publish_attributes_nowait()
 
+    # -- deterministic instruction speech (P2 preemptive repair) -------------
+
+    def instructed_reply(self, instructions: str) -> None:
+        """Fire a deterministic between-turn speech (reveal, steal window,
+        skip, game start, mode revert) via generate_reply(instructions=...).
+
+        This is a mutation source that CANNOT move into
+        on_user_turn_completed: it happens between user turns, driven by
+        timers and tool commits, and its assistant items land in the
+        persistent chat context whenever the speech is scheduled. Any
+        preemptive user-turn run started while this speech is in flight is
+        therefore dead by construction — the 1.6.4 equivalence check
+        (agent_activity.py: preemptive.chat_ctx.is_equivalent(...)) will
+        discard it. Rather than paying for that dead LLM run, preemptive
+        generation is paused here and resumed on TTS playout completion
+        (on_agent_speech_finished), using the live-read agent-level
+        turn_handling["preemptive_generation"]["enabled"] flag that 1.6.4
+        exposes."""
+        if self.session is None:
+            return
+        if self.agent is not None:
+            self.agent.set_preemptive_generation(False)
+            self._preemptive_paused = True
+        self.session.generate_reply(instructions=instructions)
+
+    def _resume_preemptive(self) -> None:
+        if self._preemptive_paused and self.agent is not None:
+            self._preemptive_paused = False
+            self.agent.set_preemptive_generation(True)
+
     # -- question supply ------------------------------------------------------
 
     def _round_for_next_question(self) -> int:
@@ -426,6 +462,10 @@ class LilyGame:
         """Called on TTS playback completion (agent stops speaking). If the
         armed question was just performed, the answer window opens HERE —
         never earlier (known v1 concession: no early buzz-ins)."""
+        # A deterministic instruction speech finished playing out — its
+        # items are committed, the persistent context is stable again, so
+        # preemptive generation can resume (P2).
+        self._resume_preemptive()
         if self._pending_reveal_event is not None:
             # Reveal speech finished without a speaking-start hook having
             # fired the packet (safety net) — emit now so the UI never hangs.
@@ -727,15 +767,12 @@ class LilyGame:
             if self.sk.mode == "adult":
                 self.sk.set_mode("general")  # sticky flag flips instantly
                 self.publish_attributes_nowait()
-                if self.session is not None:
-                    self.session.generate_reply(
-                        instructions=(
-                            "A player said 'back to normal'. Adult mode is now "
-                            "OFF — committed, in code. Switch registers "
-                            "instantly, no ceremony, no residue, straight into "
-                            "a regular category like nothing happened."
-                        )
-                    )
+                self.instructed_reply(
+                    "A player said 'back to normal'. Adult mode is now "
+                    "OFF — committed, in code. Switch registers "
+                    "instantly, no ceremony, no residue, straight into "
+                    "a regular category like nothing happened."
+                )
             return
         if command == "skip":
             asyncio.ensure_future(self.skip_question(source="voice"))
@@ -825,15 +862,12 @@ class LilyGame:
         await self.publish_metadata("")
         await self.publish_attributes()
         self.arm_next_question()
-        if self.session is not None:
-            self.session.generate_reply(
-                instructions=(
-                    "That question was skipped. Move straight to the next "
-                    "question with zero commentary about the skip and no "
-                    "spotlight on who asked. If the state block has the next "
-                    "question, ask it now."
-                )
-            )
+        self.instructed_reply(
+            "That question was skipped. Move straight to the next "
+            "question with zero commentary about the skip and no "
+            "spotlight on who asked. If the state block has the next "
+            "question, ask it now."
+        )
 
     # -- adjudication ---------------------------------------------------------
 
@@ -992,14 +1026,11 @@ class LilyGame:
                 self.open_window(
                     duration=lily_config.steal_window_seconds(), steal=True
                 )
-                if self.session is not None:
-                    self.session.generate_reply(
-                        instructions=(
-                            "Nobody landed it. Announce a five-second steal "
-                            "window — quick and hot — anyone who hasn't "
-                            "answered can grab it."
-                        )
-                    )
+                self.instructed_reply(
+                    "Nobody landed it. Announce a five-second steal "
+                    "window — quick and hot — anyone who hasn't "
+                    "answered can grab it."
+                )
                 return
 
             # Reveal — stinger is the ruling; packet fires on TTS playback.
@@ -1044,8 +1075,7 @@ class LilyGame:
                 if round_over:
                     self._set_ui_phase("scores")
                 self.arm_next_question()
-            if self.session is not None:
-                self.session.generate_reply(instructions=reveal_instr)
+            self.instructed_reply(reveal_instr)
         finally:
             self._adjudicating = False
 
@@ -1238,20 +1268,19 @@ class LilyGame:
         await self.publish_attributes()
         self._enroll_started = True
         self.fire_enrollment("game_start")
-        if self.session is not None:
-            instructions = (
-                "The table is ready to start. Kick off round one with "
-                "energy. If the state block has the next question, set "
-                "the round's category and ask it now; if it does not, "
-                "banter for a beat — it is on its way."
+        instructions = (
+            "The table is ready to start. Kick off round one with "
+            "energy. If the state block has the next question, set "
+            "the round's category and ask it now; if it does not, "
+            "banter for a beat — it is on its way."
+        )
+        if self.memory_block:
+            instructions += (
+                " The [RETURNING TABLE] context shows this table has "
+                "played with you before — one quick welcome-back beat "
+                "if you haven't done one yet, then into the game."
             )
-            if self.memory_block:
-                instructions += (
-                    " The [RETURNING TABLE] context shows this table has "
-                    "played with you before — one quick welcome-back beat "
-                    "if you haven't done one yet, then into the game."
-                )
-            self.session.generate_reply(instructions=instructions)
+        self.instructed_reply(instructions)
 
     async def finish_game(self) -> None:
         """Finale: event fires AT OR BEFORE the phase=final attribute flip,
@@ -1590,9 +1619,51 @@ class LilyAgent(Agent):
         await self._game.publish_attributes()
         return f"Bonus point to {name}."
 
-    # -- node overrides ------------------------------------------------------------
+    # -- preemptive-generation control (P2) ----------------------------------------
 
-    async def llm_node(self, chat_ctx, tools, model_settings):
+    def set_preemptive_generation(self, enabled: bool) -> None:
+        """Per-turn preemptive control. 1.6.4 reads the agent-level
+        turn_handling["preemptive_generation"] dict LIVE at fire time
+        (agent_activity.preemptive_generation_opts merges it over the
+        session options on every access), so flipping this flag pauses /
+        resumes preemptive runs without touching the session."""
+        self._turn_handling.setdefault("preemptive_generation", {})[
+            "enabled"
+        ] = enabled
+
+    # -- context blocks (P2 preemptive repair, 2026-07-14) --------------------------
+    #
+    # The state-block / adult-layer / memory-block injections used to live
+    # ONLY in llm_node — i.e. AFTER preemptive generation snapshots the
+    # agent's chat context, and on a per-generation copy the persistent
+    # context never saw. Every user turn therefore ran against a context
+    # the 1.6.4 equivalence check (preemptive.chat_ctx.is_equivalent(...))
+    # could not certify, and the preemptive LLM run was discarded — the
+    # observed "chat context changed after on_user_turn_completed"
+    # warnings, 13/session, double LLM cost.
+    #
+    # Fix: the injections run in on_user_turn_completed against BOTH the
+    # turn context (so this turn's generation sees FINAL context) and the
+    # agent's persistent chat context (so the NEXT preemptive snapshot —
+    # taken from agent.chat_ctx during user speech — already carries
+    # identical blocks). Injected messages use STABLE item ids and are
+    # rewritten only when their text actually changed, because
+    # is_equivalent compares item ids + content: an unchanged game state
+    # across the turn boundary now validates the preemptive run, and a
+    # changed one invalidates it honestly (the preemptive run really did
+    # see stale state).
+
+    _CTX_ID_ADULT = "lily_ctx_adult_layer"
+    _CTX_ID_MEMORY = "lily_ctx_memory_block"
+    _CTX_ID_STATE = "lily_ctx_state_block"
+
+    def _apply_context_blocks(self, chat_ctx) -> None:
+        """Idempotent, deterministic injection of the three system blocks.
+        Exact injection semantics preserved from the llm_node era: adult
+        layer added/removed on the sticky mode flag, memory block once,
+        state block replace-then-append — all keyed on the same dedupe
+        markers (_ADULT_LAYER_MARKER, MEMORY_BLOCK_MARKER,
+        _STATE_BLOCK_MARKER)."""
         items = _chat_items(chat_ctx)
 
         # Adult layer: additive injection/removal keyed on the sticky flag.
@@ -1606,7 +1677,12 @@ class LilyAgent(Agent):
         )
         if self._game.sk.mode == "adult" and adult_idx is None:
             items.insert(
-                0, ChatMessage(role="system", content=[LILY_ADULT_LAYER])
+                0,
+                ChatMessage(
+                    id=self._CTX_ID_ADULT,
+                    role="system",
+                    content=[LILY_ADULT_LAYER],
+                ),
             )
         elif self._game.sk.mode != "adult" and adult_idx is not None:
             items.pop(adult_idx)  # removing the layer fully reverts her
@@ -1620,22 +1696,70 @@ class LilyAgent(Agent):
             for m in items
         ):
             items.insert(
-                0, ChatMessage(role="system", content=[self._game.memory_block])
+                0,
+                ChatMessage(
+                    id=self._CTX_ID_MEMORY,
+                    role="system",
+                    content=[self._game.memory_block],
+                ),
             )
 
-        # State block: replace the previous injection, then append fresh.
-        for i in range(len(items) - 1, -1, -1):
-            m = items[i]
-            if (
-                getattr(m, "role", None) == "system"
-                and _STATE_BLOCK_MARKER in _message_text(m)
-            ):
-                items.pop(i)
-        chat_ctx.add_message(
-            role="system", content=self._game.build_state_block()
+        # State block: replace the previous injection, then append fresh —
+        # but ONLY when the rendered text changed. Leaving an unchanged
+        # block untouched (same item id, same content, same position) is
+        # what lets the preemptive equivalence check pass on quiet turns.
+        state = self._game.build_state_block()
+        existing = [
+            i for i, m in enumerate(items)
+            if getattr(m, "role", None) == "system"
+            and _STATE_BLOCK_MARKER in _message_text(m)
+        ]
+        if len(existing) == 1 and _message_text(items[existing[0]]) == state:
+            return
+        for i in reversed(existing):
+            items.pop(i)
+        items.append(
+            ChatMessage(id=self._CTX_ID_STATE, role="system", content=[state])
         )
 
-        self._game.publish_attributes_nowait()  # last_active_at heartbeat
+    # -- node overrides ------------------------------------------------------------
+
+    async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
+        # Signature verified against livekit-agents 1.6.4
+        # (voice/agent.py: async def on_user_turn_completed(self,
+        # turn_ctx: llm.ChatContext, new_message: llm.ChatMessage)).
+        # Runs after end-of-turn, before the reply generation is chosen —
+        # the preemptive equivalence check compares its snapshot against
+        # turn_ctx AFTER this hook, so this is where the context must
+        # reach its final shape.
+        try:
+            self._apply_context_blocks(turn_ctx)   # this turn sees FINAL context
+            self._apply_context_blocks(self._chat_ctx)  # next preemptive snapshot too
+        except Exception:
+            # An injection failure must never eat the turn (the framework
+            # skips the reply if this hook raises).
+            logger.exception(
+                "LILY_CTX | context-block injection failed — replying with "
+                "unmodified context"
+            )
+
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        # What REMAINS here after the P2 preemptive repair, and why:
+        #
+        # 1. _apply_context_blocks: instruction-driven generations
+        #    (generate_reply(instructions=...) — reveal, steal, skip, game
+        #    start, mode revert, greeting — and tool-call follow-ups) never
+        #    pass through on_user_turn_completed, and the reveal turn MUST
+        #    see the just-armed NEXT QUESTION / just-flipped mode. This
+        #    call mutates only the per-generation copy created inside
+        #    _pipeline_reply_task_impl (verified at 1.6.4), which is
+        #    invisible to the preemptive equivalence check — it can never
+        #    invalidate a preemptive run. For user turns the hook already
+        #    ran, the blocks are current, and this is a no-op.
+        # 2. publish_attributes_nowait: last_active_at heartbeat — fires a
+        #    network write, mutates no chat context.
+        self._apply_context_blocks(chat_ctx)
+        self._game.publish_attributes_nowait()
 
         async for chunk in Agent.default.llm_node(
             self, chat_ctx, tools, model_settings
@@ -1646,7 +1770,21 @@ class LilyAgent(Agent):
         chunks = []
         async for chunk in text:
             chunks.append(chunk)
-        full = "".join(chunks).strip()
+        raw = "".join(chunks).strip()
+
+        # P4 spoken-markdown strip: deterministic hygiene via the say gate
+        # (lily_say_gate — THE choke point for outbound speech hygiene)
+        # BEFORE the punctuation-flush guard. Markdown emphasis, headers,
+        # bullets and emoji are removed; [bracket] audio tags ([excited],
+        # [whispering], [pause], ...) are load-bearing ElevenLabs v3
+        # controls and are preserved verbatim. Emoji-only turns strip to
+        # "" and fall into the empty-candidate retry below.
+        full = lily_say_gate.lily_clean_for_speech(raw)
+        if full != raw:
+            logger.info(
+                "LILY_SAY_GATE | stripped %d chars of markdown/emoji",
+                len(raw) - len(full),
+            )
 
         if len(full) < 3:
             # §11.1: an empty candidate (safety-filter mute, truncation) is a
@@ -1679,16 +1817,14 @@ class LilyAgent(Agent):
         # by blingfire sentence tokenization. Lily's suspense holds produce
         # exactly the short unpunctuated fragments that deadlock the
         # SegmentSynchronizer (text_done=false / audio_done=true). Append a
-        # terminal period so the tokenizer always flushes.
-        last = chunks[-1]
-        if isinstance(last, str):
-            stripped = last.rstrip()
-            if stripped and stripped[-1] not in ".!?":
-                chunks[-1] = stripped + "."
+        # terminal period so the tokenizer always flushes. (The node
+        # accumulated every chunk above, so replaying the cleaned text as
+        # one chunk is equivalent — the sentence tokenizer re-splits it.)
+        if full[-1] not in ".!?":
+            full += "."
 
         async def _replay():
-            for c in chunks:
-                yield c
+            yield full
 
         async for frame in Agent.default.tts_node(self, _replay(), model_settings):
             yield frame
@@ -2135,6 +2271,7 @@ async def entrypoint(ctx: JobContext) -> None:
         game=game,
         instructions=LILY_SYSTEM_PROMPT,
     )
+    game.agent = agent  # P2: per-turn preemptive-generation control
     # NOTE: `noise_cancellation.NC()` aborts the worker at Krisp init on
     # livekit-agents==1.6.4 + livekit-plugins-noise-cancellation==0.2.6 —
     # SIGABRT with `NcSession::initSession: Input and output sample rates

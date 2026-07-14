@@ -101,6 +101,23 @@ def vocal_max_output_tokens() -> int:
     return max(600, _get_int("LILY_MAX_OUTPUT_TOKENS", 800))
 
 
+def reasoning_max_output_tokens() -> int:
+    """Dedicated budget for reasoning-node generation/verification calls
+    (P1 root cause, 2026-07-14 19:27 logs: on Gemini 3.x THINKING TOKENS
+    COUNT toward max_output_tokens — 3.1-pro at thinking_level=medium ate
+    most of the shared 800-token vocal budget before the JSON body,
+    truncating it mid-object). Prefetch is off the hot path; latency is
+    irrelevant there, so the default is generous."""
+    return max(600, _get_int("LILY_REASONING_MAX_OUTPUT_TOKENS", 4096))
+
+
+def judge_max_output_tokens() -> int:
+    """Tier-2 judge budget: runs on the vocal model at thinking low and
+    IS latency-relevant (mid-window / reveal path), but its verdict JSON
+    is small — a middle default covers thinking + verdict."""
+    return max(600, _get_int("LILY_JUDGE_MAX_OUTPUT_TOKENS", 1024))
+
+
 # ---------------------------------------------------------------------------
 # Supabase
 # ---------------------------------------------------------------------------

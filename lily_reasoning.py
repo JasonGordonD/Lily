@@ -61,6 +61,88 @@ _SAFETY_SETTINGS = [
     ),
 ]
 
+# Structured output (2026-07-14 P1 fix: QUESTION_PARSE_FAILED -> PREFETCH_FAILED):
+# every generation/verification call pins BOTH response_mime_type="application/json"
+# AND a response_schema, so the model returns schema-conformant JSON and the
+# regex/fence-stripping parse path is retired to a defensive last resort.
+#
+# The question schema carries ALL fields — current plus reserved-for-later
+# sub-agents — so downstream schema evolution is additive, never breaking:
+#   choices            (exactly 4 strings; multiple-choice, sub-agent G)
+#   image_url / image_source (generated|web|none; images, sub-agent H)
+#   proposed_category  (category proposals, sub-agent F)
+_QUESTION_RESPONSE_SCHEMA = genai_types.Schema(
+    type=genai_types.Type.OBJECT,
+    properties={
+        "id": genai_types.Schema(
+            type=genai_types.Type.STRING,
+            description="Question id, shape q_<4 digits>.",
+        ),
+        "category": genai_types.Schema(type=genai_types.Type.STRING),
+        "difficulty_tier": genai_types.Schema(
+            type=genai_types.Type.INTEGER,
+            description="1 (warm-up) to 4 (final round).",
+        ),
+        "prompt": genai_types.Schema(
+            type=genai_types.Type.STRING,
+            description="The question exactly as Lily should speak it.",
+        ),
+        "canonical_answer": genai_types.Schema(type=genai_types.Type.STRING),
+        "acceptable_answers": genai_types.Schema(
+            type=genai_types.Type.ARRAY,
+            items=genai_types.Schema(type=genai_types.Type.STRING),
+            description="Lowercase canonical answer plus common variants.",
+        ),
+        "reveal_color": genai_types.Schema(
+            type=genai_types.Type.STRING,
+            description="One short spicy fact or trap-note for the reveal.",
+        ),
+        # Reserved (optional) fields — populated by later sub-agents.
+        "choices": genai_types.Schema(
+            type=genai_types.Type.ARRAY,
+            items=genai_types.Schema(type=genai_types.Type.STRING),
+            min_items=4,
+            max_items=4,
+            nullable=True,
+            description="Exactly 4 options for multiple-choice questions "
+                        "(sub-agent G). Omit for open questions.",
+        ),
+        "image_url": genai_types.Schema(
+            type=genai_types.Type.STRING, nullable=True,
+        ),
+        "image_source": genai_types.Schema(
+            type=genai_types.Type.STRING,
+            enum=["generated", "web", "none"],
+            nullable=True,
+            description="Provenance of image_url (sub-agent H).",
+        ),
+        "proposed_category": genai_types.Schema(
+            type=genai_types.Type.STRING, nullable=True,
+            description="Model-proposed category (sub-agent F).",
+        ),
+    },
+    required=[
+        "id", "category", "difficulty_tier", "prompt",
+        "canonical_answer", "acceptable_answers", "reveal_color",
+    ],
+)
+
+_VERIFICATION_RESPONSE_SCHEMA = genai_types.Schema(
+    type=genai_types.Type.OBJECT,
+    properties={
+        "verdict": genai_types.Schema(
+            type=genai_types.Type.STRING, enum=["pass", "fail"],
+        ),
+        "reason": genai_types.Schema(type=genai_types.Type.STRING),
+        "corrected_canonical_answer": genai_types.Schema(
+            type=genai_types.Type.STRING, nullable=True,
+            description="Only when a small correction fixes the question; "
+                        "null otherwise.",
+        ),
+    },
+    required=["verdict", "reason"],
+)
+
 _GENERATION_PROMPT = """You write questions for Lily, a live voice trivia host.
 
 Write ONE trivia question following these constraints:
@@ -114,12 +196,8 @@ def _strip_fences(text: str) -> str:
     return t
 
 
-def lily_parse_question_json(raw: str) -> Optional[dict]:
-    """Parse and shape-check the structured question JSON (spec §4.2)."""
-    try:
-        data = json.loads(_strip_fences(raw))
-    except (json.JSONDecodeError, ValueError):
-        return None
+def _shape_question(data) -> Optional[dict]:
+    """Shape-check + default-fill one parsed question dict (spec §4.2)."""
     if not isinstance(data, dict):
         return None
     if not data.get("prompt") or not data.get("canonical_answer"):
@@ -131,6 +209,20 @@ def lily_parse_question_json(raw: str) -> Optional[dict]:
     data.setdefault("difficulty_tier", 2)
     data.setdefault("reveal_color", "")
     return data
+
+
+def lily_parse_question_json(raw: str) -> Optional[dict]:
+    """DEFENSIVE LAST RESORT parser (fence-strip + shape-check).
+
+    Since the P1 structured-output fix, generation runs with
+    response_mime_type + response_schema and is parsed by a plain
+    json.loads first; this path only runs if schema-mode output somehow
+    fails a direct parse. It must never again be the primary parser."""
+    try:
+        data = json.loads(_strip_fences(raw))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return _shape_question(data)
 
 
 class LilyReasoning:
@@ -153,6 +245,8 @@ class LilyReasoning:
         thinking_level: str,
         system_instruction: Optional[str] = None,
         response_mime_type: Optional[str] = None,
+        response_schema: Optional[genai_types.Schema] = None,
+        max_output_tokens: Optional[int] = None,
     ) -> str:
         config = genai_types.GenerateContentConfig(
             # Default sampling params — never override temperature/top_p/top_k
@@ -161,9 +255,18 @@ class LilyReasoning:
                 thinking_level=thinking_level
             ),
             safety_settings=_SAFETY_SETTINGS,
-            max_output_tokens=lily_config.vocal_max_output_tokens(),
+            # P1 root cause (2026-07-14 19:27 logs): on Gemini 3.x thinking
+            # tokens count toward max_output_tokens. The shared 800-token
+            # vocal budget let 3.1-pro's thinking starve the JSON body into
+            # truncation — every call here now names its own budget.
+            max_output_tokens=(
+                max_output_tokens
+                if max_output_tokens is not None
+                else lily_config.vocal_max_output_tokens()
+            ),
             system_instruction=system_instruction,
             response_mime_type=response_mime_type,
+            response_schema=response_schema,
         )
         response = await asyncio.to_thread(
             self._client.models.generate_content,
@@ -210,8 +313,25 @@ class LilyReasoning:
             prompt,
             REASONING_THINKING_LEVEL,
             response_mime_type="application/json",
+            response_schema=_QUESTION_RESPONSE_SCHEMA,
+            max_output_tokens=lily_config.reasoning_max_output_tokens(),
         )
-        parsed = lily_parse_question_json(raw)
+        # Schema mode: the output IS the JSON document — parse it directly.
+        parsed: Optional[dict] = None
+        try:
+            parsed = _shape_question(json.loads(raw))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            parsed = None
+        if parsed is None:
+            # Defensive last resort only — schema-mode output should never
+            # need fence stripping.
+            parsed = lily_parse_question_json(raw)
+            if parsed is not None:
+                logger.warning(
+                    "LILY_REASONING | QUESTION_PARSE_FALLBACK | schema-mode "
+                    "output needed the defensive parser | raw_prefix=%r",
+                    (raw or "")[:200],
+                )
         if parsed is None:
             logger.warning(
                 "LILY_REASONING | QUESTION_PARSE_FAILED | raw_prefix=%r",
@@ -229,13 +349,27 @@ class LilyReasoning:
             prompt,
             REASONING_THINKING_LEVEL,
             response_mime_type="application/json",
+            response_schema=_VERIFICATION_RESPONSE_SCHEMA,
+            max_output_tokens=lily_config.reasoning_max_output_tokens(),
         )
+        # Schema mode: direct parse first; fence stripping is a defensive
+        # last resort. Honest failure stays intact — an unparseable verdict
+        # fails verification, never passes silently.
         try:
-            data = json.loads(_strip_fences(raw))
-        except (json.JSONDecodeError, ValueError):
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            try:
+                data = json.loads(_strip_fences(raw))
+            except (json.JSONDecodeError, ValueError):
+                logger.warning(
+                    "LILY_REASONING | VERIFY_PARSE_FAILED | raw_prefix=%r",
+                    (raw or "")[:400],
+                )
+                return False, "verifier returned unparseable output"
+        if not isinstance(data, dict):
             logger.warning(
-                "LILY_REASONING | VERIFY_PARSE_FAILED | raw_prefix=%r",
-                (raw or "")[:400],
+                "LILY_REASONING | VERIFY_PARSE_FAILED | non-object verdict | "
+                "raw_prefix=%r", (raw or "")[:400],
             )
             return False, "verifier returned unparseable output"
         if data.get("verdict") == "pass":
@@ -305,4 +439,5 @@ class LilyReasoning:
             user_prompt,
             JUDGE_THINKING_LEVEL,
             system_instruction=system_instructions,
+            max_output_tokens=lily_config.judge_max_output_tokens(),
         )
