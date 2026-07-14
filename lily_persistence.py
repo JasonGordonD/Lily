@@ -300,15 +300,19 @@ async def lily_fetch_bank_question(
             and r.get("difficulty_tier") == difficulty_tier
         ] or [r for r in candidates if r.get("category") == category] or candidates
         row = preferred[0]
+        # Live-schema tolerance: the production table stores the answer as
+        # `canonical_answer` (text) with `acceptable_answers` text[]; the
+        # repo's 001 migration used `answer`. Read both, prefer live.
+        answer = row.get("canonical_answer") or row.get("answer") or ""
         acceptable = row.get("acceptable_answers")
         if not isinstance(acceptable, list) or not acceptable:
-            acceptable = [str(row.get("answer", "")).lower()]
+            acceptable = [str(answer).lower()]
         return {
             "id": f"kb_{row.get('id', 0)}",
             "category": row.get("category") or category,
             "difficulty_tier": row.get("difficulty_tier") or difficulty_tier,
             "prompt": row["question"],
-            "canonical_answer": row.get("answer", ""),
+            "canonical_answer": answer,
             "acceptable_answers": acceptable,
             "reveal_color": row.get("reveal_color") or "",
         }
