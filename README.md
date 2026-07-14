@@ -47,6 +47,31 @@ do-not-touch: no imports, no vendoring).
 - **Event-bound truth:** she never announces a score the scorekeeper hasn't
   committed, never claims the next question is ready unless prefetch landed.
 
+## Loop engagement
+
+The tiered pipeline (arm → ask → window → adjudicate) has three explicit
+entry points, in order of preference:
+
+1. **`lily_begin_round` function tool** — Lily calls this the moment the
+   lobby has real energy (first genuine group laugh). This is the primary
+   in-character way to flip out of the lobby.
+2. **`lily_control.start` RPC** — the frontend "start" button. Kept for
+   any UI that wants an explicit host-side gate.
+3. **Auto-start safety net** — if ≥2 speakers are bound, the first
+   question is prefetched, and the lobby grace window has elapsed
+   (`LILY_AUTO_START_LOBBY_GRACE_SECONDS`, default 60s), the game starts
+   automatically. This exists so a voice-only table that never calls the
+   tool AND never touches the UI still reaches question one — the exact
+   failure class that produced 15+ 2026-07-14 sessions with
+   `lily_sessions.round=0` and `question_number=0` despite hours of
+   audio and populated `final_standings`.
+
+The `_question_was_spoken` gate (which decides "did Lily just perform the
+armed question, so open the answer window?") accepts 40% distinctive-token
+overlap with a floor of two matched tokens — a 60% gate blocked the
+window on Lily's paraphrase habit and left the game running through
+`lily_award_bonus` only. Tests: `tests/test_round_loop.py`.
+
 ## Latency discipline
 
 Nothing blocking runs on the event loop's hot path, and slow calls are moved
