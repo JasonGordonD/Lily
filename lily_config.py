@@ -212,6 +212,26 @@ def group_id_override() -> Optional[str]:
     return _get("LILY_GROUP_ID")
 
 
+def greeting_memory_budget_seconds() -> float:
+    """Memory at the door (WO-LILY-DESYNC-HONESTY-001 F): how long the
+    composed greeting may wait for group resolution + memory load before
+    greeting cold. The live failure: [RETURNING TABLE] landed one turn
+    AFTER the greeting fired, so a four-time table got 'who do we have at
+    the table tonight?'. Never blocks the room beyond this budget; on
+    timeout the greeting goes out cold and recognition arrives naturally.
+    <=0 disables the wait entirely."""
+    return _get_float("LILY_GREETING_MEMORY_BUDGET_SECONDS", 1.5)
+
+
+def memory_min_questions() -> int:
+    """Memory write threshold (WO-LILY-DESYNC-HONESTY-001 F): a
+    lily_memories narrative row is written only when the session played
+    at least this many questions OR reached round 2. Below it the session
+    row still writes — no memory narrative (the live junk row: 'No sole
+    winner over 1 question(s). Final scores: Rami 0')."""
+    return max(0, _get_int("LILY_MEMORY_MIN_QUESTIONS", 3))
+
+
 # SFX assets — optional file paths; hooks are wired but silent when unset.
 def thinking_bed_path() -> Optional[str]:
     """60 BPM ticking thinking-bed played during answer windows."""

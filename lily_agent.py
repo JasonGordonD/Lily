@@ -205,6 +205,14 @@ class LilyGame:
 
         self.next_question: dict | None = None      # prefetched N+1
         self.armed_question: dict | None = None     # in state block, awaiting ask
+        # Draw idempotency (WO-LILY-DESYNC-HONESTY-001 G2): every question
+        # a prefetch DRAWS registers here the moment it lands — not at
+        # serving (arm), which is where the live q_0492 double-draw slipped
+        # through: the second draw ran before the first serving registered
+        # in used_prompts/asked_history. Session-scoped; a discarded draw
+        # stays excluded (no repeats either way).
+        self._drawn_ids: set = set()
+        self._drawn_hashes: set = set()
         # 50/50 lifeline (multiple-choice WO): eliminated choice indices for
         # the CURRENT question — reset at arm, rides publish_metadata.
         self.eliminated: list[int] = []
@@ -240,6 +248,13 @@ class LilyGame:
         # collected for the lily_memories highlights column.
         self.memory_block: str = ""
         self.highlights: list[dict] = []
+        # Memory at the door (WO-LILY-DESYNC-HONESTY-001 F): set once the
+        # returning-table memory question has an ANSWER — a strong group id
+        # loaded its memory (block or provably none), or a group-id upgrade
+        # finished its reload. The greeting awaits this event up to
+        # LILY_GREETING_MEMORY_BUDGET_SECONDS so a returning table is
+        # recognized in the FIRST utterance instead of one turn late.
+        self.memory_settled: asyncio.Event = asyncio.Event()
         # GROUP PREFERENCES (group prefs WO): the OPAQUE per-group prefs
         # dict (lily_group_prefs.prefs, migration 013), loaded at session
         # start for a returning group and persisted whole on every
@@ -466,9 +481,44 @@ class LilyGame:
         self.session.generate_reply(instructions=instructions)
 
     def _resume_preemptive(self) -> None:
+        # G1 (WO-LILY-DESYNC-HONESTY-001): while the game is LIVE the
+        # playout-completion resume must not re-enable preemptive
+        # generation — set_game_live_preemptive holds it off for the whole
+        # game (see that method for why); the P2 pause/resume pair only
+        # cycles it in the lobby and the wrapup.
+        # getattr: test harnesses build LilyGame via __new__ without the
+        # full __init__ attribute set.
         if self._preemptive_paused and self.agent is not None:
             self._preemptive_paused = False
-            self.agent.set_preemptive_generation(True)
+            if not (
+                getattr(self, "game_started", False)
+                and not getattr(self, "game_over", False)
+            ):
+                self.agent.set_preemptive_generation(True)
+
+    def set_game_live_preemptive(self, live: bool) -> None:
+        """G1 (WO-LILY-DESYNC-HONESTY-001): preemptive generation is OFF
+        for the whole live game, ON in the lobby and after the finale.
+
+        Why: the P2 injection-timing fix is correct (stable item ids,
+        injected in on_user_turn_completed against both contexts), but
+        during rounds nearly EVERY user turn still changes the state block
+        honestly — the utterance being processed lands as an answer
+        candidate line, and answer_window open/closed flips on the clock —
+        so 1.6.4's equivalence check (preemptive.chat_ctx.is_equivalent)
+        rightly discarded the speculative run anyway: 10 warnings/session
+        and a dead LLM call each, zero realized latency win. 1.6.4 has no
+        pre-snapshot injection hook (on_preemptive_generation copies
+        agent.chat_ctx synchronously inside AudioRecognition), so the
+        supported lever is the agent-level live-read enabled flag."""
+        if self.agent is None:
+            return
+        self.agent.set_preemptive_generation(not live)
+        logger.info(
+            "LILY_STATE | PREEMPTIVE_%s | session=%s (game %s)",
+            "OFF" if live else "ON", self.sk.session_id,
+            "live" if live else "not live",
+        )
 
     # -- gated speech dispatch (say-gate WO §1) -------------------------------
 
@@ -546,6 +596,38 @@ class LilyGame:
             "spoken choice or its tool saves it as the new usual). Never "
             "ask about preferences again tonight."
         )
+
+    async def await_greeting_memory(self) -> None:
+        """Memory at the door (WO-LILY-DESYNC-HONESTY-001 F): hold the
+        composed greeting until group resolution + memory load have
+        settled, within a hard budget (LILY_GREETING_MEMORY_BUDGET_SECONDS,
+        default 1.5s). The live failure: the greeting fired one turn
+        BEFORE [RETURNING TABLE] landed and a four-time table got the cold
+        'who do we have at the table tonight?'. On timeout the greeting
+        goes out cold exactly as before and recognition arrives naturally
+        — the room is never blocked beyond the budget."""
+        # getattr: test harnesses build LilyGame via __new__ without the
+        # full __init__ attribute set.
+        event = getattr(self, "memory_settled", None)
+        if event is None or event.is_set():
+            return
+        budget = lily_config.greeting_memory_budget_seconds()
+        if budget <= 0:
+            return
+        started = time.time()
+        try:
+            await asyncio.wait_for(event.wait(), timeout=budget)
+            logger.info(
+                "LILY_MEMORY | GREETING_AWAIT | settled in %.2fs "
+                "(budget %.1fs) — recognition rides the first utterance",
+                time.time() - started, budget,
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                "LILY_MEMORY | GREETING_AWAIT | timeout after %.1fs — "
+                "greeting cold; recognition arrives naturally if memory "
+                "resolves later", budget,
+            )
 
     def greeting_instructions(self) -> str:
         """The fresh-room landing line (single source of truth — both the
@@ -662,6 +744,26 @@ class LilyGame:
             return "real_entity"
         return None
 
+    def _register_draw(self, question: dict) -> bool:
+        """Draw idempotency (G2): claim a freshly drawn question by id +
+        normalized-text hash the moment the supply line lands it. Returns
+        False when this exact question was already drawn this session —
+        the caller discards the duplicate instead of prefetching it twice
+        (the live q_0492 class: draw two ran before serving one
+        registered). getattr: test harnesses build LilyGame via __new__."""
+        drawn_ids = getattr(self, "_drawn_ids", None)
+        if drawn_ids is None:
+            self._drawn_ids = drawn_ids = set()
+            self._drawn_hashes = set()
+        qid = str(question.get("id") or "")
+        qhash = lily_bank.lily_question_text_hash(question.get("prompt"))
+        if (qid and qid in drawn_ids) or qhash in self._drawn_hashes:
+            return False
+        if qid:
+            drawn_ids.add(qid)
+        self._drawn_hashes.add(qhash)
+        return True
+
     def start_prefetch(self) -> None:
         """Prefetch N+1 in the background while the current question plays
         out. Failure writes an honest status note (§11.2)."""
@@ -699,9 +801,24 @@ class LilyGame:
             mc = self.sk.format_for_round(rnd) == "multiple_choice"
 
             # Per-group asked history (migration 010): bank draws exclude
-            # the group's served kb_ ids and normalized-text hashes.
-            history_ids = lily_bank.lily_history_question_ids(self.asked_history)
-            history_hashes = lily_bank.lily_history_hashes(self.asked_history)
+            # the group's served kb_ ids and normalized-text hashes — PLUS
+            # this session's already-drawn set (G2): a question drawn but
+            # not yet served (or discarded) must never be drawn again;
+            # arm-time registration alone left the window the live q_0492
+            # double-draw ran through.
+            if getattr(self, "_drawn_ids", None) is None:
+                # Test harnesses build LilyGame via __new__ without the
+                # full __init__ attribute set.
+                self._drawn_ids = set()
+                self._drawn_hashes = set()
+            history_ids = (
+                lily_bank.lily_history_question_ids(self.asked_history)
+                | self._drawn_ids
+            )
+            history_hashes = (
+                lily_bank.lily_history_hashes(self.asked_history)
+                | self._drawn_hashes
+            )
 
             # Picture supply (WO-LILY-OMNIBUS-002 H/I/J/K): pictures-mode
             # slots are served by the REASONING node's picture builders —
@@ -770,6 +887,20 @@ class LilyGame:
                     if mc:
                         # Bank rows carry no choices — synthesize here too.
                         await self.reasoning.ensure_choices(question)
+            # G2 final idempotency gate: whatever the supply source, a
+            # question that was already drawn this session is a duplicate
+            # — discard it rather than prefetch it twice. (Generated
+            # questions are usually caught upstream by the hash exclusion;
+            # this gate is what covers bank/picture rows and any supply
+            # path that ignored the exclusion lists.)
+            if question is not None and not self._register_draw(question):
+                logger.warning(
+                    "LILY_PREFETCH | DUPLICATE_DRAW_DISCARDED | session=%s "
+                    "id=%s prompt=%r",
+                    self.sk.session_id, question.get("id"),
+                    str(question.get("prompt", ""))[:80],
+                )
+                question = None
             if question is not None and self.sk.media_mode != "pictures":
                 # Picture exclusion in voice_only (sub-agent K): a bank
                 # row's cached image never rides into a voice-only session.
@@ -2050,6 +2181,7 @@ class LilyGame:
             self.sk.session_id, source, old, new_group_id,
         )
         if self.supabase is None:
+            self.memory_settled.set()  # nothing to load — greeting unblocks
             return
         await lily_persistence.lily_rekey_group(
             self.supabase, old, new_group_id, self.sk.session_id
@@ -2095,6 +2227,10 @@ class LilyGame:
                     new_group_id, len(block),
                     (memory or {}).get("total_games"),
                 )
+        # Memory at the door (F): the upgrade's reload is the answer the
+        # greeting may be waiting on (the live race: participant metadata
+        # landed AFTER the entrypoint's initial load gave up).
+        self.memory_settled.set()
         self.fire_enrollment("group_id_upgrade")
 
     async def resolve_group_identity(self, trigger: str) -> None:
@@ -2333,6 +2469,9 @@ class LilyGame:
         self.game_started = True
         logger.info("LILY_STATE | GAME_START | session=%s source=%s",
                     self.sk.session_id, source)
+        # G1: speculative user-turn runs are dead weight during rounds
+        # (every answer changes the state block) — off until the finale.
+        self.set_game_live_preemptive(True)
         # Roster is as stable as it gets — resolve the durable group id
         # BEFORE the first question so memories/facts/voiceprints key on it
         # (and reload memory for a returning table while there's still a
@@ -2395,6 +2534,9 @@ class LilyGame:
         if self.game_over:
             return
         self.game_over = True
+        # G1: the game is no longer live — wrapup banter is quiet-context,
+        # so speculative user-turn runs win latency again.
+        self.set_game_live_preemptive(False)
         standings = sorted(
             self._players_payload(), key=lambda p: -p["score"]
         )
@@ -2429,6 +2571,7 @@ class LilyGame:
             asyncio.ensure_future(lily_memory.lily_write_session_memory(
                 self.supabase, self.group_id, self.sk.session_id,
                 standings, self.sk.question_number, self.highlights,
+                round_reached=self.sk.round,
             ))
 
     # -- session report (B3) --------------------------------------------------------
@@ -2771,6 +2914,12 @@ class LilyAgent(Agent):
                 source="on_enter",
             )
         else:
+            # Memory at the door (F): give group resolution + memory load a
+            # short budget so a returning table is recognized in the FIRST
+            # utterance. greeting_instructions() composes AFTER the wait —
+            # a block that just landed is picked up here. Timeout greets
+            # cold exactly as before.
+            await self._game.await_greeting_memory()
             self._game.gated_say(
                 "session_greet",
                 "greet",
@@ -3721,6 +3870,13 @@ async def entrypoint(ctx: JobContext) -> None:
             group_id, len(game.memory_block),
             (group_memory or {}).get("total_games"),
         )
+    # Memory at the door (F): a STRONG group id means this load IS the
+    # answer (block or provably no history) — the greeting need not wait.
+    # A weak id (room name) leaves the event unset: the greeting waits its
+    # short budget for the participant_metadata_late upgrade — the exact
+    # race that cold-greeted a four-time returning table live.
+    if group_id_source in _STRONG_GROUP_SOURCES or game.memory_block:
+        game.memory_settled.set()
 
     # Bank curation (WO-LILY-OMNIBUS-002 D/F): the group's served-question
     # history (no-repeat guard on bank draws + generated output) and the
@@ -3953,6 +4109,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 await lily_memory.lily_write_session_memory(
                     supabase, game.group_id, scorekeeper.session_id,
                     standings, scorekeeper.question_number, game.highlights,
+                    round_reached=scorekeeper.round,
                 )
                 # B3 session report — one row per session, idempotent upsert
                 # on session_id. Transcript is what's retained in memory (the
@@ -4090,6 +4247,9 @@ async def entrypoint(ctx: JobContext) -> None:
     # path still opens the night.
     if reconnected:
         game.game_started = True
+        # G1: a reconnect resumes a LIVE game — same preemptive-off rule
+        # as start_game (which this path bypasses).
+        game.set_game_live_preemptive(True)
         game.ui_phase = "question"
         await game.publish_attributes()
         game.gated_say(
@@ -4101,6 +4261,12 @@ async def entrypoint(ctx: JobContext) -> None:
     else:
         # Fresh room: Lily speaks FIRST (M1 gate — silence is her failure
         # mode). Short lobby landing, then conversational name-fishing.
+        # Memory at the door (F): same budgeted wait as on_enter, but only
+        # when this path is actually going to win the dispatch race —
+        # on_enter normally claimed session_greet already (this dispatch
+        # then logs LILY_SAY_SUPPRESSED | reason=dup with zero extra wait).
+        if game.say_registry.state("session_greet") is None:
+            await game.await_greeting_memory()
         game.gated_say(
             "session_greet",
             "greet",

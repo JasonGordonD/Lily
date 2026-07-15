@@ -111,11 +111,25 @@ with regression coverage in `tests/test_stall_recovery.py`:
   as "not enough words". The failure now logs
   `reason=stt_stream_disconnected`; the mid-game triggers (first_bind /
   game_start / group_id_upgrade) are the ones that must land.
-- **Known-noise log lines** (framework-internal, benign): "preemptive
-  generation enabled but chat context changed" (the state-block injection
-  invalidates the speculative reply by design) and
-  "on_playback_started called after start_fut is set" (double
-  playback-start notification in the transcript synchronizer).
+- **Known-noise log lines** (framework-internal, benign):
+  - "preemptive generation enabled but chat context or tools have changed
+    after `on_user_turn_completed`" — was 10/session during live games
+    because in-round state honestly changes on nearly every user turn (the
+    answer being spoken lands as a candidate line; the window flips on the
+    clock), so 1.6.4's equivalence check rightly discarded the speculative
+    run. Preemptive generation is now OFF while the game is live
+    (`set_game_live_preemptive`, logged as `LILY_STATE | PREEMPTIVE_OFF/ON`)
+    and ON in the lobby/wrapup where the check passes — a live session
+    should log ~zero of these; a rare one outside the game window is still
+    benign.
+  - "on_playback_started called after start_fut is set" (double
+    playback-start notification in the transcript synchronizer).
+  - "inference is slower than realtime" (silero VAD under momentary CPU
+    contention) — a one-off per session is noise; investigate only if it
+    repeats or latency metrics degrade alongside it.
+  - "silence has been prepended" (`recorder_io` aligning a track that
+    started mid-frame) — cosmetic recorder bookkeeping, not an audio-path
+    problem. Neither one-off is worth chasing.
 
 ## Loop engagement (2026-07-14 persistence-audit root-cause fix)
 
@@ -505,6 +519,33 @@ never to claim she remembers the table AND never to announce it's their
 first time — history is referenced only when a `[RETURNING TABLE]` block
 actually exists.
 
+### Memory at the door (WO-LILY-DESYNC-HONESTY-001 F)
+
+Two gates keep memory honest at the session boundary:
+
+- **Greeting budget.** The composed greeting awaits group resolution +
+  memory load up to `LILY_GREETING_MEMORY_BUDGET_SECONDS` (default 1.5s;
+  `<=0` disables the wait) before dispatching under `session_greet` — the
+  live failure was `[RETURNING TABLE]` landing one turn AFTER the greeting
+  fired, cold-greeting a four-time returning table. A STRONG group id
+  (dispatch/participant metadata, env override) settles the wait the moment
+  its memory load returns (block or provably no history); a weak id (room
+  name) leaves it pending so the `participant_metadata_late` upgrade can
+  land within the budget. Timeout greets cold exactly as before and lets
+  recognition arrive naturally — the room is never blocked beyond the
+  budget. Observable as `LILY_MEMORY | GREETING_AWAIT | settled/timeout`.
+- **Write threshold.** A `lily_memories` narrative row is written only when
+  the session played at least `LILY_MEMORY_MIN_QUESTIONS` questions
+  (default 3 — the same count the summary reports) OR reached round 2.
+  Below threshold the session row still writes through its own path but no
+  narrative lands (`LILY_MEMORY | WRITE_SKIPPED | ... below threshold`) —
+  an aborted one-question session ("No sole winner over 1 question(s).
+  Final scores: Rami 0") must never come back as "last game" material.
+  Existing sub-threshold rows are purged by a one-time production cleanup
+  (delete `lily_memories` where `question_count < 3`).
+
+Tests: `tests/test_memory_gate.py`.
+
 ### Group preferences (the "usual")
 
 Lily remembers HOW a table likes to play, not just who they are.
@@ -628,7 +669,15 @@ this session's rows), it drives the no-repeat guard:
 - generated output is hash-checked against the history — a cross-session
   repeat is discarded (`LILY_BANK | HISTORY_REPEAT_DISCARDED`) and the bank
   fallback serves instead (the generator's textual avoid-list only carries
-  this session's prompts).
+  this session's prompts);
+- **draw idempotency (WO-LILY-DESYNC-HONESTY-001 G2):** every question a
+  prefetch DRAWS also registers in a session-scoped set the moment it
+  lands — not at serving/arm, which left a window where a second draw ran
+  before the first serving registered (the live `q_0492` double-prefetch).
+  The drawn set rides the same exclusion lists, and a duplicate that slips
+  through any supply source is discarded at a final gate
+  (`LILY_PREFETCH | DUPLICATE_DRAW_DISCARDED`). A drawn-then-discarded
+  question stays excluded for the session.
 
 ### Difficulty self-tuning + retirement (E, `lily_bank_tuning.py`)
 
@@ -1051,6 +1100,8 @@ boot failure.
 `LILY_ANSWER_WINDOW_SECONDS`, `LILY_ROUNDS`, `LILY_QUESTIONS_PER_ROUND`,
 `LILY_AUTO_START_MIN_PLAYERS` / `LILY_AUTO_START_LOBBY_GRACE_SECONDS`
 (lobby auto-start safety net), `LILY_GROUP_ID` (group-identity override),
+`LILY_GREETING_MEMORY_BUDGET_SECONDS` (default 1.5) /
+`LILY_MEMORY_MIN_QUESTIONS` (default 3) — memory-at-the-door gates,
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
 `LILY_JOB_MEMORY_LIMIT_MB`, `LILY_REASONING_MAX_OUTPUT_TOKENS` (default 4096) /
 `LILY_JUDGE_MAX_OUTPUT_TOKENS` (default 1024) — dedicated reasoning/judge budgets
