@@ -486,6 +486,80 @@ def lily_tier1_evaluate_question(
     )
 
 
+def lily_tier1_evaluate_nbest(
+    transcript_text: str,
+    question: dict,
+    hypotheses: Optional[list] = None,
+    dispersion: Optional[float] = None,
+    dispersion_threshold: Optional[float] = None,
+    threshold: Optional[float] = None,
+) -> dict:
+    """n-best-aware Tier-1 wrapper (WO-LILY-ADDRESSEE-H1-001 Task 1).
+
+    Runs the existing format-dispatch matcher over the 1-best transcript
+    PLUS every synthesized hypothesis text, and returns the best verdict
+    under the precedence correct > uncertain > incorrect — a hit in ANY
+    hypothesis slot counts, an uncertain anywhere blocks a definitive
+    incorrect. Existing single-text functions are untouched.
+
+    Dispersion gate: when `dispersion` and `dispersion_threshold` are both
+    supplied and dispersion >= threshold, any DEFINITIVE verdict (correct,
+    or MC's incorrect) is demoted to "uncertain" — high confidence-variance
+    across hypotheses is a deliberation signal, and deliberation escalates
+    to the judge instead of scoring. Pure: thresholds are parameters, env
+    resolution stays in lily_config at the call site.
+
+    Returns the winning evaluation dict (same base shape as
+    lily_tier1_evaluate_question) plus an "nbest" key:
+      {"evaluated": int, "hit_index": int,   # 0 = the 1-best transcript
+       "dispersion": float|None, "escalated_by_dispersion": bool}
+    """
+    texts: list[str] = [transcript_text]
+    seen = {lily_normalize_answer(transcript_text)}
+    for h in hypotheses or []:
+        text = h.get("text") if isinstance(h, dict) else h
+        if not text or not isinstance(text, str):
+            continue
+        norm = lily_normalize_answer(text)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        texts.append(text)
+
+    _rank = {"correct": 2, "uncertain": 1, "incorrect": 0}
+    best: Optional[dict] = None
+    best_index = 0
+    for i, text in enumerate(texts):
+        # `threshold` (state priors, Task 2) rides every per-hypothesis
+        # evaluation — the two H1 lanes compose.
+        r = lily_tier1_evaluate_question(text, question, threshold=threshold)
+        if best is None or _rank[r["verdict"]] > _rank[best["verdict"]]:
+            best, best_index = r, i
+            if best["verdict"] == "correct":
+                break
+
+    assert best is not None  # texts is never empty
+    escalated = False
+    if (
+        best["verdict"] in ("correct", "incorrect")
+        and dispersion is not None
+        and dispersion_threshold is not None
+        and dispersion >= dispersion_threshold
+    ):
+        # Deliberation prior: the recognizer itself was torn — check,
+        # don't score. Matched info is kept for the judge's benefit.
+        best["verdict"] = "uncertain"
+        escalated = True
+
+    best["nbest"] = {
+        "evaluated": len(texts),
+        "hit_index": best_index,
+        "dispersion": dispersion,
+        "escalated_by_dispersion": escalated,
+    }
+    return best
+
+
 def lily_fifty_fifty_eliminations(
     choices: list[str],
     canonical_answer: str,
@@ -538,10 +612,19 @@ def lily_build_judge_prompt(
     attempts: list[tuple[str, str]],
     acceptable_answers: Optional[list[str]] = None,
     claimed_alternate: Optional[str] = None,
+    hypotheses_by_speaker: Optional[dict] = None,
 ) -> str:
     """Build the Tier-2 judge user prompt. attempts is ordered
     (speaker, text), earliest first — order is already decided by
-    scorekeeper timestamps and must not be re-litigated."""
+    scorekeeper timestamps and must not be re-litigated.
+
+    hypotheses_by_speaker (WO-LILY-ADDRESSEE-H1-001 Task 1): optional
+    {speaker: [{"text", "confidence"}, ...]} of ASR n-best hypotheses for
+    an attempt — competing transcriptions of the SAME utterance. The judge
+    evaluates the SET against the supplied answer domain: a semantic hit in
+    any slot with adequate confidence is a hit. The hypotheses widen what
+    the player may have SAID, never what the answer IS — the
+    judge-never-invents rule is restated in-prompt whenever they appear."""
     lines = [
         f"QUESTION: {question_prompt}",
         f"CANONICAL ANSWER: {canonical_answer}",
@@ -549,8 +632,41 @@ def lily_build_judge_prompt(
     if acceptable_answers:
         lines.append("ACCEPTABLE VARIANTS: " + ", ".join(acceptable_answers))
     lines.append("ATTEMPTS IN ORDER (earliest first):")
+    any_hypotheses = False
     for idx, (speaker, text) in enumerate(attempts, start=1):
         lines.append(f"{idx}. {speaker}: {text!r}")
+        hyps = (hypotheses_by_speaker or {}).get(speaker) or []
+        extra = []
+        attempt_norm = lily_normalize_answer(text)
+        for h in hyps:
+            htext = h.get("text") if isinstance(h, dict) else h
+            if not htext or not isinstance(htext, str):
+                continue
+            if lily_normalize_answer(htext) == attempt_norm:
+                continue  # identical to the transcribed attempt — noise
+            conf = h.get("confidence") if isinstance(h, dict) else None
+            extra.append((htext, conf))
+        if extra:
+            any_hypotheses = True
+            lines.append(
+                "   ASR N-BEST — the player may have said any of "
+                "(alternative transcriptions of the SAME utterance):"
+            )
+            for j, (htext, conf) in enumerate(extra, start=1):
+                suffix = (
+                    f" (confidence {conf:.2f})"
+                    if isinstance(conf, (int, float)) else ""
+                )
+                lines.append(f"     {j}. {htext!r}{suffix}")
+    if any_hypotheses:
+        lines.append(
+            "N-BEST RULE: the alternative transcriptions above are competing "
+            "ASR hypotheses of the same spoken words. If ANY hypothesis with "
+            "adequate confidence expresses the canonical answer, judge the "
+            "attempt correct. The hypotheses only widen what the player may "
+            "have SAID — they never change what the answer IS. Judge only "
+            "against the canonical answer supplied above."
+        )
     if claimed_alternate:
         lines.append(
             "APPEAL: the player calmly claims this alternate answer should "
