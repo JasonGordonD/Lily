@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -36,6 +37,7 @@ logger = logging.getLogger("lily_persistence")
 
 TRANSCRIPT_BATCH_SIZE = 10
 TRANSCRIPT_BATCH_FLUSH_SECONDS = 30.0
+TRANSCRIPT_FLUSH_ATTEMPTS = 3
 
 
 def lily_create_supabase_client() -> Optional[SupabaseClient]:
@@ -229,6 +231,8 @@ class LilyTranscriptBatcher:
         self._session_id = session_id
         self._batch: list[dict] = []
         self._last_flush = time.time()
+        self._flush_lock = asyncio.Lock()
+        self._disabled = False
 
     def add(
         self,
@@ -238,7 +242,10 @@ class LilyTranscriptBatcher:
         segment_start: Optional[float] = None,
         segment_end: Optional[float] = None,
     ) -> None:
+        if self._disabled:
+            return
         self._batch.append({
+            "event_id": str(uuid.uuid4()),
             "session_id": self._session_id,
             "speaker_label": speaker_label,
             "speaker_name": speaker_name,
@@ -254,16 +261,39 @@ class LilyTranscriptBatcher:
             asyncio.ensure_future(self.flush())
 
     async def flush(self) -> None:
-        if not self._batch:
-            return
-        rows, self._batch = self._batch, []
-        self._last_flush = time.time()
-        try:
-            await asyncio.to_thread(
-                lambda: self._supabase.table("lily_transcripts").insert(rows).execute()
-            )
-        except Exception as e:
-            logger.error("transcript flush error (%d rows dropped): %s", len(rows), e)
+        async with self._flush_lock:
+            if not self._batch or self._disabled:
+                return
+            rows, self._batch = self._batch, []
+            self._last_flush = time.time()
+            for attempt in range(TRANSCRIPT_FLUSH_ATTEMPTS):
+                try:
+                    await asyncio.to_thread(
+                        lambda: self._supabase.table("lily_transcripts")
+                        .upsert(rows, on_conflict="event_id")
+                        .execute()
+                    )
+                    return
+                except Exception as e:
+                    if attempt + 1 < TRANSCRIPT_FLUSH_ATTEMPTS:
+                        await asyncio.sleep(0.2 * (2 ** attempt))
+                        continue
+                    self._batch = rows + self._batch
+                    logger.error(
+                        "transcript flush error (%d rows retained for retry): %s",
+                        len(rows), e,
+                    )
+
+    async def discard_pending(self, *, disable: bool = False) -> None:
+        """Wait for any in-flight flush, then discard queued transcript rows.
+
+        Forget uses ``disable=True`` so rows spoken before or after deletion
+        cannot race back into the same session audit stream.
+        """
+        async with self._flush_lock:
+            self._batch.clear()
+            if disable:
+                self._disabled = True
 
 
 # ---------------------------------------------------------------------------
@@ -917,7 +947,7 @@ async def lily_rekey_group(
 # Hard cap on the whole cascade (deletes + verification counts). Deletion
 # is NOT fire-and-forget: it must complete and be VERIFIED before the tool
 # acknowledges — but it must also never hang a live table.
-FORGET_CASCADE_TIMEOUT_SECONDS = 10.0
+FORGET_CASCADE_TIMEOUT_SECONDS = 20.0
 
 
 async def lily_forget_group_data(
@@ -928,18 +958,15 @@ async def lily_forget_group_data(
     """The delete cascade for one group — awaited, verified, time-capped.
 
     HARD-DELETES all group rows from lily_speaker_voiceprints,
-    lily_memories, lily_group_facts; deletes the session-keyed
-    lily_addressee_log and lily_acoustic_trajectories rows via the group's
-    session ids (lily_sessions where group_id = X, plus the CURRENT
+    lily_memories, lily_group_facts; deletes every session-keyed transcript,
+    answer, addressee, acoustic, report, and image-attempt row via the
+    group's session ids (lily_sessions where group_id = X, plus the CURRENT
     session id); deletes lily_group_prefs (group prefs WO interlock —
     preferences are recognition data) and lily_asked_history IF the tables
     exist (absent-table errors — migration lag / future WO — are skipped,
     never failed);
     then re-keys lily_sessions to the `forgotten_<sha1-12>` tombstone so
-    operational records survive without linkable identity. lily_answers
-    is RETAINED untouched — it has no group_id column (migration 001,
-    session_id-keyed only), so no re-key is needed; once lily_sessions is
-    tombstoned the audit rows carry no linkable identity.
+    operational records survive without linkable identity.
 
     Every table is VERIFIED with a count query after its delete/re-key
     (remaining rows under the old key must be 0). All DB calls run via
@@ -965,13 +992,20 @@ async def lily_forget_group_data(
         return result
 
     def _session_ids():
-        res = (
-            supabase.table("lily_sessions")
-            .select("session_id")
-            .eq("group_id", group_id)
-            .execute()
-        )
-        return [r["session_id"] for r in (res.data or []) if r.get("session_id")]
+        ids = []
+        # Include the tombstone for retries after an older/partial cascade
+        # re-keyed sessions before all session-keyed deletes completed.
+        for candidate in (group_id, lily_forget.lily_tombstone_group_id(group_id)):
+            res = (
+                supabase.table("lily_sessions")
+                .select("session_id")
+                .eq("group_id", candidate)
+                .execute()
+            )
+            ids.extend(
+                r["session_id"] for r in (res.data or []) if r.get("session_id")
+            )
+        return ids
 
     def _apply(op):
         table = supabase.table(op["table"])
@@ -1002,8 +1036,18 @@ async def lily_forget_group_data(
                 f"{type(e).__name__}: {str(e)[:200]}"
             )
         session_ids = sorted(set(ids) | {session_id})
-        for op in lily_forget.lily_build_forget_plan(group_id, session_ids):
+        plan = lily_forget.lily_build_forget_plan(group_id, session_ids)
+        for op in plan:
             if not op["values"]:
+                continue
+            # Never move the session lookup key after a required deletion or
+            # verification failed. Keeping it on the original group makes a
+            # retry able to rediscover every historical session.
+            if op["action"] == "rekey" and result["failed"]:
+                logger.warning(
+                    "LILY_FORGET | REKEY_DEFERRED | table=%s failures=%s",
+                    op["table"], ",".join(sorted(result["failed"])),
+                )
                 continue
             try:
                 res = await asyncio.to_thread(_apply, op)

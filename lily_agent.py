@@ -295,6 +295,7 @@ class LilyGame:
         #   call) -> executing -> done (verified) | failed (retryable), or
         #   -> declined (a no drops it; only a fresh player request re-arms).
         self.forget_state: str = "idle"
+        self.forget_spoken_confirmed = False
         # Who asked (player name or speaker label): only THEIR yes/no
         # resolves the pending confirmation; None accepts any voice
         # (tool-initiated flow, where the requester is unattributed).
@@ -1695,6 +1696,7 @@ class LilyGame:
             if self.forget_requester is None or speaker_key == self.forget_requester:
                 verdict = lily_forget.lily_parse_forget_confirmation(text)
                 if verdict == "yes":
+                    self.forget_spoken_confirmed = True
                     logger.info(
                         "LILY_FORGET | CONFIRMED | session=%s by=%s",
                         self.sk.session_id, speaker_key,
@@ -1705,6 +1707,7 @@ class LilyGame:
                     return
                 if verdict == "no":
                     self.forget_state = "declined"
+                    self.forget_spoken_confirmed = False
                     logger.info(
                         "LILY_FORGET | DECLINED | session=%s by=%s",
                         self.sk.session_id, speaker_key,
@@ -2383,7 +2386,11 @@ class LilyGame:
         later group-id upgrade re-keys this session's rows."""
         fact = (fact or "").strip()
         name = (player_name or "").strip()
-        if not fact or self.supabase is None:
+        if (
+            not fact
+            or self.supabase is None
+            or not self.identity_persistence_allowed()
+        ):
             return
         key = (name.lower(), fact.lower())
         if key in self._group_facts_written:
@@ -2427,7 +2434,11 @@ class LilyGame:
         """Persist the whole opaque prefs dict on every preference change
         (lily_group_prefs whole-dict upsert under the CURRENT group id).
         Fire-and-forget; a later group-id upgrade re-keys the row."""
-        if self.supabase is None or not self.prefs:
+        if (
+            self.supabase is None
+            or not self.prefs
+            or not self.identity_persistence_allowed()
+        ):
             return
         asyncio.ensure_future(lily_persistence.lily_write_group_prefs(
             self.supabase, self.group_id, dict(self.prefs)
@@ -2454,7 +2465,11 @@ class LilyGame:
         """Voiceprint enrollment, fire-and-forget. group_id is passed as a
         callable so the upsert lands under whatever id is resolved by the
         time Speechmatics returns identifiers."""
-        if self.supabase is None or self.stt is None:
+        if (
+            self.supabase is None
+            or self.stt is None
+            or not self.identity_persistence_allowed()
+        ):
             return
         asyncio.ensure_future(lily_persistence.lily_enroll_voiceprints(
             self.stt, self.supabase, lambda: self.group_id, self.sk,
@@ -2597,6 +2612,10 @@ class LilyGame:
 
     # -- the right to be forgotten (WO-LILY-FORGETME-001) ------------------------
 
+    def identity_persistence_allowed(self) -> bool:
+        """Whether recognition/report data may still be written this session."""
+        return self.forget_state not in ("executing", "done", "failed")
+
     def _on_forget_requested(self, requester_key: str | None) -> None:
         """Spoken deletion request (deterministic scorekeeper detection —
         "forget me"/"forget us"/paraphrases): arm the pending-confirm
@@ -2618,6 +2637,7 @@ class LilyGame:
             )
             return
         self.forget_state = "pending_confirm"
+        self.forget_spoken_confirmed = False
         self.forget_requester = requester_key
         logger.info(
             "LILY_FORGET | REQUESTED | session=%s group=%s requester=%s",
@@ -2673,6 +2693,12 @@ class LilyGame:
             "LILY_FORGET | EXECUTE | session=%s group=%s source=%s retry=%s",
             self.sk.session_id, target, source, not first_attempt,
         )
+        if first_attempt:
+            discard = getattr(
+                getattr(self, "transcripts", None), "discard_pending", None
+            )
+            if discard is not None:
+                await discard(disable=True)
         if self.supabase is None:
             # Nothing was ever persisted (offline/dev session) — the
             # in-session teardown still runs so recognition state clears.
@@ -2719,6 +2745,9 @@ class LilyGame:
         # item on the next turn (symmetric removal path).
         self.memory_block = ""
         self.memory_total_games = 0
+        self.memory_player_names = []
+        self.sk.transcript_buffer = []
+        self.highlights = []
         # Group prefs WO interlock: the stored preferences were deleted by
         # the cascade (lily_group_prefs) — clear the in-session dict too,
         # so nothing re-persists the deleted 'usual' under the fresh id.
@@ -2873,7 +2902,7 @@ class LilyGame:
         self.sk.set_phase("wrapup")
         self.ui_phase = "final"
         await self.publish_attributes()
-        if self.supabase is not None:
+        if self.supabase is not None and self.identity_persistence_allowed():
             asyncio.ensure_future(lily_persistence.lily_checkpoint(
                 self.supabase, self.sk, final_standings=standings,
             ))
@@ -3659,6 +3688,7 @@ class LilyAgent(Agent):
             # never comes (requester unattributed -> any voice settles it).
             if game.forget_state in ("idle", "declined", "failed"):
                 game.forget_state = "pending_confirm"
+                game.forget_spoken_confirmed = False
                 game.forget_requester = None
             return (
                 "NOT deleted — deletion needs a spoken yes first. Ask the "
@@ -3668,6 +3698,15 @@ class LilyAgent(Agent):
                 "call lily_forget_group with confirm=true. On a no, drop "
                 "it for the night — never ask twice, never argue for being "
                 "remembered."
+            )
+        if (
+            game.forget_state not in ("executing", "done")
+            and not getattr(game, "forget_spoken_confirmed", False)
+        ):
+            return (
+                "NOT deleted — no verified spoken yes was recorded for the "
+                "pending request. Ask the confirmation once and wait for the "
+                "requesting player to answer."
             )
         result = await game.execute_forget(source="tool")
         return lily_forget.lily_forget_result_message(result)
@@ -4483,6 +4522,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     supabase, scorekeeper,
                     final_standings=standings, metadata=metadata,
                 )
+                if not game.identity_persistence_allowed():
+                    logger.info(
+                        "LILY_FORGET | SESSION_CLOSE_IDENTITY_WRITES_SKIPPED "
+                        "| session=%s state=%s",
+                        scorekeeper.session_id, game.forget_state,
+                    )
+                    return
                 # Session memory — idempotent with the finish_game write
                 # (upsert on session_id); this path also covers sessions
                 # that end without reaching the final question.
