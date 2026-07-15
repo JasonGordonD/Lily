@@ -212,6 +212,54 @@ Tests: `tests/test_say_gate.py` (registry + leak filter, pure) and
 `tests/test_say_gate_dispatch.py` (dispatch dedupe, BUG-2 contract,
 need-to-know, burn, clarify gate).
 
+## Multiple-choice rounds (WO-LILY-OMNIBUS-002, sub-agent G)
+
+Two round formats: `freeform` (the classic open ask) and `multiple_choice`
+(four options read aloud). The default session runs exactly ONE
+multiple-choice round — round 2 — and the table can ask for the format
+any time ("can we do multiple choice"): Lily grants it via the
+`lily_set_round_format` tool, callable in any phase, effective on the
+current/next round and sticky until changed again.
+
+- **Flag**: `LilyScorekeeper.round_format` (`freeform|multiple_choice`) plus
+  the sticky `round_format_override` set by the tool; both ride
+  snapshot/rehydrate, and the state block's header line carries
+  `format=...`. Round boundaries apply the schedule/override in
+  `arm_next_question` (`apply_round_format_for_round`).
+- **Generation**: when the target round runs MC, the generation prompt
+  demands a `choices` array — exactly 4, canonical answer verbatim among
+  them, two plausible distractors plus exactly ONE clearly-comically-wrong
+  laugh option (pub convention), order randomized. The `choices` slot in
+  the question `response_schema` (reserved since the P1 fix) is now
+  active. KB-bank questions (and any generated MC question whose choices
+  fail validation) get 3 synthesized distractors at prefetch — reasoning
+  node only (`LilyReasoning.ensure_choices`); synthesis failure degrades
+  the question honestly to freeform, never a broken 3-option read.
+- **Delivery**: the prompt contract has Lily read the question and the four
+  options exactly ONCE (never re-read unless asked). The room-metadata
+  document gains two optional keys when the armed question carries
+  choices: `choices` (the 4 option strings) and `eliminated` (50/50
+  indices into `choices`) — published at the `q_{N}_delivery` claim, the
+  window-open fallback, and the reveal; absent for freeform questions.
+- **50/50 lifeline**: `lily_use_fifty_fifty(player_name)` spends the
+  player's one lifeline on the live MC question —
+  `lily_fifty_fifty_eliminations` keeps the canonical answer plus one
+  random distractor and eliminates the other two (never blind: if the
+  canonical answer can't be located among the choices the lifeline is
+  refunded). The eliminated indices ride the metadata; the tool result
+  names the two dead options for Lily to cross out aloud, once.
+- **Tier-1 MC matching** (`lily_tier1_evaluate_mc`, dispatched via
+  `lily_tier1_evaluate_question`): letters ("B", "letter b", "option c" —
+  a bare "a" survives article stripping), positions ("the second one",
+  "number three"), or fuzzy/phonetic option text. A resolved wrong pick is
+  a DEFINITIVE Tier-1 `incorrect` (no judge call); only mumbles escalate
+  to Tier-2, and a malformed sheet (answer missing from choices) always
+  escalates rather than ruling.
+
+Tests: `tests/test_multiple_choice.py` (generation shape + synthesis,
+letter/positional/text matching, 50/50, flag snapshot, metadata seam,
+both tools).
+
 ## Latency discipline
 
 Nothing blocking runs on the event loop's hot path, and slow calls are moved
@@ -271,6 +319,11 @@ lily_reasoning.py    background node: prefetch + verification + judge transport
 lily_persistence.py  Supabase: sessions, transcripts, answers audit, voiceprints, KB bank
 lily_memory.py       persistent cross-session memory: session summaries, the
                      [RETURNING TABLE] block, KB-bank adult-mode guard (stdlib-only)
+lily_bank.py         bank curation: banking-on-generation with near-dup detection,
+                     per-group asked history, gated category proposals (stdlib-only
+                     pure logic + thin Supabase I/O)
+lily_bank_tuning.py  difficulty self-tuning + retirement decisions (pure) and the
+                     session-end tuning run (thin DB I/O)
 lily_say_gate.py     outbound-speech gate: markdown/emoji strip ([tag]-preserving),
                      SpeechActRegistry (idempotent speech acts), state-block leak
                      filter + sentinel envelope (the designated choke point; stdlib-only)
@@ -297,13 +350,16 @@ migrations/008_lily_acoustic_trajectories.sql  per-turn acoustic snapshots + add
                                                acoustic_snapshot column
 migrations/009_lily_question_status.sql  lily_questions.status lifecycle column
                                          (burn protocol; shared with tier retirement)
+migrations/010_lily_asked_history.sql    per-group served-question ledger (no-repeat
+                                         guard + tuning exposure floor)
+migrations/011_lily_category_candidates.sql  gated category proposals tally
 migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
                                          forget-cascade + re-key interlocked)
-tests/               392 tests, run with `python -m pytest tests/` — no network; needs
+tests/               467 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
-                     test_group_prefs.py import livekit)
+                     test_multiple_choice.py / test_group_prefs.py import livekit)
 ```
 
 ## Persistent memory (rematch)
@@ -478,6 +534,65 @@ Labels land three ways (`label_source`):
   `label=host_directed`; negative/thinking ("no", "just thinking",
   "talking to him") → `label=deliberation`; unparseable → `label=unknown`.
   The reply parser is pure and offline-tested (`lily_addressee.py`).
+
+## Bank curation loop (WO-LILY-OMNIBUS-002 D/E/F)
+
+The curated bank (`lily_questions`) is a living asset: it grows from
+generation, forgets nothing per group, tunes its own difficulty labels, and
+graduates player-demanded categories — all observable via `LILY_BANK |` and
+`LILY_TUNE |` log markers.
+
+### Banking-on-generation + dedup (D, `lily_bank.py`)
+
+Every generated question that passes verification is inserted into
+`lily_questions` (`source='generated'`, `status='active'`, `adult` set from
+session mode) — this is the path by which the bank self-grows. Near-dup
+detection runs at EVERY bank insert:
+
+- **exact**: identical normalized-text hash (lowercase,
+  punctuation/whitespace-stripped, sha1) against any existing row, any
+  category;
+- **fuzzy**: `difflib` ratio >= 0.87 on normalized texts, same category only.
+
+Dups are discarded and logged `LILY_BANK | DUP_DISCARDED`, never inserted.
+
+### Per-group asked history (D, migration 010)
+
+`lily_asked_history` gets one row per question SERVED (armed for delivery):
+resolved `group_id`, `question_id`, normalized-text hash, `session_id`.
+Loaded at session start (and reloaded on a group-id upgrade; a rekey moves
+this session's rows), it drives the no-repeat guard:
+
+- bank draws exclude the group's served `kb_` ids and text hashes
+  (`lily_fetch_bank_question` `exclude_ids`/`exclude_hashes`);
+- generated output is hash-checked against the history — a cross-session
+  repeat is discarded (`LILY_BANK | HISTORY_REPEAT_DISCARDED`) and the bank
+  fallback serves instead (the generator's textual avoid-list only carries
+  this session's prompts).
+
+### Difficulty self-tuning + retirement (E, `lily_bank_tuning.py`)
+
+Session-end job, fire-and-forget (never blocks or fails the shutdown gate).
+Aggregates `lily_answers` per bank question across ALL sessions, with an
+exposure floor of **5 servings** counted from `lily_asked_history`. Per
+question, ONE move per run:
+
+- success > 75% → `difficulty_tier` down one (min 1)
+- success < 30% → `difficulty_tier` up one (max 4)
+- success < 10% or > 95% → `status='retired'` (outranks a tier move; rides
+  the shared migration-009 status column, so retired rows are unservable)
+
+Decisions are pure functions (offline-testable decision table); applied
+moves log `LILY_TUNE | TIER_DOWN/TIER_UP/RETIRE | ...`.
+
+### Gated category proposals (F, migration 011)
+
+Generation may return `proposed_category` (reserved field in the question
+schema). Each proposal upserts `lily_category_candidates` (use_count +
+distinct proposing groups), but the question SERVES under its round FAMILY
+until the candidate is **promoted: use_count >= 10 AND >= 3 distinct
+groups**. Promoted extras appear as one lobby state-block line; Lily never
+announces unpromoted categories.
 
 ## The right to be forgotten (WO-LILY-FORGETME-001)
 
@@ -739,7 +854,12 @@ speaker verification, Hume, any gender-conditional behavior.
   (epoch-seconds heartbeat).
 - **Room metadata**: `{question, reveal:{answer,winner,correct}, wager}` via
   `ctx.api.room.update_room_metadata` (rtc has no room-metadata setter);
-  `wager` drives the frontend's final-round palette shift.
+  `wager` drives the frontend's final-round palette shift. Seam addition
+  (multiple-choice WO): when the armed question is multiple choice the
+  document also carries `choices` (array of exactly 4 strings) and
+  `eliminated` (array of 0-based indices into `choices` crossed out by a
+  50/50, `[]` until one fires); both keys are absent for freeform
+  questions.
 - **`lily.events`** reliable packets (discriminator key `type`, matched to the
   shipped prmpt_ui parser — kind-name drift from the original contract note is
   deliberate): `player_bind` `{player:{name},name,speaker_label}`; `reveal`

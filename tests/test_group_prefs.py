@@ -41,10 +41,8 @@ def test_relaxed_phrases_fire():
         "Let's play relaxed rounds!",
         "can we keep it relaxed",
         "keep it chill please",
-        "let's go freeform",
         "make it casual",
         "relaxed pace please",
-        "freeform mode",
         "untimed rounds",
         "no timer please",
         "can we do this without the timer",
@@ -96,6 +94,11 @@ def test_ordinary_speech_never_flips_pacing():
         "take it easy Dave",
         "Tungsten",
         "",
+        # The multiple-choice WO owns "freeform" as a ROUND FORMAT word —
+        # it must never flip pacing (post-merge reconcile).
+        "let's go freeform",
+        "freeform mode",
+        "can we play freeform",
     ):
         cmd = lily_detect_control_command(phrase)
         assert cmd not in ("pacing_relaxed", "pacing_timed"), (phrase, cmd)

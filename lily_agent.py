@@ -59,6 +59,8 @@ from livekit.plugins.speechmatics import (
 import lily_addressee
 import lily_audeering_client
 import lily_audeering_consumers
+import lily_bank
+import lily_bank_tuning
 import lily_config
 import lily_evaluation
 import lily_forget
@@ -202,7 +204,16 @@ class LilyGame:
 
         self.next_question: dict | None = None      # prefetched N+1
         self.armed_question: dict | None = None     # in state block, awaiting ask
+        # 50/50 lifeline (multiple-choice WO): eliminated choice indices for
+        # the CURRENT question — reset at arm, rides publish_metadata.
+        self.eliminated: list[int] = []
         self.used_prompts: list[str] = []
+        # Bank curation (WO-LILY-OMNIBUS-002 D/F): the group's served-
+        # question history (loaded at entrypoint, appended per serving)
+        # and the promoted category-candidate names (F — the only
+        # proposals Lily may ever announce).
+        self.asked_history: list[dict] = []
+        self.promoted_categories: list[str] = []
         self._prefetch_task: asyncio.Task | None = None
         self._window_timer: asyncio.Task | None = None
         self._judged_keys: set[str] = set()
@@ -326,16 +337,27 @@ class LilyGame:
         self,
         question_text: str | None,
         reveal: dict | None = None,
+        choices: list[str] | None = None,
+        eliminated: list[int] | None = None,
     ) -> None:
-        """Room metadata: current question text + reveal payload."""
+        """Room metadata: current question text + reveal payload. Seam
+        addition (multiple-choice WO): when the armed question carries
+        choices, they ride here too — `choices` (the 4 option strings) and
+        `eliminated` (50/50: indices into choices crossed out). Both keys
+        are ABSENT for freeform questions (optional fields, no
+        restructuring of the existing document)."""
         try:
-            metadata = json.dumps({
+            payload = {
                 "question": question_text or "",
                 "reveal": reveal
                 or {"answer": "", "winner": None, "correct": False},
                 # Drives the frontend's high-contrast wager palette shift.
                 "wager": self.sk.phase == "final",
-            })
+            }
+            if choices:
+                payload["choices"] = list(choices)
+                payload["eliminated"] = list(eliminated or [])
+            metadata = json.dumps(payload)
             # Room metadata has no rtc-side setter — server API only.
             await self.ctx.api.room.update_room_metadata(
                 api.UpdateRoomMetadataRequest(
@@ -605,6 +627,14 @@ class LilyGame:
             rnd = self._round_for_next_question()
             category = self._category_for_round(rnd)
             tier = self._difficulty_for_round(rnd)
+            # Multiple-choice WO: the format of the round this question is
+            # FOR (schedule/override), decided at prefetch time.
+            mc = self.sk.format_for_round(rnd) == "multiple_choice"
+
+            # Per-group asked history (migration 010): bank draws exclude
+            # the group's served kb_ ids and normalized-text hashes.
+            history_ids = lily_bank.lily_history_question_ids(self.asked_history)
+            history_hashes = lily_bank.lily_history_hashes(self.asked_history)
 
             # Runbook fallback: LILY_KB_ONLY flips supply to the curated
             # bank; bank questions bypass verification (§4.5).
@@ -613,6 +643,7 @@ class LilyGame:
                 from_bank = await lily_persistence.lily_fetch_bank_question(
                     self.supabase, category, tier, self.used_prompts,
                     mode=self.sk.mode,
+                    exclude_ids=history_ids, exclude_hashes=history_hashes,
                 )
             question = await self.reasoning.prefetch_question(
                 self.sk,
@@ -620,15 +651,28 @@ class LilyGame:
                 difficulty_tier=tier,
                 avoid_questions=self.used_prompts,
                 from_bank=from_bank,
+                multiple_choice=mc,
             )
+            if question is not None and not str(
+                question.get("id", "")
+            ).startswith("kb_"):
+                # Generated (verified) question: asked-history check,
+                # category-proposal gating (F), then banking (D).
+                question = self._curate_generated_question(
+                    question, category, history_hashes
+                )
             if question is None and self.supabase is not None:
                 # Generation failed — curated bank is the insurance policy.
                 question = await lily_persistence.lily_fetch_bank_question(
                     self.supabase, category, tier, self.used_prompts,
                     mode=self.sk.mode,
+                    exclude_ids=history_ids, exclude_hashes=history_hashes,
                 )
                 if question is not None:
                     self.sk.clear_status_notes()
+                    if mc:
+                        # Bank rows carry no choices — synthesize here too.
+                        await self.reasoning.ensure_choices(question)
             if question is not None:
                 self.next_question = question
                 # Auto-advance (frozen-reveal deadlock fix): when the reveal
@@ -666,6 +710,52 @@ class LilyGame:
 
         self._prefetch_task = asyncio.ensure_future(_prefetch())
 
+    def _curate_generated_question(
+        self,
+        question: dict,
+        family: str,
+        history_hashes: set,
+    ) -> dict | None:
+        """Bank-curation gate for one VERIFIED generated question
+        (WO-LILY-OMNIBUS-002 D/F). Returns the question ready to serve,
+        or None when the group has already heard it (asked-history hash
+        collision — the generator's textual avoid-list only carries this
+        session's prompts, so cross-session repeats are caught here).
+
+        Category proposals (F): a `proposed_category` is tallied in
+        lily_category_candidates, but the question SERVES under its round
+        family until the proposal is promoted (>=10 uses across >=3
+        distinct groups). Lily never announces unpromoted categories.
+
+        Banking (D): the surviving question is inserted into
+        lily_questions (source='generated') with near-dup detection at
+        insert — this is where the bank self-grows."""
+        text_hash = lily_bank.lily_question_text_hash(question.get("prompt"))
+        if text_hash in history_hashes:
+            logger.info(
+                "LILY_BANK | HISTORY_REPEAT_DISCARDED | group=%s hash=%s "
+                "prompt=%r",
+                self.group_id, text_hash[:12],
+                str(question.get("prompt", ""))[:80],
+            )
+            return None
+        proposed = lily_bank.lily_normalize_category_name(
+            question.get("proposed_category")
+        )
+        if proposed:
+            if self.supabase is not None:
+                asyncio.ensure_future(lily_bank.lily_record_category_proposal(
+                    self.supabase, proposed, family, self.group_id,
+                ))
+            question["category"] = (
+                proposed if proposed in self.promoted_categories else family
+            )
+        if self.supabase is not None:
+            asyncio.ensure_future(lily_bank.lily_bank_generated_question(
+                self.supabase, dict(question), self.sk.mode,
+            ))
+        return question
+
     def arm_next_question(self) -> bool:
         """Move the prefetched question into the state block for Lily to
         perform. Returns True if a question is armed."""
@@ -693,7 +783,25 @@ class LilyGame:
             self.sk.set_phase("final")
         else:
             self.sk.set_phase("round")
+        # Round format follows the round (multiple-choice WO): schedule or
+        # sticky override; 50/50 eliminations are per-question.
+        self.sk.apply_round_format_for_round(self.sk.round)
+        self.eliminated = []
         self.used_prompts.append(self.armed_question.get("prompt", ""))
+        # Asked history (migration 010): one row per question SERVED,
+        # keyed to the resolved group id; the in-memory mirror keeps this
+        # session's own draws excluded without a re-read.
+        self.asked_history.append({
+            "question_id": self.armed_question.get("id"),
+            "question_text_hash": lily_bank.lily_question_text_hash(
+                self.armed_question.get("prompt")
+            ),
+        })
+        if self.supabase is not None:
+            asyncio.ensure_future(lily_bank.lily_record_asked(
+                self.supabase, self.group_id, dict(self.armed_question),
+                self.sk.session_id,
+            ))
         self._armed_speech_misses = 0
         self._judged_keys = set()
         self._addressee_rows = {}  # B1: row-id tasks are per-question
@@ -792,7 +900,11 @@ class LilyGame:
         # the question must be on the glass once answers are live.
         if not steal and self.armed_question is not None:
             asyncio.ensure_future(
-                self.publish_metadata(self.armed_question.get("prompt", ""))
+                self.publish_metadata(
+                    self.armed_question.get("prompt", ""),
+                    choices=self.armed_question.get("choices"),
+                    eliminated=self.eliminated,
+                )
             )
         self._start_bed()
         if self._window_timer and not self._window_timer.done():
@@ -1158,8 +1270,11 @@ class LilyGame:
             if ordered and acceptable:
                 first = ordered[0]
                 if first.get("text") == text or len(ordered) == 1:
-                    t1 = lily_evaluation.lily_tier1_evaluate(
-                        first["text"], acceptable
+                    # Format dispatch (multiple-choice WO): a question with
+                    # four choices runs the MC matcher (letters, positions,
+                    # option text); freeform runs acceptable_answers.
+                    t1 = lily_evaluation.lily_tier1_evaluate_question(
+                        first["text"], question
                     )
                     if t1["verdict"] == "correct":
                         asyncio.ensure_future(self.adjudicate(steal_allowed=False))
@@ -1167,14 +1282,18 @@ class LilyGame:
             # Speculative Tier-2: judge ambiguous candidates DURING the
             # window so the verdict is cached by reveal time — the judge
             # round trip comes off the reveal path (prefetch trick, applied
-            # to judging).
+            # to judging). Only "uncertain" escalates: an MC letter pick of
+            # a wrong option is a definitive Tier-1 "incorrect" and never
+            # burns a judge call (Tier-2 stays for mumbles).
             if acceptable:
                 for cand in ordered:
                     key = cand["player"] or f"unrostered:{cand['speaker_label']}"
                     if key in self._spec_judge or cand.get("text") != text:
                         continue
-                    t1 = lily_evaluation.lily_tier1_evaluate(cand["text"], acceptable)
-                    if t1["verdict"] != "correct":
+                    t1 = lily_evaluation.lily_tier1_evaluate_question(
+                        cand["text"], question
+                    )
+                    if t1["verdict"] == "uncertain":
                         self._spec_judge[key] = asyncio.ensure_future(
                             self._speculative_judge(question, cand["text"], key)
                         )
@@ -1263,12 +1382,19 @@ class LilyGame:
             uncertain: list[dict] = []
 
             for cand in ordered:
-                t1 = lily_evaluation.lily_tier1_evaluate(cand["text"], acceptable)
+                # Format dispatch (multiple-choice WO): MC questions match
+                # letters / positions / option text and may return a
+                # DEFINITIVE "incorrect" (clean wrong pick — no Tier-2);
+                # only "uncertain" (mumbles) escalates to the judge.
+                t1 = lily_evaluation.lily_tier1_evaluate_question(
+                    cand["text"], question
+                )
                 cand["_tier1"] = t1
                 if t1["verdict"] == "correct":
                     winner_candidate = cand
                     break
-                uncertain.append(cand)
+                if t1["verdict"] == "uncertain":
+                    uncertain.append(cand)
 
             if winner_candidate is None and uncertain:
                 # Tier 2. Prefer verdicts cached by speculative mid-window
@@ -1358,7 +1484,10 @@ class LilyGame:
                         self.sk.question_number,
                         cand["text"],
                         "correct" if is_winner else "incorrect",
-                        eval_tier if not cand.get("_tier1", {}).get("verdict") == "correct" else 1,
+                        # Tier-1 decided verdicts (correct, or MC's
+                        # definitive incorrect) audit as tier 1.
+                        1 if cand.get("_tier1", {}).get("verdict")
+                        in ("correct", "incorrect") else eval_tier,
                         points if is_winner else 0,
                     ))
 
@@ -1413,6 +1542,8 @@ class LilyGame:
                     "winner": winner,
                     "correct": winner_candidate is not None,
                 },
+                choices=question.get("choices"),
+                eliminated=self.eliminated,
             )
             await self.publish_attributes()
             if self.supabase is not None:
@@ -1637,6 +1768,12 @@ class LilyGame:
             return
         await lily_persistence.lily_rekey_group(
             self.supabase, old, new_group_id, self.sk.session_id
+        )
+        # Asked history follows the resolved id (rekey moved this
+        # session's rows; the reload pulls the group's PRIOR sessions so
+        # the no-repeat guard covers rematches immediately).
+        self.asked_history = await lily_bank.lily_load_asked_history(
+            self.supabase, new_group_id
         )
         if self.sk.question_number == 0:
             # Group prefs WO: the resolved group may have a stored 'usual'.
@@ -2082,6 +2219,14 @@ class LilyGame:
                 "game not started: you are in the lobby — bind names, fish "
                 "for lobby facts, start on the first genuine group laugh"
             )
+            if self.promoted_categories:
+                # Gated category proposals (F): PROMOTED extras only —
+                # unpromoted candidates are never announced.
+                extra.append(
+                    "extra categories in tonight's rotation (promoted by "
+                    "player demand — you may mention these): "
+                    + ", ".join(self.promoted_categories)
+                )
         if extra:
             block += "\n" + "\n".join(extra)
         return block
@@ -2497,11 +2642,13 @@ class LilyAgent(Agent):
     @function_tool()
     async def lily_set_pacing(self, context: RunContext, pacing: str) -> str:
         """Set the table's pacing: "timed" (the standard answer clock —
-        the default) or "relaxed" (freeform, no time pressure — answer
+        the default) or "relaxed" (easygoing, no time pressure — answer
         windows run about twice as long). Call it whenever the table
         chooses a pacing in any phrasing — "let's keep it casual", "put
-        the timer back on" — or answers your timed-or-relaxed offer. The
-        choice is saved as this table's usual for future nights.
+        the timer back on" — or answers your timed-or-relaxed offer.
+        Pacing is about TIME only; a table asking for "freeform" vs
+        "multiple choice" questions wants lily_set_round_format instead.
+        The choice is saved as this table's usual for future nights.
 
         Args:
             pacing: "timed" or "relaxed".
@@ -2521,6 +2668,126 @@ class LilyAgent(Agent):
         return (
             "Pacing is TIMED — committed and saved as this table's usual. "
             "The standard answer clock is on."
+        )
+
+    @function_tool()
+    async def lily_set_round_format(
+        self, context: RunContext, format: str
+    ) -> str:
+        """Switch the question format the moment the table asks — "can we
+        do multiple choice" flips to four-option questions; "normal
+        questions" goes back to open ones. Callable in any phase; it takes
+        effect on the current/next round and sticks until changed again.
+        (Round two runs multiple choice by default.)
+
+        Args:
+            format: "multiple_choice" or "freeform".
+        """
+        fmt = (format or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if fmt in ("mc", "multichoice", "multiple_choice"):
+            fmt = "multiple_choice"
+        elif fmt in ("normal", "open", "free_form", "freeform"):
+            fmt = "freeform"
+        game = self._game
+        if not game.sk.set_round_format(fmt):
+            return (
+                f"Unknown format {format!r} — use 'multiple_choice' or "
+                "'freeform'."
+            )
+        # In-flight questions follow the new format where that's still
+        # safe: the armed question only changes shape while it has NOT been
+        # delivered (no q_{N}_delivery claim, window shut).
+        armed = game.armed_question
+        armed_mutable = (
+            armed is not None
+            and not game.sk.answer_window_open
+            and game.say_registry.state(
+                f"q_{game.sk.question_number}_delivery"
+            ) is None
+        )
+        if fmt == "multiple_choice":
+            if game.next_question is not None:
+                asyncio.ensure_future(
+                    game.reasoning.ensure_choices(game.next_question)
+                )
+            if armed_mutable:
+                asyncio.ensure_future(game.reasoning.ensure_choices(armed))
+            return (
+                "Round format is now multiple_choice (sticky). Questions "
+                "carry four options: read the question, then the options "
+                "once — A, B, C, D — and never re-read them unless asked. "
+                "If the current question shows no choices yet, run it as "
+                "asked; the next one will have them."
+            )
+        if game.next_question is not None:
+            game.next_question.pop("choices", None)
+        if armed_mutable and armed is not None:
+            armed.pop("choices", None)
+            game.eliminated = []
+        return (
+            "Round format is now freeform (sticky) — open questions, "
+            "no options read out, from the next question you ask."
+        )
+
+    @function_tool()
+    async def lily_use_fifty_fifty(
+        self, context: RunContext, player_name: str
+    ) -> str:
+        """Spend a player's one 50/50 lifeline on the live multiple-choice
+        question. Call it the moment a player asks for their 50/50; the
+        result names the TWO eliminated options — cross exactly those two
+        out aloud, once, and let the two survivors stand.
+
+        Args:
+            player_name: The rostered player spending their lifeline.
+        """
+        game = self._game
+        if not game.game_started:
+            return "The game hasn't started — no lifelines to spend yet."
+        name = (player_name or "").strip()
+        if name not in game.sk.players:
+            return f"No rostered player named {name!r} — no lifeline spent."
+        question = game.armed_question or game.sk.current_question
+        choices = (question or {}).get("choices")
+        if not isinstance(choices, list) or len(choices) != 4:
+            return (
+                "This question has no multiple-choice options — the 50/50 "
+                "only works on a multiple-choice question. Lifeline NOT "
+                "spent; tell them to save it."
+            )
+        if game.eliminated:
+            return (
+                "A 50/50 already ran on this question — the crossed-out "
+                "options stand. Lifeline NOT spent."
+            )
+        if not game.sk.use_lifeline(name):
+            return (
+                f"{name} already used their lifeline this game — no dice, "
+                "say so with love."
+            )
+        eliminated = lily_evaluation.lily_fifty_fifty_eliminations(
+            choices, str(question.get("canonical_answer", ""))
+        )
+        if len(eliminated) != 2:
+            # Never eliminate blind — refund the lifeline.
+            game.sk.players[name]["lifeline_available"] = True
+            return (
+                "The 50/50 could not run on this question — lifeline NOT "
+                "spent, they keep it."
+            )
+        game.eliminated = eliminated
+        await game.publish_metadata(
+            question.get("prompt", ""),
+            choices=choices,
+            eliminated=eliminated,
+        )
+        letters = lily_evaluation.MC_CHOICE_LETTERS
+        gone = " and ".join(
+            f"{letters[i]} ({choices[i]})" for i in eliminated
+        )
+        return (
+            f"50/50 committed for {name} — eliminated: {gone}. Cross "
+            "exactly those two out aloud, once; two options remain."
         )
 
     # -- memory transparency + deletion right (WO-LILY-FORGETME-001) ---------------
@@ -2839,9 +3106,14 @@ class LilyAgent(Agent):
                     )
                     # Screen syncs to the spoken question at delivery, not
                     # at arm (arm-time publish spoiled the reveal and led
-                    # the voice by a whole celebration beat).
+                    # the voice by a whole celebration beat). MC choices
+                    # ride the same publish (seam addition).
                     asyncio.ensure_future(
-                        game.publish_metadata(armed.get("prompt", ""))
+                        game.publish_metadata(
+                            armed.get("prompt", ""),
+                            choices=armed.get("choices"),
+                            eliminated=game.eliminated,
+                        )
                     )
                 else:
                     logger.warning(
@@ -3080,6 +3352,16 @@ async def entrypoint(ctx: JobContext) -> None:
             (group_memory or {}).get("total_games"),
         )
 
+    # Bank curation (WO-LILY-OMNIBUS-002 D/F): the group's served-question
+    # history (no-repeat guard on bank draws + generated output) and the
+    # promoted category-candidate names (lobby state-block line).
+    game.asked_history = await lily_bank.lily_load_asked_history(
+        supabase, group_id
+    )
+    game.promoted_categories = await lily_bank.lily_load_promoted_categories(
+        supabase
+    )
+
     # Returning group: stored voiceprints -> known_speakers (instant
     # recognition on rematch). Loaded before STT construction so the
     # identifiers ride the constructor.
@@ -3267,6 +3549,13 @@ async def entrypoint(ctx: JobContext) -> None:
         async def _persist() -> None:
             try:
                 heartbeat_stop.set()
+                # Difficulty self-tuning + retirement (sub-agent E):
+                # session-end job, fire-and-forget — it runs concurrently
+                # with the awaited persistence writes below and is never
+                # allowed to block (or fail) the shutdown gate.
+                asyncio.ensure_future(
+                    lily_bank_tuning.lily_run_bank_tuning(supabase)
+                )
                 if game.audeering_pipeline is not None:
                     try:
                         await game.audeering_pipeline.stop()

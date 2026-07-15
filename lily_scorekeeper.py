@@ -34,6 +34,13 @@ TRANSCRIPT_BUFFER_SIZE = 30
 DEFAULT_ANSWER_WINDOW_SECONDS = 15.0
 FRAGMENT_JOIN_WINDOW_SECONDS = 2.0  # ASR fragment accumulation for commands
 
+# Round formats (multiple-choice WO): freeform is the classic open ask;
+# multiple_choice reads four options aloud. The default session includes
+# exactly ONE multiple-choice round — round 2 — unless the table asks for
+# a different arrangement via the lily_set_round_format tool.
+ROUND_FORMATS = ("freeform", "multiple_choice")
+DEFAULT_MC_ROUND = 2
+
 # ---------------------------------------------------------------------------
 # System-directed turn classifier — lifted verbatim from lbs_scorekeeper
 # (lbs_is_system_directed) with the vocative swapped to "Lily".
@@ -133,13 +140,18 @@ def _normalize_command_text(text: str) -> str:
 # flips the flag in code; the lily_set_pacing tool covers phrasings these
 # conservative patterns miss. Checked BEFORE start_game so "let's play
 # relaxed" reads as a pacing choice, not a game start.
+# NOTE (post-merge reconcile): "freeform" deliberately does NOT appear in
+# these patterns — the multiple-choice WO owns that word as the open
+# ROUND FORMAT ("freeform" vs "multiple_choice", lily_set_round_format),
+# so a spoken "let's go freeform" must reach that feature, not flip
+# pacing. Relaxed pacing keys on relaxed/casual/chill/timer words only.
 _PACING_RELAXED_PATTERNS = (
-    # "let's play relaxed" / "keep it chill" / "go freeform" / "make this casual"
+    # "let's play relaxed" / "keep it chill" / "make this casual"
     r"\b(?:play|go|keep (?:it|things)|make (?:it|this)|do)"
     r"(?: it| this| things)?(?: more)?"
-    r" (?:relaxed|freeform|free form|casual|chill|laid back)\b",
-    # "relaxed rounds" / "freeform mode" / "casual pace" / "untimed game"
-    r"\b(?:relaxed|freeform|free form|casual|chill|laid back|untimed)"
+    r" (?:relaxed|casual|chill|laid back)\b",
+    # "relaxed rounds" / "casual pace" / "untimed game"
+    r"\b(?:relaxed|casual|chill|laid back|untimed)"
     r" (?:rounds?|pace|pacing|mode|game|play|style)\b",
     # "no timer" / "without the clock" / "turn the timer off"
     r"\bno (?:timers?|clock|countdowns?)\b",
@@ -148,7 +160,7 @@ _PACING_RELAXED_PATTERNS = (
     r"\bturn off the (?:timers?|clock|countdowns?)\b",
     # A whole-utterance answer to the pacing offer ("Relaxed, please.") —
     # entire-utterance only, so "I'm relaxed" table talk never fires.
-    r"^(?:relaxed|freeform|free form|casual|chill)(?: please| rounds?)?$",
+    r"^(?:relaxed|casual|chill)(?: please| rounds?)?$",
 )
 _PACING_TIMED_PATTERNS = (
     # "let's play timed" / "keep it timed" / "make this timed"
@@ -305,6 +317,12 @@ class LilyScorekeeper:
         # `pacing` (a seam addition) and persisted per group as the
         # "pacing" key of the opaque lily_group_prefs dict.
         self.pacing: str = "timed"
+        # Round format (multiple-choice WO): the CURRENT round's format,
+        # plus the sticky explicit override set by lily_set_round_format
+        # (None = follow the default schedule: round DEFAULT_MC_ROUND runs
+        # multiple choice, every other round freeform).
+        self.round_format: str = "freeform"  # freeform | multiple_choice
+        self.round_format_override: Optional[str] = None
         self.category: Optional[str] = None
         self.question_number: int = 0
         self.questions_per_round: int = 6
@@ -743,6 +761,42 @@ class LilyScorekeeper:
             )
         self.pacing = pacing
 
+    # -- round format (multiple-choice WO) -----------------------------------
+
+    def set_round_format(self, fmt: str) -> bool:
+        """Explicit format request (lily_set_round_format tool — the table
+        asked). Callable in any phase; takes effect immediately (current
+        round) and sticks for following rounds until changed again."""
+        if fmt not in ROUND_FORMATS:
+            return False
+        if fmt != self.round_format:
+            logger.info(
+                "LILY_STATE | ROUND_FORMAT | session=%s from=%s to=%s source=tool",
+                self.session_id, self.round_format, fmt,
+            )
+        self.round_format_override = fmt
+        self.round_format = fmt
+        return True
+
+    def format_for_round(self, rnd: int) -> str:
+        """The format a given round runs in: the explicit override when the
+        table has asked, else the default schedule (round DEFAULT_MC_ROUND
+        is the session's one multiple-choice round)."""
+        if self.round_format_override is not None:
+            return self.round_format_override
+        return "multiple_choice" if rnd == DEFAULT_MC_ROUND else "freeform"
+
+    def apply_round_format_for_round(self, rnd: int) -> None:
+        """Round-boundary bookkeeping: flip round_format to whatever the
+        schedule/override says this round runs in."""
+        fmt = self.format_for_round(rnd)
+        if fmt != self.round_format:
+            logger.info(
+                "LILY_STATE | ROUND_FORMAT | session=%s from=%s to=%s source=schedule round=%d",
+                self.session_id, self.round_format, fmt, rnd,
+            )
+        self.round_format = fmt
+
     # -- honest failure notes (§11.2) ----------------------------------------
 
     def set_status_note(self, note: str) -> None:
@@ -769,6 +823,7 @@ class LilyScorekeeper:
         lines.append(
             f"phase={self.phase} round={self.round}/{self.rounds_total} "
             f"mode={self.mode} pacing={self.pacing} "
+            f"format={self.round_format} "
             f"question={q_in_round}/{self.questions_per_round} in this round "
             f"(#{self.question_number} of {total_questions} total, "
             f"then one final wager question) "
@@ -828,6 +883,8 @@ class LilyScorekeeper:
             "round": self.round,
             "mode": self.mode,
             "pacing": self.pacing,
+            "round_format": self.round_format,
+            "round_format_override": self.round_format_override,
             "category": self.category,
             "question_number": self.question_number,
             "questions_per_round": self.questions_per_round,
@@ -847,6 +904,10 @@ class LilyScorekeeper:
         self.round = snap.get("round", self.round)
         self.mode = snap.get("mode", self.mode)
         self.pacing = snap.get("pacing", self.pacing)
+        self.round_format = snap.get("round_format", self.round_format)
+        self.round_format_override = snap.get(
+            "round_format_override", self.round_format_override
+        )
         self.category = snap.get("category", self.category)
         self.question_number = snap.get("question_number", self.question_number)
         self.questions_per_round = snap.get(
