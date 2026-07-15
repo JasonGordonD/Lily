@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -62,6 +63,7 @@ import lily_bank
 import lily_bank_tuning
 import lily_config
 import lily_evaluation
+import lily_forget
 import lily_memory
 import lily_persistence
 import lily_say_gate
@@ -101,6 +103,10 @@ _EVENT_CONTRACT_ALIAS = {
     "biggest_comeback": "callout",
     # 2026-07-14 amendment: clarify carries `clarify` on BOTH discriminators.
     "clarify": "clarify",
+    # WO-LILY-FORGETME-001: memory_forgotten carries the same spelling on
+    # BOTH discriminators (the shipped frontend clears the device
+    # localStorage group id and shows a transient confirmation).
+    "memory_forgotten": "memory_forgotten",
 }
 
 
@@ -223,6 +229,25 @@ class LilyGame:
         # collected for the lily_memories highlights column.
         self.memory_block: str = ""
         self.highlights: list[dict] = []
+        # WO-LILY-FORGETME-001: deletion right + memory transparency.
+        # forget_state drives the deterministic spoken flow:
+        #   idle -> pending_confirm (spoken request or confirm=false tool
+        #   call) -> executing -> done (verified) | failed (retryable), or
+        #   -> declined (a no drops it; only a fresh player request re-arms).
+        self.forget_state: str = "idle"
+        # Who asked (player name or speaker label): only THEIR yes/no
+        # resolves the pending confirmation; None accepts any voice
+        # (tool-initiated flow, where the requester is unattributed).
+        self.forget_requester: str | None = None
+        # The group id the cascade targets — captured on the FIRST attempt,
+        # BEFORE the fresh-anonymous re-bind, so a retry after partial
+        # failure still deletes the ORIGINAL identity, never the fresh one.
+        self._forget_target_group: str | None = None
+        # Task 4 lobby disclosure: total stored games (the lily_memories
+        # row count — the persistent disclosure counter) + once-per-session
+        # latch so the clause is never repeated within a night.
+        self.memory_total_games: int = 0
+        self._memory_disclosure_offered = False
 
         # B3 session report: wall-clock duration baseline.
         self.session_started_at = time.time()
@@ -422,37 +447,89 @@ class LilyGame:
         self.instructed_reply(instructions)
         return True
 
+    def memory_disclosure_instruction(self) -> str:
+        """Task 4 lobby disclosure (WO-LILY-FORGETME-001) — RETURNING
+        groups only, frequency-capped (first rematch, then every 5th; the
+        persistent counter is the lily_memories row count itself, so no
+        new column or migration is needed). Consumed at most once per
+        session; cold groups return "" and disclose nothing."""
+        if not self.memory_block or self._memory_disclosure_offered:
+            return ""
+        if not lily_forget.lily_should_disclose_memory(self.memory_total_games):
+            return ""
+        self._memory_disclosure_offered = True
+        return (
+            " Fold ONE natural disclosure clause into the same welcome-back "
+            "breath — part of the charm, never a warning: you remember your "
+            "regulars, and any time they want you to forget, they just say "
+            "so ('...I remember my regulars — any time you want me to "
+            "forget, just say so')."
+        )
+
     def greeting_instructions(self) -> str:
         """The fresh-room landing line (single source of truth — both the
         on_enter and entrypoint trigger paths dispatch THIS text under the
-        session_greet key; the gate makes the second path silent)."""
-        greeting = (
-            "The room just opened — this is your landing line. Greet the "
-            "table as Lily: two or three short, warm, excited sentences. "
-            "Tell them the deal (you host, they shout answers, the screen "
-            "keeps score) and ask who you've got at the table tonight — "
-            "conversationally, no roll-call. Bind names as people speak. "
-            "When the table feels ready — the first genuine group laugh — "
-            "call lily_begin_round to open round one; nothing scores until "
-            "you do."
-        )
+        session_greet key; the gate makes the second path silent).
+
+        Composed from ordered parts, never one rigid line (principal
+        correction: a live session opened with 'welcome back everyone' and
+        NO self-intro): (1) ALWAYS the one-breath self-intro first — every
+        session, returning or not; (2) then the recognition nuance,
+        composed per-player from the memory/roster data (whole table
+        returning / mixed table / all new); (3) the first-time question is
+        asked only when memory gives no answer — when memory KNOWS, she
+        acts on it. The walkthrough/refresher draws on the prompt's WHAT
+        THE TABLE CAN ASK FOR block, at most once per session."""
+        parts = [
+            "The room just opened — this is your landing. Compose it from "
+            "these parts, in this order, as ONE natural beat. PART ONE, "
+            "always — every session, returning table or not: a very quick "
+            "self-introduction in one breath — 'Hi, I'm Lily —' you host "
+            "trivia. Never skip it, never stretch it into a monologue. "
+        ]
         if self.memory_block:
-            greeting += (
-                " This is a RETURNING table — the [RETURNING TABLE] context "
-                "has who they are. Greet them back by name, reference last "
-                "game's winner, and lean into the rematch energy."
+            parts.append(
+                "PART TWO — your memory KNOWS this table (the "
+                "[RETURNING TABLE] context has who they are), so act on it "
+                "instead of asking: compose the recognition per player. "
+                "Whole table returning: '...welcome back, all of you.' "
+                "MIXED table (voices or names the memory doesn't list, "
+                "alongside the regulars): welcome the returners BY NAME "
+                "and the newcomers separately — '...welcome back, Rami — "
+                "and hello to the new faces.' Reference last game's winner "
+                "and lean into the rematch energy. Do NOT ask if it's "
+                "their first time. Returners get no walkthrough — offer "
+                "ONCE, 'want a refresher on the options, or straight in?', "
+                "and respect the answer; newcomers at a mixed table get "
+                "the short version of the options, aimed at them. The "
+                "walkthrough or refresher draws on WHAT THE TABLE CAN ASK "
+                "FOR and happens at most once tonight."
+                + self.memory_disclosure_instruction()
             )
         else:
             # Neutral-history rule: without memory data, never claim OR deny
             # prior contact (memory may still resolve mid-lobby via a
             # group-id upgrade).
-            greeting += (
-                " You have no memory of this table right now — do not claim "
-                "you remember them, and do not announce it's their first "
-                "time either. If a [RETURNING TABLE] block appears later, "
-                "you may reference it from then on."
+            parts.append(
+                "PART TWO — your memory gives no answer about this table, "
+                "so ask: a plain warm welcome, then whether it's their "
+                "first time playing with you. FIRST TIME: walk them "
+                "through their options naturally, drawing on the WHAT THE "
+                "TABLE CAN ASK FOR block — conversational, folded into the "
+                "banter, never a feature list read aloud. RETURNING (they "
+                "say so, or a [RETURNING TABLE] block appears later): no "
+                "walkthrough — offer a refresher ONCE and respect the "
+                "answer. Either way the walkthrough or refresher happens "
+                "at most once tonight. Never claim you remember them, and "
+                "never announce it's their first time — let them tell you."
             )
-        return greeting
+        parts.append(
+            " Bind names as people speak. When the table feels ready — "
+            "the first genuine group laugh, or a clear 'start' — call "
+            "lily_begin_round to open round one; nothing scores until "
+            "you do."
+        )
+        return "".join(parts)
 
     def rejoin_instructions(self) -> str:
         """The reconnect re-entry line — its own key (session_rejoin) and
@@ -1007,6 +1084,47 @@ class LilyGame:
             self._resolve_clarify(player, text)
 
         command = result.get("control_command")
+
+        # WO-LILY-FORGETME-001: pending forget confirmation resolves
+        # DETERMINISTICALLY (same pattern as the clarify resolution) — the
+        # requester's next parseable yes fires the cascade, a no drops it
+        # for the night, anything ambiguous does nothing destructive and
+        # stays pending. Runs before command dispatch so a "yes, delete
+        # it" can never be mis-read as a fresh request.
+        if self.forget_state == "pending_confirm" and command != "forget_me":
+            speaker_key = player or speaker_label
+            if self.forget_requester is None or speaker_key == self.forget_requester:
+                verdict = lily_forget.lily_parse_forget_confirmation(text)
+                if verdict == "yes":
+                    logger.info(
+                        "LILY_FORGET | CONFIRMED | session=%s by=%s",
+                        self.sk.session_id, speaker_key,
+                    )
+                    asyncio.ensure_future(
+                        self._forget_confirmed(source="voice_confirm")
+                    )
+                    return
+                if verdict == "no":
+                    self.forget_state = "declined"
+                    logger.info(
+                        "LILY_FORGET | DECLINED | session=%s by=%s",
+                        self.sk.session_id, speaker_key,
+                    )
+                    self.gated_say(
+                        None,
+                        "forget_declined",
+                        "They said no — the deletion is dropped and nothing "
+                        "was touched. One light line acknowledging it, then "
+                        "straight back into the game. Never re-raise it "
+                        "this session, never ask twice, and never argue for "
+                        "being remembered.",
+                        source="voice_confirm",
+                    )
+                    return
+
+        if command == "forget_me":
+            self._on_forget_requested(player or speaker_label)
+            return
         if command == "back_to_normal":
             if self.sk.mode == "adult":
                 self.sk.set_mode("general")  # sticky flag flips instantly
@@ -1452,6 +1570,17 @@ class LilyGame:
         old = self.group_id
         if not new_group_id or new_group_id == old:
             return
+        # WO-LILY-FORGETME-001: after a deletion, the fresh anonymous
+        # binding is FINAL for this session — no late device metadata, no
+        # voiceprint match, no name-set hash may re-key toward (or rebuild)
+        # the deleted identity.
+        if self.forget_state in ("executing", "done", "failed"):
+            logger.info(
+                "LILY_FORGET | GROUP_UPGRADE_SUPPRESSED | session=%s "
+                "source=%s candidate=%s (post-forget anonymous binding)",
+                self.sk.session_id, source, new_group_id,
+            )
+            return
         self.group_id = new_group_id
         self.group_id_source = source
         logger.info(
@@ -1476,6 +1605,9 @@ class LilyGame:
             block = lily_memory.lily_build_memory_block(memory)
             if block:
                 self.memory_block = block  # llm_node injects it next turn
+                self.memory_total_games = int(
+                    (memory or {}).get("total_games") or 0
+                )
                 logger.info(
                     "LILY_MEMORY | BLOCK_READY | group=%s chars=%d "
                     "total_games=%s (post-upgrade)",
@@ -1489,6 +1621,17 @@ class LilyGame:
         start). Only runs when the current id is weak (room-random or a
         prior name-set hash). Order: (b) stored-voiceprint identifier match
         -> (c) normalized sorted player-name-set hash -> keep current."""
+        # WO-LILY-FORGETME-001: post-deletion the session stays on its
+        # fresh anonymous id — re-resolving would re-run the name-set hash
+        # into a new memory-keyed group and silently rebuild the identity
+        # the table just deleted.
+        if self.forget_state in ("executing", "done", "failed"):
+            logger.info(
+                "LILY_FORGET | GROUP_RESOLVE_SUPPRESSED | session=%s "
+                "trigger=%s (post-forget anonymous binding)",
+                self.sk.session_id, trigger,
+            )
+            return
         if self.group_id_source in _STRONG_GROUP_SOURCES:
             return
         names = list(self.sk.players.keys())
@@ -1525,6 +1668,174 @@ class LilyGame:
         if new_id is None or new_id == self.group_id:
             return
         await self.upgrade_group_id(new_id, source)
+
+    # -- the right to be forgotten (WO-LILY-FORGETME-001) ------------------------
+
+    def _on_forget_requested(self, requester_key: str | None) -> None:
+        """Spoken deletion request (deterministic scorekeeper detection —
+        "forget me"/"forget us"/paraphrases): arm the pending-confirm
+        state and dispatch ONE plain confirmation naming the scope. Never
+        asks twice: a pending flow ignores re-requests, a completed
+        deletion answers plainly, and a declined flow only re-arms on THIS
+        path — a fresh player-initiated request, never Lily re-raising."""
+        if self.forget_state in ("pending_confirm", "executing"):
+            return  # never ask twice / cascade already running
+        if self.forget_state == "done":
+            self.gated_say(
+                None,
+                "forget_already_done",
+                "They asked you to forget them, but the deletion already "
+                "ran this session — everything is gone and the night is "
+                "running on a clean anonymous slate. Say exactly that in "
+                "one plain warm line and keep the game moving.",
+                source="voice_command",
+            )
+            return
+        self.forget_state = "pending_confirm"
+        self.forget_requester = requester_key
+        logger.info(
+            "LILY_FORGET | REQUESTED | session=%s group=%s requester=%s",
+            self.sk.session_id, self.group_id, requester_key,
+        )
+        self.gated_say(
+            None,
+            "forget_confirm",
+            "A player just asked you to forget them. Ask for ONE plain "
+            "spoken confirmation, naming the full scope: everything you "
+            "keep for this table — voices, games, facts — gone for good, "
+            "and tonight's game keeps going. Something like: 'Happy to. "
+            "That wipes everything I keep for this table — voices, games, "
+            "facts — gone for good. Tonight's game keeps going. Say yes "
+            "and it's done.' One question only — never ask twice, never "
+            "argue for being remembered.",
+            source="voice_command",
+        )
+
+    async def _forget_confirmed(self, source: str) -> None:
+        """The deterministic yes landed: run the cascade, then speak the
+        outcome — the SAME message shape the tool returns, so honest
+        partial-failure reporting is identical on both paths."""
+        result = await self.execute_forget(source=source)
+        self.gated_say(
+            None,
+            "forget_done",
+            lily_forget.lily_forget_result_message(result),
+            source=source,
+        )
+
+    async def execute_forget(self, source: str) -> dict:
+        """Task 1: the delete cascade + in-session teardown. Awaited and
+        verified — NEVER fire-and-forget: the acknowledgment only goes out
+        after the deletes completed and count-queries confirmed zero rows
+        under the old identity (capped ~10s in lily_persistence; partial
+        failure is reported honestly and stays retryable). Idempotent:
+        done -> already_done, executing -> in_progress."""
+        if self.forget_state == "done":
+            return {"ok": True, "already_done": True}
+        if self.forget_state == "executing":
+            return {"ok": False, "in_progress": True}
+        self.forget_state = "executing"
+        # The cascade targets the ORIGINAL identity, captured once — the
+        # teardown below re-binds the session to a fresh anonymous id, so
+        # a retry after partial failure must not target the fresh id.
+        first_attempt = self._forget_target_group is None
+        target = self._forget_target_group or self.group_id
+        self._forget_target_group = target
+        logger.info(
+            "LILY_FORGET | EXECUTE | session=%s group=%s source=%s retry=%s",
+            self.sk.session_id, target, source, not first_attempt,
+        )
+        if self.supabase is None:
+            # Nothing was ever persisted (offline/dev session) — the
+            # in-session teardown still runs so recognition state clears.
+            result: dict = {
+                "ok": True, "deleted": {}, "rekeyed": {},
+                "skipped": ["all tables (no supabase client — nothing persisted)"],
+                "failed": {}, "verified": [],
+            }
+        else:
+            result = await lily_persistence.lily_forget_group_data(
+                self.supabase, target, self.sk.session_id
+            )
+        if first_attempt:
+            self._teardown_group_identity()
+        if result.get("ok"):
+            self.forget_state = "done"
+            # Emitted AFTER the cascade succeeded, never before: the
+            # frontend clears the device localStorage group id and shows a
+            # transient confirmation on this packet.
+            await self.send_event("memory_forgotten", {"scope": "all"})
+        else:
+            # Retryable: a fresh spoken request or lily_forget_group
+            # (confirm=true) re-runs the cascade against the ORIGINAL id.
+            self.forget_state = "failed"
+        return result
+
+    def _teardown_group_identity(self) -> None:
+        """In-session teardown after the cascade ran: the game continues
+        under a FRESH ANONYMOUS binding (WO: "the current game continues
+        under fresh anonymous binding") — a new random id, not the device
+        metadata one. Memory/fact/voiceprint WRITES continue under the
+        fresh id (record_group_fact, fire_enrollment, and the session-close
+        memory write all read self.group_id live), but the deleted identity
+        is unreachable: the device id is dead (frontend cleared it on
+        memory_forgotten) and resolve_group_identity / upgrade_group_id are
+        suppressed for the rest of the session, so the name-set hash can
+        never silently rebuild the deleted group."""
+        old = self.group_id
+        fresh = "anon_" + uuid.uuid4().hex[:16]
+        self.group_id = fresh
+        self.group_id_source = "post_forget_anonymous"
+        # [RETURNING TABLE] injection stops immediately: the block is
+        # cleared here and _apply_context_blocks REMOVES the stale system
+        # item on the next turn (symmetric removal path).
+        self.memory_block = ""
+        self.memory_total_games = 0
+        # STT: clear the enrolled speakers so no future STT stream this
+        # session re-injects the deleted voiceprints. 1.6.4 NOTE:
+        # livekit-plugins-speechmatics 1.6.4 has NO live de-enrollment
+        # path — update_speakers() only takes focus/ignore/focus_mode, and
+        # known_speakers ride the one-shot StartRecognition message.
+        # Clearing _stt_options.known_speakers guarantees any STT
+        # websocket reconnect starts with zero enrolled voices; the
+        # already-open stream keeps its labels until it closes (documented
+        # limitation) — but the stored identifiers behind them are gone
+        # and nothing new is written under the deleted identity.
+        if self.stt is not None:
+            try:
+                opts = getattr(self.stt, "_stt_options", None)
+                if opts is not None:
+                    opts.known_speakers = []
+            except Exception as e:
+                logger.warning("LILY_FORGET | STT_TEARDOWN | failed: %s", e)
+        # The CURRENT session row follows the live game onto the fresh
+        # anonymous id (the cascade tombstoned it with the rest of the
+        # group's history; tonight's operational row is the one exception
+        # — the game it describes is still running, anonymously).
+        if self.supabase is not None:
+            supabase = self.supabase
+            session_id = self.sk.session_id
+
+            async def _rekey_current() -> None:
+                try:
+                    await asyncio.to_thread(
+                        lambda: supabase.table("lily_sessions")
+                        .update({"group_id": fresh})
+                        .eq("session_id", session_id)
+                        .execute()
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "LILY_FORGET | SESSION_REKEY | failed: %s", e
+                    )
+
+            asyncio.ensure_future(_rekey_current())
+        logger.info(
+            "LILY_FORGET | TEARDOWN | session=%s old_group=%s fresh_group=%s "
+            "(memory block cleared, known_speakers cleared, resolve/upgrade "
+            "suppressed, writes continue under the fresh id)",
+            self.sk.session_id, old, fresh,
+        )
 
     # -- game lifecycle ---------------------------------------------------------
 
@@ -1569,6 +1880,11 @@ class LilyGame:
                 " The [RETURNING TABLE] context shows this table has "
                 "played with you before — one quick welcome-back beat "
                 "if you haven't done one yet, then into the game."
+                # Task 4 disclosure ride-along: covers memory that resolved
+                # AFTER the greeting (mid-lobby group-id upgrade) — the
+                # once-per-session latch inside makes this a no-op when the
+                # greeting already carried it.
+                + self.memory_disclosure_instruction()
             )
         self.gated_say(
             None, "game_start", instructions, source=f"start_{source}"
@@ -2107,6 +2423,62 @@ class LilyAgent(Agent):
         await self._game.publish_attributes()
         return f"Bonus point to {name}."
 
+    # -- memory transparency + deletion right (WO-LILY-FORGETME-001) ---------------
+    #
+    # Both tools are deliberately UNGATED by game_started, per the tool-
+    # gating principle (README): gate tools that mutate game outcomes or
+    # emit game events — explaining memory and deleting it do NEITHER
+    # (memory_forgotten is a memory-transparency packet, not a game event),
+    # and the deletion right must work from the lobby onward.
+
+    @function_tool()
+    async def lily_forget_group(self, context: RunContext, confirm: bool) -> str:
+        """Delete everything you keep for this table — voices, games,
+        facts — for good. Two-step: a call with confirm=false is refused;
+        you must first ask the table out loud, naming the scope, and get a
+        spoken yes. Tonight's game keeps going either way.
+
+        Args:
+            confirm: True ONLY after a player said yes out loud to your
+                confirmation question. False to check the flow first.
+        """
+        game = self._game
+        if not confirm:
+            # Arm the deterministic pending-confirm state so the spoken
+            # yes/no is parsed in code even if the follow-up tool call
+            # never comes (requester unattributed -> any voice settles it).
+            if game.forget_state in ("idle", "declined", "failed"):
+                game.forget_state = "pending_confirm"
+                game.forget_requester = None
+            return (
+                "NOT deleted — deletion needs a spoken yes first. Ask the "
+                "table ONE plain confirmation naming the scope: everything "
+                "kept for this table — voices, games, facts — gone for "
+                "good, and tonight's game keeps going. On a spoken yes, "
+                "call lily_forget_group with confirm=true. On a no, drop "
+                "it for the night — never ask twice, never argue for being "
+                "remembered."
+            )
+        result = await game.execute_forget(source="tool")
+        return lily_forget.lily_forget_result_message(result)
+
+    @function_tool()
+    async def lily_explain_memory(self, context: RunContext) -> str:
+        """Explain honestly what you have on file for this table — counts
+        only (voices remembered, games on record, facts kept) and how you
+        recognized them tonight. Call it when someone presses on how you
+        knew them, or asks what you remember. Read-only; stores nothing;
+        never returns raw contents."""
+        game = self._game
+        counts = None
+        if game.supabase is not None:
+            counts = await lily_persistence.lily_count_group_memory(
+                game.supabase, game.group_id
+            )
+        return lily_forget.lily_explain_memory_result(
+            counts, game.group_id_source
+        )
+
     # -- preemptive-generation control (P2) ----------------------------------------
 
     def set_preemptive_generation(self, enabled: bool) -> None:
@@ -2177,12 +2549,18 @@ class LilyAgent(Agent):
 
         # Returning-table memory: one persistent [RETURNING TABLE] system
         # block, injected the same additive way as the adult layer
-        # (re-inserted if history trimming ever drops it).
-        if self._game.memory_block and not any(
-            getattr(m, "role", None) == "system"
-            and lily_memory.MEMORY_BLOCK_MARKER in _message_text(m)
-            for m in items
-        ):
+        # (re-inserted if history trimming ever drops it) — and REMOVED the
+        # same way when memory_block is cleared (forget-me teardown:
+        # injection stops immediately, WO-LILY-FORGETME-001).
+        memory_idx = next(
+            (
+                i for i, m in enumerate(items)
+                if getattr(m, "role", None) == "system"
+                and lily_memory.MEMORY_BLOCK_MARKER in _message_text(m)
+            ),
+            None,
+        )
+        if self._game.memory_block and memory_idx is None:
             items.insert(
                 0,
                 ChatMessage(
@@ -2191,6 +2569,8 @@ class LilyAgent(Agent):
                     content=[self._game.memory_block],
                 ),
             )
+        elif not self._game.memory_block and memory_idx is not None:
+            items.pop(memory_idx)
 
         # State block: replace the previous injection, then append fresh —
         # but ONLY when the rendered text changed. Leaving an unchanged
@@ -2583,6 +2963,9 @@ async def entrypoint(ctx: JobContext) -> None:
     # system block (injected in llm_node alongside the adult layer).
     group_memory = await lily_memory.lily_load_group_memory(supabase, group_id)
     game.memory_block = lily_memory.lily_build_memory_block(group_memory)
+    # Task 4 disclosure counter (WO-LILY-FORGETME-001): the lily_memories
+    # row count doubles as the persistent disclosure counter.
+    game.memory_total_games = int((group_memory or {}).get("total_games") or 0)
     if game.memory_block:
         logger.info(
             "LILY_MEMORY | BLOCK_READY | group=%s chars=%d total_games=%s",
