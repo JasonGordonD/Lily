@@ -270,6 +270,10 @@ class LilyGame:
         # code-dispatched to perform — that turn claims q_{N}_delivery at
         # dispatch regardless of phrasing. None = no delivery in flight.
         self._pending_delivery_qnum: int | None = None
+        # Post-reveal delivery is strict: if the generated turn does not
+        # contain the armed prompt (and every MC option), tts_node replaces
+        # it with the deterministic question sheet before any claim opens.
+        self._strict_delivery_qnum: int | None = None
         # Honesty assist (desync WO Sub-agent C): one grounded
         # `[state note: …]` line, set when a player's utterance makes a
         # checkable claim about published state, rendered into the state
@@ -615,7 +619,7 @@ class LilyGame:
     # The window still opens at the delivery TURN's playout completion
     # (on_agent_speech_finished) — what changed is WHAT registers delivery.
 
-    def expect_delivery(self) -> None:
+    def expect_delivery(self, *, strict: bool = False) -> None:
         """Arm the structural delivery flag: the next outbound spoken turn
         was just dispatched to perform the armed question and will claim
         q_{N}_delivery at dispatch. No-op when nothing is armed, the
@@ -625,6 +629,9 @@ class LilyGame:
         key = f"q_{self.sk.question_number}_delivery"
         if self.say_registry.state(key) is None:
             self._pending_delivery_qnum = self.sk.question_number
+            self._strict_delivery_qnum = (
+                self.sk.question_number if strict else None
+            )
 
     def consume_pending_delivery(self, qnum: int) -> bool:
         """One-shot consume of the structural delivery flag for question
@@ -634,6 +641,65 @@ class LilyGame:
             self._pending_delivery_qnum = None
             return True
         return False
+
+    def rendered_armed_question(self) -> str:
+        """Deterministic spoken sheet used when strict delivery drifts."""
+        armed = self.armed_question or {}
+        prompt = str(armed.get("prompt") or "").strip()
+        choices = armed.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return prompt
+        labels = lily_evaluation.MC_CHOICE_LETTERS
+        rendered = [
+            f"{labels[index]}) {choice}"
+            for index, choice in enumerate(choices[: len(labels)])
+        ]
+        return "\n".join([prompt, *rendered])
+
+    def _delivery_text_matches_armed(self, spoken_text: str) -> bool:
+        armed = self.armed_question or {}
+        if not lily_evaluation.lily_turn_presents_question(
+            armed.get("prompt", ""), spoken_text
+        ):
+            return False
+        choices = armed.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return True
+        normalized = re.sub(r"[^a-z0-9]+", " ", spoken_text.lower()).strip()
+        return all(
+            re.sub(r"[^a-z0-9]+", " ", str(choice).lower()).strip()
+            in normalized
+            for choice in choices
+        )
+
+    def dispatch_armed_question(self, *, source: str) -> bool:
+        """Dispatch one question-only turn after a completed reveal.
+
+        Keeping reveal and delivery on separate handles prevents a round
+        transition from registering an invented or stale question as N+1.
+        Strict TTS validation rewrites any drift to the deterministic sheet.
+        """
+        if (
+            self.armed_question is None
+            or self.sk.answer_window_open
+            or getattr(self, "game_over", False)
+        ):
+            return False
+        key = f"q_{self.sk.question_number}_delivery"
+        if self.say_registry.state(key) is not None:
+            return False
+        self.expect_delivery(strict=True)
+        sheet = self.rendered_armed_question()
+        return self.gated_say(
+            None,
+            "question_delivery",
+            (
+                "The previous reveal is complete. Deliver ONLY the armed "
+                "question now. Read this sheet exactly, with every option "
+                f"when present, then stop for answers:\n{sheet}"
+            ),
+            source=source,
+        )
 
     def register_delivery_claim(
         self,
@@ -658,10 +724,18 @@ class LilyGame:
             return None
         qnum = self.sk.question_number
         key = f"q_{qnum}_delivery"
+        strict = getattr(self, "_strict_delivery_qnum", None) == qnum
         structural = self.consume_pending_delivery(qnum)
-        textual = lily_evaluation.lily_turn_presents_question(
-            armed.get("prompt", ""), spoken_text
-        )
+        if structural:
+            self._strict_delivery_qnum = None
+        textual = self._delivery_text_matches_armed(spoken_text)
+        if structural and strict and not textual:
+            logger.error(
+                "LILY_DELIVERY | STRICT_REWRITE | session=%s q=%d "
+                "reason=spoken_question_mismatch",
+                self.sk.session_id, qnum,
+            )
+            return "rewrite_strict"
         if not structural and not textual:
             return None
         if self.say_registry.claim(key, owner=speech_id):
@@ -1381,6 +1455,7 @@ class LilyGame:
             ))
         self._armed_speech_misses = 0
         self._pending_delivery_qnum = None  # stale delivery intent dies at arm
+        self._strict_delivery_qnum = None
         self._judged_keys = set()
         self._addressee_rows = {}  # B1: row-id tasks are per-question
         for _task in self._spec_judge.values():
@@ -1487,6 +1562,11 @@ class LilyGame:
             # fired the packet (safety net) — emit now so the UI never hangs.
             ev, self._pending_reveal_event = self._pending_reveal_event, None
             self.send_event_nowait("reveal", ev)
+        if any(key.endswith("_reveal") for key in confirmed):
+            # The next armed question gets its own strict delivery handle.
+            # Do not let the reveal/score turn also freestyle N+1.
+            if self.dispatch_armed_question(source="post_reveal"):
+                return
         if (
             self.armed_question is not None
             and not self.sk.answer_window_open
@@ -2669,13 +2749,15 @@ class LilyGame:
         elif round_over:
             parts.append(
                 "That closes the round. Read FULL standings now (one of your "
-                "two allowed spreadsheet moments), then roll into the next "
-                "round — tighter and faster."
+                "two allowed spreadsheet moments), then STOP. Do not ask or "
+                "invent the next question in this reveal turn; a separate "
+                "authoritative delivery turn follows."
             )
         else:
             parts.append(
                 "Then one relational score line (deltas, not standings) and "
-                "straight into the next question from the state block."
+                "STOP. Do not ask or invent the next question in this reveal "
+                "turn; a separate authoritative delivery turn follows."
             )
         return " ".join(parts)
 
@@ -4340,9 +4422,25 @@ class LilyAgent(Agent):
         # registered speaks normally. Decision + claim + screen publish
         # live in LilyGame.register_delivery_claim (offline-tested).
         speech_id = _current_speech_id()
-        if self._game.register_delivery_claim(
+        delivery = self._game.register_delivery_claim(
             full, speech_id=speech_id
-        ) == "duplicate":
+        )
+        if delivery == "rewrite_strict":
+            full = self._game.rendered_armed_question()
+            self._game.expect_delivery(strict=True)
+            delivery = self._game.register_delivery_claim(
+                full, speech_id=speech_id
+            )
+            if delivery not in (
+                "claimed_structural",
+                "claimed_core_sentence",
+            ):
+                logger.error(
+                    "LILY_DELIVERY | STRICT_REWRITE_FAILED | session=%s q=%d",
+                    self._game.sk.session_id,
+                    self._game.sk.question_number,
+                )
+        if delivery == "duplicate":
             if speech_id:
                 suppressed_ids = getattr(
                     self._game, "_suppressed_speech_ids", None

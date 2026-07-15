@@ -685,6 +685,83 @@ def _arm_question(game: LilyGame, question: dict) -> None:
     game.sk.set_phase("round")
 
 
+ROUND_TWO_MC = {
+    "id": "q_round_two",
+    "prompt": "Which planet in our solar system has the most moons?",
+    "canonical_answer": "Saturn",
+    "acceptable_answers": ["saturn"],
+    "choices": ["Jupiter", "Saturn", "Uranus", "Neptune"],
+    "category": "academic",
+    "difficulty_tier": 2,
+}
+
+
+def test_round_transition_reveal_and_question_use_separate_strict_turns():
+    """Regression for the 00:07 Jupiter-vs-Verona identity split.
+
+    The round-closing reveal must stop before N+1. Only after that reveal
+    completes may a strict question-only turn deliver the armed MC sheet.
+    """
+    game = _make_game()
+    game.sk.questions_per_round = 6
+    game.sk.question_number = 5
+    game.next_question = dict(ROUND_TWO_MC)
+    game.start_prefetch = lambda: None
+    game.sk.bind_speaker("S1", "Rami")
+    _arm_question(game, FEMUR_QUESTION)  # q=6, closes round one
+    now = 900.0
+    game.sk.open_answer_window(duration=30.0, now=now)
+    game.sk.on_transcript_segment(
+        text="femur", speaker_label="S1", is_final=True,
+        now=now + 2, segment_start_time=now + 2,
+    )
+
+    _run(_adjudicate_and_drain(game), game)
+
+    assert game.sk.question_number == 7
+    assert game.armed_question["id"] == ROUND_TWO_MC["id"]
+    assert len(game.session.instructions) == 1
+    reveal = game.session.instructions[0]
+    assert "separate authoritative delivery turn follows" in reveal
+    assert ROUND_TWO_MC["prompt"] not in reveal
+    assert game._pending_delivery_qnum is None
+
+    async def delivery_scenario():
+        # Completing q6's reveal dispatches, but does not yet open, q7.
+        game._pending_reveal_event = None  # UI plumbing is outside this test
+        game.on_agent_speech_finished(
+            "The femur is correct. Round one is over."
+        )
+        assert len(game.session.instructions) == 2
+        delivery = game.session.instructions[1]
+        assert ROUND_TWO_MC["prompt"] in delivery
+        for choice in ROUND_TWO_MC["choices"]:
+            assert choice in delivery
+        assert game._pending_delivery_qnum == 7
+        assert game._strict_delivery_qnum == 7
+        assert game.sk.answer_window_open is False
+
+        # If the vocal turn resurrects Verona or emits a malformed
+        # three-option sheet, strict registration requests deterministic
+        # replacement before any answer window can open.
+        malformed = (
+            f"{ROUND_TWO_MC['prompt']} "
+            "A) Jupiter B) Saturn C) Uranus"
+        )
+        assert game.register_delivery_claim(malformed) == "rewrite_strict"
+        assert game.say_registry.state("q_7_delivery") is None
+        game.expect_delivery(strict=True)
+        stale = "Romeo and Juliet is set in which Italian city?"
+        assert game.register_delivery_claim(stale) == "rewrite_strict"
+        exact = game.rendered_armed_question()
+        assert "D) Neptune" in exact
+        game.expect_delivery(strict=True)
+        assert game.register_delivery_claim(exact) == "claimed_structural"
+        await _drain()
+
+    _run(delivery_scenario(), game)
+
+
 def test_013754_replay_score_published_before_the_verdict_speaks():
     game = _make_game()
     timeline: list = []

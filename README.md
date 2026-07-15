@@ -205,6 +205,15 @@ in `tts_node` at speech dispatch on either trigger
   flourish before and after, never inside; the prompt states that
   contract as texture).
 
+Post-adjudication delivery is stricter still. The reveal/score turn now
+STOPS before N+1; only after its playout does a separate question-only turn
+dispatch. That turn must contain the armed prompt and every multiple-choice
+option. If the vocal model resurrects a stale question, invents another one,
+or emits an incomplete option sheet, `tts_node` replaces it with the
+deterministic armed sheet before claiming delivery or opening the window
+(`LILY_DELIVERY | STRICT_REWRITE`). This pins the live 00:07 failure where
+“Jupiter” was answered to a moons question but evaluated against Verona.
+
 The old text-ratio matcher (`lily_question_spoken_ratio`, verbatim ≥0.6 /
 paraphrase ≥0.3 tiers) is **telemetry only** — logged per playout as
 `LILY_WINDOW | RATIO | … telemetry` and acted on by nothing. Two live
@@ -548,7 +557,7 @@ migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group pref
 migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt columns
 migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
-tests/               731 tests, run with `python -m pytest tests/` — no network; needs
+tests/               732 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
