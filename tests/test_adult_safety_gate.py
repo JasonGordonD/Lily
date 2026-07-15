@@ -46,7 +46,11 @@ from lily_scorekeeper import LilyScorekeeper
 
 class _FakeGame:
     """Minimum surface lily_enter_adult_mode / on_child_gate_lost touch:
-    sk, acoustic, session, publish_attributes(_nowait), gated_say."""
+    sk, acoustic, session, publish_attributes(_nowait), gated_say, and the
+    mode-switch flush seam (WO-LILY-DESYNC-HONESTY-001 D: every mode
+    switch — entry, spoken revert, veto, breaker trip — flushes the
+    armed/prefetched questions and re-draws from the new deck; recorded
+    here, exercised for real in test_adult_identity.py)."""
 
     def __init__(self) -> None:
         self.sk = LilyScorekeeper("test-room")
@@ -55,6 +59,10 @@ class _FakeGame:
         self.publish_calls = 0
         self.publish_nowait_calls = 0
         self.said: list[dict] = []
+        self.flush_calls: list[str] = []
+
+    def flush_for_mode_switch(self, source: str) -> None:
+        self.flush_calls.append(source)
 
     async def publish_attributes(self) -> None:
         self.publish_calls += 1
@@ -275,7 +283,12 @@ def test_mid_session_trip_exits_adult_mode_via_sticky_revert(caplog):
     revert = game.said[0]
     assert revert["act"] == "mode_revert"
     assert revert["source"] == "child_gate"
-    assert "general-category question next" in revert["instructions"]
+    # D seam: the auto-revert flushes the adult deck and the general deck
+    # re-draws — the instruction is honest about the one-beat gap.
+    assert "general deck is re-drawing" in revert["instructions"]
+    # Both switches flushed: entry drew the adult deck, the trip re-draws
+    # general.
+    assert game.flush_calls == ["enter_adult", "child_gate"]
     for word in ("breaker", "audeering", "acoustic", "sensor"):
         assert word not in revert["instructions"].lower()
     # Exit logged with the breaker reason.
