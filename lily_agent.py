@@ -284,8 +284,12 @@ class LilyGame:
         self,
         question_text: str | None,
         reveal: dict | None = None,
+        image_url: str | None = None,
     ) -> None:
-        """Room metadata: current question text + reveal payload."""
+        """Room metadata: current question text + reveal payload.
+        image_url (sub-agent H) is an OPTIONAL additive field — picture
+        questions put their public bucket URL into the question payload;
+        every other publish clears it (the frontend already renders it)."""
         try:
             metadata = json.dumps({
                 "question": question_text or "",
@@ -293,6 +297,7 @@ class LilyGame:
                 or {"answer": "", "winner": None, "correct": False},
                 # Drives the frontend's high-contrast wager palette shift.
                 "wager": self.sk.phase == "final",
+                "image_url": image_url or "",
             })
             # Room metadata has no rtc-side setter — server API only.
             await self.ctx.api.room.update_room_metadata(
@@ -662,7 +667,10 @@ class LilyGame:
         # the question must be on the glass once answers are live.
         if not steal and self.armed_question is not None:
             asyncio.ensure_future(
-                self.publish_metadata(self.armed_question.get("prompt", ""))
+                self.publish_metadata(
+                    self.armed_question.get("prompt", ""),
+                    image_url=self.armed_question.get("image_url"),
+                )
             )
         self._start_bed()
         if self._window_timer and not self._window_timer.done():
@@ -2262,9 +2270,13 @@ class LilyAgent(Agent):
                     )
                     # Screen syncs to the spoken question at delivery, not
                     # at arm (arm-time publish spoiled the reveal and led
-                    # the voice by a whole celebration beat).
+                    # the voice by a whole celebration beat). Picture
+                    # questions carry their image in the same payload.
                     asyncio.ensure_future(
-                        game.publish_metadata(armed.get("prompt", ""))
+                        game.publish_metadata(
+                            armed.get("prompt", ""),
+                            image_url=armed.get("image_url"),
+                        )
                     )
                 else:
                     logger.warning(
