@@ -646,6 +646,74 @@ Labels land three ways (`label_source`):
   "talking to him") → `label=deliberation`; unparseable → `label=unknown`.
   The reply parser is pure and offline-tested (`lily_addressee.py`).
 
+### State-prior thresholds (WO-ADDRESSEE-H1 Task 2)
+
+The Tier-1 acceptance threshold is no longer static — a scorekeeper-owned
+**prior-state machine** (`lily_scorekeeper.PRIOR_*`, pure, zero new models,
+zero LLM) moves it with game state, per the report's strongest cheap
+finding (the host's last dialogue act is a top addressee predictor):
+
+- **`OPEN_WINDOW`** — a question was just asked, the answer window is open,
+  no crosstalk → threshold **lowered** (`0.84` vs the `0.88` baseline;
+  favor recall — a bare mangled proper noun right after the ask is almost
+  certainly an answer).
+- **`OVERLAP`** — diarization shows ≥2 speakers with temporally overlapping
+  segments inside the window → threshold **raised sharply** (default
+  `1.01`; any value above 1.0 disables Tier-1 auto-accept entirely — even
+  exact/containment hits, whose similarity is 1.0, escalate to the Tier-2
+  judge). Crosstalk is a deliberation prior: the right answer shouted into
+  an argument gets checked, never auto-scored.
+- **`HOST_SPEAKING` / `SCORING`** — Lily is on air (wired off the
+  framework's `agent_state_changed` → `speaking` transition, which at
+  livekit-agents 1.6.4 fires on actual TTS playout start and leaves on
+  playout end/interrupt) or adjudication is in flight
+  (`LilyGame._adjudicating`, mirrored onto `sk.adjudicating`) → biased
+  against acceptance (default `1.01`): backchannels expected, nothing
+  scoreable. `IDLE` (window closed, nothing special) keeps the pre-H1
+  baseline exactly.
+
+Precedence: `SCORING > HOST_SPEAKING > OVERLAP > OPEN_WINDOW > IDLE`.
+Adjudication evaluates candidates under the prior their window was
+**captured** in (`sk.window_prior_state()` — `overlap_flag` persists across
+the window close), never under the SCORING state the evaluation itself
+runs in.
+
+**Overlap detection math** (`sk._note_speaker_span`): each final segment
+inside the open window records a per-speaker span
+`[segment_start_time, segment_end_time≈now]`; two spans from **different**
+speaker identities flip `OVERLAP` when
+`min(end₁,end₂) − max(start₁,start₂) > LILY_OVERLAP_EPSILON_SECONDS`
+(default `0.3`, strict inequality — conservative by construction).
+Production caveat: `UserInputTranscribedEvent` carries no per-segment word
+timings at 1.6.4, so the entrypoint currently stamps `start == arrival` —
+degenerate point spans can never flip the flag until real segment timings
+flow through the transcript path (the n-best work widens exactly that
+path). The flag resets on every window open (steal windows included).
+
+Every classification decision logs its prior:
+`LILY_PRIOR | state=OVERLAP threshold=1.010 overlap=True | ...` (scorekeeper
+per-final, plus the agent's `source=instant_tier1` / `source=adjudicate`
+call sites, and `LILY_PRIOR | OVERLAP_DETECTED` on the flip). Each logged
+utterance persists its `prior_state` and `overlap_flag` to
+`lily_addressee_log` (columns per schema amendment 5a).
+
+**Env knobs** (all through `lily_config`): `LILY_TIER1_THRESHOLD_OPEN_WINDOW`
+(0.84), `LILY_TIER1_THRESHOLD_OVERLAP` (1.01),
+`LILY_TIER1_THRESHOLD_HOST_SPEAKING` (1.01), `LILY_TIER1_THRESHOLD_SCORING`
+(1.01), `LILY_TIER1_THRESHOLD_IDLE` (0.88), `LILY_OVERLAP_EPSILON_SECONDS`
+(0.3), `LILY_TIER1_CLARIFY_MARGIN` (0.15).
+
+**Middle band (Task 4 surface):** `lily_evaluation.lily_tier1_band(similarity,
+threshold, clarify_margin)` splits Tier-1 similarity space into
+`BAND_ACCEPT` (≥ threshold), `BAND_CLARIFY` (within
+`LILY_TIER1_CLARIFY_MARGIN` below it — where the deterministic clarify
+question fires), and `BAND_REJECT` (below the band — act on the
+classification, write the implicit label as wired in B1).
+
+H1 honesty note: these priors **narrow the clarifying question's workload**
+— they do not retire it. Text+context plateaus around 24–27% EER, so the
+house rule (answers are said TO Lily) stays live and stated in the lobby.
+
 ## Bank curation loop (WO-LILY-OMNIBUS-002 D/E/F)
 
 The curated bank (`lily_questions`) is a living asset: it grows from
@@ -1138,6 +1206,9 @@ boot failure.
 `RAVEN_VOICE_ID`) · `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` · optional:
 `LILY_KB_ONLY=1` (curated-bank-only question supply — the demo-day fallback),
 `LILY_ANSWER_WINDOW_SECONDS`, `LILY_ROUNDS`, `LILY_QUESTIONS_PER_ROUND`,
+the `LILY_TIER1_THRESHOLD_*` / `LILY_OVERLAP_EPSILON_SECONDS` /
+`LILY_TIER1_CLARIFY_MARGIN` state-prior tunables (see the state-prior
+thresholds section),
 `LILY_AUTO_START_MIN_PLAYERS` / `LILY_AUTO_START_LOBBY_GRACE_SECONDS`
 (lobby auto-start safety net), `LILY_GROUP_ID` (group-identity override),
 `LILY_GREETING_MEMORY_BUDGET_SECONDS` (default 1.5) /

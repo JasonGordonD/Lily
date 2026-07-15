@@ -179,9 +179,19 @@ def _contains_phrase(haystack: str, needle: str) -> bool:
 def lily_tier1_evaluate(
     transcript_text: str,
     acceptable_answers: list[str],
+    threshold: Optional[float] = None,
 ) -> dict:
     """
     Tier-1 evaluation of one attempt against acceptable_answers.
+
+    threshold (WO-ADDRESSEE-H1 Task 2): the state-prior acceptance
+    threshold. None keeps the pre-H1 behavior exactly
+    (FUZZY_CORRECT_THRESHOLD). Every accept path is gated on its match
+    similarity reaching the threshold — exact and containment matches
+    carry similarity 1.0, so a threshold ABOVE 1.0 disables Tier-1
+    auto-accept entirely (the OVERLAP / HOST_SPEAKING / SCORING defaults:
+    everything escalates to the Tier-2 judge). The phonetic bar scales
+    proportionally (PHONETIC_FUZZY_THRESHOLD × threshold/baseline).
 
     Returns:
       {
@@ -193,6 +203,8 @@ def lily_tier1_evaluate(
 
     "uncertain" means escalate to the Tier-2 judge — Tier 1 never rejects.
     """
+    t = FUZZY_CORRECT_THRESHOLD if threshold is None else threshold
+    phonetic_t = PHONETIC_FUZZY_THRESHOLD * (t / FUZZY_CORRECT_THRESHOLD)
     attempt = lily_normalize_answer(transcript_text)
     best_sim = 0.0
     best_answer = None
@@ -212,28 +224,34 @@ def lily_tier1_evaluate(
 
         # Exact normalized match
         if attempt == answer:
-            return {
-                "verdict": "correct",
-                "matched_answer": raw_answer,
-                "method": "exact",
-                "similarity": 1.0,
-            }
+            if 1.0 >= t:
+                return {
+                    "verdict": "correct",
+                    "matched_answer": raw_answer,
+                    "method": "exact",
+                    "similarity": 1.0,
+                }
+            best_sim, best_answer = 1.0, raw_answer
+            continue
 
         # Whole-word containment ("uh Canberra, Australia" contains "canberra")
         if _contains_phrase(attempt, answer):
-            return {
-                "verdict": "correct",
-                "matched_answer": raw_answer,
-                "method": "containment",
-                "similarity": 1.0,
-            }
+            if 1.0 >= t:
+                return {
+                    "verdict": "correct",
+                    "matched_answer": raw_answer,
+                    "method": "containment",
+                    "similarity": 1.0,
+                }
+            best_sim, best_answer = 1.0, raw_answer
+            continue
 
         sim = SequenceMatcher(None, attempt, answer).ratio()
         if sim > best_sim:
             best_sim = sim
             best_answer = raw_answer
 
-        if sim >= FUZZY_CORRECT_THRESHOLD:
+        if sim >= t:
             return {
                 "verdict": "correct",
                 "matched_answer": raw_answer,
@@ -243,8 +261,9 @@ def lily_tier1_evaluate(
 
         # Phonetic path: soundex agreement + moderate string similarity
         if (
-            _phrase_soundex(attempt) == _phrase_soundex(answer)
-            and sim >= PHONETIC_FUZZY_THRESHOLD
+            t <= 1.0
+            and _phrase_soundex(attempt) == _phrase_soundex(answer)
+            and sim >= phonetic_t
         ):
             return {
                 "verdict": "correct",
@@ -259,6 +278,38 @@ def lily_tier1_evaluate(
         "method": None,
         "similarity": round(best_sim, 3),
     }
+
+
+# ---------------------------------------------------------------------------
+# Tier-1 outcome bands (WO-ADDRESSEE-H1 Task 2 — consumed by Task 4)
+#
+# The state-prior threshold splits Tier-1 similarity space into three bands:
+# at/above the threshold is ACCEPT territory; the MIDDLE band — within
+# clarify_margin below the threshold — is where Task 4's deterministic
+# clarify question fires; further below, the classification stands (REJECT
+# band: act on it, write the implicit label as wired in B1). Pure — callers
+# pass lily_config.tier1_clarify_margin() for the env-tunable margin.
+# ---------------------------------------------------------------------------
+
+BAND_ACCEPT = "accept"
+BAND_CLARIFY = "clarify"
+BAND_REJECT = "reject"
+
+
+def lily_tier1_band(
+    similarity: float,
+    threshold: float,
+    clarify_margin: float,
+) -> str:
+    """Which band a Tier-1 similarity lands in under the active
+    state-prior threshold: BAND_ACCEPT (>= threshold), BAND_CLARIFY
+    (the ambiguous middle: [threshold - clarify_margin, threshold)),
+    or BAND_REJECT (below the middle band)."""
+    if similarity >= threshold:
+        return BAND_ACCEPT
+    if similarity >= threshold - clarify_margin:
+        return BAND_CLARIFY
+    return BAND_REJECT
 
 
 # ---------------------------------------------------------------------------
@@ -315,9 +366,16 @@ def lily_tier1_evaluate_mc(
     transcript_text: str,
     choices: list[str],
     canonical_answer: str,
+    threshold: Optional[float] = None,
 ) -> dict:
     """
     Tier-1 evaluation of one attempt against a four-choice question.
+
+    threshold (WO-ADDRESSEE-H1 Task 2) gates the OPTION-TEXT resolvers
+    (they run the freeform matcher per choice); explicit letter /
+    positional picks ("B", "the second one") are deterministic
+    full-utterance parses and resolve regardless — a bare letter is a
+    committed selection even under a raised prior.
 
     Returns:
       {
@@ -343,7 +401,9 @@ def lily_tier1_evaluate_mc(
     fuzzy_sim = 0.0
     if choices:
         for i, choice in enumerate(choices):
-            r = lily_tier1_evaluate(transcript_text, [str(choice)])
+            r = lily_tier1_evaluate(
+                transcript_text, [str(choice)], threshold=threshold
+            )
             if r["method"] in ("exact", "containment"):
                 selected, method, similarity = i, "choice_text", r["similarity"]
                 break
@@ -403,18 +463,27 @@ def lily_tier1_evaluate_mc(
     }
 
 
-def lily_tier1_evaluate_question(transcript_text: str, question: dict) -> dict:
+def lily_tier1_evaluate_question(
+    transcript_text: str,
+    question: dict,
+    threshold: Optional[float] = None,
+) -> dict:
     """Format dispatch: a question carrying four choices runs the MC
     matcher; anything else runs the freeform matcher against
     acceptable_answers. Pure — the single Tier-1 entry point for the
-    agent's adjudication paths."""
+    agent's adjudication paths. threshold is the optional state-prior
+    acceptance threshold (WO-ADDRESSEE-H1 Task 2); None keeps the pre-H1
+    behavior exactly."""
     q = question or {}
     choices = q.get("choices")
     if isinstance(choices, list) and len(choices) == 4:
         return lily_tier1_evaluate_mc(
-            transcript_text, choices, str(q.get("canonical_answer", ""))
+            transcript_text, choices, str(q.get("canonical_answer", "")),
+            threshold=threshold,
         )
-    return lily_tier1_evaluate(transcript_text, q.get("acceptable_answers") or [])
+    return lily_tier1_evaluate(
+        transcript_text, q.get("acceptable_answers") or [], threshold=threshold
+    )
 
 
 def lily_fifty_fifty_eliminations(

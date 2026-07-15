@@ -232,6 +232,81 @@ def memory_min_questions() -> int:
     return max(0, _get_int("LILY_MEMORY_MIN_QUESTIONS", 3))
 
 
+# ---------------------------------------------------------------------------
+# State-prior Tier-1 thresholds (WO-LILY-ADDRESSEE-H1-001 Task 2)
+# ---------------------------------------------------------------------------
+# The scorekeeper's prior state (lily_scorekeeper.PRIOR_*) picks the Tier-1
+# acceptance threshold. Semantics: a similarity-based Tier-1 match accepts
+# only at or above the active threshold; any value ABOVE 1.0 disables Tier-1
+# auto-accept entirely for that state (even exact/containment hits — max
+# similarity is 1.0 — escalate to the Tier-2 judge). Defaults are deliberate:
+# OPEN_WINDOW lowers the bar below the 0.88 baseline (favor recall right
+# after the ask); OVERLAP / HOST_SPEAKING / SCORING sit above 1.0 (crosstalk
+# is a deliberation prior, backchannels during host speech / adjudication
+# are not scoreable — nothing auto-accepts, the judge or the clarify
+# question decides).
+
+# Mirrors lily_evaluation.FUZZY_CORRECT_THRESHOLD (the no-prior baseline).
+TIER1_BASELINE_THRESHOLD = 0.88
+
+
+def tier1_threshold_open_window() -> float:
+    """OPEN_WINDOW: question just asked, floor is clean — LOWERED bar."""
+    return _get_float("LILY_TIER1_THRESHOLD_OPEN_WINDOW", 0.84)
+
+
+def tier1_threshold_overlap() -> float:
+    """OVERLAP: >=2 speakers overlapping inside the window — RAISED sharply.
+    Default > 1.0 = no Tier-1 auto-accept at all (everything escalates)."""
+    return _get_float("LILY_TIER1_THRESHOLD_OVERLAP", 1.01)
+
+
+def tier1_threshold_host_speaking() -> float:
+    """HOST_SPEAKING: Lily is on air — backchannels expected, biased
+    against acceptance."""
+    return _get_float("LILY_TIER1_THRESHOLD_HOST_SPEAKING", 1.01)
+
+
+def tier1_threshold_scoring() -> float:
+    """SCORING: adjudication in flight — nothing new is scoreable."""
+    return _get_float("LILY_TIER1_THRESHOLD_SCORING", 1.01)
+
+
+def tier1_threshold_idle() -> float:
+    """IDLE (window closed, nothing special): the pre-H1 baseline."""
+    return _get_float("LILY_TIER1_THRESHOLD_IDLE", TIER1_BASELINE_THRESHOLD)
+
+
+def tier1_threshold_for_prior(state: Optional[str]) -> float:
+    """Threshold for a scorekeeper prior state. Unknown/None states fall
+    back to the IDLE baseline (never fail, never loosen by accident).
+    Keys are the lily_scorekeeper.PRIOR_* string values — spelled literally
+    here because lily_scorekeeper imports this module."""
+    return {
+        "OPEN_WINDOW": tier1_threshold_open_window(),
+        "OVERLAP": tier1_threshold_overlap(),
+        "HOST_SPEAKING": tier1_threshold_host_speaking(),
+        "SCORING": tier1_threshold_scoring(),
+    }.get(state or "", tier1_threshold_idle())
+
+
+def overlap_epsilon_seconds() -> float:
+    """Conservative overlap gate: two different speakers' segment spans
+    must overlap by MORE than this many seconds inside the open window to
+    flip OVERLAP. Pure timestamp arithmetic — zero new models. Note the
+    strict inequality: degenerate zero-length spans (no per-segment word
+    timings from the STT event) can never flip it, even at epsilon 0."""
+    return _get_float("LILY_OVERLAP_EPSILON_SECONDS", 0.3)
+
+
+def tier1_clarify_margin() -> float:
+    """Width of the ambiguous MIDDLE BAND below the active Tier-1
+    threshold (Task 4 consumes this): similarity in
+    [threshold - margin, threshold) is clarify territory; below it, the
+    classification stands. See lily_evaluation.lily_tier1_band."""
+    return _get_float("LILY_TIER1_CLARIFY_MARGIN", 0.15)
+
+
 # SFX assets — optional file paths; hooks are wired but silent when unset.
 def thinking_bed_path() -> Optional[str]:
     """60 BPM ticking thinking-bed played during answer windows."""
