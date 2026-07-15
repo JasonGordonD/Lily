@@ -479,9 +479,11 @@ async def lily_fetch_bank_question(
                 supabase.table("lily_questions")
                 .select("*")
                 .eq("status", "active")
+                # Adult mode serves the adult deck only; general mode hard
+                # excludes it. Deck exhaustion falls through to mode-aware
+                # generation, never across the consent boundary.
+                .eq("adult", mode == "adult")
             )
-            if mode != "adult":
-                query = query.eq("adult", False)
             if stage_category is not None:
                 query = query.eq("category", stage_category)
             if stage_tier is not None:

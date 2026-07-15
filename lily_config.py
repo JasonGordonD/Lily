@@ -315,9 +315,19 @@ def stt_max_alternatives() -> int:
     """Alternatives count injected into the Speechmatics StartRecognition
     transcription_config (per-word alternatives; there is no per-utterance
     n-best at plugin 1.6.4 — see lily_nbest.py). 1 disables the injection
-    patch entirely (clean 1-best kill switch if the server ever rejects
-    the field). Bounded to the lily_nbest synthesis ceiling."""
-    return max(1, min(_get_int("LILY_STT_MAX_ALTERNATIVES", 3), 8))
+    patch entirely. Bounded to the lily_nbest synthesis ceiling.
+
+    DEFAULT IS 1 (OFF) — LIVE INCIDENT 2026-07-14 23:31 (session
+    lily-B0CB8B-13a65381): the Speechmatics VOICE endpoint schema REJECTS
+    the field at the protocol level ("Additional property
+    max_alternatives is not allowed" -> websocket 1003 -> AgentSession
+    unrecoverable close, ~8s into every session). The injection was
+    defensive against plugin-shape drift but the rejection happens
+    SERVER-side after the handshake, where no client-side fallback can
+    catch it. Do not raise this above 1 until the injected config has
+    been validated against the live voice-endpoint schema; the whole
+    n-best pipeline no-ops cleanly at 1 (single-hypothesis sets)."""
+    return max(1, min(_get_int("LILY_STT_MAX_ALTERNATIVES", 1), 8))
 
 
 def nbest_dispersion_threshold() -> float:

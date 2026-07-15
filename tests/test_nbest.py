@@ -442,7 +442,9 @@ def test_judge_prompt_unchanged_without_hypotheses():
 def test_config_defaults(monkeypatch):
     monkeypatch.delenv("LILY_STT_MAX_ALTERNATIVES", raising=False)
     monkeypatch.delenv("LILY_NBEST_DISPERSION_THRESHOLD", raising=False)
-    assert lily_config.stt_max_alternatives() == 3
+    # Default OFF (live 2026-07-14 23:31: the voice-endpoint schema
+    # rejects the injected field and kills the session at the websocket).
+    assert lily_config.stt_max_alternatives() == 1
     assert lily_config.nbest_dispersion_threshold() == 0.02
 
 

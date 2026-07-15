@@ -101,12 +101,14 @@ def lily_normalize_answer(text: str) -> str:
     return " ".join(words)
 
 
-# Answer-window opening tiers: >= VERBATIM opens as a faithful ask,
-# >= PARAPHRASE opens as a reworded ask; below that the agent's
-# any-agent-speech fallback (lily_agent.WINDOW_FALLBACK_AGENT_TURNS)
-# guarantees the window still opens. MIN_HITS guards the loosened
-# thresholds: one bare incidental word overlap on a long prompt must not
-# open the window.
+# Spoken/prompt overlap ratio — TELEMETRY ONLY since the desync WO
+# (WO-LILY-DESYNC-HONESTY-001 Sub-agent B). The tiers below used to open
+# the answer window; live evidence (ratios 0.00–0.15 on questions the
+# table demonstrably heard, and fallback windows opened against turns
+# that carried no question at all) demoted the matcher: delivery
+# registration is STRUCTURAL (the q_{N}_delivery claim), and the ratio
+# is logged as `LILY_WINDOW | RATIO | … telemetry` and acted on by
+# nothing. The constants stay for log continuity and analysis.
 QUESTION_SPOKEN_VERBATIM_RATIO = 0.6
 QUESTION_SPOKEN_PARAPHRASE_RATIO = 0.3
 QUESTION_SPOKEN_MIN_HITS = 2
@@ -120,10 +122,10 @@ def lily_question_spoken_ratio(
     """How much of the armed question did this agent turn actually perform?
     Fraction of the prompt's distinctive tokens (len > 3) present in the
     spoken text, 0.0..1.0 — but 0.0 when fewer than `min_hits` tokens
-    matched (single incidental hits never count as evidence). Pure — used
-    by the answer-window opener with tiered thresholds (verbatim /
-    paraphrase / any-speech fallback) so a paraphrased question can never
-    leave the window shut forever."""
+    matched (single incidental hits never count as evidence). Pure —
+    TELEMETRY ONLY (desync WO Sub-agent B): logged per outbound turn while
+    a question is armed, never used to open the window or register
+    delivery."""
     if not question_prompt or not spoken_text:
         return 0.0
     strip = lambda s: re.sub(r"[^a-z0-9\s]", " ", s.lower())
@@ -135,6 +137,60 @@ def lily_question_spoken_ratio(
     if hits < min(min_hits, len(q_tokens)):
         return 0.0
     return hits / len(q_tokens)
+
+
+# Structural delivery detection (desync WO Sub-agent B): the organic-turn
+# claim mechanism. A turn PRESENTS the armed question when it contains the
+# question's core answer-bearing sentence as written — flourish before and
+# after, never inside (the prompt states that contract; this detects
+# compliance). Used ONLY to decide the q_{N}_delivery CLAIM for organic
+# LLM turns; every downstream action (window open, delivered marking) keys
+# off the claim event, never off text similarity.
+
+# Bracketed audio tags ([excited], [pause], …) and SSML-ish <break/> tags
+# are TTS controls, not words — stripped before containment so a tag
+# before/after the sentence can never break the match. (A tag INSIDE the
+# core sentence breaks containment by design: the contract is the sentence
+# lands whole.)
+_TTS_TAG_RE = re.compile(r"\[[^\]]*\]|<[^>]*>")
+
+
+def _presentation_normalize(text: str) -> str:
+    """Lowercase, tag-strip, punctuation-strip, whitespace-collapse — the
+    canonical form for core-sentence containment."""
+    t = _TTS_TAG_RE.sub(" ", text or "")
+    t = re.sub(r"[^a-z0-9\s]", " ", t.lower())
+    return " ".join(t.split())
+
+
+def lily_question_core_sentence(question_prompt: str) -> str:
+    """The armed question's core answer-bearing sentence: the LAST sentence
+    of the prompt (house style puts the thing being asked for at the very
+    end, so everyone knows the moment to jump in). Single-sentence prompts
+    return whole. Pure."""
+    prompt = (question_prompt or "").strip()
+    if not prompt:
+        return ""
+    sentences = [
+        s.strip() for s in re.split(r"(?<=[.?!])\s+", prompt) if s.strip()
+    ]
+    return sentences[-1] if sentences else prompt
+
+
+def lily_turn_presents_question(
+    question_prompt: str, spoken_text: str
+) -> bool:
+    """Does this outbound agent turn PERFORM the armed question — its core
+    sentence as written, contiguously, with any flourish outside it?
+    Word-boundary containment on normalized text. Pure; decides the
+    organic q_{N}_delivery claim in tts_node and nothing else."""
+    core = _presentation_normalize(
+        lily_question_core_sentence(question_prompt)
+    )
+    spoken = _presentation_normalize(spoken_text)
+    if not core or not spoken:
+        return False
+    return f" {core} " in f" {spoken} "
 
 
 def _soundex(word: str) -> str:

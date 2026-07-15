@@ -128,11 +128,15 @@ _SENTINEL_ENVELOPE_RE = re.compile(
 # Bracketed metadata line markers — the injected-context headers that must
 # never be spoken. Matched case-insensitively anywhere in a line; a line
 # containing one is dropped whole (it is metadata, not speech).
+# "[state note:" is the honesty assist (WO-LILY-DESYNC-HONESTY-001
+# Sub-agent C): the grounded truth injected when a player calls out a
+# state desync — context for her acknowledgment, never words on the air.
 LEAK_LINE_MARKERS = (
     "[GAME STATE]",
     "[room read:",
     "[env:",
     "[RETURNING TABLE]",
+    "[state note:",
 )
 
 
