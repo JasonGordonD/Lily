@@ -290,6 +290,46 @@ def tier1_threshold_for_prior(state: Optional[str]) -> float:
     }.get(state or "", tier1_threshold_idle())
 
 
+def addressee_fusion_diarization_weight() -> float:
+    """Speechmatics diarization contribution to fused addressee confidence."""
+    return max(0.0, _get_float("LILY_ADDRESSEE_FUSION_DIARIZATION_WEIGHT", 0.75))
+
+
+def addressee_fusion_acoustic_weight() -> float:
+    """Acoustic (room-read + child ladder) contribution to fused confidence."""
+    return max(0.0, _get_float("LILY_ADDRESSEE_FUSION_ACOUSTIC_WEIGHT", 0.25))
+
+
+def addressee_confidence_neutral() -> float:
+    """Confidence level where no threshold penalty is applied."""
+    return max(0.05, min(_get_float("LILY_ADDRESSEE_CONFIDENCE_NEUTRAL", 0.65), 1.0))
+
+
+def addressee_confidence_penalty_max() -> float:
+    """Maximum additive threshold penalty at very low confidence."""
+    return max(0.0, _get_float("LILY_ADDRESSEE_CONFIDENCE_PENALTY_MAX", 0.10))
+
+
+def tier1_addressee_penalty(addressee_confidence: Optional[float]) -> float:
+    """Additive Tier-1 penalty from fused addressee confidence.
+
+    The score-prior machine remains intact; this simply adds a confidence
+    penalty on top of whichever PRIOR_* base threshold is active.
+    """
+    if addressee_confidence is None:
+        return 0.0
+    try:
+        conf = float(addressee_confidence)
+    except (TypeError, ValueError):
+        return 0.0
+    conf = max(0.0, min(conf, 1.0))
+    neutral = addressee_confidence_neutral()
+    if conf >= neutral:
+        return 0.0
+    span = max(neutral, 1e-6)
+    return ((neutral - conf) / span) * addressee_confidence_penalty_max()
+
+
 def overlap_epsilon_seconds() -> float:
     """Conservative overlap gate: two different speakers' segment spans
     must overlap by MORE than this many seconds inside the open window to

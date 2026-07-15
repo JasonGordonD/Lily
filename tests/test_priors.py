@@ -389,6 +389,34 @@ def test_tier1_band_under_overlap_everything_below_accept():
     assert lily_tier1_band(0.5, thr, margin) == BAND_REJECT
 
 
+def test_addressee_confidence_adds_penalty_to_active_prior_threshold():
+    sk = make_sk()
+    sk.open_answer_window(now=100.0)
+    sk.on_transcript_segment(
+        text="Canberra",
+        speaker_label="S1",
+        is_final=True,
+        now=101.0,
+        segment_start_time=101.0,
+        addressee_confidence=0.2,
+    )
+    assert sk.tier1_threshold(now=101.0) > lily_config.tier1_threshold_open_window()
+
+
+def test_high_addressee_confidence_keeps_open_window_baseline():
+    sk = make_sk()
+    sk.open_answer_window(now=100.0)
+    sk.on_transcript_segment(
+        text="Canberra",
+        speaker_label="S1",
+        is_final=True,
+        now=101.0,
+        segment_start_time=101.0,
+        addressee_confidence=0.95,
+    )
+    assert sk.tier1_threshold(now=101.0) == lily_config.tier1_threshold_open_window()
+
+
 # ---------------------------------------------------------------------------
 # (5) Env knobs through lily_config — correct defaults, env-tunable.
 # ---------------------------------------------------------------------------

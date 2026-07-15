@@ -142,6 +142,37 @@ def _current_speech_id() -> str | None:
         return None
 
 
+def _segment_addressee_confidence(
+    game: "LilyGame",
+    *,
+    event=None,
+    attribution: str | None = None,
+    speaker_label: str | None = None,
+) -> float | None:
+    """Fused confidence: Speechmatics diarization + acoustic read."""
+    diar = lily_addressee.lily_extract_diarization_confidence(event)
+    if diar is None:
+        diar = lily_addressee.lily_fallback_diarization_confidence(
+            attribution, speaker_label
+        )
+    acoustic_inputs = {}
+    try:
+        acoustic_inputs = game.acoustic.addressee_fusion_inputs()
+    except Exception:
+        acoustic_inputs = {}
+    acoustic = lily_addressee.lily_acoustic_addressee_confidence(
+        acoustic_inputs.get("room_read"),
+        bool(acoustic_inputs.get("child_veto_active")),
+        breaker_open=bool(acoustic_inputs.get("breaker_open")),
+    )
+    return lily_addressee.lily_fuse_addressee_confidence(
+        diar,
+        acoustic,
+        diarization_weight=lily_config.addressee_fusion_diarization_weight(),
+        acoustic_weight=lily_config.addressee_fusion_acoustic_weight(),
+    )
+
+
 # Answer-window opening (persistence-audit root-cause fix): the old hard
 # >=60% token-overlap gate meant a paraphrased question NEVER opened the
 # window and the whole deterministic pipeline stalled. Overlap is now a
@@ -2237,11 +2268,21 @@ class LilyGame:
             # auto-accept, so crosstalk candidates escalate instead of
             # instantly scoring.
             prior_now = self.sk.prior_state(now=ts)
-            tier1_threshold = lily_config.tier1_threshold_for_prior(prior_now)
+            seg_addressee_conf = result.get("addressee_confidence")
+            tier1_threshold = self.sk.tier1_threshold(
+                now=ts,
+                addressee_confidence=seg_addressee_conf,
+            )
             logger.info(
-                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s | "
+                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s "
+                "addressee_conf=%s | "
                 "session=%s q=%d source=instant_tier1",
                 prior_now, tier1_threshold, self.sk.overlap_flag,
+                (
+                    f"{seg_addressee_conf:.3f}"
+                    if isinstance(seg_addressee_conf, (int, float))
+                    else "None"
+                ),
                 self.sk.session_id, self.sk.question_number,
             )
             if ordered and acceptable:
@@ -2392,13 +2433,21 @@ class LilyGame:
             # OPEN_WINDOW) — never under the SCORING state this evaluation
             # itself runs in. overlap_flag persists across the close above.
             window_prior = self.sk.window_prior_state()
-            tier1_threshold = lily_config.tier1_threshold_for_prior(
-                window_prior
+            window_addressee_conf = self.sk.window_addressee_confidence()
+            tier1_threshold = self.sk.tier1_threshold_for_state(
+                window_prior,
+                addressee_confidence=window_addressee_conf,
             )
             logger.info(
-                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s | "
+                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s "
+                "addressee_conf=%s | "
                 "session=%s q=%d source=adjudicate",
                 window_prior, tier1_threshold, self.sk.overlap_flag,
+                (
+                    f"{window_addressee_conf:.3f}"
+                    if isinstance(window_addressee_conf, (int, float))
+                    else "None"
+                ),
                 self.sk.session_id, self.sk.question_number,
             )
 
@@ -2427,7 +2476,7 @@ class LilyGame:
             attempts_timeline = sorted(
                 (
                     (attempt.get("segment_start_time", cand["segment_start_time"]),
-                     cand, attempt["text"])
+                     cand, attempt["text"], attempt)
                     for cand in ordered
                     for attempt in (
                         cand.get("attempts")
@@ -2437,7 +2486,22 @@ class LilyGame:
                 ),
                 key=lambda entry: entry[0],
             )
-            for _, cand, attempt_text in attempts_timeline:
+            for _, cand, attempt_text, attempt in attempts_timeline:
+                attempt_conf = (
+                    attempt.get("addressee_confidence")
+                    if isinstance(attempt, dict)
+                    else None
+                )
+                if attempt_conf is None:
+                    attempt_conf = cand.get("addressee_confidence")
+                attempt_threshold = self.sk.tier1_threshold_for_state(
+                    window_prior,
+                    addressee_confidence=(
+                        attempt_conf
+                        if attempt_conf is not None
+                        else window_addressee_conf
+                    ),
+                )
                 # Format dispatch (multiple-choice WO): MC questions match
                 # letters / positions / option text and may return a
                 # DEFINITIVE "incorrect" (clean wrong pick — no Tier-2);
@@ -2449,7 +2513,7 @@ class LilyGame:
                 t1 = self._tier1_question(
                     attempt_text, question,
                     key=cand["player"] or f"unrostered:{cand['speaker_label']}",
-                    threshold=tier1_threshold,
+                    threshold=attempt_threshold,
                 )
                 if t1["verdict"] == "correct":
                     cand["_tier1"] = t1
@@ -4900,11 +4964,15 @@ async def entrypoint(ctx: JobContext) -> None:
             if game.nbest_collector is not None
             else None
         )
+        fused_conf = _segment_addressee_confidence(
+            game, event=ev, speaker_label=speaker_label
+        )
         result = scorekeeper.on_transcript_segment(
             text=text,
             speaker_label=speaker_label,
             is_final=True,
             segment_start_time=seg_ts,
+            addressee_confidence=fused_conf,
         )
         player = result.get("player")
         transcripts.add(

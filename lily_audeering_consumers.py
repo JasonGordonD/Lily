@@ -570,6 +570,25 @@ class LilyAcousticState:
                 return None
             return dict(self._latest_snapshot)
 
+    def addressee_fusion_inputs(self) -> dict[str, Any]:
+        """Current acoustic inputs for addressee-confidence fusion."""
+        with self._lock:
+            room_read = None
+            if isinstance(self._room_line, str):
+                raw = self._room_line.strip()
+                if raw.startswith("[room read:") and raw.endswith("]"):
+                    room_read = raw[len("[room read:") : -1].strip()
+            return {
+                "room_read": room_read,
+                "child_veto_active": child_veto_active(self.baseline),
+                "breaker_open": bool(self._breaker_open),
+                "captured_at": (
+                    (self._latest_snapshot or {}).get("captured_at")
+                    if isinstance(self._latest_snapshot, dict)
+                    else None
+                ),
+            }
+
 
 def _snapshot_from_parsed(parsed: dict[str, Any]) -> dict[str, Any]:
     """Persistence snapshot (drt_acoustic_trajectories clone shape):
