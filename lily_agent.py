@@ -2291,19 +2291,31 @@ class LilyGame:
             }
             self._pending_reveal_event = reveal_payload
             self._set_ui_phase("reveal")
-            await self.publish_metadata(
-                question.get("prompt", ""),
-                reveal={
-                    "answer": str(question.get("canonical_answer", "")),
-                    "winner": winner,
-                    "correct": winner_candidate is not None,
-                },
-                choices=question.get("choices"),
-                eliminated=self.eliminated,
-                image_url=question.get("image_url"),
-                category=question.get("category"),
+            # Score truth (desync WO Sub-agent E): the committed scores go
+            # out in the SAME tick as the verdict. The attribute publish
+            # (players/scores) is dispatched alongside the reveal metadata
+            # — never queued behind its network round-trip (the old
+            # sequential awaits held the scoreboard hostage to the
+            # metadata call while Lily called the point "safe and sound"
+            # over a screen still showing zero). Everything from here to
+            # the reveal gated_say below is synchronous for a non-final
+            # question, so the publish dispatch, the score commit above,
+            # and the verdict speech dispatch share one tick.
+            await asyncio.gather(
+                self.publish_metadata(
+                    question.get("prompt", ""),
+                    reveal={
+                        "answer": str(question.get("canonical_answer", "")),
+                        "winner": winner,
+                        "correct": winner_candidate is not None,
+                    },
+                    choices=question.get("choices"),
+                    eliminated=self.eliminated,
+                    image_url=question.get("image_url"),
+                    category=question.get("category"),
+                ),
+                self.publish_attributes(),
             )
-            await self.publish_attributes()
             if self.supabase is not None:
                 asyncio.ensure_future(
                     lily_persistence.lily_checkpoint(self.supabase, self.sk)

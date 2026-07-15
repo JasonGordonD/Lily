@@ -297,6 +297,28 @@ never-validate-uncommitted-numbers instruction when it doesn't. The note
 is one-shot (consumed when her acknowledging turn finishes playing) and
 is context only — the leak filter above keeps it off the air.
 
+### Score truth (WO-LILY-DESYNC-HONESTY-001 E)
+
+Scores commit at adjudication, BEFORE Lily narrates (unchanged), and the
+committed truth goes out **in the same tick as the verdict**: `adjudicate`
+dispatches the attribute publish (players/scores) and the reveal metadata
+together (`asyncio.gather`) — the scoreboard is never queued behind the
+metadata network round-trip, and everything between that dispatch and the
+reveal `gated_say` is synchronous for a non-final question, so score
+commit, publish dispatch, and verdict-speech dispatch share one tick
+(live 01:37:54: the screen showed zero while she called the point "safe
+and sound"). Sub-agent B's structural claims make committing at
+adjudication safe — delivery, answer, and verdict share one
+question-number identity chain. Frontend half (prmpt_ui
+`lily-surface.tsx`): if the `players` attribute is still stale 2s after a
+spoken correct verdict (the `reveal` beat fires at TTS playback), the
+winner's chip count-rolls optimistically to a display-only round-based
+estimate; committed attributes reconcile on arrival and always win — a
+timely backend never sees the overlay. Fixture:
+`tests/test_desync_fixture.py` (attributes published within the
+adjudication tick; non-zero on the board at the moment she says "on the
+board").
+
 ### Need-to-know ambient context
 
 The ambient state block **never** carries `canonical_answer`,

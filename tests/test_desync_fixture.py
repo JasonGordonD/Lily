@@ -102,6 +102,21 @@ def _make_game() -> LilyGame:
     game._user_turn_index = 0
     game.promoted_categories = []
 
+    # adjudicate-path attributes (Sub-agent E scenarios):
+    game.rounds_total = 3
+    game.asked_history = []
+    game.group_id = "grp_desync"
+    game.prewager_standings = None
+    game.highlights = []
+    game.reasoning = None  # Tier-1 decides; Tier-2 never reached here
+    game._prefetch_task = None
+    game._watchdog_task = None
+    game._prefetch_stall_ticks = 0
+    game._judged_keys = set()
+    game._spec_judge = {}
+    game._addressee_rows = {}
+    game._forget_target_group = None
+
     game.metadata_publishes: list[str] = []
     game.attribute_publishes: list[bool] = []
 
@@ -638,3 +653,138 @@ def test_ordinary_audio_tags_still_pass_the_extended_filter():
     filtered, reasons = lily_say_gate.lily_filter_leaks(text)
     assert reasons == []
     assert filtered == text
+
+
+# ==============================================================================
+# Sub-agent E — score truth: commit at adjudication, screen never contradicted
+# ==============================================================================
+#
+# 01:37:54 replay: "my score is not updating, it's still showing zero" —
+# points committed only on the "official re-run" while Lily called the
+# point "safe and sound". Post-B the identity chain (delivery/answer/
+# verdict) makes committing at adjudication safe; pinned here: the score
+# commits and its attribute publish DISPATCHES in the same tick as the
+# verdict, is never queued behind the metadata round-trip, and the board
+# is non-zero at the moment she says "on the board".
+
+FEMUR_QUESTION = {
+    "id": "q_1001",
+    "prompt": "Often measuring the longest in adults, what is the longest "
+              "human bone?",
+    "canonical_answer": "the femur",
+    "acceptable_answers": ["femur", "the femur", "thigh bone"],
+    "category": "academic",
+    "difficulty_tier": 1,
+}
+
+
+def _arm_question(game: LilyGame, question: dict) -> None:
+    game.armed_question = dict(question)
+    game.sk.start_question(game.armed_question)
+    game.sk.round = 1
+    game.sk.set_phase("round")
+
+
+def test_013754_replay_score_published_before_the_verdict_speaks():
+    game = _make_game()
+    timeline: list = []
+
+    def _speak(instructions: str) -> None:
+        timeline.append(("reveal_speech", instructions))
+        game.session.instructions.append(instructions)
+
+    game.session.generate_reply = _speak
+
+    async def slow_metadata(question_text, **kwargs):
+        timeline.append(("meta_start", question_text or ""))
+        await asyncio.sleep(0.05)  # the network round-trip
+        timeline.append(("meta_end", question_text or ""))
+
+    async def attrs_publish():
+        timeline.append(
+            ("attrs", {n: s["score"] for n, s in game.sk.players.items()})
+        )
+
+    game.publish_metadata = slow_metadata
+    game.publish_attributes = attrs_publish
+    game.arm_next_question = lambda: False
+    game.start_prefetch = lambda: None
+
+    game.sk.bind_speaker("S1", "Rami")
+    _arm_question(game, FEMUR_QUESTION)
+    now = 1000.0
+    game.sk.open_answer_window(duration=30.0, now=now)
+    game.sk.on_transcript_segment(
+        text="The femur.", speaker_label="S1", is_final=True,
+        now=now + 3, segment_start_time=now + 3,
+    )
+
+    async def scenario():
+        await game.adjudicate(steal_allowed=True)
+        await _drain()
+
+    _run(scenario(), game)
+
+    # Commit happened:
+    assert game.sk.players["Rami"]["score"] > 0
+
+    kinds = [entry[0] for entry in timeline]
+    assert "reveal_speech" in kinds and "attrs" in kinds and "meta_end" in kinds
+    # (a) The attribute publish is NEVER queued behind the metadata
+    # round-trip: every attrs publish lands before the metadata call
+    # completes (they were dispatched together, in the verdict tick).
+    last_attrs = max(i for i, k in enumerate(kinds) if k == "attrs")
+    meta_end = kinds.index("meta_end")
+    assert last_attrs < meta_end, timeline
+    # (b) The board is non-zero at the moment she says "on the board":
+    # an attrs publish carrying Rami's committed point precedes the
+    # verdict speech dispatch.
+    speech_at = kinds.index("reveal_speech")
+    committed_published = [
+        i for i, entry in enumerate(timeline)
+        if entry[0] == "attrs" and entry[1].get("Rami", 0) > 0
+    ]
+    assert committed_published and committed_published[0] < speech_at, timeline
+    # (c) The reveal itself is the gated q_1_reveal act:
+    assert game.say_registry.state("q_1_reveal") is not None
+
+
+def test_adjudication_publishes_reveal_and_attributes_concurrently():
+    # The gather contract: both publishes START before either completes —
+    # the score truth never waits a full metadata round-trip.
+    game = _make_game()
+    timeline: list = []
+
+    async def slow_metadata(question_text, **kwargs):
+        timeline.append("meta_start")
+        await asyncio.sleep(0.05)
+        timeline.append("meta_end")
+
+    async def slow_attrs():
+        timeline.append("attrs_start")
+        await asyncio.sleep(0.01)
+        timeline.append("attrs_end")
+
+    game.publish_metadata = slow_metadata
+    game.publish_attributes = slow_attrs
+    game.arm_next_question = lambda: False
+    game.start_prefetch = lambda: None
+
+    game.sk.bind_speaker("S1", "Rami")
+    _arm_question(game, FEMUR_QUESTION)
+    now = 2000.0
+    game.sk.open_answer_window(duration=30.0, now=now)
+    game.sk.on_transcript_segment(
+        text="femur", speaker_label="S1", is_final=True,
+        now=now + 2, segment_start_time=now + 2,
+    )
+
+    _run(_adjudicate_and_drain(game), game)
+
+    assert timeline.index("attrs_start") < timeline.index("meta_end")
+    assert timeline.index("attrs_end") < timeline.index("meta_end")
+
+
+async def _adjudicate_and_drain(game: LilyGame):
+    await game.adjudicate(steal_allowed=True)
+    await _drain()
