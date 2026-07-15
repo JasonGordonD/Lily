@@ -366,6 +366,129 @@ def lily_detect_media_choice(text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Published-state honesty assist (WO-LILY-DESYNC-HONESTY-001 Sub-agent C)
+#
+# Live evidence, twice: at 01:37 a player said "my score is not updating,
+# it's still showing zero" and Lily invented mechanisms ("the digital
+# board takes a second to refresh once I submit to the database" — false,
+# nothing had committed); at 23:04 she narrated "you should actually have
+# three points" — ungrounded validation of a player's complaint. The
+# assist is deterministic: when a player's utterance makes a checkable
+# claim about their published score, the agent layer injects ONE
+# grounded [state note: …] line built from the score the scorekeeper
+# actually committed — her acknowledgment is grounded, never guessed.
+# The note is context, never speech (the say-gate leak filter strips it
+# if echoed). Detection is conservative: it requires a score/board
+# anchor word plus either a concrete value claim or a stuck/desync
+# phrase, so table talk never fires it.
+# ---------------------------------------------------------------------------
+
+_STATE_ANCHOR_RE = _re.compile(
+    r"\b(?:scores?|points?|board|scoreboard|screen)\b"
+)
+
+_SCORE_NUMBER_WORDS = {
+    "zero": 0, "nothing": 0, "none": 0, "one": 1, "two": 2, "three": 3,
+    "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10,
+}
+_SCORE_NUMBER_PATTERN = (
+    r"(zero|nothing|none|one|two|three|four|five|six|seven|eight|nine|"
+    r"ten|\d+)"
+)
+
+# A concrete value claim about the player's own score / the board:
+# "still showing zero", "it says two", "stuck at zero", "i have one
+# point", "i should have three points", "my score is zero".
+_SCORE_VALUE_CLAIM_RE = _re.compile(
+    r"\b(?:"
+    r"(?:still\s+)?(?:showing|shows|says|reads|reading|displaying)"
+    r"|stuck\s+(?:at|on)"
+    r"|still\s+(?:at|on)"
+    r"|(?:i|we)\s+(?:only\s+)?(?:have|has|got)"
+    r"|should\s+(?:actually\s+)?(?:have|be\s+at|show|say)"
+    r"|score\s+is(?:\s+still)?"
+    r"|it\s+s\s+still"
+    r")\s+(?:a\s+|an\s+|like\s+)?" + _SCORE_NUMBER_PATTERN +
+    r"(?:\s+points?)?\b"
+)
+
+# A stuck/desync callout with no concrete value: "my score is not
+# updating", "the board isn't moving", "the scoreboard is behind/frozen/
+# wrong", "it never updated".
+_SCORE_STUCK_RE = _re.compile(
+    r"\b(?:"
+    r"(?:not|isn\s?t|hasn\s?t|didn\s?t|don\s?t|doesn\s?t|never|won\s?t|"
+    r"stopped)\s+(?:been\s+)?(?:updat\w*|mov\w*|chang\w*|count\w*|"
+    r"register\w*|show\w*)"
+    r"|(?:behind|frozen|stuck|wrong|stale|lagg\w*)\b"
+    r")"
+)
+
+
+def _extract_claimed_score(normalized: str) -> Optional[int]:
+    m = _SCORE_VALUE_CLAIM_RE.search(normalized)
+    if not m:
+        return None
+    token = m.group(1)
+    if token.isdigit():
+        return int(token)
+    return _SCORE_NUMBER_WORDS.get(token)
+
+
+def lily_detect_state_contradiction(
+    text: str,
+    player_name: Optional[str],
+    players: dict,
+) -> Optional[str]:
+    """Deterministic honesty assist: does this utterance make a checkable
+    claim about the player's published score? Returns the grounded note
+    body (the agent layer wraps it as `[state note: …]` and injects it
+    into the next turn's context), or None.
+
+    Grounding, off the score the scorekeeper committed and published:
+      - the claim MATCHES committed state -> "player is correct — …"
+        (the live class: she narrated a point that never committed; the
+        player and the board are right, she must not invent a refresh);
+      - the claim DIFFERS from committed state -> the committed number,
+        with an explicit instruction never to validate an uncommitted
+        one (the 23:04 "three points" class);
+      - a stuck/desync callout with no number -> the committed number,
+        so the acknowledgment is grounded either way.
+    Pure; requires a resolved rostered player."""
+    if not text or not player_name:
+        return None
+    state = players.get(player_name)
+    if state is None:
+        return None
+    normalized = _normalize_command_text(text)
+    if not normalized or not _STATE_ANCHOR_RE.search(normalized):
+        return None
+    committed = int(state.get("score", 0))
+    claimed = _extract_claimed_score(normalized)
+    if claimed is not None:
+        if claimed == committed:
+            return (
+                f"player is correct — {player_name}'s committed score is "
+                f"{committed}; nothing more has been committed. Acknowledge "
+                "honestly and re-sync; never invent a mechanism for the gap"
+            )
+        return (
+            f"player says {claimed} but {player_name}'s committed score is "
+            f"{committed} — that committed number is the only score truth; "
+            "speak to it and never validate a number the scorekeeper has "
+            "not committed"
+        )
+    if _SCORE_STUCK_RE.search(normalized):
+        return (
+            f"player flagged the board — {player_name}'s committed score "
+            f"is {committed}; that is the truth to speak to. Acknowledge "
+            "honestly and re-sync; never invent a mechanism for the gap"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Scorekeeper
 # ---------------------------------------------------------------------------
 

@@ -159,20 +159,42 @@ The pipeline now has four entry points, in order of preference:
    `lily_sessions.round=0` and `question_number=0` despite hours of
    audio and populated `final_standings`.
 
-The question-spoken gate (which decides "did Lily just perform the armed
-question, so open the answer window?") is now a tiered preference, not a
-hard gate (`lily_evaluation.lily_question_spoken_ratio`, logged as
-`LILY_WINDOW | OPEN | reason=... ratio=...`): ≥0.6 distinctive-token
-overlap opens as `verbatim`, ≥0.3 as `paraphrase` (both with a floor of
-two matched tokens so a single incidental word never opens it), and after
-2 finished agent turns with a question armed in phase `question` the
-window opens as `fallback_any_agent_speech` (warning-logged) — the
-pipeline can never again stall on Lily's phrasing. The old 60% hard gate
-blocked the window on her paraphrase habit and left the game running
-through `lily_award_bonus` only. The prompt now also requires her to
-perform the NEXT QUESTION word-for-word and never to invent questions
-mid-game (the old "generating questions" section is scoped to the
-broken-question-machine fallback only).
+**Delivery registration is STRUCTURAL** (WO-LILY-DESYNC-HONESTY-001
+Sub-agent B; supersedes the tiered ratio gate). "Did Lily just perform
+the armed question?" is answered by the `q_{N}_delivery` CLAIM, never by
+text similarity: the answer window opens (at the delivery TURN's playout
+completion, as always — `LILY_WINDOW | OPEN | reason=delivery_claim`)
+and the question marks delivered off that claim event. The claim fires
+in `tts_node` at speech dispatch on either trigger
+(`LilyGame.register_delivery_claim`):
+
+- **structural** — code dispatched this turn to deliver the armed
+  question (`expect_delivery()` arms a one-shot flag: the
+  `lily_begin_round` post-tool turn, both question nudges, the skip and
+  voice game-start follow-ups) — the turn claims regardless of phrasing;
+- **core sentence** — an organic turn performs the question's core
+  answer-bearing sentence as written
+  (`lily_evaluation.lily_turn_presents_question`: word-boundary
+  containment of the prompt's final sentence, TTS tags stripped —
+  flourish before and after, never inside; the prompt states that
+  contract as texture).
+
+The old text-ratio matcher (`lily_question_spoken_ratio`, verbatim ≥0.6 /
+paraphrase ≥0.3 tiers) is **telemetry only** — logged per playout as
+`LILY_WINDOW | RATIO | … telemetry` and acted on by nothing. Two live
+sessions (2026-07-15 01:33 and 22:54) proved it can never decide game
+state: conversationally woven questions the table demonstrably heard
+scored 0.00–0.15, so deliveries never registered, and the
+`fallback_any_agent_speech` opener then opened windows against turns
+carrying no question at all — the ghost game (engine at q=5 while Lily
+ran a different quiz by voice; "official re-runs" of already-answered
+questions). The fallback is gone: after `WINDOW_FALLBACK_AGENT_TURNS`
+finished agent turns with a question armed in phase `question` and no
+claim, ONE structural delivery nudge dispatches instead
+(`LILY_WINDOW | DELIVERY_NUDGE`) — the nudged turn claims at dispatch
+and the window opens on ITS playout. The pipeline never stalls, and a
+window can never again open on a question nobody was delivered. Fixture:
+`tests/test_desync_fixture.py`.
 
 With the pipeline engaged, `lily_answers` rows (one per adjudicated
 attempt, schema `(session_id, player_name, question_id, question_index,
@@ -226,12 +248,14 @@ category) and the post-tool turn is the SOLE deliverer — `start_game`
 dispatches no racing instructed reply for the `host_tool` source, and the
 prompt states the contract (tool-call turn: transition line only; the
 next turn asks the question exactly once; the reveal repeats the answer,
-never the question). Enforcement is physical: `tts_node` detects an
-outbound question performance with the same verbatim detector that opens
-the answer window (`lily_question_spoken_ratio ≥ 0.6`) and claims
-`q_{N}_delivery`; a failed claim means question N was already delivered,
-and the duplicate turn is replaced with silence (no retry — suppressed,
-not swallowed).
+never the question). Enforcement is physical, and since the desync WO it
+is structural: the tool arms `expect_delivery()`, the post-tool turn
+claims `q_{N}_delivery` in `tts_node` at dispatch (regardless of
+phrasing), and any later turn that textually re-performs a delivered
+question fails the claim and is replaced with silence (no retry —
+suppressed, not swallowed). Banter after a registered delivery is never
+suppressed — only textual re-asks are. See "Loop engagement" above for
+the full claim-trigger table (`LilyGame.register_delivery_claim`).
 
 ### Leak filter
 
@@ -240,9 +264,60 @@ sentinel envelope (`<lily_state>…</lily_state>`). `tts_node` runs
 `lily_filter_leaks` before the hygiene strip: whole envelopes, envelope
 fragments (chunk-boundary partials like `<lily_state`), and any line
 carrying a bracketed metadata marker (`[GAME STATE]`, `[room read:`,
-`[env:`, `[RETURNING TABLE]`) are deterministically removed and logged as
-`LILY_SAY_SUPPRESSED | reason=leak`. Ordinary `[bracket]` audio tags and
-clean text pass untouched.
+`[env:`, `[RETURNING TABLE]`, `[state note:`) are deterministically
+removed and logged as `LILY_SAY_SUPPRESSED | reason=leak`. Ordinary
+`[bracket]` audio tags and clean text pass untouched. A leak whose ONLY
+marker is `[state note:` (the honesty assist below — committed scores,
+never answer material) is stripped but does NOT trigger the burn
+protocol.
+
+### The honesty rule (WO-LILY-DESYNC-HONESTY-001 C)
+
+When state and experience visibly disagree — a lagging board, a
+repeated-feeling question, a score a player disputes — Lily says the
+honest minimal thing ("you're right — let me re-sync, one sec") and
+moves on. She may acknowledge a hiccup; she may never explain one with
+fiction (live evidence, twice: "the digital board takes a second to
+refresh once I submit to the database", "my system had to do a little
+reboot" — both invented). The prompt contract is the `WHEN THE ROOM SEES
+A GLITCH` block (positive framing, zero scalars — same lint discipline
+as the room-read rubric); it also forbids confirming or denying what's
+on a screen she cannot see (the 23:04 "Romney misspelling" class).
+
+Paired deterministic assist: when a player's utterance makes a checkable
+claim about their published score
+(`lily_scorekeeper.lily_detect_state_contradiction` — conservative:
+score/board anchor word plus a concrete value claim or a stuck/desync
+phrase, resolved rostered player required), the agent layer injects one
+grounded `[state note: …]` line into the next turn's state block
+(`LILY_HONESTY | STATE_NOTE` log), built from the score the scorekeeper
+actually committed: "player is correct — …" when the claim matches
+committed truth, the committed number with an explicit
+never-validate-uncommitted-numbers instruction when it doesn't. The note
+is one-shot (consumed when her acknowledging turn finishes playing) and
+is context only — the leak filter above keeps it off the air.
+
+### Score truth (WO-LILY-DESYNC-HONESTY-001 E)
+
+Scores commit at adjudication, BEFORE Lily narrates (unchanged), and the
+committed truth goes out **in the same tick as the verdict**: `adjudicate`
+dispatches the attribute publish (players/scores) and the reveal metadata
+together (`asyncio.gather`) — the scoreboard is never queued behind the
+metadata network round-trip, and everything between that dispatch and the
+reveal `gated_say` is synchronous for a non-final question, so score
+commit, publish dispatch, and verdict-speech dispatch share one tick
+(live 01:37:54: the screen showed zero while she called the point "safe
+and sound"). Sub-agent B's structural claims make committing at
+adjudication safe — delivery, answer, and verdict share one
+question-number identity chain. Frontend half (prmpt_ui
+`lily-surface.tsx`): if the `players` attribute is still stale 2s after a
+spoken correct verdict (the `reveal` beat fires at TTS playback), the
+winner's chip count-rolls optimistically to a display-only round-based
+estimate; committed attributes reconcile on arrival and always win — a
+timely backend never sees the overlay. Fixture:
+`tests/test_desync_fixture.py` (attributes published within the
+adjudication tick; non-zero on the board at the moment she says "on the
+board").
 
 ### Need-to-know ambient context
 
@@ -442,7 +517,7 @@ migrations/012_lily_question_images.sql  lily_questions image_url/image_source/
                                          (visible error rows)
 migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
                                          forget-cascade + re-key interlocked)
-tests/               671 tests, run with `python -m pytest tests/` — no network; needs
+tests/               713 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /

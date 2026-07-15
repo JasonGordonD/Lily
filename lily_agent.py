@@ -75,7 +75,7 @@ from lily_binding import (
     lily_is_valid_name,
 )
 from lily_reasoning import LilyReasoning
-from lily_scorekeeper import LilyScorekeeper
+from lily_scorekeeper import LilyScorekeeper, lily_detect_state_contradiction
 from lily_tts import LilyTTS, lily_prewarm_tts_connection
 
 logger = logging.getLogger("lily_agent")
@@ -253,6 +253,17 @@ class LilyGame:
         self._last_assistant_text = ""
         self._enroll_started = False
         self._armed_speech_misses = 0  # agent turns finished w/o performing q
+        # Structural delivery intent (desync WO Sub-agent B): question
+        # number whose delivery the NEXT outbound spoken turn was
+        # code-dispatched to perform — that turn claims q_{N}_delivery at
+        # dispatch regardless of phrasing. None = no delivery in flight.
+        self._pending_delivery_qnum: int | None = None
+        # Honesty assist (desync WO Sub-agent C): one grounded
+        # `[state note: …]` line, set when a player's utterance makes a
+        # checkable claim about published state, rendered into the state
+        # block for her next turn, cleared when that turn finishes playing.
+        # The leak filter keeps the note itself off the air.
+        self._state_note: str | None = None
         self._group_facts_written: set = set()  # per-session fact dedupe
 
         # Persistent cross-session memory (rematch): the [RETURNING TABLE]
@@ -568,6 +579,99 @@ class LilyGame:
         )
         self.instructed_reply(instructions)
         return True
+
+    # -- structural delivery claims (desync WO Sub-agent B) -------------------
+    #
+    # The q_{N}_delivery CLAIM is the delivery-registration event: the
+    # answer window opens and the question marks delivered off THAT claim,
+    # never off text similarity (the ratio matcher is telemetry only —
+    # live evidence showed 0.00–0.15 ratios on questions the table heard,
+    # and fallback windows opened against turns carrying no question).
+    # Claim triggers, both in tts_node at speech dispatch:
+    #   (a) STRUCTURAL — code dispatched a turn whose job is to perform
+    #       the armed question (begin_round post-tool turn, the question
+    #       nudges, skip/game-start follow-ups): expect_delivery() arms
+    #       the flag, and that turn claims regardless of phrasing;
+    #   (b) ORGANIC — any turn while the question is armed and undelivered
+    #       that performs its core answer-bearing sentence as written
+    #       (lily_evaluation.lily_turn_presents_question).
+    # The window still opens at the delivery TURN's playout completion
+    # (on_agent_speech_finished) — what changed is WHAT registers delivery.
+
+    def expect_delivery(self) -> None:
+        """Arm the structural delivery flag: the next outbound spoken turn
+        was just dispatched to perform the armed question and will claim
+        q_{N}_delivery at dispatch. No-op when nothing is armed, the
+        window is already open, or the delivery is already claimed."""
+        if self.armed_question is None or self.sk.answer_window_open:
+            return
+        key = f"q_{self.sk.question_number}_delivery"
+        if self.say_registry.state(key) is None:
+            self._pending_delivery_qnum = self.sk.question_number
+
+    def consume_pending_delivery(self, qnum: int) -> bool:
+        """One-shot consume of the structural delivery flag for question
+        `qnum` (tts_node, at speech dispatch). True = this turn is the
+        code-dispatched delivery turn."""
+        if self._pending_delivery_qnum == qnum:
+            self._pending_delivery_qnum = None
+            return True
+        return False
+
+    def register_delivery_claim(self, spoken_text: str) -> str | None:
+        """The delivery-registration decision for ONE outbound spoken turn
+        (called from tts_node at speech dispatch; pure decision + claim +
+        screen publish, no audio plumbing — offline-testable). Returns:
+          "claimed_structural"   — this is the code-dispatched delivery turn
+                                   (claims regardless of phrasing);
+          "claimed_core_sentence" — organic turn performing the question's
+                                   core answer-bearing sentence as written;
+          "duplicate"            — the turn textually re-performs an
+                                   already-delivered question (BUG-2: the
+                                   caller makes it physically silent);
+          None                   — not a delivery event; speak normally.
+        """
+        armed = self.armed_question
+        if armed is None or self.sk.answer_window_open:
+            return None
+        qnum = self.sk.question_number
+        key = f"q_{qnum}_delivery"
+        structural = self.consume_pending_delivery(qnum)
+        textual = lily_evaluation.lily_turn_presents_question(
+            armed.get("prompt", ""), spoken_text
+        )
+        if not structural and not textual:
+            return None
+        if self.say_registry.claim(key):
+            trigger = "structural" if structural else "core_sentence"
+            logger.info(
+                "LILY_SAY | act=question_delivery | key=%s | "
+                "source=tts_node | trigger=%s", key, trigger,
+            )
+            # Screen syncs to the spoken question at delivery, not at arm
+            # (arm-time publish spoiled the reveal and led the voice by a
+            # whole celebration beat). MC choices and picture-question
+            # images ride the same publish (seam additions).
+            asyncio.ensure_future(
+                self.publish_metadata(
+                    armed.get("prompt", ""),
+                    choices=armed.get("choices"),
+                    eliminated=self.eliminated,
+                    image_url=armed.get("image_url"),
+                    category=armed.get("category"),
+                )
+            )
+            return f"claimed_{trigger}"
+        if textual:
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=dup | key=%s | "
+                "act=question_delivery | source=tts_node", key,
+            )
+            return "duplicate"
+        # Structural flag met an already-claimed key with no textual
+        # re-ask in the turn — banter after a registered delivery speaks
+        # normally.
+        return None
 
     def memory_disclosure_instruction(self) -> str:
         """Task 4 lobby disclosure (WO-LILY-FORGETME-001) — RETURNING
@@ -976,16 +1080,20 @@ class LilyGame:
                             "LILY_STATE | PREFETCH_AUTO_ADVANCE | session=%s q=%d",
                             self.sk.session_id, self.sk.question_number,
                         )
-                        # Keyless nudge: the q_{N}_delivery claim happens in
-                        # tts_node when the question text actually goes out,
-                        # so a racing second deliverer stays silent.
+                        # Keyless nudge; structural delivery claim (desync
+                        # WO Sub-agent B): the nudged turn IS the delivery
+                        # — it claims q_{N}_delivery in tts_node at
+                        # dispatch regardless of phrasing, so a racing
+                        # second deliverer stays silent.
+                        self.expect_delivery()
                         self.gated_say(
                             None,
                             "question_nudge",
                             (
                                 "The next question just landed in the state "
                                 "block. Bridge in one short beat and ask it "
-                                "now, word for word."
+                                "now — its question sentence exactly as "
+                                "written, whole, in one breath."
                             ),
                             source="prefetch_auto_advance",
                         )
@@ -1036,13 +1144,17 @@ class LilyGame:
                             "LILY_WATCHDOG | IDLE_REARM | session=%s q=%d",
                             self.sk.session_id, self.sk.question_number,
                         )
+                        # Structural delivery claim (desync WO Sub-agent
+                        # B): the nudged turn registers the delivery.
+                        self.expect_delivery()
                         self.gated_say(
                             None,
                             "question_nudge",
                             (
                                 "The next question just landed in the state "
                                 "block. Bridge in one short beat and ask it "
-                                "now, word for word."
+                                "now — its question sentence exactly as "
+                                "written, whole, in one breath."
                             ),
                             source="idle_watchdog",
                         )
@@ -1237,6 +1349,7 @@ class LilyGame:
                 self.sk.session_id,
             ))
         self._armed_speech_misses = 0
+        self._pending_delivery_qnum = None  # stale delivery intent dies at arm
         self._judged_keys = set()
         self._addressee_rows = {}  # B1: row-id tasks are per-question
         for _task in self._spec_judge.values():
@@ -1257,7 +1370,8 @@ class LilyGame:
 
     def on_agent_speech_finished(self, spoken_text: str) -> None:
         """Called on TTS playback completion (agent stops speaking). If the
-        armed question was just performed, the answer window opens HERE —
+        armed question's delivery is REGISTERED (the q_{N}_delivery claim —
+        structural, never text-similarity), the answer window opens HERE —
         never earlier (known v1 concession: no early buzz-ins)."""
         # A deterministic instruction speech finished playing out — its
         # items are committed, the persistent context is stable again, so
@@ -1272,6 +1386,9 @@ class LilyGame:
             logger.info(
                 "LILY_SAY | CONFIRMED | keys=%s", ",".join(sorted(confirmed))
             )
+        # Honesty assist (desync WO Sub-agent C): the state note serviced
+        # the turn that just finished playing — one-shot, consumed here.
+        self._state_note = None
         if self._pending_reveal_event is not None:
             # Reveal speech finished without a speaking-start hook having
             # fired the packet (safety net) — emit now so the UI never hangs.
@@ -1282,34 +1399,63 @@ class LilyGame:
             and not self.sk.answer_window_open
             and not self._adjudicating
         ):
+            # Text-similarity is TELEMETRY ONLY (desync WO Sub-agent B):
+            # the ratio is logged for analysis and acted on by nothing.
+            # Live evidence: 0.00–0.15 on questions the table demonstrably
+            # heard — the matcher can never again decide game state.
             ratio = lily_evaluation.lily_question_spoken_ratio(
                 self.armed_question.get("prompt", ""), spoken_text
             )
-            if ratio >= lily_evaluation.QUESTION_SPOKEN_VERBATIM_RATIO:
-                reason = "verbatim"
-            elif ratio >= lily_evaluation.QUESTION_SPOKEN_PARAPHRASE_RATIO:
-                reason = "paraphrase"
-            else:
-                # Overlap is a preference, not a gate: after N finished
-                # agent turns with a question armed in phase=question, open
-                # anyway — the pipeline must never stall on phrasing.
-                self._armed_speech_misses += 1
-                if (
-                    self._armed_speech_misses < WINDOW_FALLBACK_AGENT_TURNS
-                    or self.ui_phase != "question"
-                ):
-                    return
-                reason = "fallback_any_agent_speech"
-                logger.warning(
-                    "LILY_WINDOW | FALLBACK_OPEN | session=%s q=%d ratio=%.2f "
-                    "— question likely paraphrased beyond recognition",
+            logger.info(
+                "LILY_WINDOW | RATIO | session=%s q=%d ratio=%.2f | telemetry",
+                self.sk.session_id, self.sk.question_number, ratio,
+            )
+            key = f"q_{self.sk.question_number}_delivery"
+            if self.say_registry.state(key) is not None:
+                # Delivery is registered (claimed at dispatch, confirmed
+                # just above) and its turn finished playing — open.
+                self._armed_speech_misses = 0
+                logger.info(
+                    "LILY_WINDOW | OPEN | session=%s q=%d reason=delivery_claim "
+                    "ratio=%.2f",
                     self.sk.session_id, self.sk.question_number, ratio,
                 )
-            logger.info(
-                "LILY_WINDOW | OPEN | session=%s q=%d reason=%s ratio=%.2f",
-                self.sk.session_id, self.sk.question_number, reason, ratio,
+                self.open_window()
+                return
+            # No registered delivery: NEVER open a ghost window (the old
+            # fallback opened windows on questions nobody heard — the
+            # ghost-game / "official re-run" theater). After N finished
+            # agent turns with a question armed in phase=question,
+            # dispatch ONE structural delivery nudge instead: the nudged
+            # turn claims q_{N}_delivery at dispatch and the window opens
+            # at ITS playout — the pipeline never stalls, and the window
+            # only ever opens on a registered delivery.
+            self._armed_speech_misses += 1
+            if (
+                self._armed_speech_misses < WINDOW_FALLBACK_AGENT_TURNS
+                or self.ui_phase != "question"
+            ):
+                return
+            self._armed_speech_misses = 0
+            logger.warning(
+                "LILY_WINDOW | DELIVERY_NUDGE | session=%s q=%d ratio=%.2f "
+                "— no delivery claim after %d agent turns; dispatching a "
+                "structural delivery turn",
+                self.sk.session_id, self.sk.question_number, ratio,
+                WINDOW_FALLBACK_AGENT_TURNS,
             )
-            self.open_window()
+            self.expect_delivery()
+            self.gated_say(
+                None,
+                "question_nudge",
+                (
+                    "The armed question has not been asked cleanly yet. "
+                    "Deliver it now: one short bridge if you need it, then "
+                    "its question sentence exactly as written, whole, in "
+                    "one breath — then stop and let the table answer."
+                ),
+                source="window_fallback",
+            )
 
     def _answer_window_duration(self) -> float:
         """The standard answer-window duration for the CURRENT pacing
@@ -1331,9 +1477,9 @@ class LilyGame:
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
         # Fallback screen sync (LWW-idempotent with the delivery-claim
-        # publish): a paraphrased ask below the verbatim ratio never fires
-        # the claim, but the tiered window-open detector still caught it —
-        # the question must be on the glass once answers are live.
+        # publish): the claim path already published at dispatch; this
+        # re-publish is a harmless last-writer guarantee that the question
+        # is on the glass once answers are live.
         if not steal and self.armed_question is not None:
             asyncio.ensure_future(
                 self.publish_metadata(
@@ -1705,6 +1851,24 @@ class LilyGame:
 
         command = result.get("control_command")
 
+        # Honesty assist (desync WO Sub-agent C): a player calling out the
+        # board/score gets answered from PUBLISHED truth, never guesswork.
+        # The detector is conservative (score/board anchor + a checkable
+        # claim); commands and media choices never double as callouts. The
+        # note rides the state block as context — the say-gate leak filter
+        # keeps it off the air if echoed.
+        if command is None and not result.get("media_choice"):
+            note = lily_detect_state_contradiction(
+                text, player, self.sk.players
+            )
+            if note is not None:
+                self._state_note = f"[state note: {note}]"
+                logger.info(
+                    "LILY_HONESTY | STATE_NOTE | session=%s player=%s "
+                    "note=%r",
+                    self.sk.session_id, player, note[:120],
+                )
+
         # WO-LILY-FORGETME-001: pending forget confirmation resolves
         # DETERMINISTICALLY (same pattern as the clarify resolution) — the
         # requester's next parseable yes fires the cascade, a no drops it
@@ -1954,14 +2118,18 @@ class LilyGame:
         self._set_ui_phase("question")
         await self.publish_metadata("")
         await self.publish_attributes()
-        self.arm_next_question()
+        # Structural delivery claim (desync WO Sub-agent B): when the next
+        # question armed, the skip follow-up turn IS its delivery.
+        if self.arm_next_question():
+            self.expect_delivery()
         self.gated_say(
             None,
             "skip",
             "That question was skipped. Move straight to the next "
             "question with zero commentary about the skip and no "
             "spotlight on who asked. If the state block has the next "
-            "question, ask it now.",
+            "question, ask it now — its question sentence exactly as "
+            "written.",
             source=f"skip_{source}",
         )
 
@@ -2235,19 +2403,31 @@ class LilyGame:
             }
             self._pending_reveal_event = reveal_payload
             self._set_ui_phase("reveal")
-            await self.publish_metadata(
-                question.get("prompt", ""),
-                reveal={
-                    "answer": str(question.get("canonical_answer", "")),
-                    "winner": winner,
-                    "correct": winner_candidate is not None,
-                },
-                choices=question.get("choices"),
-                eliminated=self.eliminated,
-                image_url=question.get("image_url"),
-                category=question.get("category"),
+            # Score truth (desync WO Sub-agent E): the committed scores go
+            # out in the SAME tick as the verdict. The attribute publish
+            # (players/scores) is dispatched alongside the reveal metadata
+            # — never queued behind its network round-trip (the old
+            # sequential awaits held the scoreboard hostage to the
+            # metadata call while Lily called the point "safe and sound"
+            # over a screen still showing zero). Everything from here to
+            # the reveal gated_say below is synchronous for a non-final
+            # question, so the publish dispatch, the score commit above,
+            # and the verdict speech dispatch share one tick.
+            await asyncio.gather(
+                self.publish_metadata(
+                    question.get("prompt", ""),
+                    reveal={
+                        "answer": str(question.get("canonical_answer", "")),
+                        "winner": winner,
+                        "correct": winner_candidate is not None,
+                    },
+                    choices=question.get("choices"),
+                    eliminated=self.eliminated,
+                    image_url=question.get("image_url"),
+                    category=question.get("category"),
+                ),
+                self.publish_attributes(),
             )
-            await self.publish_attributes()
             if self.supabase is not None:
                 asyncio.ensure_future(
                     lily_persistence.lily_checkpoint(self.supabase, self.sk)
@@ -2845,6 +3025,10 @@ class LilyGame:
                 # flags make a "the usual" answer a pure no-op.
                 + self.prefs_offer_instruction()
             )
+        # Structural delivery claim (desync WO Sub-agent B): when question
+        # one is already armed, the kickoff turn IS its delivery.
+        if self.armed_question is not None:
+            self.expect_delivery()
         self.gated_say(
             None, "game_start", instructions, source=f"start_{source}"
         )
@@ -2972,6 +3156,13 @@ class LilyGame:
                 f"({self._pending_unbound_award['speaker_label']}) has a "
                 "point waiting — get their name and bind them"
             )
+        # Honesty assist (desync WO Sub-agent C): the grounded truth for a
+        # player's state callout — context only, never speech (the leak
+        # filter drops the line if it ever echoes outbound). getattr: test
+        # harnesses build LilyGame via __new__.
+        state_note = getattr(self, "_state_note", None)
+        if state_note:
+            extra.append(state_note)
         if not self.game_started:
             extra.append(
                 "game not started: you are in the lobby — bind names, fish "
@@ -3453,6 +3644,10 @@ class LilyAgent(Agent):
         # the same question physically silent.
         q = self._game.armed_question
         if q is not None:
+            # Structural delivery claim (desync WO Sub-agent B): the
+            # post-tool turn is the sole deliverer BY CONTRACT — it claims
+            # q_{N}_delivery at dispatch regardless of phrasing.
+            self._game.expect_delivery()
             return (
                 "Round one is armed and YOU deliver the first question in "
                 "this very turn — you are its sole deliverer. One short "
@@ -3903,7 +4098,15 @@ class LilyAgent(Agent):
                 "LILY_SAY_SUPPRESSED | reason=leak | markers=%s",
                 ",".join(sorted(set(leak_reasons))),
             )
-            self._game.on_answer_leak()
+            # Burn protocol: only for leaks that could carry answer
+            # material. The honesty state note (desync WO Sub-agent C)
+            # holds committed scores, never answers — it is stripped
+            # above, and burning a live question over it would punish the
+            # table for calling out the board.
+            if any(
+                r != "metadata:[state note:" for r in leak_reasons
+            ):
+                self._game.on_answer_leak()
 
         # P4 spoken-markdown strip: deterministic hygiene via the say gate
         # (lily_say_gate — THE choke point for outbound speech hygiene)
@@ -3936,6 +4139,13 @@ class LilyAgent(Agent):
                     "LILY_SAY | RELEASED | key=%s | reason=empty_candidate "
                     "— retry may redeliver", k,
                 )
+            # Structural delivery retry (desync WO Sub-agent B): a released
+            # q_{N}_delivery claim re-arms the one-shot delivery flag so
+            # the retry turn re-registers the delivery at its dispatch.
+            if (
+                f"q_{self._game.sk.question_number}_delivery" in released
+            ):
+                self._game.expect_delivery()
             if not self._empty_retry_pending:
                 self._empty_retry_pending = True
                 logger.warning(
@@ -3959,51 +4169,28 @@ class LilyAgent(Agent):
 
         self._empty_retry_pending = False
 
-        # BUG-2 enforcement — ONE authoritative question delivery: if this
-        # outbound turn performs the armed question (same verbatim
-        # detector that opens the answer window), it must claim
-        # q_{N}_delivery at dispatch. A failed claim means another turn
-        # already delivered question N — this duplicate is made physically
-        # silent (no retry: the turn was suppressed, not swallowed).
-        game = self._game
-        armed = getattr(game, "armed_question", None)
-        if armed is not None and not game.sk.answer_window_open:
-            ratio = lily_evaluation.lily_question_spoken_ratio(
-                armed.get("prompt", ""), full
+        # STRUCTURAL delivery registration (desync WO Sub-agent B) — the
+        # q_{N}_delivery CLAIM is the delivery event; window-open and
+        # "delivered" marking key off it, never off text similarity. This
+        # turn claims when (a) code dispatched it to deliver the armed
+        # question (the one-shot pending-delivery flag: begin_round
+        # post-tool turn, question nudges, skip/game-start follow-ups) —
+        # regardless of phrasing; or (b) it organically performs the
+        # question's core answer-bearing sentence as written
+        # (lily_turn_presents_question). BUG-2 duplicate suppression
+        # stands: a turn that textually re-performs an already-claimed
+        # question is made physically silent (no retry: suppressed, not
+        # swallowed) — but a turn that merely banters after the delivery
+        # registered speaks normally. Decision + claim + screen publish
+        # live in LilyGame.register_delivery_claim (offline-tested).
+        if self._game.register_delivery_claim(full) == "duplicate":
+            yield rtc.AudioFrame(
+                data=b"\x00\x00" * 2400,
+                sample_rate=24000,
+                num_channels=1,
+                samples_per_channel=2400,
             )
-            if ratio >= lily_evaluation.QUESTION_SPOKEN_VERBATIM_RATIO:
-                key = f"q_{game.sk.question_number}_delivery"
-                if game.say_registry.claim(key):
-                    logger.info(
-                        "LILY_SAY | act=question_delivery | key=%s | "
-                        "source=tts_node", key,
-                    )
-                    # Screen syncs to the spoken question at delivery, not
-                    # at arm (arm-time publish spoiled the reveal and led
-                    # the voice by a whole celebration beat). MC choices
-                    # and picture-question images ride the same publish
-                    # (seam additions).
-                    asyncio.ensure_future(
-                        game.publish_metadata(
-                            armed.get("prompt", ""),
-                            choices=armed.get("choices"),
-                            eliminated=game.eliminated,
-                            image_url=armed.get("image_url"),
-                            category=armed.get("category"),
-                        )
-                    )
-                else:
-                    logger.warning(
-                        "LILY_SAY_SUPPRESSED | reason=dup | key=%s | "
-                        "act=question_delivery | source=tts_node", key,
-                    )
-                    yield rtc.AudioFrame(
-                        data=b"\x00\x00" * 2400,
-                        sample_rate=24000,
-                        num_channels=1,
-                        samples_per_channel=2400,
-                    )
-                    return
+            return
 
         # MANDATORY punctuation-flush guard (Lovebirds fix): LilyTTS is
         # streaming=False, so the framework wraps it in StreamAdapter gated
