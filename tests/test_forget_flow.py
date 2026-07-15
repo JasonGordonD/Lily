@@ -330,8 +330,18 @@ def test_returning_greet_carries_disclosure_once_on_first_rematch():
     game = _make_game()
     game.memory_total_games = 1  # first rematch -> disclose
     greet = game.greeting_instructions()
-    # Returning: skip the first-time question, offer the refresher once
-    assert "SKIP the first-time question" in greet
+    # Composition order: the one-breath self-intro is ALWAYS part one —
+    # never skipped for a returning table (the live 'welcome back
+    # everyone' with no intro is the exact bug this pins).
+    assert "PART ONE, always" in greet
+    assert "Hi, I'm Lily" in greet
+    assert greet.index("I'm Lily") < greet.index("welcome back")
+    # Memory KNOWS -> act on it, never ask; per-player composition with
+    # the mixed-table nuance
+    assert "Do NOT ask if it's their first time" in greet
+    assert "welcome back, all of you" in greet
+    assert "hello to the new faces" in greet
+    # Refresher (not walkthrough) for returners, from the single block
     assert "refresher" in greet
     assert "WHAT THE TABLE CAN ASK FOR" in greet
     # Task 4 disclosure folded into the same beat
@@ -347,6 +357,7 @@ def test_returning_greet_disclosure_respects_frequency_cap():
     greet = game.greeting_instructions()
     assert "disclosure" not in greet
     assert "refresher" in greet  # the refresher offer still happens
+    assert "Hi, I'm Lily" in greet  # the intro survives regardless
 
 
 def test_cold_greet_asks_first_time_and_never_discloses():
@@ -354,9 +365,12 @@ def test_cold_greet_asks_first_time_and_never_discloses():
     game.memory_block = ""
     game.memory_total_games = 0
     greet = game.greeting_instructions()
+    # Intro first, always — then memory gives no answer, so she asks
+    assert "Hi, I'm Lily" in greet
+    assert "memory gives no answer" in greet
     assert "first time" in greet
     assert "WHAT THE TABLE CAN ASK FOR" in greet
     assert "at most once tonight" in greet
     assert "disclosure" not in greet
     # Neutral-history rule preserved
-    assert "do not claim" in greet
+    assert "Never claim you remember them" in greet

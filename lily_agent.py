@@ -463,50 +463,65 @@ class LilyGame:
         on_enter and entrypoint trigger paths dispatch THIS text under the
         session_greet key; the gate makes the second path silent).
 
-        Dynamic, never rigid: a one-breath self-intro, then either the
-        first-time walkthrough or the returning refresher offer — drawn
-        from the prompt's WHAT THE TABLE CAN ASK FOR block, at most once
-        per session."""
-        greeting = (
-            "The room just opened — this is your landing line. Introduce "
-            "yourself in ONE breath — you're Lily, you host trivia — no "
-            "canned monologue, then straight into conversation. Bind names "
-            "as people speak. "
-        )
+        Composed from ordered parts, never one rigid line (principal
+        correction: a live session opened with 'welcome back everyone' and
+        NO self-intro): (1) ALWAYS the one-breath self-intro first — every
+        session, returning or not; (2) then the recognition nuance,
+        composed per-player from the memory/roster data (whole table
+        returning / mixed table / all new); (3) the first-time question is
+        asked only when memory gives no answer — when memory KNOWS, she
+        acts on it. The walkthrough/refresher draws on the prompt's WHAT
+        THE TABLE CAN ASK FOR block, at most once per session."""
+        parts = [
+            "The room just opened — this is your landing. Compose it from "
+            "these parts, in this order, as ONE natural beat. PART ONE, "
+            "always — every session, returning table or not: a very quick "
+            "self-introduction in one breath — 'Hi, I'm Lily —' you host "
+            "trivia. Never skip it, never stretch it into a monologue. "
+        ]
         if self.memory_block:
-            greeting += (
-                "This is a RETURNING table — the [RETURNING TABLE] context "
-                "has who they are, so SKIP the first-time question: greet "
-                "them back by name, reference last game's winner, lean into "
-                "the rematch energy, and offer ONCE — 'want a refresher on "
-                "the options, or straight in?' — then respect the answer "
-                "(the refresher draws on WHAT THE TABLE CAN ASK FOR, and "
-                "happens at most once tonight)."
+            parts.append(
+                "PART TWO — your memory KNOWS this table (the "
+                "[RETURNING TABLE] context has who they are), so act on it "
+                "instead of asking: compose the recognition per player. "
+                "Whole table returning: '...welcome back, all of you.' "
+                "MIXED table (voices or names the memory doesn't list, "
+                "alongside the regulars): welcome the returners BY NAME "
+                "and the newcomers separately — '...welcome back, Rami — "
+                "and hello to the new faces.' Reference last game's winner "
+                "and lean into the rematch energy. Do NOT ask if it's "
+                "their first time. Returners get no walkthrough — offer "
+                "ONCE, 'want a refresher on the options, or straight in?', "
+                "and respect the answer; newcomers at a mixed table get "
+                "the short version of the options, aimed at them. The "
+                "walkthrough or refresher draws on WHAT THE TABLE CAN ASK "
+                "FOR and happens at most once tonight."
                 + self.memory_disclosure_instruction()
             )
         else:
             # Neutral-history rule: without memory data, never claim OR deny
             # prior contact (memory may still resolve mid-lobby via a
             # group-id upgrade).
-            greeting += (
-                "Ask whether it's the table's first time playing with you. "
-                "FIRST TIME: walk them through their options naturally, "
-                "drawing on the WHAT THE TABLE CAN ASK FOR block — "
-                "conversational, folded into the banter, never a feature "
-                "list read aloud. RETURNING (they say so, or a "
-                "[RETURNING TABLE] block appears later): no walkthrough — "
-                "offer a refresher ONCE and respect the answer. Either way "
-                "the walkthrough or refresher happens at most once tonight. "
-                "You have no memory of this table right now — do not claim "
-                "you remember them, and do not announce it's their first "
-                "time either; let them tell you."
+            parts.append(
+                "PART TWO — your memory gives no answer about this table, "
+                "so ask: a plain warm welcome, then whether it's their "
+                "first time playing with you. FIRST TIME: walk them "
+                "through their options naturally, drawing on the WHAT THE "
+                "TABLE CAN ASK FOR block — conversational, folded into the "
+                "banter, never a feature list read aloud. RETURNING (they "
+                "say so, or a [RETURNING TABLE] block appears later): no "
+                "walkthrough — offer a refresher ONCE and respect the "
+                "answer. Either way the walkthrough or refresher happens "
+                "at most once tonight. Never claim you remember them, and "
+                "never announce it's their first time — let them tell you."
             )
-        greeting += (
-            " When the table feels ready — the first genuine group laugh, "
-            "or a clear 'start' — call lily_begin_round to open round one; "
-            "nothing scores until you do."
+        parts.append(
+            " Bind names as people speak. When the table feels ready — "
+            "the first genuine group laugh, or a clear 'start' — call "
+            "lily_begin_round to open round one; nothing scores until "
+            "you do."
         )
-        return greeting
+        return "".join(parts)
 
     def rejoin_instructions(self) -> str:
         """The reconnect re-entry line — its own key (session_rejoin) and

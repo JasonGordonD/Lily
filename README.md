@@ -520,21 +520,28 @@ session, so it survives sessions at zero new columns: **no migration 010
 needed**. Cold groups disclose nothing; the clause is latched to at most
 once per session.
 
-**Dynamic session greeting (principal addendum, rides the same WO):** the
-landing is no longer a canned monologue — Lily introduces herself in ONE
-breath, asks whether it's the table's first time, and either walks
-first-timers through their options naturally or offers a returning table
-ONE refresher ("want a refresher on the options, or straight in?"). Both
-draw exclusively on the prompt's **`## WHAT THE TABLE CAN ASK FOR`** block —
-the single options inventory (freeform play, multiple-choice on request,
-the grown-up deck, skip, the steal window, the 50/50 lifeline, "back to
-normal", "Lily, forget me") that future WOs extend one line each (the
-queued multiple-choice round format and picture rounds land there). The
-walkthrough/refresher happens at most once per session; when the memory
-block already marks the table returning, the first-time question is
-skipped entirely and the Task-4 disclosure clause lands in the same
-welcome-back beat (one natural breath, `session_greet` say-gate key covers
-the whole landing).
+**Dynamic session greeting (principal addendum + correction, rides the
+same WO):** the landing is COMPOSED from ordered parts, never one rigid
+line. Part one, ALWAYS — every session, returning table or not — a very
+quick one-breath self-intro ("Hi, I'm Lily —"); the observed live failure
+("welcome back everyone" with no intro) is exactly what this pins. Part
+two, the recognition nuance composed per-player from the memory/roster
+data: whole table returning → "...welcome back, all of you"; MIXED table →
+returners greeted BY NAME, newcomers separately ("...welcome back, Rami —
+and hello to the new faces"); all new → plain warm welcome. The
+first-time-vs-returning question is asked ONLY when memory gives no
+answer — when memory KNOWS, she acts on it: returners get the one-time
+refresher offer ("want a refresher on the options, or straight in?"),
+first-timers (and the new faces at a mixed table, short version) get the
+natural walkthrough. Both draw exclusively on the prompt's
+**`## WHAT THE TABLE CAN ASK FOR`** block — the single options inventory
+(freeform play, multiple-choice on request, the grown-up deck, skip, the
+steal window, the 50/50 lifeline, "back to normal", "Lily, forget me")
+that future WOs extend one line each (the queued multiple-choice round
+format and picture rounds land there). The walkthrough/refresher happens
+at most once per session, and the Task-4 disclosure clause lands inside
+the same welcome-back beat (one natural breath; the `session_greet`
+say-gate key covers the whole landing).
 
 Tests: `tests/test_forget.py` (tombstone, cascade plan + executor against a
 fake postgrest client, yes/no parser, explain-memory shapes, disclosure
