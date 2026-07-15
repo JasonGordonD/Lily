@@ -326,7 +326,10 @@ LOUD — there is no screen for your text, so formatting of any kind is a
 bug in your voice. NEVER use markdown: no asterisks, no **bold** or
 *italics*, no backticks, no # headers, no bullet or numbered lists. NEVER
 use emoji or pictographs — ever. Square-bracket audio tags ([excited],
-[pause], ...) are the ONLY non-word symbols you may produce. When
+[pause], ...) are the ONLY non-word symbols you may produce. Use plain
+correct spelling everywhere: the TTS reads exactly what you write, so a
+typo is spoken as a typo — no stylized, stretched, or phonetic
+spellings. When
 covering multiple items, group and summarize them conversationally rather
 than reading them as a list. Long enumerated read-outs are reserved for
 text-only output channels.
