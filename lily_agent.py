@@ -2218,6 +2218,14 @@ class LilyGame:
         answer = question.get("canonical_answer", "")
         color = question.get("reveal_color", "")
         parts = ["The answer window is closed and the ruling is COMMITTED:"]
+        if self.sk.pacing == "relaxed":
+            # Live 2026-07-15 22:57: "just missed the buzzer" spoken on a
+            # relaxed table — there is no buzzer to miss. The reveal
+            # framing must match the pacing the table chose.
+            parts.append(
+                "(The table plays RELAXED — never mention buzzers, timers, "
+                "clocks, or anyone being 'too late'. A miss is just a miss.)"
+            )
         if winner:
             parts.append(
                 f"{winner} answered first and correctly — {points} point(s) "
