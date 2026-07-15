@@ -25,8 +25,9 @@ do-not-touch: no imports, no vendoring).
 
 ## Architecture invariants
 
-- **No generation gate, no trigger loop, no watchdog.** Lily speaks by default —
-  silence is her failure mode (the deliberate inversion of Lovebirds' Raven).
+- **No generation gate or trigger loop.** Lily speaks by default — silence is
+  her failure mode (the deliberate inversion of Lovebirds' Raven). A bounded
+  supply watchdog exists only to recover a stalled question pipeline.
 - **The scorekeeper owns order; the LLM owns correctness.** First-committed-answer
   is a timestamp comparison in `lily_scorekeeper.py`, never an LLM judgment.
 - **Answer window** opens on question TTS playout completion (SpeechHandle — 1.6.4
@@ -131,6 +132,31 @@ with regression coverage in `tests/test_stall_recovery.py`:
     started mid-frame) — cosmetic recorder bookkeeping, not an audio-path
     problem. Neither one-off is worth chasing.
 
+## Reliability and privacy audit hardening (2026-07-15)
+
+The repository-wide audit closed the remaining state, privacy, schema, and
+deployment gaps:
+
+- picture prefetch now accepts the shared history-exclusion contract, so a
+  picture slot can fall back to text instead of crashing on unexpected kwargs;
+- reconnect restores the checkpointed question without incrementing it and
+  starts the supply watchdog;
+- speech-act claims are owned by their concrete `SpeechHandle`; a silent,
+  interrupted, or duplicate handle cannot confirm another turn or open an
+  answer window;
+- skip and adjudication use a single transition guard, and media-mode commands
+  are never answer candidates;
+- forget requires a recorded spoken yes, deletes every session-linked content
+  table, disables queued transcript writes, clears in-memory names/transcripts,
+  and suppresses identity reports, memories, facts, preferences, and
+  voiceprints for the remainder of the session;
+- transcript batches retry idempotently through `event_id`, devAIce `202`
+  results are polled to a bounded completion, and bank draws use bounded,
+  server-filtered randomized candidate sets;
+- migrations `001` through `016` now apply to an empty PostgreSQL database in
+  order; pull requests and main deployments run all unit tests plus that
+  greenfield migration check before deployment.
+
 ## Loop engagement (2026-07-14 persistence-audit root-cause fix)
 
 The live audit found every session with `round=0` / `question_number=0`,
@@ -205,10 +231,12 @@ Game-critical speech acts carry state keys — `session_greet`,
 `finale` — in a per-session `SpeechActRegistry` on `LilyGame`. Keys are
 claimed with an atomic check-and-set **at dispatch time** — never at
 playback completion, which is exactly the race window that produced the
-live duplicates. Lifecycle: **claim at dispatch → confirm at playout
-completion → release on playback failure** (a claimed-but-never-played
-act releases so a retry can redeliver — the 19:27:52 swallowed-delivery
-class; a confirmed act stays done forever). All code-triggered speech
+live duplicates. Every claim is then bound to its concrete `SpeechHandle`.
+Lifecycle: **claim at dispatch → bind to handle → confirm that handle at
+playout completion → release that handle on playback failure** (a
+claimed-but-never-played act releases so a retry can redeliver — the
+19:27:52 swallowed-delivery class; a silent duplicate cannot confirm the
+original handle, and a confirmed act stays done forever). All code-triggered speech
 routes through `LilyGame.gated_say(key, act, instructions, source)`:
 a first claim logs `LILY_SAY | act=... | key=... | source=...`, a second
 claim logs `LILY_SAY_SUPPRESSED | reason=dup | key=...` and does NOT
@@ -442,7 +470,10 @@ migrations/012_lily_question_images.sql  lily_questions image_url/image_source/
                                          (visible error rows)
 migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
                                          forget-cascade + re-key interlocked)
-tests/               671 tests, run with `python -m pytest tests/` — no network; needs
+migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt columns
+migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
+migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
+tests/               692 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -486,7 +517,8 @@ source=... group_id=...` is logged every session, upgrades as
    — nothing re-keys on it; the upgrade path exists exactly to escape it).
 
 **Tables:** `lily_memories` (one row per session, upserted idempotently on
-`session_id` from both `finish_game` and the shutdown callback: final
+`session_id` from both `finish_game` and the shutdown callback unless forget
+disabled identity persistence: final
 `players [{name,score,streak}]`, `winner`, `question_count` — read straight
 off `scorekeeper.question_number` — `highlights` callouts, a deterministic
 template `summary`, and `player_names`, the normalized sorted name-set audit
@@ -505,7 +537,8 @@ night.
 **Voiceprint enrollment** (`lily_speaker_voiceprints`) fires the moment the
 FIRST binding commits, again at game start / group-id upgrade, and once more
 — awaited, inside the shutdown gate, so teardown can't race it — at session
-close for late binders. The upsert is idempotent on
+close for late binders (unless forget ran, which disables enrollment for the
+remainder of that session). The upsert is idempotent on
 `(group_id, speaker_label)`, and the group id is read at write time (a
 callable), so a mid-session upgrade re-keys in-flight enrollments too.
 No-silent-crash: every failure path logs a structured
@@ -614,7 +647,8 @@ scorekeeper's rolling buffer — never re-queried from the DB) plus `game_stats`
 (final standings, rounds/questions played, per-player answers
 attempted/correct, mode changes, callouts, `duration_s`); `report_status`
 stays `'pending'` and `assessment` is filled later by the clinical desk,
-never by agent code.
+never by agent code. A session that executed or partially executed forget
+does not write a report.
 
 ### Addressee-label corpus (B1)
 
@@ -803,6 +837,11 @@ detection runs at EVERY bank insert:
 
 Dups are discarded and logged `LILY_BANK | DUP_DISCARDED`, never inserted.
 
+Bank reads never load the full self-growing table: PostgREST applies
+`status`, consent mode, category, and difficulty filters server-side, caps
+each fallback stage at 100 rows, and randomly chooses from the surviving
+history-safe candidates. Migration 016 supplies the matching composite index.
+
 ### Per-group asked history (D, migration 010)
 
 `lily_asked_history` gets one row per question SERVED (armed for delivery):
@@ -924,20 +963,23 @@ names asserted that no voice has confirmed.
 tool-gating principle above, deletion neither mutates game outcomes nor
 emits game events, so the tool carries NO `game_started` gate — the right
 works from the lobby onward. `confirm=false` is refused (and arms the
-deterministic yes/no parse); `confirm=true` runs
+deterministic yes/no parse); `confirm=true` is accepted only after that
+pending request recorded a spoken yes from the requester. The verified path runs
 `lily_persistence.lily_forget_group_data`: HARD-DELETE of all group rows in
 `lily_speaker_voiceprints`, `lily_memories`, `lily_group_facts`, plus the
-session-keyed `lily_addressee_log` and `lily_acoustic_trajectories` via the
-group's session ids (from `lily_sessions`, plus the current session), plus
+session-keyed `lily_transcripts`, `lily_answers`, `lily_addressee_log`,
+`lily_acoustic_trajectories`, `lily_session_reports`, and
+`lily_image_attempts` via the group's session ids (from `lily_sessions`, its
+deterministic tombstone for retry recovery, plus the current session), plus
 `lily_asked_history` and `lily_group_prefs` IF the tables exist (the former
 lands with a future WO, the latter only skips on migration-013 lag — a
 forgotten table's preferences are recognition data; absent-table errors are
 skipped and logged, never failed). `lily_sessions`
 is RETAINED but re-keyed to the tombstone `forgotten_<sha1-12 of the old
-group id>` — operational records survive without linkable identity;
-`lily_answers` is retained untouched because it has no `group_id` column
-(migration 001 — session-keyed only). Deletion is awaited, count-VERIFIED
-per table (zero rows under the old key), capped at ~10s, and reports
+group id>` only after every required delete verifies — operational records
+survive without linked content, and a partial failure keeps the original key
+discoverable for retry. Deletion is awaited, count-VERIFIED
+per table (zero rows under the old key), capped at ~20s, and reports
 honestly on partial failure — the tool result names which tables succeeded
 and tells Lily what to say; a partial failure stays retryable against the
 ORIGINAL id. Logs `LILY_FORGET | group=... | tables=... | rows=...` with
@@ -950,8 +992,10 @@ and `known_speakers` ride the one-shot StartRecognition message, so the
 clear guarantees any STT reconnect starts unenrolled while the open stream
 keeps its labels until it closes); the game re-binds to a FRESH ANONYMOUS
 group id (`anon_<random>`, source `post_forget_anonymous`) and the current
-game continues normally — writes continue under the fresh id, but the
-device metadata id is dead (the frontend cleared it) and
+game continues normally. Pending/future transcript writes are disabled,
+remembered player names and the rolling transcript are cleared, and identity
+reports, memories, facts, preferences, and voiceprints stay off for the rest
+of the session. The device metadata id is dead (the frontend cleared it) and
 `resolve_group_identity` / `upgrade_group_id` are suppressed for the rest
 of the session so the name-set hash can never silently rebuild the deleted
 group; `memory_block` is cleared and `_apply_context_blocks` now REMOVES
@@ -1058,7 +1102,9 @@ tables attach every non-agent audio track.
    own per-segment streak counters — widening the smooth window cannot
    delay it (regression-pinned in `tests/test_audeering.py`).
 6. **Never block a turn.** Uploads are fire-and-forget; the agent reads the
-   latest state synchronously in `build_state_block`.
+   latest state synchronously in `build_state_block`. Accepted asynchronous
+   uploads (`202`) are polled with bounded backoff instead of being dropped
+   after the first pending response.
 7. **Consumer exceptions never stop raw-signal recording.**
 8. **Circuit breaker on missing `AUDEERING_API_KEY`** — best-effort: one
    structured `LILY_AUDEERING_BREAKER` log line, uploads disabled, the
