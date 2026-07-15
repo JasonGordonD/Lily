@@ -658,6 +658,24 @@ def test_start_game_applies_the_usual():
     assert game.sk.pacing == "relaxed"
 
 
+def test_on_speaker_bound_retries_enrollment_for_late_binders():
+    game = _make_game()
+    game._enroll_started = False
+    game._pending_unbound_award = None
+    fired: list[str] = []
+    game.fire_enrollment = fired.append
+    game.send_event_nowait = lambda *_args, **_kwargs: None
+    game.publish_attributes_nowait = lambda: None
+    game._maybe_auto_start_after_lobby = lambda: None
+
+    game.sk.bind_speaker("S2", "Dave")
+    game.on_speaker_bound("S2", "Dave")
+    game.sk.bind_speaker("S3", "Priya")
+    game.on_speaker_bound("S3", "Priya")
+
+    assert fired == ["first_bind", "bind_refresh"]
+
+
 # ---------------------------------------------------------------------------
 # The ask-once flow — latch semantics
 # ---------------------------------------------------------------------------

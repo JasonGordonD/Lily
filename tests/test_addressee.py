@@ -17,7 +17,13 @@ from lily_addressee import (
     LABEL_SOURCE_IMPLICIT_APPEALED,
     LABEL_SOURCE_IMPLICIT_SCORED,
     LABEL_UNKNOWN,
+    lily_acoustic_addressee_confidence,
+    lily_acoustic_alignment_skew_seconds,
+    lily_acoustic_sample_aligned,
     lily_candidate_key,
+    lily_extract_diarization_confidence,
+    lily_fallback_diarization_confidence,
+    lily_fuse_addressee_confidence,
     lily_labels_for_adjudication,
     lily_parse_clarify_reply,
     lily_seconds_into_window,
@@ -94,6 +100,80 @@ def test_clarify_word_boundaries():
     # "nose" must not fire the "no" cue; "yesterday" must not fire "yes".
     assert lily_parse_clarify_reply("the nose knows") == LABEL_UNKNOWN
     assert lily_parse_clarify_reply("I said that yesterday") == LABEL_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Addressee-confidence fusion
+# ---------------------------------------------------------------------------
+
+class _Event:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+def test_extract_diarization_confidence_from_event():
+    ev = _Event(speaker_confidence=0.73)
+    assert lily_extract_diarization_confidence(ev) == 0.73
+
+
+def test_extract_diarization_confidence_from_dict():
+    ev = {"diarization_confidence": 0.41}
+    assert lily_extract_diarization_confidence(ev) == 0.41
+
+
+def test_fallback_diarization_confidence_prefers_strong_attribution():
+    assert lily_fallback_diarization_confidence("speaker_id", "S1") > \
+        lily_fallback_diarization_confidence("self_introduction", "S1")
+    assert lily_fallback_diarization_confidence(None, None) == 0.5
+
+
+def test_acoustic_addressee_confidence_uses_room_read_and_child_ladder():
+    # Energetic overlap-ish rooms lower confidence; child-veto lowers it
+    # further (veto-only signal, never an authorization).
+    hot = lily_acoustic_addressee_confidence("hot / riding high", False)
+    hot_with_child = lily_acoustic_addressee_confidence("hot / riding high", True)
+    assert hot is not None
+    assert hot_with_child is not None
+    assert hot_with_child < hot
+    assert lily_acoustic_addressee_confidence(
+        "flat / low energy", False
+    ) > hot
+
+
+def test_fusion_weighted_average_and_missing_inputs():
+    fused = lily_fuse_addressee_confidence(
+        0.9, 0.3, diarization_weight=0.75, acoustic_weight=0.25
+    )
+    assert round(fused, 3) == 0.75
+    assert lily_fuse_addressee_confidence(None, 0.4) == 0.4
+    assert lily_fuse_addressee_confidence(0.6, None) == 0.6
+    assert lily_fuse_addressee_confidence(None, None) is None
+
+
+def test_acoustic_alignment_skew_and_bounds():
+    assert lily_acoustic_alignment_skew_seconds(100.0, 99.2) == -0.8
+    assert lily_acoustic_alignment_skew_seconds(100.0, 100.4) == 0.4
+    assert lily_acoustic_sample_aligned(
+        100.0,
+        99.2,
+        max_staleness_seconds=1.0,
+        max_future_seconds=0.5,
+    ) is True
+    assert lily_acoustic_sample_aligned(
+        100.0,
+        98.7,
+        max_staleness_seconds=1.0,
+        max_future_seconds=0.5,
+    ) is False
+    assert lily_acoustic_sample_aligned(
+        100.0,
+        100.7,
+        max_staleness_seconds=1.0,
+        max_future_seconds=0.5,
+    ) is False
+    assert lily_acoustic_sample_aligned(None, 99.0) is False
+    assert lily_acoustic_sample_aligned(100.0, None) is False
 
 
 # ---------------------------------------------------------------------------

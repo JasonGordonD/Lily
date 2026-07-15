@@ -823,6 +823,49 @@ async def lily_enroll_voiceprints(
             for name, state in scorekeeper.players.items()
             if state.get("speaker_label")
         }
+        # Case-insensitive roster fallback: returning-table labels may be
+        # normalized differently by STT ("sarah" vs "Sarah").
+        name_lookup = {
+            str(name).strip().lower(): name
+            for name in (scorekeeper.players or {})
+            if str(name).strip()
+        }
+        # Keep prior label->player_name bindings when a refresh happens
+        # before (re)binding catches up this session; otherwise a null
+        # player_name overwrite silently narrows next-session lookup
+        # (lily_load_voiceprints_by_players filters by player_name).
+        known_names_by_label: dict[str, str] = {}
+        entry_labels = sorted({
+            str(
+                getattr(entry, "label", None)
+                or (entry.get("label") if isinstance(entry, dict) else "")
+            ).strip()
+            for entry in flat
+            if str(
+                getattr(entry, "label", None)
+                or (entry.get("label") if isinstance(entry, dict) else "")
+            ).strip()
+        })
+        if gid and entry_labels:
+            try:
+                existing = await asyncio.to_thread(
+                    lambda: supabase.table("lily_speaker_voiceprints")
+                    .select("speaker_label, player_name")
+                    .eq("group_id", gid)
+                    .in_("speaker_label", entry_labels)
+                    .execute()
+                )
+                for row in existing.data or []:
+                    label = str((row or {}).get("speaker_label") or "").strip()
+                    player_name = str((row or {}).get("player_name") or "").strip()
+                    if label and player_name:
+                        known_names_by_label[label] = player_name
+            except Exception as e:
+                logger.warning(
+                    "LILY_ENROLL | EXISTING_LABEL_LOOKUP_FAILED | trigger=%s "
+                    "group=%s error=%s",
+                    trigger, gid, e,
+                )
         rows = []
         for entry in flat:
             label = getattr(entry, "label", None) or (
@@ -833,14 +876,21 @@ async def lily_enroll_voiceprints(
             )
             if not label:
                 continue
+            if not identifiers:
+                continue
+            resolved_name = label_to_name.get(label)
+            if resolved_name is None and isinstance(label, str):
+                resolved_name = name_lookup.get(label.strip().lower())
             rows.append({
                 "group_id": gid,
                 "speaker_label": label,
                 # Speechmatics may already return the enrolled player name as
                 # the label on a rematch (known_speakers are injected with
                 # player-name labels) — keep the roster mapping as fallback.
-                "player_name": label_to_name.get(label)
-                or (label if label in scorekeeper.players else None),
+                "player_name": (
+                    resolved_name
+                    or known_names_by_label.get(label)
+                ),
                 "speaker_identifiers": identifiers,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
@@ -874,27 +924,47 @@ async def lily_load_voiceprints_by_players(
     player_names: list,
 ) -> list:
     """Candidate voiceprints for group-identity resolution step (b): every
-    stored row whose player_name matches one of this session's roster names
-    (exact or lowercase spelling). Returns raw dicts
+    stored row whose player_name OR speaker_label matches one of this
+    session's roster names (exact or simple case variants). Returns raw dicts
     [{group_id, player_name, speaker_label, speaker_identifiers}] for
     lily_memory.lily_match_group_by_voiceprints."""
     names = sorted({
         variant
         for n in player_names or []
         if str(n or "").strip()
-        for variant in (str(n).strip(), str(n).strip().lower(),
-                        str(n).strip().capitalize())
+        for variant in (
+            str(n).strip(),
+            str(n).strip().lower(),
+            str(n).strip().capitalize(),
+            str(n).strip().title(),
+        )
     })
     if not names:
         return []
     try:
-        result = await asyncio.to_thread(
+        by_name = await asyncio.to_thread(
             lambda: supabase.table("lily_speaker_voiceprints")
             .select("group_id, player_name, speaker_label, speaker_identifiers")
             .in_("player_name", names)
             .execute()
         )
-        return result.data or []
+        by_label = await asyncio.to_thread(
+            lambda: supabase.table("lily_speaker_voiceprints")
+            .select("group_id, player_name, speaker_label, speaker_identifiers")
+            .in_("speaker_label", names)
+            .execute()
+        )
+        merged: dict[tuple[str, str, str], dict] = {}
+        for row in (by_name.data or []) + (by_label.data or []):
+            if not isinstance(row, dict):
+                continue
+            key = (
+                str(row.get("group_id") or ""),
+                str(row.get("speaker_label") or ""),
+                str(row.get("player_name") or ""),
+            )
+            merged[key] = row
+        return list(merged.values())
     except Exception as e:
         logger.error("lily_load_voiceprints_by_players error: %s", e)
         return []
@@ -909,8 +979,9 @@ async def lily_rekey_group(
     """Mid-session group-id upgrade: move rows written under the provisional
     id to the RESOLVED id. Scoped conservatively — lily_sessions and
     lily_group_facts by THIS session; lily_speaker_voiceprints only when the
-    provisional id was the room-random session id (never merges two real
-    groups). Each table update tolerates failure independently."""
+    provisional id was weak (the room-random session id or deterministic
+    name-set hash), never on arbitrary strong->strong merges. Each table
+    update tolerates failure independently."""
     if not old_group_id or not new_group_id or old_group_id == new_group_id:
         return
     updates = [
@@ -929,7 +1000,13 @@ async def lily_rekey_group(
          .update({"group_id": new_group_id})
          .eq("session_id", session_id).execute()),
     ]
-    if old_group_id == session_id:
+    is_name_set_hash = (
+        isinstance(old_group_id, str)
+        and old_group_id.startswith(lily_memory.NAME_SET_GROUP_PREFIX)
+        and len(old_group_id) == len(lily_memory.NAME_SET_GROUP_PREFIX) + 40
+        and all(ch in "0123456789abcdef" for ch in old_group_id[-40:].lower())
+    )
+    if old_group_id == session_id or is_name_set_hash:
         updates.append(
             ("lily_speaker_voiceprints",
              lambda: supabase.table("lily_speaker_voiceprints")
