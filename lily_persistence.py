@@ -25,6 +25,7 @@ import httpx
 from postgrest.exceptions import APIError as PostgrestAPIError
 from supabase import Client as SupabaseClient, create_client as create_supabase_client
 
+import lily_bank
 import lily_config
 import lily_memory
 
@@ -400,13 +401,22 @@ async def lily_fetch_bank_question(
     difficulty_tier: int,
     exclude_prompts: list[str],
     mode: str = "general",
+    exclude_ids: Optional[set] = None,
+    exclude_hashes: Optional[set] = None,
 ) -> Optional[dict]:
     """Pull one unused curated question from lily_questions, preferring the
     requested category/tier, falling back to any unused row. Returns the
     §4.2 structured shape or None.
 
     Mode guard (consent-safety): adult=true bank rows are returned ONLY
-    when mode == 'adult' — general mode hard-excludes them."""
+    when mode == 'adult' — general mode hard-excludes them.
+
+    Asked-history guard (bank-curation WO, migration 010): rows whose
+    kb_ id is in `exclude_ids` or whose normalized-text hash is in
+    `exclude_hashes` (the group's lily_asked_history) are never re-served
+    to that group."""
+    exclude_ids = exclude_ids or set()
+    exclude_hashes = exclude_hashes or set()
     try:
         rows = await asyncio.to_thread(
             lambda: supabase.table("lily_questions")
@@ -423,6 +433,14 @@ async def lily_fetch_bank_question(
             # 'retired') are excluded. A missing column (pre-009 schema)
             # reads as active.
             and (r.get("status") or "active") == "active"
+            # Per-group asked history (migration 010): never re-serve a
+            # question this group has already heard.
+            and f"kb_{r.get('id', 0)}" not in exclude_ids
+            and (
+                not exclude_hashes
+                or lily_bank.lily_question_text_hash(r["question"])
+                not in exclude_hashes
+            )
         ]
         if not candidates:
             return None
@@ -672,6 +690,13 @@ async def lily_rekey_group(
          lambda: supabase.table("lily_group_facts")
          .update({"group_id": new_group_id})
          .eq("source_session_id", session_id).execute()),
+        # Asked history (migration 010): this session's served-question
+        # rows follow the resolved id so the no-repeat guard holds on
+        # the group's next visit.
+        ("lily_asked_history",
+         lambda: supabase.table("lily_asked_history")
+         .update({"group_id": new_group_id})
+         .eq("session_id", session_id).execute()),
     ]
     if old_group_id == session_id:
         updates.append(

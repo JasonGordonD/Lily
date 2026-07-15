@@ -58,6 +58,8 @@ from livekit.plugins.speechmatics import (
 import lily_addressee
 import lily_audeering_client
 import lily_audeering_consumers
+import lily_bank
+import lily_bank_tuning
 import lily_config
 import lily_evaluation
 import lily_memory
@@ -197,6 +199,12 @@ class LilyGame:
         self.next_question: dict | None = None      # prefetched N+1
         self.armed_question: dict | None = None     # in state block, awaiting ask
         self.used_prompts: list[str] = []
+        # Bank curation (WO-LILY-OMNIBUS-002 D/F): the group's served-
+        # question history (loaded at entrypoint, appended per serving)
+        # and the promoted category-candidate names (F — the only
+        # proposals Lily may ever announce).
+        self.asked_history: list[dict] = []
+        self.promoted_categories: list[str] = []
         self._prefetch_task: asyncio.Task | None = None
         self._window_timer: asyncio.Task | None = None
         self._judged_keys: set[str] = set()
@@ -487,6 +495,11 @@ class LilyGame:
             category = self._category_for_round(rnd)
             tier = self._difficulty_for_round(rnd)
 
+            # Per-group asked history (migration 010): bank draws exclude
+            # the group's served kb_ ids and normalized-text hashes.
+            history_ids = lily_bank.lily_history_question_ids(self.asked_history)
+            history_hashes = lily_bank.lily_history_hashes(self.asked_history)
+
             # Runbook fallback: LILY_KB_ONLY flips supply to the curated
             # bank; bank questions bypass verification (§4.5).
             from_bank = None
@@ -494,6 +507,7 @@ class LilyGame:
                 from_bank = await lily_persistence.lily_fetch_bank_question(
                     self.supabase, category, tier, self.used_prompts,
                     mode=self.sk.mode,
+                    exclude_ids=history_ids, exclude_hashes=history_hashes,
                 )
             question = await self.reasoning.prefetch_question(
                 self.sk,
@@ -502,11 +516,20 @@ class LilyGame:
                 avoid_questions=self.used_prompts,
                 from_bank=from_bank,
             )
+            if question is not None and not str(
+                question.get("id", "")
+            ).startswith("kb_"):
+                # Generated (verified) question: asked-history check,
+                # category-proposal gating (F), then banking (D).
+                question = self._curate_generated_question(
+                    question, category, history_hashes
+                )
             if question is None and self.supabase is not None:
                 # Generation failed — curated bank is the insurance policy.
                 question = await lily_persistence.lily_fetch_bank_question(
                     self.supabase, category, tier, self.used_prompts,
                     mode=self.sk.mode,
+                    exclude_ids=history_ids, exclude_hashes=history_hashes,
                 )
                 if question is not None:
                     self.sk.clear_status_notes()
@@ -547,6 +570,52 @@ class LilyGame:
 
         self._prefetch_task = asyncio.ensure_future(_prefetch())
 
+    def _curate_generated_question(
+        self,
+        question: dict,
+        family: str,
+        history_hashes: set,
+    ) -> dict | None:
+        """Bank-curation gate for one VERIFIED generated question
+        (WO-LILY-OMNIBUS-002 D/F). Returns the question ready to serve,
+        or None when the group has already heard it (asked-history hash
+        collision — the generator's textual avoid-list only carries this
+        session's prompts, so cross-session repeats are caught here).
+
+        Category proposals (F): a `proposed_category` is tallied in
+        lily_category_candidates, but the question SERVES under its round
+        family until the proposal is promoted (>=10 uses across >=3
+        distinct groups). Lily never announces unpromoted categories.
+
+        Banking (D): the surviving question is inserted into
+        lily_questions (source='generated') with near-dup detection at
+        insert — this is where the bank self-grows."""
+        text_hash = lily_bank.lily_question_text_hash(question.get("prompt"))
+        if text_hash in history_hashes:
+            logger.info(
+                "LILY_BANK | HISTORY_REPEAT_DISCARDED | group=%s hash=%s "
+                "prompt=%r",
+                self.group_id, text_hash[:12],
+                str(question.get("prompt", ""))[:80],
+            )
+            return None
+        proposed = lily_bank.lily_normalize_category_name(
+            question.get("proposed_category")
+        )
+        if proposed:
+            if self.supabase is not None:
+                asyncio.ensure_future(lily_bank.lily_record_category_proposal(
+                    self.supabase, proposed, family, self.group_id,
+                ))
+            question["category"] = (
+                proposed if proposed in self.promoted_categories else family
+            )
+        if self.supabase is not None:
+            asyncio.ensure_future(lily_bank.lily_bank_generated_question(
+                self.supabase, dict(question), self.sk.mode,
+            ))
+        return question
+
     def arm_next_question(self) -> bool:
         """Move the prefetched question into the state block for Lily to
         perform. Returns True if a question is armed."""
@@ -575,6 +644,20 @@ class LilyGame:
         else:
             self.sk.set_phase("round")
         self.used_prompts.append(self.armed_question.get("prompt", ""))
+        # Asked history (migration 010): one row per question SERVED,
+        # keyed to the resolved group id; the in-memory mirror keeps this
+        # session's own draws excluded without a re-read.
+        self.asked_history.append({
+            "question_id": self.armed_question.get("id"),
+            "question_text_hash": lily_bank.lily_question_text_hash(
+                self.armed_question.get("prompt")
+            ),
+        })
+        if self.supabase is not None:
+            asyncio.ensure_future(lily_bank.lily_record_asked(
+                self.supabase, self.group_id, dict(self.armed_question),
+                self.sk.session_id,
+            ))
         self._armed_speech_misses = 0
         self._judged_keys = set()
         self._addressee_rows = {}  # B1: row-id tasks are per-question
@@ -1380,6 +1463,12 @@ class LilyGame:
         await lily_persistence.lily_rekey_group(
             self.supabase, old, new_group_id, self.sk.session_id
         )
+        # Asked history follows the resolved id (rekey moved this
+        # session's rows; the reload pulls the group's PRIOR sessions so
+        # the no-repeat guard covers rematches immediately).
+        self.asked_history = await lily_bank.lily_load_asked_history(
+            self.supabase, new_group_id
+        )
         if self.sk.question_number == 0:
             memory = await lily_memory.lily_load_group_memory(
                 self.supabase, new_group_id
@@ -1601,6 +1690,14 @@ class LilyGame:
                 "game not started: you are in the lobby — bind names, fish "
                 "for lobby facts, start on the first genuine group laugh"
             )
+            if self.promoted_categories:
+                # Gated category proposals (F): PROMOTED extras only —
+                # unpromoted candidates are never announced.
+                extra.append(
+                    "extra categories in tonight's rotation (promoted by "
+                    "player demand — you may mention these): "
+                    + ", ".join(self.promoted_categories)
+                )
         if extra:
             block += "\n" + "\n".join(extra)
         return block
@@ -2493,6 +2590,16 @@ async def entrypoint(ctx: JobContext) -> None:
             (group_memory or {}).get("total_games"),
         )
 
+    # Bank curation (WO-LILY-OMNIBUS-002 D/F): the group's served-question
+    # history (no-repeat guard on bank draws + generated output) and the
+    # promoted category-candidate names (lobby state-block line).
+    game.asked_history = await lily_bank.lily_load_asked_history(
+        supabase, group_id
+    )
+    game.promoted_categories = await lily_bank.lily_load_promoted_categories(
+        supabase
+    )
+
     # Returning group: stored voiceprints -> known_speakers (instant
     # recognition on rematch). Loaded before STT construction so the
     # identifiers ride the constructor.
@@ -2680,6 +2787,13 @@ async def entrypoint(ctx: JobContext) -> None:
         async def _persist() -> None:
             try:
                 heartbeat_stop.set()
+                # Difficulty self-tuning + retirement (sub-agent E):
+                # session-end job, fire-and-forget — it runs concurrently
+                # with the awaited persistence writes below and is never
+                # allowed to block (or fail) the shutdown gate.
+                asyncio.ensure_future(
+                    lily_bank_tuning.lily_run_bank_tuning(supabase)
+                )
                 if game.audeering_pipeline is not None:
                     try:
                         await game.audeering_pipeline.stop()
