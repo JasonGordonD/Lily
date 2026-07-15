@@ -107,3 +107,33 @@ def test_fragment_only_stopwords_yields_none():
     acc.add("S1", "okay.", now=100.0)
     acc.add("S1", "ready to play.", now=100.5)
     assert lily_extract_name_from_fragments(acc, "S1", now=100.6) is None
+
+
+# ---------------------------------------------------------------------------
+# Known-name STT snap (live 2026-07-15, the "Romney" class)
+# ---------------------------------------------------------------------------
+
+import lily_memory
+
+
+def test_known_name_correction_snaps_garbled_returning_player():
+    assert lily_memory.lily_known_name_correction("Romney", ["Rami"]) == "Rami"
+    assert lily_memory.lily_known_name_correction("Sara", ["Sarah", "Dave"]) == "Sarah"
+
+
+def test_known_name_correction_never_touches_exact_or_distinct_names():
+    # Exact match: nothing to correct (protects distinct real players).
+    assert lily_memory.lily_known_name_correction("Dave", ["Dave"]) is None
+    # Different person, same first letter: no snap.
+    assert lily_memory.lily_known_name_correction("Dan", ["Dave"]) is None
+    assert lily_memory.lily_known_name_correction("Robbie", ["Rami"]) is None
+
+
+def test_known_name_correction_refuses_ambiguity_and_junk():
+    # Two plausible candidates -> never guess.
+    assert lily_memory.lily_known_name_correction("Sari", ["Sarah", "Sara"]) is None
+    # Empty / too short / no memory.
+    assert lily_memory.lily_known_name_correction("", ["Rami"]) is None
+    assert lily_memory.lily_known_name_correction("R", ["Rami"]) is None
+    assert lily_memory.lily_known_name_correction("Romney", []) is None
+    assert lily_memory.lily_known_name_correction("Romney", None) is None

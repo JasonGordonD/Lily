@@ -420,3 +420,63 @@ def lily_bank_mode_filter(rows, mode: str) -> list:
     if (mode or "general") == "adult":
         return rows
     return [r for r in rows if not (r or {}).get("adult")]
+
+
+# ---------------------------------------------------------------------------
+# Known-name STT correction (live 2026-07-15 22:54, the "Romney" class)
+# ---------------------------------------------------------------------------
+
+def _name_consonant_skeleton(name: str) -> str:
+    """Lowercased consonant skeleton ('romney' -> 'rmny', 'rami' -> 'rm').
+    Deliberately crude — it exists only to catch STT garbling a name the
+    table's memory already knows."""
+    lowered = "".join(ch for ch in (name or "").lower() if ch.isalpha())
+    return "".join(ch for ch in lowered if ch not in "aeiou")
+
+
+def lily_known_name_correction(heard: str, known_names) -> "Optional[str]":
+    """If an STT-heard player name is almost certainly a garbled spelling
+    of a name this group's MEMORY already knows, return the remembered
+    spelling; else None.
+
+    The live failure class: a returning player's spoken name arrives
+    mangled ("Romney" for "Rami") and would bind as a stranger — breaking
+    recognition, memory continuity, and the scoreboard label — while the
+    correct spelling sits in lily_memories.player_names the whole time.
+
+    Deterministic and conservative, exactly-one-candidate rule:
+      - the heard name IS a known name (case-insensitive) -> None
+        (nothing to correct; also protects distinct real players)
+      - candidate = known name sharing the first letter whose consonant
+        skeleton prefixes the heard name's skeleton (or vice versa), or
+        with difflib ratio >= 0.75
+      - exactly ONE candidate matches -> return it; zero or several -> None
+        (never guess between two plausible people)
+    """
+    import difflib
+
+    heard_clean = "".join(ch for ch in (heard or "").lower() if ch.isalpha())
+    if len(heard_clean) < 2:
+        return None
+    known = [str(n) for n in (known_names or []) if n and str(n).strip()]
+    if any(heard_clean == k.lower() for k in known):
+        return None
+    heard_skel = _name_consonant_skeleton(heard)
+    candidates = []
+    for k in known:
+        k_clean = k.lower()
+        if not k_clean or k_clean[0] != heard_clean[0]:
+            continue
+        k_skel = _name_consonant_skeleton(k)
+        skeleton_hit = bool(
+            heard_skel and k_skel
+            and (heard_skel.startswith(k_skel) or k_skel.startswith(heard_skel))
+        )
+        ratio_hit = difflib.SequenceMatcher(
+            None, heard_clean, k_clean
+        ).ratio() >= 0.75
+        if skeleton_hit or ratio_hit:
+            candidates.append(k)
+    if len(candidates) == 1:
+        return candidates[0]
+    return None

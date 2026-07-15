@@ -254,6 +254,9 @@ class LilyGame:
         # block loaded at session start, and this session's callouts
         # collected for the lily_memories highlights column.
         self.memory_block: str = ""
+        # Remembered player names for STT name-snapping at bind time
+        # (the "Romney"-for-"Rami" class).
+        self.memory_player_names: list[str] = []
         self.highlights: list[dict] = []
         # Memory at the door (WO-LILY-DESYNC-HONESTY-001 F): set once the
         # returning-table memory question has an ANSWER — a strong group id
@@ -2422,6 +2425,9 @@ class LilyGame:
                 self.memory_total_games = int(
                     (memory or {}).get("total_games") or 0
                 )
+                self.memory_player_names = list(
+                    (memory or {}).get("player_names") or []
+                )
                 logger.info(
                     "LILY_MEMORY | BLOCK_READY | group=%s chars=%d "
                     "total_games=%s (post-upgrade)",
@@ -3158,9 +3164,31 @@ class LilyAgent(Agent):
                     f"Could not bind {label}: {player_name!r} does not look "
                     "like a name. Ask again naturally."
                 )
+        # Known-name STT snap (live 2026-07-15, the "Romney" class): if the
+        # heard name is almost certainly a garbled spelling of a name this
+        # group's memory already knows, bind the REMEMBERED spelling —
+        # recognition, memory continuity, and the scoreboard label all key
+        # on it. Conservative exactly-one-candidate rule; the spoken
+        # confirmation ("welcome back, Rami") lets the table correct a
+        # wrong snap instantly.
+        snapped = lily_memory.lily_known_name_correction(
+            name, getattr(self._game, "memory_player_names", None)
+        )
+        snap_note = ""
+        if snapped:
+            logger.info(
+                "LILY_BIND | NAME_SNAPPED | heard=%r -> remembered=%r",
+                name, snapped,
+            )
+            snap_note = (
+                f" (Heard {name!r}, but this table's memory knows "
+                f"{snapped!r} — bound the remembered spelling; confirm the "
+                "name lightly when you greet them.)"
+            )
+            name = snapped
         self._game.sk.bind_speaker(label, name)
         note = self._game.on_speaker_bound(label, name)
-        return f"Bound: voice {label} is {name}.{note}"
+        return f"Bound: voice {label} is {name}.{snap_note}{note}"
 
     @function_tool()
     async def lily_note_fact(
@@ -4063,6 +4091,9 @@ async def entrypoint(ctx: JobContext) -> None:
     group_memory = await lily_memory.lily_load_group_memory(supabase, group_id)
     game.memory_block = lily_memory.lily_build_memory_block(
         group_memory, prefs=game.prefs
+    )
+    game.memory_player_names = list(
+        (group_memory or {}).get("player_names") or []
     )
     # Task 4 disclosure counter (WO-LILY-FORGETME-001): the lily_memories
     # row count doubles as the persistent disclosure counter.
