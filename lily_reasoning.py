@@ -785,11 +785,18 @@ class LilyReasoning:
     async def judge(self, system_instructions: str, user_prompt: str) -> str:
         """One non-spoken LLM turn on the vocal model for Tier-2
         adjudication. Returns the raw model text (parsed by
-        lily_evaluation.lily_parse_judge_response)."""
-        return await self._generate(
-            self._vocal_model,
-            user_prompt,
-            JUDGE_THINKING_LEVEL,
-            system_instruction=system_instructions,
-            max_output_tokens=lily_config.judge_max_output_tokens(),
+        lily_evaluation.lily_parse_judge_response). Hard-bounded: this
+        call sits inside adjudicate, where an unbounded hang wedges
+        _adjudicating=True for the rest of the session (live 2026-07-15
+        04:05 stall class) — the caller treats TimeoutError as
+        judge-unavailable and rules on Tier-1 alone."""
+        return await asyncio.wait_for(
+            self._generate(
+                self._vocal_model,
+                user_prompt,
+                JUDGE_THINKING_LEVEL,
+                system_instruction=system_instructions,
+                max_output_tokens=lily_config.judge_max_output_tokens(),
+            ),
+            timeout=12.0,
         )

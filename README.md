@@ -89,6 +89,14 @@ with regression coverage in `tests/test_stall_recovery.py`:
   loaded question → arm + nudge; dead supply task → relaunch; supply task
   alive past ~90s → cancel, honest status note, relaunch. All watchdog
   actions log as `LILY_WATCHDOG | ...`.
+- **Armed-limbo recovery (04:05 session).** Adjudication can die between
+  the answer commit and the reveal publish; the game then sits with a
+  confirmed-delivered question armed, window closed, nothing adjudicating
+  — a state the watchdog used to trust as "in progress". It now detects
+  the limbo (delivery claim CONFIRMED + closed window + idle ≥2 ticks)
+  and recovers deterministically: candidates waiting → force
+  adjudication; none → reopen the window. The Tier-2 judge call is also
+  hard-bounded (12s) so a hung judge can never wedge `_adjudicating`.
 - **Arm-failure honesty.** When the reveal can't arm a next question, the
   consumed question is cleared from the state block and a status note
   tells Lily to vamp — never to re-ask the revealed question "for the
@@ -517,7 +525,7 @@ migrations/012_lily_question_images.sql  lily_questions image_url/image_source/
                                          (visible error rows)
 migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
                                          forget-cascade + re-key interlocked)
-tests/               713 tests, run with `python -m pytest tests/` — no network; needs
+tests/               716 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
