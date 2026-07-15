@@ -126,6 +126,73 @@ def _normalize_command_text(text: str) -> str:
     return _re.sub(r"\s+", " ", cleaned).strip()
 
 
+# Pacing choice — group prefs WO: "timed" (the standard clock, today's
+# behavior) vs "relaxed" (no time pressure; the answer window stretches by
+# LILY_RELAXED_WINDOW_MULTIPLIER). Deterministic, paraphrase-tolerant
+# detection at the command layer, like "back to normal": the spoken choice
+# flips the flag in code; the lily_set_pacing tool covers phrasings these
+# conservative patterns miss. Checked BEFORE start_game so "let's play
+# relaxed" reads as a pacing choice, not a game start.
+_PACING_RELAXED_PATTERNS = (
+    # "let's play relaxed" / "keep it chill" / "go freeform" / "make this casual"
+    r"\b(?:play|go|keep (?:it|things)|make (?:it|this)|do)"
+    r"(?: it| this| things)?(?: more)?"
+    r" (?:relaxed|freeform|free form|casual|chill|laid back)\b",
+    # "relaxed rounds" / "freeform mode" / "casual pace" / "untimed game"
+    r"\b(?:relaxed|freeform|free form|casual|chill|laid back|untimed)"
+    r" (?:rounds?|pace|pacing|mode|game|play|style)\b",
+    # "no timer" / "without the clock" / "turn the timer off"
+    r"\bno (?:timers?|clock|countdowns?)\b",
+    r"\bwithout (?:the |a )?(?:timers?|clock|countdowns?)\b",
+    r"\bturn (?:the )?(?:timers?|clock|countdowns?) off\b",
+    r"\bturn off the (?:timers?|clock|countdowns?)\b",
+    # A whole-utterance answer to the pacing offer ("Relaxed, please.") —
+    # entire-utterance only, so "I'm relaxed" table talk never fires.
+    r"^(?:relaxed|freeform|free form|casual|chill)(?: please| rounds?)?$",
+)
+_PACING_TIMED_PATTERNS = (
+    # "let's play timed" / "keep it timed" / "make this timed"
+    r"\b(?:play|go|keep (?:it|things)|make (?:it|this)|do)"
+    r"(?: it| this| things)?(?: more)?"
+    r" timed\b",
+    # "timed rounds" / "timed mode" / "timed pace"
+    r"\btimed (?:rounds?|pace|pacing|mode|game|play|style)\b",
+    # "with the timer" / "on the clock" / "put the timer back on"
+    r"\b(?:with|on) (?:the|a) (?:timer|clock)\b",
+    r"\b(?:put|turn) the (?:timers?|clock) (?:back )?on\b",
+    r"\bbring the (?:timers?|clock) back\b",
+    # Whole-utterance answer to the offer ("Timed." / "timed please")
+    r"^timed(?: please| rounds?)?$",
+)
+_PACING_RELAXED_RE = _re.compile("|".join(_PACING_RELAXED_PATTERNS))
+_PACING_TIMED_RE = _re.compile("|".join(_PACING_TIMED_PATTERNS))
+# Negated timed is a relaxed request: "no timed rounds", "don't want it
+# timed", "not timed". The negation word must IMMEDIATELY precede "timed"
+# (give or take a want/the/it) so "timed rounds, not relaxed" never
+# misreads. (Apostrophes normalize to spaces: "don t".)
+_PACING_TIMED_NEGATION_RE = _re.compile(
+    r"\b(?:no|not|don t want|dont want|do not want|won t do|without)"
+    r"\s+(?:the\s+|it\s+|any\s+|them\s+)?timed\b"
+)
+
+
+def lily_detect_pacing_choice(text_normalized: str) -> Optional[str]:
+    """Classify a normalized utterance as a pacing choice. Returns
+    "pacing_relaxed", "pacing_timed", or None. A negated timed ("no timed
+    rounds") is a relaxed request; when BOTH directions fire un-negated
+    the utterance is ambiguous — returns None (the prompt/tool layer sorts
+    it out conversationally; nothing flips on ambiguity)."""
+    if _PACING_TIMED_NEGATION_RE.search(text_normalized):
+        return "pacing_relaxed"
+    relaxed = _PACING_RELAXED_RE.search(text_normalized) is not None
+    timed = _PACING_TIMED_RE.search(text_normalized) is not None
+    if relaxed and not timed:
+        return "pacing_relaxed"
+    if timed and not relaxed:
+        return "pacing_timed"
+    return None
+
+
 # Spoken game-start phrases — deterministic, so start_game engages from the
 # spoken path too (not just the lily_begin_round tool / lily_control.start
 # RPC). Conservative set; "let s" is "let's" after punctuation stripping.
@@ -171,7 +238,8 @@ _FORGET_NEGATION_RE = _re.compile(
 def lily_detect_control_command(text: str) -> Optional[str]:
     """
     Detect a sticky player command in an utterance.
-    Returns "back_to_normal", "forget_me", "skip", "start_game", or None.
+    Returns "back_to_normal", "forget_me", "pacing_relaxed",
+    "pacing_timed", "skip", "start_game", or None.
 
     Punctuation-proof: "Back. To normal." and "back to... normal" both fire.
     "forget_me" fires on paraphrase-tolerant deletion requests ("forget
@@ -179,9 +247,13 @@ def lily_detect_control_command(text: str) -> Optional[str]:
     forms like "don't forget us" never fire) and takes priority over
     "skip" ("forget us and skip this one" is a deletion request).
     "skip" fires as a standalone word ("skip", "can we skip this one"),
-    never inside other words ("skipper" does not fire). "start the game" /
-    "let's start" / "let's play" / "start round one" fire "start_game"
-    (the agent layer ignores it once the game is running).
+    never inside other words ("skipper" does not fire). Pacing choices
+    ("let's play relaxed", "timed rounds", "no timer" — group prefs WO)
+    fire "pacing_relaxed"/"pacing_timed" and are checked BEFORE
+    start_game, so "let's play relaxed" is a pacing choice, not a game
+    start. "start the game" / "let's start" / "let's play" / "start round
+    one" fire "start_game" (the agent layer ignores it once the game is
+    running).
     """
     normalized = _normalize_command_text(text)
     if not normalized:
@@ -190,6 +262,9 @@ def lily_detect_control_command(text: str) -> Optional[str]:
         return "back_to_normal"
     if _FORGET_RE.search(normalized) and not _FORGET_NEGATION_RE.search(normalized):
         return "forget_me"
+    pacing = lily_detect_pacing_choice(normalized)
+    if pacing:
+        return pacing
     if _re.search(r"\bskip\b", normalized):
         return "skip"
     if _START_GAME_RE.search(normalized):
@@ -223,6 +298,13 @@ class LilyScorekeeper:
         self.phase: str = "lobby"          # lobby | round | final | wrapup
         self.round: int = 0
         self.mode: str = "general"         # general | adult (sticky flag)
+        # Pacing (group prefs WO): "timed" (the standard clock — exactly
+        # today's behavior) | "relaxed" (looser tempo; the agent layer
+        # stretches the answer window by LILY_RELAXED_WINDOW_MULTIPLIER).
+        # Sticky flag like mode; published as the participant attribute
+        # `pacing` (a seam addition) and persisted per group as the
+        # "pacing" key of the opaque lily_group_prefs dict.
+        self.pacing: str = "timed"
         self.category: Optional[str] = None
         self.question_number: int = 0
         self.questions_per_round: int = 6
@@ -649,6 +731,18 @@ class LilyScorekeeper:
         if phase in ("lobby", "round", "final", "wrapup"):
             self.phase = phase
 
+    def set_pacing(self, pacing: str) -> None:
+        """Flip the sticky pacing flag (group prefs WO). Invalid values are
+        ignored — the flag can only ever hold "timed" or "relaxed"."""
+        if pacing not in ("timed", "relaxed"):
+            return
+        if pacing != self.pacing:
+            logger.info(
+                "LILY_STATE | PACING_CHANGE | session=%s from=%s to=%s",
+                self.session_id, self.pacing, pacing,
+            )
+        self.pacing = pacing
+
     # -- honest failure notes (§11.2) ----------------------------------------
 
     def set_status_note(self, note: str) -> None:
@@ -674,12 +768,21 @@ class LilyScorekeeper:
         total_questions = self.rounds_total * self.questions_per_round
         lines.append(
             f"phase={self.phase} round={self.round}/{self.rounds_total} "
-            f"mode={self.mode} "
+            f"mode={self.mode} pacing={self.pacing} "
             f"question={q_in_round}/{self.questions_per_round} in this round "
             f"(#{self.question_number} of {total_questions} total, "
             f"then one final wager question) "
             f"category={self.category or '-'}"
         )
+        if self.pacing == "relaxed":
+            # Group prefs WO prompt note: the flag alone doesn't change how
+            # she talks — this line does. Timed carries no note (today's
+            # behavior).
+            lines.append(
+                "relaxed pacing: looser tempo — the answer window runs "
+                "longer on purpose. Give the table room to think; no "
+                "countdown talk, no rushing anyone, no 'quickly now'."
+            )
         if self.players:
             for name, s in sorted(
                 self.players.items(), key=lambda kv: -kv[1]["score"]
@@ -724,6 +827,7 @@ class LilyScorekeeper:
             "phase": self.phase,
             "round": self.round,
             "mode": self.mode,
+            "pacing": self.pacing,
             "category": self.category,
             "question_number": self.question_number,
             "questions_per_round": self.questions_per_round,
@@ -742,6 +846,7 @@ class LilyScorekeeper:
         self.phase = snap.get("phase", self.phase)
         self.round = snap.get("round", self.round)
         self.mode = snap.get("mode", self.mode)
+        self.pacing = snap.get("pacing", self.pacing)
         self.category = snap.get("category", self.category)
         self.question_number = snap.get("question_number", self.question_number)
         self.questions_per_round = snap.get(

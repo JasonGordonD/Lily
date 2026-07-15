@@ -299,16 +299,44 @@ async def lily_load_group_memory(supabase, group_id: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Group preferences summary (pure) — group prefs WO
+# ---------------------------------------------------------------------------
+
+def lily_prefs_summary(prefs) -> str:
+    """One compact human line for a group's stored preferences ("relaxed
+    pacing"). OPAQUE: renders whatever scalar keys the dict carries — the
+    keys this WO owns get natural phrasing; unknown keys (round_format /
+    media_mode land with their own features post-merge) render generically
+    as "key: value", so their stored choices surface without changes here.
+    Returns "" for empty/None prefs."""
+    if not isinstance(prefs, dict):
+        return ""
+    bits = []
+    for key in sorted(prefs):
+        value = prefs[key]
+        if value is None or value == "" or not isinstance(value, (str, int, float, bool)):
+            continue
+        if key == "pacing":
+            bits.append(f"{value} pacing")
+        else:
+            bits.append(f"{key}: {value}")
+    return ", ".join(bits)
+
+
+# ---------------------------------------------------------------------------
 # The [RETURNING TABLE] block (pure)
 # ---------------------------------------------------------------------------
 
 def lily_build_memory_block(
     memory: Optional[dict],
+    prefs: Optional[dict] = None,
     max_chars: int = MEMORY_BLOCK_MAX_CHARS,
 ) -> str:
     """Compact system-context block for a returning table: who they are, who
     won last time, running bits, total games — written so Lily greets
-    returning players by name and uses callbacks naturally. Returns "" for
+    returning players by name and uses callbacks naturally. `prefs` (the
+    stored lily_group_prefs dict) adds one compact "usual" line ("usual:
+    relaxed pacing") for the ask-once preferences flow. Returns "" for
     empty/None memory. Capped at ~600 chars."""
     if not memory:
         return ""
@@ -345,6 +373,9 @@ def lily_build_memory_block(
         fact_bits.append(f"{who}: {fact}" if who else fact)
     if fact_bits:
         lines.append("Running bits you remember: " + "; ".join(fact_bits) + ".")
+    usual = lily_prefs_summary(prefs)
+    if usual:
+        lines.append(f"usual: {usual}.")
     lines.append(
         "Greet returning players back BY NAME, reference who won last time, "
         "and drop the running bits as callbacks — naturally, like a host who "

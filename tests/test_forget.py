@@ -75,9 +75,17 @@ def test_plan_covers_every_table_with_correct_keys():
         assert op["column"] == "session_id"
         assert op["values"] == ["room-1", "room-2"]
         assert op["optional"] is False
-    # Optional future table — skipped gracefully when absent
+    # Optional tables — skipped gracefully when absent, deleted when present
     assert by_table["lily_asked_history"]["optional"] is True
     assert by_table["lily_asked_history"]["column"] == "group_id"
+    # Group prefs WO interlock: a forgotten table's preferences are
+    # recognition data — lily_group_prefs joins the cascade (optional only
+    # for migration-013 lag; absent means nothing was ever stored).
+    prefs_op = by_table["lily_group_prefs"]
+    assert prefs_op["action"] == "delete"
+    assert prefs_op["column"] == "group_id"
+    assert prefs_op["values"] == ["g1"]
+    assert prefs_op["optional"] is True
     # Re-key, never delete: lily_sessions -> tombstone
     rekey = by_table["lily_sessions"]
     assert rekey["action"] == "rekey"
@@ -190,7 +198,7 @@ class _FakeSupabase:
         return _FakeQuery(self, name)
 
 
-def _seed(with_asked_history=False):
+def _seed(with_asked_history=False, with_prefs=True):
     tables = {
         "lily_sessions": [
             {"session_id": "room-1", "group_id": "gA"},
@@ -227,6 +235,11 @@ def _seed(with_asked_history=False):
             {"group_id": "gA", "question_id": "kb_1"},
             {"group_id": "gB", "question_id": "kb_2"},
         ]
+    if with_prefs:
+        tables["lily_group_prefs"] = [
+            {"group_id": "gA", "prefs": {"pacing": "relaxed"}},
+            {"group_id": "gB", "prefs": {"pacing": "timed"}},
+        ]
     return _FakeSupabase(tables)
 
 
@@ -247,6 +260,7 @@ def test_cascade_deletes_verifies_and_tombstones():
         "lily_speaker_voiceprints": 2,
         "lily_memories": 1,
         "lily_group_facts": 1,
+        "lily_group_prefs": 1,
         "lily_addressee_log": 2,
         "lily_acoustic_trajectories": 1,
     }
@@ -261,11 +275,17 @@ def test_cascade_deletes_verifies_and_tombstones():
     # Every touched table verified (count queries came back 0)
     assert set(result["verified"]) == {
         "lily_speaker_voiceprints", "lily_memories", "lily_group_facts",
-        "lily_addressee_log", "lily_acoustic_trajectories", "lily_sessions",
+        "lily_group_prefs", "lily_addressee_log",
+        "lily_acoustic_trajectories", "lily_sessions",
     }
     # Other groups untouched
     assert db.tables["lily_speaker_voiceprints"] == [
         {"group_id": "gB", "speaker_label": "S1"}
+    ]
+    # Group prefs WO interlock: the forgotten table's preferences are gone;
+    # the other group's remain.
+    assert db.tables["lily_group_prefs"] == [
+        {"group_id": "gB", "prefs": {"pacing": "timed"}}
     ]
     assert db.tables["lily_memories"] == [{"group_id": "gB", "session_id": "room-x"}]
     assert [r["session_id"] for r in db.tables["lily_addressee_log"]] == ["room-x"]
@@ -282,6 +302,17 @@ def test_cascade_deletes_asked_history_when_present():
     assert db.tables["lily_asked_history"] == [
         {"group_id": "gB", "question_id": "kb_2"}
     ]
+
+
+def test_cascade_skips_prefs_table_when_absent():
+    # Migration-013 lag: before production applies 013 there were never
+    # any prefs stored — an absent lily_group_prefs is an honest skip,
+    # never a partial failure the table is told to retry forever.
+    db = _seed(with_prefs=False)
+    result = _run_cascade(db)
+    assert result["ok"] is True
+    assert "lily_group_prefs" in result["skipped"]
+    assert "lily_group_prefs" not in result["failed"]
 
 
 def test_cascade_includes_current_session_even_if_unlisted():

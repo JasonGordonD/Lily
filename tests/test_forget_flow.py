@@ -101,6 +101,8 @@ def _make_game() -> LilyGame:
     game.forget_state = "idle"
     game.forget_requester = None
     game._forget_target_group = None
+    game.prefs = {}
+    game._prefs_offer_made = False
     return game
 
 

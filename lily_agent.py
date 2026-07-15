@@ -221,6 +221,18 @@ class LilyGame:
         # collected for the lily_memories highlights column.
         self.memory_block: str = ""
         self.highlights: list[dict] = []
+        # GROUP PREFERENCES (group prefs WO): the OPAQUE per-group prefs
+        # dict (lily_group_prefs.prefs, migration 013), loaded at session
+        # start for a returning group and persisted whole on every
+        # preference change. Keys are feature-owned — this WO owns
+        # "pacing"; round_format / media_mode slot into the SAME dict when
+        # their features land post-merge (nothing here enumerates keys).
+        self.prefs: dict = {}
+        # Ask-once latch: the "play the usual, or change anything?"
+        # question is issued AT MOST once per session — whichever of the
+        # greeting or the post-upgrade game-start beat meets stored prefs
+        # first consumes it; it is never re-asked tonight.
+        self._prefs_offer_made = False
         # WO-LILY-FORGETME-001: deletion right + memory transparency.
         # forget_state drives the deterministic spoken flow:
         #   idle -> pending_confirm (spoken request or confirm=false tool
@@ -294,6 +306,11 @@ class LilyGame:
                 "round": str(self.sk.round),
                 "question_number": str(self.sk.question_number),
                 "mode": self.sk.mode,  # deterministic sticky flag (§11.4)
+                # SEAM ADDITION (group prefs WO): `pacing` — "timed" |
+                # "relaxed" — joins the LWW attribute set so the frontend
+                # can style/omit its countdown UI; answer_window.duration_ms
+                # already carries the stretched window when relaxed.
+                "pacing": self.sk.pacing,
                 "players": json.dumps(self._players_payload()),
                 "answer_window": json.dumps(window),
                 "last_active_at": str(int(time.time())),
@@ -458,6 +475,30 @@ class LilyGame:
             "forget, just say so')."
         )
 
+    def prefs_offer_instruction(self) -> str:
+        """Group prefs WO ask-once flow: a returning group with stored
+        preferences gets ONE simple question after the composed welcome —
+        play the usual, or change anything? Consumed at most once per
+        session (never re-asked tonight); cold groups (no stored prefs)
+        return "" — their preferences get captured as they choose during
+        the walkthrough/lobby, no extra ceremony."""
+        if not self.prefs or self._prefs_offer_made:
+            return ""
+        usual = lily_memory.lily_prefs_summary(self.prefs)
+        if not usual:
+            return ""
+        self._prefs_offer_made = True
+        return (
+            " AFTER the composed welcome, ask ONCE, simply — do they want "
+            f"to play the usual, or change anything? (their usual: {usual} "
+            "— the [RETURNING TABLE] context carries it too). A yes / 'the "
+            "usual' needs NO announcement and no tool call: the stored "
+            "preferences apply on their own when the game starts — just "
+            "move on. If they change something, act on the change (the "
+            "spoken choice or its tool saves it as the new usual). Never "
+            "ask about preferences again tonight."
+        )
+
     def greeting_instructions(self) -> str:
         """The fresh-room landing line (single source of truth — both the
         on_enter and entrypoint trigger paths dispatch THIS text under the
@@ -497,6 +538,7 @@ class LilyGame:
                 "walkthrough or refresher draws on WHAT THE TABLE CAN ASK "
                 "FOR and happens at most once tonight."
                 + self.memory_disclosure_instruction()
+                + self.prefs_offer_instruction()
             )
         else:
             # Neutral-history rule: without memory data, never claim OR deny
@@ -726,10 +768,21 @@ class LilyGame:
             )
             self.open_window()
 
+    def _answer_window_duration(self) -> float:
+        """The standard answer-window duration for the CURRENT pacing
+        (group prefs WO): timed = lily_config.answer_window_seconds()
+        exactly (today's behavior); relaxed = that base ×
+        LILY_RELAXED_WINDOW_MULTIPLIER (default 2.0). Explicitly-passed
+        durations (the steal window) never go through this."""
+        base = lily_config.answer_window_seconds()
+        if self.sk.pacing == "relaxed":
+            return base * lily_config.relaxed_window_multiplier()
+        return base
+
     def open_window(
         self, duration: float | None = None, steal: bool = False
     ) -> None:
-        dur = duration if duration is not None else lily_config.answer_window_seconds()
+        dur = duration if duration is not None else self._answer_window_duration()
         self.sk.open_answer_window(duration=dur, reset_candidates=not steal)
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
@@ -1053,6 +1106,30 @@ class LilyGame:
                     "OFF — committed, in code. Switch registers "
                     "instantly, no ceremony, no residue, straight into "
                     "a regular category like nothing happened.",
+                    source="voice_command",
+                )
+            return
+        if command in ("pacing_relaxed", "pacing_timed"):
+            # Group prefs WO: the spoken pacing choice is committed in code
+            # (flag + persisted prefs) before Lily says a word about it —
+            # same contract as "back to normal".
+            pacing = "relaxed" if command == "pacing_relaxed" else "timed"
+            if self.set_pacing(pacing, source="voice_command"):
+                if pacing == "relaxed":
+                    note = (
+                        "answer windows now run about twice as long. Keep "
+                        "the tempo loose from here: no countdown talk, no "
+                        "rushing anyone."
+                    )
+                else:
+                    note = "the standard answer clock is back on."
+                self.gated_say(
+                    None,
+                    "pacing_set",
+                    f"A player just chose {pacing} pacing — committed, in "
+                    f"code, and saved as this table's usual: {note} One "
+                    "light line acknowledging it, then keep the night "
+                    "moving.",
                     source="voice_command",
                 )
             return
@@ -1468,6 +1545,58 @@ class LilyGame:
             self.sk.session_id,
         ))
 
+    # -- group preferences (group prefs WO) -----------------------------------
+
+    def set_pacing(self, pacing: str, source: str = "unspecified") -> bool:
+        """Deterministic pacing flip (spoken command layer or the
+        lily_set_pacing tool). Sets the scorekeeper's sticky flag, records
+        the choice in the opaque prefs dict, and persists the WHOLE dict —
+        it is this table's 'usual' next time. Returns False on an invalid
+        value (nothing changes)."""
+        if pacing not in ("timed", "relaxed"):
+            return False
+        changed = pacing != self.sk.pacing
+        self.sk.set_pacing(pacing)
+        self.prefs = dict(self.prefs or {})
+        self.prefs["pacing"] = pacing
+        logger.info(
+            "LILY_PREFS | PACING | session=%s group=%s pacing=%s source=%s "
+            "changed=%s",
+            self.sk.session_id, self.group_id, pacing, source, changed,
+        )
+        self.persist_prefs()
+        if changed:
+            # Seam: the `pacing` participant attribute updates immediately.
+            self.publish_attributes_nowait()
+        return True
+
+    def persist_prefs(self) -> None:
+        """Persist the whole opaque prefs dict on every preference change
+        (lily_group_prefs whole-dict upsert under the CURRENT group id).
+        Fire-and-forget; a later group-id upgrade re-keys the row."""
+        if self.supabase is None or not self.prefs:
+            return
+        asyncio.ensure_future(lily_persistence.lily_write_group_prefs(
+            self.supabase, self.group_id, dict(self.prefs)
+        ))
+
+    def apply_prefs_at_game_start(self) -> None:
+        """The stored 'usual' becomes live flags at game start — silently
+        (the ask-once flow promised a yes/'the usual' needs no ceremony).
+        Only the keys THIS feature owns are applied here (pacing);
+        unknown keys (round_format / media_mode — other features') pass
+        through untouched and get applied by their own features
+        post-merge. A pacing already chosen out loud this session wrote
+        itself into the prefs dict, so this read is always the latest
+        word."""
+        pacing = (self.prefs or {}).get("pacing")
+        if pacing in ("timed", "relaxed") and pacing != self.sk.pacing:
+            self.sk.set_pacing(pacing)
+            logger.info(
+                "LILY_PREFS | APPLIED | session=%s pacing=%s (the usual, "
+                "at game start)", self.sk.session_id, pacing,
+            )
+
     def fire_enrollment(self, trigger: str) -> None:
         """Voiceprint enrollment, fire-and-forget. group_id is passed as a
         callable so the upsert lands under whatever id is resolved by the
@@ -1510,10 +1639,29 @@ class LilyGame:
             self.supabase, old, new_group_id, self.sk.session_id
         )
         if self.sk.question_number == 0:
+            # Group prefs WO: the resolved group may have a stored 'usual'.
+            # The re-key above already merged any session-written row under
+            # the new id (session choices winning); reconcile the in-memory
+            # dict the same way — stored keys slot in UNDER this session's
+            # spoken choices, opaquely (round_format / media_mode included).
+            stored_prefs = await lily_persistence.lily_load_group_prefs(
+                self.supabase, new_group_id
+            )
+            if stored_prefs:
+                merged = dict(stored_prefs)
+                merged.update(self.prefs or {})
+                self.prefs = merged
+                logger.info(
+                    "LILY_PREFS | RECONCILED | group=%s keys=%s "
+                    "(post-upgrade)",
+                    new_group_id, ",".join(sorted(merged.keys())),
+                )
             memory = await lily_memory.lily_load_group_memory(
                 self.supabase, new_group_id
             )
-            block = lily_memory.lily_build_memory_block(memory)
+            block = lily_memory.lily_build_memory_block(
+                memory, prefs=self.prefs
+            )
             if block:
                 self.memory_block = block  # llm_node injects it next turn
                 self.memory_total_games = int(
@@ -1702,6 +1850,13 @@ class LilyGame:
         # item on the next turn (symmetric removal path).
         self.memory_block = ""
         self.memory_total_games = 0
+        # Group prefs WO interlock: the stored preferences were deleted by
+        # the cascade (lily_group_prefs) — clear the in-session dict too,
+        # so nothing re-persists the deleted 'usual' under the fresh id.
+        # The LIVE pacing flag stays: tonight's tempo is tonight's choice,
+        # not identity; if the table picks a pacing again later it writes
+        # fresh under the anonymous id like the other post-forget writes.
+        self.prefs = {}
         # STT: clear the enrolled speakers so no future STT stream this
         # session re-injects the deleted voiceprints. 1.6.4 NOTE:
         # livekit-plugins-speechmatics 1.6.4 has NO live de-enrollment
@@ -1764,6 +1919,10 @@ class LilyGame:
             await self.resolve_group_identity(trigger="game_start")
         except Exception as e:
             logger.warning("LILY_MEMORY | GROUP_ID_RESOLVE | failed: %s", e)
+        # Group prefs WO: the stored 'usual' becomes live flags HERE —
+        # silently (a "play the usual" needed no announcement). Runs after
+        # identity resolution so a just-recognized table's prefs apply too.
+        self.apply_prefs_at_game_start()
         self.sk.set_phase("round")
         self.start_prefetch()
         self.arm_next_question()
@@ -1796,6 +1955,12 @@ class LilyGame:
                 # once-per-session latch inside makes this a no-op when the
                 # greeting already carried it.
                 + self.memory_disclosure_instruction()
+                # Group prefs ask-once ride-along, same latch pattern: if
+                # the greeting never met stored prefs (they resolved with a
+                # mid-lobby upgrade), this is the last natural moment to
+                # offer "the usual, or change anything?" — already-applied
+                # flags make a "the usual" answer a pure no-op.
+                + self.prefs_offer_instruction()
             )
         self.gated_say(
             None, "game_start", instructions, source=f"start_{source}"
@@ -2325,6 +2490,38 @@ class LilyAgent(Agent):
         )
         await self._game.publish_attributes()
         return f"Bonus point to {name}."
+
+    # Ungated by game_started (tool-gating principle: gate tools that
+    # mutate game outcomes or emit game events — a pacing preference does
+    # neither, and its primary habitat is the pre-game lobby).
+    @function_tool()
+    async def lily_set_pacing(self, context: RunContext, pacing: str) -> str:
+        """Set the table's pacing: "timed" (the standard answer clock —
+        the default) or "relaxed" (freeform, no time pressure — answer
+        windows run about twice as long). Call it whenever the table
+        chooses a pacing in any phrasing — "let's keep it casual", "put
+        the timer back on" — or answers your timed-or-relaxed offer. The
+        choice is saved as this table's usual for future nights.
+
+        Args:
+            pacing: "timed" or "relaxed".
+        """
+        choice = (pacing or "").strip().lower()
+        if not self._game.set_pacing(choice, source="tool"):
+            return (
+                f"Unknown pacing {pacing!r} — the only choices are 'timed' "
+                "and 'relaxed'. Nothing changed."
+            )
+        if choice == "relaxed":
+            return (
+                "Pacing is RELAXED — committed and saved as this table's "
+                "usual. Answer windows now run about twice as long; keep "
+                "the tempo loose — no countdown talk, no rushing anyone."
+            )
+        return (
+            "Pacing is TIMED — committed and saved as this table's usual. "
+            "The standard answer clock is on."
+        )
 
     # -- memory transparency + deletion right (WO-LILY-FORGETME-001) ---------------
     #
@@ -2862,10 +3059,17 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.room.on("participant_connected", _on_participant_connected)
 
+    # Group preferences (group prefs WO): the stored 'usual' loads WITH the
+    # memory — the [RETURNING TABLE] block below carries its compact line
+    # and the greeting's ask-once offer reads from game.prefs.
+    game.prefs = await lily_persistence.lily_load_group_prefs(supabase, group_id)
+
     # Returning-table memory: last games + group facts -> [RETURNING TABLE]
     # system block (injected in llm_node alongside the adult layer).
     group_memory = await lily_memory.lily_load_group_memory(supabase, group_id)
-    game.memory_block = lily_memory.lily_build_memory_block(group_memory)
+    game.memory_block = lily_memory.lily_build_memory_block(
+        group_memory, prefs=game.prefs
+    )
     # Task 4 disclosure counter (WO-LILY-FORGETME-001): the lily_memories
     # row count doubles as the persistent disclosure counter.
     game.memory_total_games = int((group_memory or {}).get("total_games") or 0)

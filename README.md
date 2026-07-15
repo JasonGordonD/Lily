@@ -36,8 +36,9 @@ do-not-touch: no imports, no vendoring).
   `acceptable_answers` (uncertainty escalates, never rejects); Tier-2 is one
   non-spoken LLM call that judges against the supplied canonical answer only — it
   never re-derives the fact.
-- **Sticky commands enforced in code:** "skip" and "back to normal" (adult-mode
-  revert) flip deterministic flags at the transcript-event layer; the prompt is
+- **Sticky commands enforced in code:** "skip", "back to normal" (adult-mode
+  revert), and the pacing choices ("let's play relaxed" / "timed rounds") flip
+  deterministic flags at the transcript-event layer; the prompt is
   texture, not the mechanism. The adult layer is additively injected/removed on the
   sticky `mode` flag — removal fully reverts her.
 - **tts_node punctuation-flush guard is mandatory** — suspense holds ("The answer
@@ -296,10 +297,13 @@ migrations/008_lily_acoustic_trajectories.sql  per-turn acoustic snapshots + add
                                                acoustic_snapshot column
 migrations/009_lily_question_status.sql  lily_questions.status lifecycle column
                                          (burn protocol; shared with tier retirement)
-tests/               355 tests, run with `python -m pytest tests/` — no network; needs
+migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
+                                         forget-cascade + re-key interlocked)
+tests/               392 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
-                     test_say_gate_dispatch.py / test_forget_flow.py import livekit)
+                     test_say_gate_dispatch.py / test_forget_flow.py /
+                     test_group_prefs.py import livekit)
 ```
 
 ## Persistent memory (rematch)
@@ -384,6 +388,50 @@ same way. **Neutral-greeting rule:** with no memory data she is instructed
 never to claim she remembers the table AND never to announce it's their
 first time — history is referenced only when a `[RETURNING TABLE]` block
 actually exists.
+
+### Group preferences (the "usual")
+
+Lily remembers HOW a table likes to play, not just who they are.
+`lily_group_prefs` (migration 013) holds one row per group: an **opaque
+`prefs` jsonb dict**, persisted whole (upsert on `group_id`) on every
+preference change. Keys are feature-owned — this WO owns `"pacing"`;
+`round_format` / `media_mode` slot into the same dict when their features
+land, with zero schema or plumbing changes (`lily_memory.lily_prefs_summary`
+renders unknown keys generically).
+
+**Pacing (`timed` | `relaxed`):** a sticky scorekeeper flag beside `mode`.
+`timed` is exactly the previous behavior; `relaxed` stretches the standard
+answer window by `LILY_RELAXED_WINDOW_MULTIPLIER` (default 2.0 —
+`LilyGame._answer_window_duration`; the steal window keeps its own tunable)
+and adds a looser-tempo note to the state block (no countdown talk, no
+rushing anyone). The choice flips deterministically at the command layer
+("let's play relaxed", "timed rounds", "no timer", negation-guarded — checked
+BEFORE the start-game phrases so "let's play relaxed" is a pacing choice, not
+a game start) or via the `lily_set_pacing(pacing)` tool (ungated — a
+preference mutates no game outcome). Snapshot/rehydrate carry it across
+reconnects; **seam addition:** the participant attribute `pacing` joins the
+LWW set (`answer_window.duration_ms` already reflects the stretched window).
+
+**The ask-once flow:** a returning group's prefs load at session start with
+the memory; the `[RETURNING TABLE]` block gains a compact `usual:` line
+("usual: relaxed pacing") and the greeting asks ONCE, after the composed
+welcome — play the usual, or change anything? A yes/"the usual" needs no
+ceremony and no tool call: `apply_prefs_at_game_start` sets flags from the
+stored dict silently when the game starts. Changes update the stored usual.
+The offer is latched (`_prefs_offer_made`) — never re-asked in a session; a
+mid-lobby group-id upgrade that resolves prefs late rides the game-start
+beat under the same latch. Cold groups get no ceremony at all: choices are
+captured as they make them in the lobby.
+
+**Interlocks:** `lily_group_prefs` is part of the forget cascade
+(`lily_forget.OPTIONAL_GROUP_TABLES` — deleted and verified when present,
+absent-table-skipped only for migration-013 lag; a forgotten table's
+preferences are recognition data, and the in-session teardown clears the
+prefs dict while tonight's live pacing survives as tonight's choice). On a
+mid-session group-id upgrade the row **merge-re-keys**
+(`lily_rekey_group_prefs`): `group_id` is the PK, so old and new dicts merge
+key-by-key with this session's choices winning; the provisional row is
+deleted only when it was the room-random session id.
 
 **Adult-column guard (consent-safety):** `lily_questions.adult` marks
 adult-register bank rows; `lily_fetch_bank_question` takes the session `mode`
@@ -481,8 +529,10 @@ deterministic yes/no parse); `confirm=true` runs
 `lily_speaker_voiceprints`, `lily_memories`, `lily_group_facts`, plus the
 session-keyed `lily_addressee_log` and `lily_acoustic_trajectories` via the
 group's session ids (from `lily_sessions`, plus the current session), plus
-`lily_asked_history` IF the table exists (it lands with a future WO —
-absent-table errors are skipped and logged, never failed). `lily_sessions`
+`lily_asked_history` and `lily_group_prefs` IF the tables exist (the former
+lands with a future WO, the latter only skips on migration-013 lag — a
+forgotten table's preferences are recognition data; absent-table errors are
+skipped and logged, never failed). `lily_sessions`
 is RETAINED but re-keyed to the tombstone `forgotten_<sha1-12 of the old
 group id>` — operational records survive without linkable identity;
 `lily_answers` is retained untouched because it has no `group_id` column
@@ -536,9 +586,9 @@ first-timers (and the new faces at a mixed table, short version) get the
 natural walkthrough. Both draw exclusively on the prompt's
 **`## WHAT THE TABLE CAN ASK FOR`** block — the single options inventory
 (freeform play, multiple-choice on request, the grown-up deck, skip, the
-steal window, the 50/50 lifeline, "back to normal", "Lily, forget me")
-that future WOs extend one line each (the queued multiple-choice round
-format and picture rounds land there). The walkthrough/refresher happens
+steal window, the 50/50 lifeline, "back to normal", "Lily, forget me",
+timed-vs-relaxed pacing) that future WOs extend one line each (the queued
+multiple-choice round format and picture rounds land there). The walkthrough/refresher happens
 at most once per session, and the Task-4 disclosure clause lands inside
 the same welcome-back beat (one natural breath; the `session_greet`
 say-gate key covers the whole landing).

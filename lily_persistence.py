@@ -509,6 +509,131 @@ async def lily_write_group_fact(
 
 
 # ---------------------------------------------------------------------------
+# Group preferences (group prefs WO — lily_group_prefs, migration 013)
+# ---------------------------------------------------------------------------
+
+async def lily_write_group_prefs(
+    supabase: SupabaseClient,
+    group_id: str,
+    prefs: dict,
+) -> None:
+    """Upsert the WHOLE opaque prefs dict for a group (on_conflict=group_id)
+    — called on every preference change. The dict is stored opaquely: this
+    WO writes {"pacing": ...}; round_format / media_mode keys are written by
+    their own features post-merge and ride the same whole-dict upsert.
+    Fire-and-forget: logs LILY_PREFS | markers, never raises."""
+    if supabase is None or not group_id:
+        return
+    try:
+        payload = {
+            "group_id": group_id,
+            "prefs": dict(prefs or {}),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_group_prefs")
+            .upsert(payload, on_conflict="group_id")
+            .execute()
+        )
+        logger.info(
+            "LILY_PREFS | WRITE | group=%s keys=%s",
+            group_id, ",".join(sorted((prefs or {}).keys())) or "-",
+        )
+    except Exception as e:
+        logger.error("lily_write_group_prefs error: %s", e)
+
+
+async def lily_load_group_prefs(
+    supabase: SupabaseClient,
+    group_id: str,
+) -> dict:
+    """Load the stored prefs dict for a group. Returns {} when nothing is
+    stored or on any error (prefs are never load-bearing — a missing 013
+    table degrades to cold-group behavior)."""
+    if supabase is None or not group_id:
+        return {}
+    try:
+        result = await asyncio.to_thread(
+            lambda: supabase.table("lily_group_prefs")
+            .select("prefs")
+            .eq("group_id", group_id)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        prefs = (rows[0] or {}).get("prefs") if rows else None
+        if isinstance(prefs, dict) and prefs:
+            logger.info(
+                "LILY_PREFS | LOADED | group=%s keys=%s",
+                group_id, ",".join(sorted(prefs.keys())),
+            )
+            return dict(prefs)
+        return {}
+    except Exception as e:
+        logger.error("lily_load_group_prefs error: %s", e)
+        return {}
+
+
+async def lily_rekey_group_prefs(
+    supabase: SupabaseClient,
+    old_group_id: str,
+    new_group_id: str,
+    session_id: str,
+) -> None:
+    """Move a prefs row written under a provisional group id to the RESOLVED
+    id on a mid-session upgrade. group_id is the table's PRIMARY KEY, so a
+    blind UPDATE collides when the resolved group already has a row —
+    instead the two dicts MERGE key-by-key with the OLD (this session's
+    fresher choices) winning, upserted under the new id. The old row is
+    deleted only when the provisional id was the room-random session id
+    (the same conservatism as the voiceprint re-key: never destroys another
+    real group's row). Tolerates failure independently, like the other
+    lily_rekey_group tables."""
+    if not old_group_id or not new_group_id or old_group_id == new_group_id:
+        return
+    try:
+        old_res = await asyncio.to_thread(
+            lambda: supabase.table("lily_group_prefs")
+            .select("prefs").eq("group_id", old_group_id).limit(1).execute()
+        )
+        old_rows = old_res.data or []
+        old_prefs = (old_rows[0] or {}).get("prefs") if old_rows else None
+        if not isinstance(old_prefs, dict) or not old_prefs:
+            return  # nothing written under the provisional id — no-op
+        new_res = await asyncio.to_thread(
+            lambda: supabase.table("lily_group_prefs")
+            .select("prefs").eq("group_id", new_group_id).limit(1).execute()
+        )
+        new_rows = new_res.data or []
+        stored = (new_rows[0] or {}).get("prefs") if new_rows else None
+        merged = dict(stored) if isinstance(stored, dict) else {}
+        merged.update(old_prefs)  # this session's choices win the reconcile
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_group_prefs").upsert({
+                "group_id": new_group_id,
+                "prefs": merged,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }, on_conflict="group_id").execute()
+        )
+        if old_group_id == session_id:
+            await asyncio.to_thread(
+                lambda: supabase.table("lily_group_prefs")
+                .delete().eq("group_id", old_group_id).execute()
+            )
+        logger.info(
+            "LILY_MEMORY | REKEY | table=lily_group_prefs session=%s old=%s "
+            "new=%s keys=%s",
+            session_id, old_group_id, new_group_id,
+            ",".join(sorted(merged.keys())),
+        )
+    except Exception as e:
+        logger.error(
+            "LILY_MEMORY | REKEY_FAILED | table=lily_group_prefs session=%s "
+            "error=%s", session_id, e,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Voiceprint persistence (fully passive — Lovebirds Task 6 lift)
 # ---------------------------------------------------------------------------
 
@@ -694,6 +819,12 @@ async def lily_rekey_group(
                 "LILY_MEMORY | REKEY_FAILED | table=%s session=%s error=%s",
                 table, session_id, e,
             )
+    # lily_group_prefs (group prefs WO): PK-safe merge re-key — its own
+    # helper because a blind UPDATE collides with an existing prefs row
+    # under the resolved id. Tolerates failure independently like the rest.
+    await lily_rekey_group_prefs(
+        supabase, old_group_id, new_group_id, session_id
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -717,8 +848,10 @@ async def lily_forget_group_data(
     lily_memories, lily_group_facts; deletes the session-keyed
     lily_addressee_log and lily_acoustic_trajectories rows via the group's
     session ids (lily_sessions where group_id = X, plus the CURRENT
-    session id); deletes lily_asked_history IF the table exists (it lands
-    with a future WO — absent-table errors are skipped, never failed);
+    session id); deletes lily_group_prefs (group prefs WO interlock —
+    preferences are recognition data) and lily_asked_history IF the tables
+    exist (absent-table errors — migration lag / future WO — are skipped,
+    never failed);
     then re-keys lily_sessions to the `forgotten_<sha1-12>` tombstone so
     operational records survive without linkable identity. lily_answers
     is RETAINED untouched — it has no group_id column (migration 001,

@@ -56,6 +56,8 @@ def lily_tombstone_group_id(group_id: str) -> str:
 #   003: lily_memories(group_id)
 #   005: lily_addressee_log(session_id only — NO group_id column)
 #   008: lily_acoustic_trajectories(session_id only — NO group_id column)
+#   013: lily_group_prefs(group_id PK) — a forgotten table's preferences
+#        are recognition data (group prefs WO interlock).
 #   lily_asked_history: lands with a future WO — optional, absent-table
 #        errors (42P01 / PGRST205) are tolerated and logged as skipped.
 # ---------------------------------------------------------------------------
@@ -75,10 +77,18 @@ SESSION_KEYED_DELETE_TABLES = (
     "lily_acoustic_trajectories",
 )
 
-# HARD-DELETE if present — the table ships with a future WO; a missing
-# table is skipped gracefully, never a failure.
+# HARD-DELETE if present — a missing table is skipped gracefully (via the
+# absent-table matcher below), never a failure. Any OTHER error on these
+# tables still fails honestly.
+#   lily_asked_history: ships with a future WO.
+#   lily_group_prefs (group prefs WO interlock — a forgotten table's
+#       preferences are recognition data): migration 013 ships alongside
+#       the feature; before production applies it there were never any
+#       prefs stored, so an absent table is an honest skip, not a partial
+#       failure the table would be told to retry forever.
 OPTIONAL_GROUP_TABLES = (
     "lily_asked_history",
+    "lily_group_prefs",
 )
 
 # RETAINED but re-keyed to the tombstone: operational records survive

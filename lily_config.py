@@ -139,6 +139,14 @@ def answer_window_seconds() -> float:
     return _get_float("LILY_ANSWER_WINDOW_SECONDS", 15.0)
 
 
+def relaxed_window_multiplier() -> float:
+    """Group prefs WO: relaxed pacing stretches the standard answer window
+    by this factor (default 2.0). Timed pacing is exactly today's behavior
+    — the multiplier never applies to it, nor to explicitly-passed
+    durations (the steal window keeps its own tunable)."""
+    return _get_float("LILY_RELAXED_WINDOW_MULTIPLIER", 2.0)
+
+
 def steal_window_seconds() -> float:
     return _get_float("LILY_STEAL_WINDOW_SECONDS", 5.0)
 

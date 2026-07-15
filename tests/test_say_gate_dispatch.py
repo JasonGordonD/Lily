@@ -62,6 +62,8 @@ def _make_game() -> LilyGame:
     game._bed_handle = None
     game._pending_unbound_award = None
     game.acoustic = lily_audeering_consumers.LilyAcousticState()
+    game.prefs = {}
+    game._prefs_offer_made = False
     return game
 
 
