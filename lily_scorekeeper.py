@@ -22,6 +22,9 @@ Owns:
     OVERLAP / HOST_SPEAKING / SCORING / IDLE, with cross-speaker
     timestamp-overlap detection inside the open window — drives the
     Tier-1 acceptance threshold (env-tunable via lily_config)
+  - overlap-time addressee confidence fusion: diarization confidence
+    blended with room-level acoustic confidence to conservatively demote
+    low-confidence crosstalk attributions to open-floor utterances
 
 The scorekeeper owns ORDER; the LLM owns CORRECTNESS.
 """
@@ -61,6 +64,41 @@ PRIOR_STATES = (
     PRIOR_OPEN_WINDOW, PRIOR_OVERLAP, PRIOR_HOST_SPEAKING,
     PRIOR_SCORING, PRIOR_IDLE,
 )
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _coerce_confidence(value: object) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return _clamp01(float(value))
+    return None
+
+
+def lily_overlap_fused_confidence(
+    diarization_confidence: object,
+    acoustic_confidence: object,
+) -> float:
+    """Fused addressee confidence for overlap arbitration (0..1).
+
+    Missing signals degrade to a neutral fallback; available signals are
+    blended with env-tunable weights.
+    """
+    diar = _coerce_confidence(diarization_confidence)
+    acoustic = _coerce_confidence(acoustic_confidence)
+    neutral = lily_config.overlap_fusion_neutral_confidence()
+    if diar is None and acoustic is None:
+        return round(neutral, 3)
+    if diar is None:
+        return round(acoustic if acoustic is not None else neutral, 3)
+    if acoustic is None:
+        return round(diar, 3)
+    w_diar = lily_config.overlap_fusion_diarization_weight()
+    return round(_clamp01(diar * w_diar + acoustic * (1.0 - w_diar)), 3)
+
 
 # Per-speaker span-list cap inside one window (a 15–30s window can't need
 # more; keeps a pathologically chatty table bounded).
@@ -816,6 +854,10 @@ class LilyScorekeeper:
         is_final: bool = True,
         segment_start_time: Optional[float] = None,
         segment_end_time: Optional[float] = None,
+        diarization_confidence: Optional[float] = None,
+        acoustic_confidence: Optional[float] = None,
+        timestamp_source: Optional[str] = None,
+        timing_drift_seconds: Optional[float] = None,
         now: Optional[float] = None,
         timestamp: Optional[str] = None,
     ) -> dict:
@@ -833,6 +875,8 @@ class LilyScorekeeper:
             "unrostered": bool,
             "prior_state": PRIOR_* string (WO-ADDRESSEE-H1 Task 2),
             "overlap_flag": bool,
+            "addressee_fused_confidence": float in [0,1],
+            "attribution_demoted": bool,
           }
         """
         t = now if now is not None else time.time()
@@ -849,6 +893,8 @@ class LilyScorekeeper:
             # below for finals after overlap detection runs.
             "prior_state": self.prior_state(now=t),
             "overlap_flag": self.overlap_flag,
+            "addressee_fused_confidence": None,
+            "attribution_demoted": False,
         }
 
         if not text or not text.strip():
@@ -889,6 +935,35 @@ class LilyScorekeeper:
             self.overlap_flag, self.session_id, self.question_number,
             player or speaker_label or "?",
         )
+
+        # Crosstalk fusion (WO-LILY-CROSSTALK-FUSION): when PRIOR_OVERLAP is
+        # active, fuse diarization confidence with room-level acoustic
+        # confidence and conservatively demote low-confidence roster
+        # attributions to open-floor utterances.
+        fused_conf = lily_overlap_fused_confidence(
+            diarization_confidence, acoustic_confidence
+        )
+        result["addressee_fused_confidence"] = fused_conf
+        if (
+            prior == PRIOR_OVERLAP
+            and player
+            and method in ("label_match", "name_match", "self_introduction")
+            and fused_conf < lily_config.overlap_fusion_min_confidence()
+        ):
+            demoted_player = player
+            player, method = None, "overlap_low_confidence_fusion"
+            result["player"] = None
+            result["attribution"] = method
+            result["attribution_demoted"] = True
+            logger.info(
+                "LILY_PRIOR | ADDRESSEE_DEMOTED | session=%s q=%d "
+                "speaker=%s confidence=%.3f threshold=%.3f",
+                self.session_id,
+                self.question_number,
+                demoted_player,
+                fused_conf,
+                lily_config.overlap_fusion_min_confidence(),
+            )
 
         # System-directed classification — "Lily, are you there?" must not
         # count as an answer attempt during an open window.
@@ -976,6 +1051,9 @@ class LilyScorekeeper:
             seg_start = (
                 segment_start_time if segment_start_time is not None else t
             )
+            seg_end = (
+                segment_end_time if segment_end_time is not None else seg_start
+            )
             if player:
                 key = player
             else:
@@ -992,15 +1070,31 @@ class LilyScorekeeper:
                     "speaker_label": speaker_label,
                     "text": clean,
                     "segment_start_time": seg_start,
+                    "segment_end_time": seg_end,
                     "timestamp": ts,
                     "unrostered": player is None,
+                    "addressee_fused_confidence": result.get(
+                        "addressee_fused_confidence"
+                    ),
+                    "diarization_confidence": _coerce_confidence(
+                        diarization_confidence
+                    ),
+                    "acoustic_confidence": _coerce_confidence(acoustic_confidence),
+                    "timestamp_source": timestamp_source,
+                    "timing_drift_seconds": timing_drift_seconds,
                     # Every in-window final from this player, in order —
                     # adjudication judges the whole set (self-correction,
                     # live 2026-07-15: "the spine… no, the femur" must be
                     # able to score on the femur).
                     "attempts": [
-                        {"text": clean, "segment_start_time": seg_start,
-                         "timestamp": ts},
+                        {
+                            "text": clean,
+                            "segment_start_time": seg_start,
+                            "segment_end_time": seg_end,
+                            "timestamp": ts,
+                            "timestamp_source": timestamp_source,
+                            "timing_drift_seconds": timing_drift_seconds,
+                        },
                     ],
                 }
                 result["candidate_recorded"] = True
@@ -1021,9 +1115,27 @@ class LilyScorekeeper:
                 # its own (later) timestamp.
                 existing["text"] = clean
                 existing["timestamp"] = ts
+                existing["segment_end_time"] = seg_end
+                existing["addressee_fused_confidence"] = result.get(
+                    "addressee_fused_confidence"
+                )
+                existing["diarization_confidence"] = _coerce_confidence(
+                    diarization_confidence
+                )
+                existing["acoustic_confidence"] = _coerce_confidence(
+                    acoustic_confidence
+                )
+                existing["timestamp_source"] = timestamp_source
+                existing["timing_drift_seconds"] = timing_drift_seconds
                 existing.setdefault("attempts", []).append(
-                    {"text": clean, "segment_start_time": seg_start,
-                     "timestamp": ts}
+                    {
+                        "text": clean,
+                        "segment_start_time": seg_start,
+                        "segment_end_time": seg_end,
+                        "timestamp": ts,
+                        "timestamp_source": timestamp_source,
+                        "timing_drift_seconds": timing_drift_seconds,
+                    }
                 )
                 result["candidate_recorded"] = True
                 logger.info(
