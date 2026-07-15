@@ -217,6 +217,9 @@ class LilyGame:
         self.promoted_categories: list[str] = []
         self._prefetch_task: asyncio.Task | None = None
         self._window_timer: asyncio.Task | None = None
+        # True while the currently-open answer window is a steal window
+        # (seam: rides answer_window JSON as the optional `steal` key).
+        self._steal_window = False
         self._judged_keys: set[str] = set()
         self._spec_judge: dict[str, asyncio.Task] = {}
         self._adjudicating = False
@@ -313,6 +316,11 @@ class LilyGame:
                 ),
                 "opened_at": int((self.sk.answer_window_opened_at or 0) * 1000),
             }
+            # Seam contract: optional `steal` key — present and true only
+            # while the open window is a steal window (frontend renders
+            # the hot steal bar off this flag).
+            if window["open"] and self._steal_window:
+                window["steal"] = True
             attrs = {
                 "phase": self.ui_phase,
                 "round": str(self.sk.round),
@@ -344,6 +352,7 @@ class LilyGame:
         choices: list[str] | None = None,
         eliminated: list[int] | None = None,
         image_url: str | None = None,
+        category: str | None = None,
     ) -> None:
         """Room metadata: current question text + reveal payload. Seam
         addition (multiple-choice WO): when the armed question carries
@@ -353,7 +362,9 @@ class LilyGame:
         restructuring of the existing document). image_url (sub-agent H)
         is an OPTIONAL additive field — picture questions put their public
         bucket URL into the question payload; every other publish clears
-        it (the frontend already renders it)."""
+        it (the frontend already renders it). `category` is the question's
+        category family for the frontend's eyebrow line — optional key,
+        ABSENT when unknown (the parser tolerates absence)."""
         try:
             payload = {
                 "question": question_text or "",
@@ -363,6 +374,8 @@ class LilyGame:
                 "wager": self.sk.phase == "final",
                 "image_url": image_url or "",
             }
+            if category:
+                payload["category"] = category
             if choices:
                 payload["choices"] = list(choices)
                 payload["eliminated"] = list(eliminated or [])
@@ -727,6 +740,7 @@ class LilyGame:
                 # row's cached image never rides into a voice-only session.
                 question.pop("image_url", None)
                 question.pop("image_license_note", None)
+                question.pop("image_prompt", None)
                 if question.get("image_source"):
                     question["image_source"] = "none"
             if question is not None:
@@ -948,6 +962,7 @@ class LilyGame:
     ) -> None:
         dur = duration if duration is not None else self._answer_window_duration()
         self.sk.open_answer_window(duration=dur, reset_candidates=not steal)
+        self._steal_window = steal
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
         # Fallback screen sync (LWW-idempotent with the delivery-claim
@@ -961,6 +976,7 @@ class LilyGame:
                     choices=self.armed_question.get("choices"),
                     eliminated=self.eliminated,
                     image_url=self.armed_question.get("image_url"),
+                    category=self.armed_question.get("category"),
                 )
             )
         self._start_bed()
@@ -1341,6 +1357,12 @@ class LilyGame:
 
         # Instant Tier-1 path: a clean earliest answer scores immediately.
         if result.get("candidate_recorded") and self.sk.answer_window_open:
+            # Seam contract `lock` beat: one packet per recorded candidate
+            # (first final per player — the scorekeeper dedupes) so the
+            # frontend can mark the answer as locked in. Carries the name
+            # only; the ANSWER TEXT never rides this packet (need-to-know:
+            # nothing spoilable on the wire before the reveal).
+            self.send_event_nowait("lock", {"name": result.get("player")})
             question = self.sk.current_question or {}
             acceptable = question.get("acceptable_answers") or []
             ordered = self.sk.ordered_candidates()
@@ -1621,6 +1643,8 @@ class LilyGame:
                 },
                 choices=question.get("choices"),
                 eliminated=self.eliminated,
+                image_url=question.get("image_url"),
+                category=question.get("category"),
             )
             await self.publish_attributes()
             if self.supabase is not None:
@@ -2865,6 +2889,8 @@ class LilyAgent(Agent):
             question.get("prompt", ""),
             choices=choices,
             eliminated=eliminated,
+            image_url=question.get("image_url"),
+            category=question.get("category"),
         )
         letters = lily_evaluation.MC_CHOICE_LETTERS
         gone = " and ".join(
@@ -3200,6 +3226,7 @@ class LilyAgent(Agent):
                             choices=armed.get("choices"),
                             eliminated=game.eliminated,
                             image_url=armed.get("image_url"),
+                            category=armed.get("category"),
                         )
                     )
                 else:

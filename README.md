@@ -365,7 +365,7 @@ migrations/012_lily_question_images.sql  lily_questions image_url/image_source/
                                          (visible error rows)
 migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
                                          forget-cascade + re-key interlocked)
-tests/               551 tests, run with `python -m pytest tests/` — no network; needs
+tests/               560 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -861,8 +861,10 @@ speaker verification, Hume, any gender-conditional behavior.
   (`lobby|question|answering|reveal|scores|final`), `round`, `question_number`,
   `mode` (`general|adult`, sticky), `media_mode` (`voice_only|pictures`, sticky
   lobby choice), `players` (JSON `[{name,score,streak,leader}]`),
-  `answer_window` (JSON `{open,duration_ms,opened_at}`), `last_active_at`
-  (epoch-seconds heartbeat).
+  `answer_window` (JSON `{open,duration_ms,opened_at}` + optional
+  `steal: true` while the open window is a 5-second steal window),
+  `last_active_at` (epoch-seconds heartbeat), `pacing` (`timed|relaxed`,
+  sticky group pref).
 - **Room metadata**: `{question, reveal:{answer,winner,correct}, wager,
   image_url}` via `ctx.api.room.update_room_metadata` (rtc has no
   room-metadata setter); `wager` drives the frontend's final-round palette
@@ -872,7 +874,8 @@ speaker verification, Hume, any gender-conditional behavior.
   document also carries `choices` (array of exactly 4 strings) and
   `eliminated` (array of 0-based indices into `choices` crossed out by a
   50/50, `[]` until one fires); both keys are absent for freeform
-  questions.
+  questions. `category` (optional, absent when unknown) names the
+  question's category family for the frontend's eyebrow line.
 - **`lily.events`** reliable packets (discriminator key `type`, matched to the
   shipped prmpt_ui parser — kind-name drift from the original contract note is
   deliberate): `player_bind` `{player:{name},name,speaker_label}`; `reveal`
@@ -880,7 +883,9 @@ speaker verification, Hume, any gender-conditional behavior.
   `{player,answer}`; `biggest_comeback` `{player,detail}`; `finale`
   `{standings}` — fired at or before the `phase=final` flip; `clarify`
   `{name}` when Lily asks the "answer or thinking out loud?" question
-  (2026-07-14 amendment — carries `clarify` on both discriminators).
+  (2026-07-14 amendment — carries `clarify` on both discriminators);
+  `lock` `{name}` the moment a player's answer candidate is recorded
+  (name only — the answer text never rides the wire before the reveal).
 - **RPCs registered**: `lily_control.start`, `lily_control.skip` (identical to the
   spoken "skip": no commentary, no spotlight — the adult-mode consent affordance).
 

@@ -447,3 +447,33 @@ def test_note_fact_stays_ungated():
         )
     )
     assert "Noted" in msg
+
+
+def test_bank_fetcher_passes_choices_and_image_prompt_through():
+    # Seam TODO (e): adult-bank rows (migration 014) carry choices text[]
+    # and image_prompt — both must survive into the served shape.
+    rows = [{
+        "id": 5, "question": "mc bank q", "canonical_answer": "b",
+        "acceptable_answers": ["b"], "category": "academic",
+        "difficulty_tier": 1, "status": "active",
+        "choices": ["a", "b", "c", "d"],
+        "image_prompt": "product photo of a thing",
+    }]
+    q = asyncio.new_event_loop().run_until_complete(
+        lily_fetch_bank_question(_FakeSupabase(rows), "academic", 1, [])
+    )
+    assert q is not None
+    assert q["choices"] == ["a", "b", "c", "d"]
+    assert q["image_prompt"] == "product photo of a thing"
+
+
+def test_bank_fetcher_omits_absent_choices_and_prompt():
+    rows = [{"id": 6, "question": "plain q", "canonical_answer": "x",
+             "category": "academic", "difficulty_tier": 1,
+             "status": "active", "choices": None, "image_prompt": None}]
+    q = asyncio.new_event_loop().run_until_complete(
+        lily_fetch_bank_question(_FakeSupabase(rows), "academic", 1, [])
+    )
+    assert q is not None
+    assert "choices" not in q
+    assert "image_prompt" not in q

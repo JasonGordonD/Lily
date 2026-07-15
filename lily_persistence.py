@@ -477,6 +477,17 @@ async def lily_fetch_bank_question(
             out["image_source"] = row.get("image_source") or "web"
             if row.get("image_license_note"):
                 out["image_license_note"] = row["image_license_note"]
+        # Bank MC wiring (adult bank, migration 014): stored choices ride
+        # along — exactly 4 plain options, positional letter mapping — so
+        # a bank MC row runs the MC matcher instead of synthesis.
+        if isinstance(row.get("choices"), list) and row["choices"]:
+            out["choices"] = [str(c) for c in row["choices"]]
+        # image_prompt rides along for pictures-mode serving (generation
+        # prompt for rows that ship a prompt instead of a cached URL); it
+        # is never published to the room and is stripped with the rest of
+        # the image fields in voice_only.
+        if row.get("image_prompt"):
+            out["image_prompt"] = row["image_prompt"]
         return out
     except Exception as e:
         logger.error("lily_fetch_bank_question error: %s", e)
