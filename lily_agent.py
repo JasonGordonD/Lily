@@ -240,6 +240,13 @@ class LilyGame:
         # collected for the lily_memories highlights column.
         self.memory_block: str = ""
         self.highlights: list[dict] = []
+        # Memory at the door (WO-LILY-DESYNC-HONESTY-001 F): set once the
+        # returning-table memory question has an ANSWER — a strong group id
+        # loaded its memory (block or provably none), or a group-id upgrade
+        # finished its reload. The greeting awaits this event up to
+        # LILY_GREETING_MEMORY_BUDGET_SECONDS so a returning table is
+        # recognized in the FIRST utterance instead of one turn late.
+        self.memory_settled: asyncio.Event = asyncio.Event()
         # GROUP PREFERENCES (group prefs WO): the OPAQUE per-group prefs
         # dict (lily_group_prefs.prefs, migration 013), loaded at session
         # start for a returning group and persisted whole on every
@@ -546,6 +553,38 @@ class LilyGame:
             "spoken choice or its tool saves it as the new usual). Never "
             "ask about preferences again tonight."
         )
+
+    async def await_greeting_memory(self) -> None:
+        """Memory at the door (WO-LILY-DESYNC-HONESTY-001 F): hold the
+        composed greeting until group resolution + memory load have
+        settled, within a hard budget (LILY_GREETING_MEMORY_BUDGET_SECONDS,
+        default 1.5s). The live failure: the greeting fired one turn
+        BEFORE [RETURNING TABLE] landed and a four-time table got the cold
+        'who do we have at the table tonight?'. On timeout the greeting
+        goes out cold exactly as before and recognition arrives naturally
+        — the room is never blocked beyond the budget."""
+        # getattr: test harnesses build LilyGame via __new__ without the
+        # full __init__ attribute set.
+        event = getattr(self, "memory_settled", None)
+        if event is None or event.is_set():
+            return
+        budget = lily_config.greeting_memory_budget_seconds()
+        if budget <= 0:
+            return
+        started = time.time()
+        try:
+            await asyncio.wait_for(event.wait(), timeout=budget)
+            logger.info(
+                "LILY_MEMORY | GREETING_AWAIT | settled in %.2fs "
+                "(budget %.1fs) — recognition rides the first utterance",
+                time.time() - started, budget,
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                "LILY_MEMORY | GREETING_AWAIT | timeout after %.1fs — "
+                "greeting cold; recognition arrives naturally if memory "
+                "resolves later", budget,
+            )
 
     def greeting_instructions(self) -> str:
         """The fresh-room landing line (single source of truth — both the
@@ -2050,6 +2089,7 @@ class LilyGame:
             self.sk.session_id, source, old, new_group_id,
         )
         if self.supabase is None:
+            self.memory_settled.set()  # nothing to load — greeting unblocks
             return
         await lily_persistence.lily_rekey_group(
             self.supabase, old, new_group_id, self.sk.session_id
@@ -2095,6 +2135,10 @@ class LilyGame:
                     new_group_id, len(block),
                     (memory or {}).get("total_games"),
                 )
+        # Memory at the door (F): the upgrade's reload is the answer the
+        # greeting may be waiting on (the live race: participant metadata
+        # landed AFTER the entrypoint's initial load gave up).
+        self.memory_settled.set()
         self.fire_enrollment("group_id_upgrade")
 
     async def resolve_group_identity(self, trigger: str) -> None:
@@ -2429,6 +2473,7 @@ class LilyGame:
             asyncio.ensure_future(lily_memory.lily_write_session_memory(
                 self.supabase, self.group_id, self.sk.session_id,
                 standings, self.sk.question_number, self.highlights,
+                round_reached=self.sk.round,
             ))
 
     # -- session report (B3) --------------------------------------------------------
@@ -2733,6 +2778,12 @@ class LilyAgent(Agent):
                 source="on_enter",
             )
         else:
+            # Memory at the door (F): give group resolution + memory load a
+            # short budget so a returning table is recognized in the FIRST
+            # utterance. greeting_instructions() composes AFTER the wait —
+            # a block that just landed is picked up here. Timeout greets
+            # cold exactly as before.
+            await self._game.await_greeting_memory()
             self._game.gated_say(
                 "session_greet",
                 "greet",
@@ -3650,6 +3701,13 @@ async def entrypoint(ctx: JobContext) -> None:
             group_id, len(game.memory_block),
             (group_memory or {}).get("total_games"),
         )
+    # Memory at the door (F): a STRONG group id means this load IS the
+    # answer (block or provably no history) — the greeting need not wait.
+    # A weak id (room name) leaves the event unset: the greeting waits its
+    # short budget for the participant_metadata_late upgrade — the exact
+    # race that cold-greeted a four-time returning table live.
+    if group_id_source in _STRONG_GROUP_SOURCES or game.memory_block:
+        game.memory_settled.set()
 
     # Bank curation (WO-LILY-OMNIBUS-002 D/F): the group's served-question
     # history (no-repeat guard on bank draws + generated output) and the
@@ -3882,6 +3940,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 await lily_memory.lily_write_session_memory(
                     supabase, game.group_id, scorekeeper.session_id,
                     standings, scorekeeper.question_number, game.highlights,
+                    round_reached=scorekeeper.round,
                 )
                 # B3 session report — one row per session, idempotent upsert
                 # on session_id. Transcript is what's retained in memory (the
@@ -4030,6 +4089,12 @@ async def entrypoint(ctx: JobContext) -> None:
     else:
         # Fresh room: Lily speaks FIRST (M1 gate — silence is her failure
         # mode). Short lobby landing, then conversational name-fishing.
+        # Memory at the door (F): same budgeted wait as on_enter, but only
+        # when this path is actually going to win the dispatch race —
+        # on_enter normally claimed session_greet already (this dispatch
+        # then logs LILY_SAY_SUPPRESSED | reason=dup with zero extra wait).
+        if game.say_registry.state("session_greet") is None:
+            await game.await_greeting_memory()
         game.gated_say(
             "session_greet",
             "greet",

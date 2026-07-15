@@ -7,12 +7,13 @@ lily_agent.entrypoint with the priority chain participant metadata ->
 LILY_GROUP_ID env override -> room name (legacy fallback; random per session,
 so nothing re-keys on it).
 
-Deliberately dependency-light: stdlib only, so the pure logic here (metadata
-parsing, summary template, memory-block builder, KB-bank mode guard) is
-testable offline without livekit or the supabase client installed. The two
-Supabase I/O functions take an already-constructed client, run their blocking
-calls off-thread, and are fire-and-forget: they log LILY_MEMORY | markers and
-never raise into the session.
+Deliberately dependency-light: stdlib plus lily_config (itself stdlib-only —
+ambient discipline keeps every env read there), so the pure logic here
+(metadata parsing, summary template, memory-block builder, KB-bank mode
+guard) is testable offline without livekit or the supabase client installed.
+The two Supabase I/O functions take an already-constructed client, run their
+blocking calls off-thread, and are fire-and-forget: they log LILY_MEMORY |
+markers and never raise into the session.
 """
 
 import asyncio
@@ -20,6 +21,8 @@ import hashlib
 import json
 import logging
 from typing import Optional
+
+import lily_config
 
 logger = logging.getLogger("lily_memory")
 
@@ -177,10 +180,18 @@ async def lily_write_session_memory(
     standings,
     question_count: int,
     highlights=None,
+    round_reached: int = 0,
 ) -> None:
     """Upsert one lily_memories row for this session (on_conflict=session_id,
     so finish_game and the shutdown callback can both call it safely).
-    Fire-and-forget: logs LILY_MEMORY | markers, never raises."""
+    Fire-and-forget: logs LILY_MEMORY | markers, never raises.
+
+    Write threshold (WO-LILY-DESYNC-HONESTY-001 F): the narrative row is
+    written only when the session played >= LILY_MEMORY_MIN_QUESTIONS
+    (default 3 — the same count the summary reports) OR reached round 2.
+    Below threshold nothing writes here — the lily_sessions row still
+    lands via its own path; an aborted one-question session must never
+    become 'last game' material ('No sole winner over 1 question(s).')."""
     if supabase is None:
         logger.info("LILY_MEMORY | WRITE_SKIPPED | session=%s no supabase client",
                     session_id)
@@ -189,6 +200,15 @@ async def lily_write_session_memory(
     if not standings and not question_count:
         logger.info("LILY_MEMORY | WRITE_SKIPPED | session=%s empty session",
                     session_id)
+        return
+    min_questions = lily_config.memory_min_questions()
+    if int(question_count or 0) < min_questions and int(round_reached or 0) < 2:
+        logger.info(
+            "LILY_MEMORY | WRITE_SKIPPED | session=%s below threshold "
+            "(questions=%d < %d, round=%d) — session row only, no narrative",
+            session_id, int(question_count or 0), min_questions,
+            int(round_reached or 0),
+        )
         return
     winner = lily_session_winner(standings)
     players = [
