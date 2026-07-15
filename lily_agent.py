@@ -246,14 +246,19 @@ def _segment_addressee_confidence(
 # in phase=question the window opens regardless.
 WINDOW_FALLBACK_AGENT_TURNS = 2
 
-# Group-id sources that are already stable — never overridden by the
-# mid-session (voiceprint / name-set) upgrade path. Late participant
-# metadata is the strongest signal and MAY override a name-set hash.
-_STRONG_GROUP_SOURCES = (
+# Device metadata identifies a browser/table candidate, never the humans
+# currently present. Its memories stay quarantined until a live voiceprint
+# overlaps the stored group.
+_DEVICE_CANDIDATE_SOURCES = (
     "participant_metadata",
     "participant_metadata_late",
     "dispatch_metadata",
+)
+
+# Sources that identify the live table strongly enough to skip fallback.
+_STRONG_GROUP_SOURCES = (
     "env_override",
+    "voiceprint_match",
 )
 
 
@@ -385,6 +390,18 @@ class LilyGame:
         # Remembered player names for STT name-snapping at bind time
         # (the "Romney"-for-"Rami" class).
         self.memory_player_names: list[str] = []
+        # A device key may point at a returning table, but it does not prove
+        # who is in the room now. Candidate data is quarantined from the
+        # vocal context until a current voiceprint overlaps.
+        self.device_candidate_group_id: str | None = None
+        self.device_candidate_source: str | None = None
+        self.device_identity_verified = False
+        self.device_identity_rejected = False
+        self._device_candidate_memory: dict | None = None
+        self._device_candidate_memory_block = ""
+        self._device_candidate_prefs: dict = {}
+        self._device_candidate_voiceprints: list[dict] = []
+        self._device_verify_task: asyncio.Task | None = None
         self.highlights: list[dict] = []
         # Memory at the door (WO-LILY-DESYNC-HONESTY-001 F): set once the
         # returning-table memory question has an ANSWER — a strong group id
@@ -908,6 +925,168 @@ class LilyGame:
             "ask about preferences again tonight."
         )
 
+    async def stage_device_candidate(
+        self,
+        candidate_group_id: str,
+        source: str,
+    ) -> bool:
+        """Load device-linked data into quarantine, never vocal context."""
+        if (
+            not candidate_group_id
+            or self.supabase is None
+            or self.forget_state in ("executing", "done", "failed")
+        ):
+            return False
+        memory, prefs, voiceprints = await asyncio.gather(
+            lily_memory.lily_load_group_memory(
+                self.supabase, candidate_group_id
+            ),
+            lily_persistence.lily_load_group_prefs(
+                self.supabase, candidate_group_id
+            ),
+            lily_persistence.lily_load_voiceprints(
+                self.supabase, candidate_group_id
+            ),
+        )
+        block = lily_memory.lily_build_memory_block(memory, prefs=prefs)
+        if not block and not prefs and not voiceprints:
+            logger.info(
+                "LILY_MEMORY | DEVICE_CANDIDATE_EMPTY | source=%s group=%s",
+                source, candidate_group_id,
+            )
+            return False
+        self.device_candidate_group_id = candidate_group_id
+        self.device_candidate_source = source
+        self._device_candidate_memory = memory or {}
+        self._device_candidate_memory_block = block
+        self._device_candidate_prefs = dict(prefs or {})
+        self._device_candidate_voiceprints = [
+            {
+                "group_id": candidate_group_id,
+                "player_name": row.get("label"),
+                "speaker_label": row.get("label"),
+                "speaker_identifiers": row.get("speaker_identifiers"),
+            }
+            for row in voiceprints or []
+            if row.get("speaker_identifiers")
+        ]
+        self.memory_settled.set()
+        logger.info(
+            "LILY_MEMORY | DEVICE_CANDIDATE_STAGED | source=%s group=%s "
+            "memory=%s voices=%d — quarantined until voice match",
+            source, candidate_group_id, bool(block),
+            len(self._device_candidate_voiceprints),
+        )
+        return True
+
+    def request_device_verification(self, trigger: str) -> None:
+        """Schedule one best-effort candidate voice check."""
+        if (
+            not getattr(self, "device_candidate_group_id", None)
+            or getattr(self, "device_identity_verified", False)
+            or getattr(self, "device_identity_rejected", False)
+            or getattr(self, "stt", None) is None
+        ):
+            return
+        task = getattr(self, "_device_verify_task", None)
+        if task is not None and not task.done():
+            return
+        self._device_verify_task = asyncio.ensure_future(
+            self.verify_device_candidate(trigger)
+        )
+
+    async def verify_device_candidate(self, trigger: str) -> bool | None:
+        """Promote candidate memory on voice overlap; reject on mismatch.
+
+        None means Speechmatics has not produced identifiers yet, so the
+        candidate remains quarantined and a later finalized turn retries.
+        """
+        candidate = getattr(self, "device_candidate_group_id", None)
+        if not candidate or getattr(self, "stt", None) is None:
+            return None
+        get_ids = getattr(self.stt, "get_speaker_ids", None)
+        if get_ids is None:
+            return None
+        try:
+            current = get_ids()
+            if asyncio.iscoroutine(current) or isinstance(
+                current, asyncio.Future
+            ):
+                current = await asyncio.wait_for(current, timeout=3.0)
+        except Exception as exc:
+            logger.warning(
+                "LILY_MEMORY | DEVICE_VERIFY_PENDING | trigger=%s error=%s",
+                trigger, exc,
+            )
+            return None
+        if not current:
+            logger.info(
+                "LILY_MEMORY | DEVICE_VERIFY_PENDING | trigger=%s "
+                "reason=no_current_voice_ids",
+                trigger,
+            )
+            return None
+        matched = lily_memory.lily_match_group_by_voiceprints(
+            current, self._device_candidate_voiceprints
+        )
+        if matched == candidate:
+            await self._promote_device_candidate(trigger)
+            return True
+        roster_size = 1
+        try:
+            roster_size = max(1, int(self.sk.roster_size()))
+        except Exception:
+            pass
+        current_speakers = len(current) if isinstance(current, (list, tuple)) else 1
+        if trigger != "game_start" or current_speakers < roster_size:
+            logger.info(
+                "LILY_MEMORY | DEVICE_VERIFY_PENDING | trigger=%s "
+                "reason=no_overlap_yet current_speakers=%d roster=%d",
+                trigger, current_speakers, roster_size,
+            )
+            return None
+        self.device_identity_rejected = True
+        self.device_candidate_group_id = None
+        self.device_candidate_source = None
+        self._device_candidate_memory = None
+        self._device_candidate_memory_block = ""
+        self._device_candidate_prefs = {}
+        self._device_candidate_voiceprints = []
+        logger.warning(
+            "LILY_MEMORY | DEVICE_CANDIDATE_REJECTED | trigger=%s "
+            "reason=voice_mismatch — live session remains a new table",
+            trigger,
+        )
+        return False
+
+    async def _promote_device_candidate(self, trigger: str) -> None:
+        candidate = self.device_candidate_group_id
+        if not candidate:
+            return
+        memory = dict(self._device_candidate_memory or {})
+        block = self._device_candidate_memory_block
+        staged_prefs = dict(self._device_candidate_prefs)
+        await self.upgrade_group_id(candidate, "voiceprint_match")
+        merged_prefs = staged_prefs
+        merged_prefs.update(self.prefs or {})
+        self.prefs = merged_prefs
+        self.memory_block = block
+        self.memory_total_games = int(memory.get("total_games") or 0)
+        self.memory_player_names = list(memory.get("player_names") or [])
+        self.device_identity_verified = True
+        self.device_candidate_group_id = None
+        self.device_candidate_source = None
+        self._device_candidate_memory = None
+        self._device_candidate_memory_block = ""
+        self._device_candidate_prefs = {}
+        self._device_candidate_voiceprints = []
+        self.memory_settled.set()
+        logger.info(
+            "LILY_MEMORY | DEVICE_CANDIDATE_VERIFIED | trigger=%s group=%s "
+            "— returning memory promoted",
+            trigger, candidate,
+        )
+
     async def await_greeting_memory(self) -> None:
         """Memory at the door (WO-LILY-DESYNC-HONESTY-001 F): hold the
         composed greeting until group resolution + memory load have
@@ -961,7 +1140,17 @@ class LilyGame:
             "self-introduction in one breath — 'Hi, I'm Lily —' you host "
             "trivia. Never skip it, never stretch it into a monologue. "
         ]
-        if self.memory_block:
+        if getattr(self, "device_candidate_group_id", None):
+            parts.append(
+                "PART TWO — the DEVICE looks familiar, but no current voice "
+                "has been verified. Say only that the device looks familiar "
+                "and ask who is playing tonight. Do NOT say welcome back, "
+                "do NOT call anyone a returner, and do NOT mention prior "
+                "names, winners, counts, dates, preferences, or facts. "
+                "Different people may share a device; voice verification "
+                "must happen first."
+            )
+        elif self.memory_block:
             parts.append(
                 "PART TWO — your memory KNOWS this table (the "
                 "[RETURNING TABLE] context has who they are), so act on it "
@@ -2136,6 +2325,7 @@ class LilyGame:
         nothing was buffered) — optional and additive, existing callers
         unchanged."""
         ts = segment_ts if segment_ts is not None else time.time()
+        self.request_device_verification("final_transcript")
 
         # n-best telemetry (WO-ADDRESSEE-H1 Task 1): dispersion logged per
         # utterance — high dispersion is a deliberation signal.
@@ -3160,6 +3350,14 @@ class LilyGame:
                 self.sk.session_id, trigger,
             )
             return
+        if getattr(self, "device_candidate_group_id", None):
+            verified = await self.verify_device_candidate(trigger)
+            if verified is True:
+                return
+            if verified is None:
+                # Voice evidence is not ready; keep the candidate quarantined
+                # rather than falling through to weaker name-only memory.
+                return
         if self.group_id_source in _STRONG_GROUP_SOURCES:
             return
         names = list(self.sk.players.keys())
@@ -3274,7 +3472,11 @@ class LilyGame:
         # teardown below re-binds the session to a fresh anonymous id, so
         # a retry after partial failure must not target the fresh id.
         first_attempt = self._forget_target_group is None
-        target = self._forget_target_group or self.group_id
+        target = (
+            self._forget_target_group
+            or getattr(self, "device_candidate_group_id", None)
+            or self.group_id
+        )
         self._forget_target_group = target
         logger.info(
             "LILY_FORGET | EXECUTE | session=%s group=%s source=%s retry=%s",
@@ -3333,6 +3535,13 @@ class LilyGame:
         self.memory_block = ""
         self.memory_total_games = 0
         self.memory_player_names = []
+        self.device_candidate_group_id = None
+        self.device_candidate_source = None
+        self.device_identity_rejected = True
+        self._device_candidate_memory = None
+        self._device_candidate_memory_block = ""
+        self._device_candidate_prefs = {}
+        self._device_candidate_voiceprints = []
         self.sk.transcript_buffer = []
         self.highlights = []
         # Group prefs WO interlock: the stored preferences were deleted by
@@ -3545,6 +3754,12 @@ class LilyGame:
             extra.append(
                 "architect mode: server-authenticated override ACTIVE — "
                 "operator testing may bypass adult age/signal vetoes"
+            )
+        if getattr(self, "device_candidate_group_id", None):
+            extra.append(
+                "device memory candidate: UNVERIFIED — the device looks "
+                "familiar, but disclose no returning-table details until "
+                "a current voiceprint verifies"
             )
         if self.armed_question is not None and not self.sk.answer_window_open:
             # NEED-TO-KNOW (say-gate WO): the ambient context carries the
@@ -3769,6 +3984,7 @@ class LilyGame:
             self.fire_enrollment("first_bind")
         else:
             self.fire_enrollment("bind_refresh")
+        self.request_device_verification("speaker_bind")
         # Packet kind `player_bind` per the shipped frontend parser
         # (contract note said `bind`; the canonical prmpt_ui parser accepts
         # chip_bind/name_chip/player_bind — drift recorded for Rami).
@@ -4328,6 +4544,15 @@ class LilyAgent(Agent):
         knew them, or asks what you remember. Read-only; stores nothing;
         never returns raw contents."""
         game = self._game
+        if getattr(game, "device_candidate_group_id", None):
+            return (
+                "A device-linked table record exists, but no current voice "
+                "has been verified against it. Do NOT disclose counts, "
+                "dates, names, preferences, winners, or facts. Say only: "
+                "'This device looks familiar, but I don't know who's here "
+                "until you speak — who's playing tonight?' Never claim you "
+                "recognized a person from the device."
+            )
         counts = None
         if game.supabase is not None:
             counts = await lily_persistence.lily_count_group_memory(
@@ -4703,6 +4928,17 @@ def _setup_session_log(room_name: str) -> None:
 PARTICIPANT_METADATA_WAIT_SECONDS = 3.0
 
 
+def _quarantine_initial_device_identity(
+    resolved_group_id: str,
+    resolved_group_source: str,
+    room_name: str,
+) -> tuple[str, str, str | None]:
+    """Return (live id, live source, optional device candidate id)."""
+    if resolved_group_source in _DEVICE_CANDIDATE_SOURCES:
+        return room_name, "room_name", resolved_group_id
+    return resolved_group_id, resolved_group_source, None
+
+
 async def _resolve_initial_group_id(ctx: JobContext, room_name: str) -> tuple[str, str]:
     """Group identity at job start (persistent memory / voiceprint re-key).
     Priority: (a) lily_group_id from dispatch/job metadata (the token route
@@ -4786,10 +5022,22 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # --- Group identity resolution (observable: this line MUST appear
     # every session) ---
-    group_id, group_id_source = await _resolve_initial_group_id(ctx, room_name)
+    resolved_group_id, resolved_group_source = await _resolve_initial_group_id(
+        ctx, room_name
+    )
+    (
+        group_id,
+        group_id_source,
+        device_candidate_group_id,
+    ) = _quarantine_initial_device_identity(
+        resolved_group_id, resolved_group_source, room_name
+    )
     logger.info(
-        "LILY_MEMORY | GROUP_ID | source=%s group_id=%s",
+        "LILY_MEMORY | GROUP_ID | source=%s group_id=%s candidate_source=%s "
+        "candidate_group=%s",
         group_id_source, group_id,
+        resolved_group_source if device_candidate_group_id else "-",
+        device_candidate_group_id or "-",
     )
 
     # --- Session-init hardening: fail-fast on unpersistable rooms ---
@@ -4823,17 +5071,12 @@ async def entrypoint(ctx: JobContext) -> None:
     acoustic_state = lily_audeering_consumers.lily_reset_acoustic_state()
     game.acoustic = acoustic_state
     acoustic_state.on_child_signal = game.on_child_signal
-    # Safety gate (WO-LILY-DESYNC-HONESTY-001 Sub-agent A): a mid-session
-    # breaker OPEN while adult mode is active exits adult mode through the
-    # same sticky-flag revert path as "back to normal" — sensor down means
-    # deck down, fail closed. Wired BEFORE the pipeline is constructed so
-    # even a startup breaker-open lands on a live hook.
+    # Monitoring-status hook: audEERING availability never authorizes or
+    # revokes adult mode; an actual young-voice signal remains veto-only.
     acoustic_state.on_breaker_open = game.on_child_gate_lost
 
-    # Late-arrival upgrade hook: if the initial resolution fell through to a
-    # weak id (room name / name-set hash) and a participant with
-    # lily_group_id metadata joins later, upgrade to it — the metadata UUID
-    # is the strongest signal.
+    # Late device metadata is staged, never promoted directly. A current
+    # voiceprint must verify it before any memory enters vocal context.
     def _on_participant_connected(participant) -> None:
         try:
             if game.group_id_source in _STRONG_GROUP_SOURCES:
@@ -4846,45 +5089,56 @@ async def entrypoint(ctx: JobContext) -> None:
             candidate = lily_memory.lily_parse_group_id_from_metadata(
                 getattr(participant, "metadata", None)
             )
-            if candidate and candidate != game.group_id:
+            if (
+                candidate
+                and candidate != game.group_id
+                and candidate != game.device_candidate_group_id
+            ):
                 asyncio.ensure_future(
-                    game.upgrade_group_id(candidate, "participant_metadata_late")
+                    game.stage_device_candidate(
+                        candidate, "participant_metadata_late"
+                    )
                 )
         except Exception as e:
             logger.warning("LILY_MEMORY | GROUP_ID | late-join scan failed: %s", e)
 
     ctx.room.on("participant_connected", _on_participant_connected)
 
-    # Group preferences (group prefs WO): the stored 'usual' loads WITH the
-    # memory — the [RETURNING TABLE] block below carries its compact line
-    # and the greeting's ask-once offer reads from game.prefs.
-    game.prefs = await lily_persistence.lily_load_group_prefs(supabase, group_id)
-
-    # Returning-table memory: last games + group facts -> [RETURNING TABLE]
-    # system block (injected in llm_node alongside the adult layer).
-    group_memory = await lily_memory.lily_load_group_memory(supabase, group_id)
-    game.memory_block = lily_memory.lily_build_memory_block(
-        group_memory, prefs=game.prefs
-    )
-    game.memory_player_names = list(
-        (group_memory or {}).get("player_names") or []
-    )
-    # Task 4 disclosure counter (WO-LILY-FORGETME-001): the lily_memories
-    # row count doubles as the persistent disclosure counter.
-    game.memory_total_games = int((group_memory or {}).get("total_games") or 0)
-    if game.memory_block:
-        logger.info(
-            "LILY_MEMORY | BLOCK_READY | group=%s chars=%d total_games=%s",
-            group_id, len(game.memory_block),
-            (group_memory or {}).get("total_games"),
+    if device_candidate_group_id:
+        staged = await game.stage_device_candidate(
+            device_candidate_group_id, resolved_group_source
         )
-    # Memory at the door (F): a STRONG group id means this load IS the
-    # answer (block or provably no history) — the greeting need not wait.
-    # A weak id (room name) leaves the event unset: the greeting waits its
-    # short budget for the participant_metadata_late upgrade — the exact
-    # race that cold-greeted a four-time returning table live.
-    if group_id_source in _STRONG_GROUP_SOURCES or game.memory_block:
-        game.memory_settled.set()
+        if not staged:
+            game.memory_settled.set()
+        # No candidate preference, name, memory block, or known speaker is
+        # activated before voice verification.
+        game.prefs = {}
+        group_memory = {}
+    else:
+        # Trusted/verified identity: returning memory may enter context.
+        game.prefs = await lily_persistence.lily_load_group_prefs(
+            supabase, group_id
+        )
+        group_memory = await lily_memory.lily_load_group_memory(
+            supabase, group_id
+        )
+        game.memory_block = lily_memory.lily_build_memory_block(
+            group_memory, prefs=game.prefs
+        )
+        game.memory_player_names = list(
+            (group_memory or {}).get("player_names") or []
+        )
+        game.memory_total_games = int(
+            (group_memory or {}).get("total_games") or 0
+        )
+        if game.memory_block:
+            logger.info(
+                "LILY_MEMORY | BLOCK_READY | group=%s chars=%d total_games=%s",
+                group_id, len(game.memory_block),
+                (group_memory or {}).get("total_games"),
+            )
+        if group_id_source in _STRONG_GROUP_SOURCES or game.memory_block:
+            game.memory_settled.set()
 
     # Bank curation (WO-LILY-OMNIBUS-002 D/F): the group's served-question
     # history (no-repeat guard on bank draws + generated output) and the
@@ -4896,10 +5150,21 @@ async def entrypoint(ctx: JobContext) -> None:
         supabase
     )
 
-    # Returning group: stored voiceprints -> known_speakers (instant
-    # recognition on rematch). Loaded before STT construction so the
-    # identifiers ride the constructor.
-    known_rows = await lily_persistence.lily_load_voiceprints(supabase, group_id)
+    # Candidate voiceprints may be supplied to Speechmatics as matching
+    # hints, but their names/memories remain absent from Lily's context until
+    # someone actually speaks and the returned identifiers overlap.
+    if device_candidate_group_id:
+        known_rows = [
+            {
+                "label": row.get("player_name") or row.get("speaker_label"),
+                "speaker_identifiers": row.get("speaker_identifiers"),
+            }
+            for row in game._device_candidate_voiceprints
+        ]
+    else:
+        known_rows = await lily_persistence.lily_load_voiceprints(
+            supabase, group_id
+        )
     known_speakers = [
         SpeakerIdentifier(
             label=row["label"], speaker_identifiers=row["speaker_identifiers"]

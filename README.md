@@ -565,7 +565,7 @@ migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group pref
 migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt columns
 migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
-tests/               759 tests, run with `python -m pytest tests/` — no network; needs
+tests/               767 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -579,19 +579,20 @@ The resolution chain (every step observable — `LILY_MEMORY | GROUP_ID |
 source=... group_id=...` is logged every session, upgrades as
 `LILY_MEMORY | GROUP_ID_UPGRADE | source=... old=... new=...`):
 
-1. **(a) `lily_group_id` metadata** — strongest signal. Read from BOTH the
+1. **(a) `lily_group_id` metadata** — device candidate only. Read from BOTH the
    dispatch/job metadata (`ctx.job.metadata`; the token route mirrors
    participant metadata into `RoomAgentDispatch`, available immediately) and
    the first non-agent participant's token metadata (JSON
    `{"lily_group_id": "<uuid>"}`). Live evidence showed the participant is
    often NOT in `remote_participants` yet when `ctx.connect()` returns, so
    the scan polls up to 3s for the first participant, and a
-   `participant_connected` hook upgrades a weak id if a metadata-carrying
-   participant joins later (`source=participant_metadata_late`).
-2. **(b) voiceprint match** (at game start, roster stabilized): this
-   session's `stt.get_speaker_ids()` identifiers are matched by exact string
-   overlap against `lily_speaker_voiceprints` rows loaded by roster
-   player-name — a hit reuses that prior `group_id`
+   `participant_connected` hook stages a late device candidate if a
+   metadata-carrying participant joins. Metadata never activates memory.
+2. **(b) voiceprint match** (as current speech lands, and at game start):
+   this session's `stt.get_speaker_ids()` identifiers are matched by exact
+   string overlap against the staged candidate voiceprints first, then
+   against roster-name lookup for ordinary weak-id resolution. A hit reuses
+   that prior `group_id`
    (`source=voiceprint_match`). Best-effort: it only hits when Speechmatics
    returns stable identifier strings for a returning voice.
 3. **(c) name-set hash fallback**: `grp_` + sha1 of the normalized sorted
@@ -669,11 +670,10 @@ Two gates keep memory honest at the session boundary:
   memory load up to `LILY_GREETING_MEMORY_BUDGET_SECONDS` (default 1.5s;
   `<=0` disables the wait) before dispatching under `session_greet` — the
   live failure was `[RETURNING TABLE]` landing one turn AFTER the greeting
-  fired, cold-greeting a four-time returning table. A STRONG group id
-  (dispatch/participant metadata, env override) settles the wait the moment
-  its memory load returns (block or provably no history); a weak id (room
-  name) leaves it pending so the `participant_metadata_late` upgrade can
-  land within the budget. Timeout greets cold exactly as before and lets
+  fired, cold-greeting a four-time returning table. An operator-pinned id or
+  voice-verified identity may release returning memory. Dispatch/participant
+  metadata settles only to the soft "device looks familiar" candidate
+  greeting; a weak room id remains neutral. Timeout greets cold and lets
   recognition arrive naturally — the room is never blocked beyond the
   budget. Observable as `LILY_MEMORY | GREETING_AWAIT | settled/timeout`.
 - **Write threshold.** A `lily_memories` narrative row is written only when
@@ -1102,17 +1102,19 @@ run-sheet note: if a vendor-side deletion request is ever needed,
 snapshot the `lily_speaker_voiceprints` identifiers BEFORE running the
 forget arc — post-cascade they are untargetable.
 
-**Recognition false-positive path (OR amendment W2 — defined, not yet
-built; H1 tail or next Lily WO):** the greeting currently keys on device
-identity (`lily_group_id`) before any voice is heard — a known device
-with different humans produces a confident greeting of absent people,
-the desync class in miniature. Expected behavior when built: the
-device-keyed greeting SOFTENS to a recognition-shaped but non-committal
-open ("this device knows me — who've we got tonight?" register), and
-full by-name recognition upgrades only once a first utterance matches an
-enrolled voiceprint; a device match with zero voice matches after the
-first exchanges DOWNGRADES gracefully to the new-table path, with no
-names asserted that no voice has confirmed.
+**Device identity quarantine (OR amendment W2):** `lily_group_id` metadata
+identifies a browser/device candidate, never the humans currently present.
+The live session remains keyed to its room-random provisional id; candidate
+memories, preferences, names, counts, dates, facts, and asked history are
+quarantined from vocal context. Stored voiceprints may enter Speechmatics as
+matching hints, but no label can surface until a current person speaks. The
+opening may say only "this device looks familiar — who's playing tonight?"
+A live Speechmatics identifier overlap promotes the candidate through
+`source=voiceprint_match`, re-keys the session, and releases returning-table
+memory. A current identifier set with no overlap rejects the candidate and
+keeps a new-table path. Until verification, `lily_explain_memory` discloses
+no counts or dates; a forget request still targets and deletes the staged
+device identity.
 
 **The cascade (`lily_forget_group(confirm)`, two-step, UNGATED):** per the
 tool-gating principle above, deletion neither mutates game outcomes nor
