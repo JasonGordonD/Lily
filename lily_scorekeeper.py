@@ -667,6 +667,32 @@ class LilyScorekeeper:
                 if state.get("speaker_label") == speaker_label:
                     return name, "label_match"
 
+        # Path 2b: the diarization label IS a rostered player's name —
+        # voiceprint identification labels a recognized stream by the
+        # PLAYER NAME it was enrolled under (known_speakers injection).
+        # Live 2026-07-15 18:17 deafness: Speechmatics opened with a
+        # transient "S0", Lily bound S0->Rami, then identification
+        # converged and relabeled the stream "Rami" — which matched no
+        # stored label, so every utterance for the rest of the session
+        # went unrostered and nothing could score. When the label equals
+        # a player name (case-insensitive), MIGRATE the stored label to
+        # the incoming one — identification labels are stickier than the
+        # transient S-numbers they replace.
+        if speaker_label:
+            wanted = str(speaker_label).strip().lower()
+            for name, state in self.players.items():
+                if name.strip().lower() == wanted:
+                    old = state.get("speaker_label")
+                    if old != speaker_label:
+                        state["speaker_label"] = speaker_label
+                        logger.info(
+                            "LILY_STATE | LABEL_MIGRATED | session=%s "
+                            "player=%s old_label=%s new_label=%s "
+                            "(voiceprint identification converged)",
+                            self.session_id, name, old, speaker_label,
+                        )
+                    return name, "voiceprint_label"
+
         # Path 3: exact name match
         if speaker_name:
             wanted = str(speaker_name).strip().lower()

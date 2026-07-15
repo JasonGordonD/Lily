@@ -137,3 +137,56 @@ def test_known_name_correction_refuses_ambiguity_and_junk():
     assert lily_memory.lily_known_name_correction("R", ["Rami"]) is None
     assert lily_memory.lily_known_name_correction("Romney", []) is None
     assert lily_memory.lily_known_name_correction("Romney", None) is None
+
+
+# ---------------------------------------------------------------------------
+# Voiceprint label migration (live 2026-07-15 18:17 deafness)
+# ---------------------------------------------------------------------------
+
+from lily_scorekeeper import LilyScorekeeper
+
+
+def test_voiceprint_label_convergence_migrates_binding():
+    # Speechmatics opens with a transient S0; Lily binds it; identification
+    # then converges and relabels the stream by the enrolled player name.
+    sk = LilyScorekeeper("test-room")
+    sk.bind_speaker("S0", "Rami")
+    sk.start_question({
+        "prompt": "q", "canonical_answer": "hydrogen",
+        "acceptable_answers": ["hydrogen"],
+    })
+    sk.open_answer_window(duration=30.0, now=100.0)
+    result = sk.on_transcript_segment(
+        text="hydrogen", speaker_label="Rami", is_final=True,
+        now=101.0, segment_start_time=101.0,
+    )
+    # Attributed to Rami, label migrated, candidate recorded — not deaf.
+    assert result["player"] == "Rami"
+    assert result["candidate_recorded"] is True
+    assert sk.players["Rami"]["speaker_label"] == "Rami"
+    assert sk.players["Rami"]["talk_time_s"] > 0
+
+
+def test_voiceprint_label_migration_is_case_insensitive_and_sticky():
+    sk = LilyScorekeeper("test-room")
+    sk.bind_speaker("S1", "Sarah")
+    r = sk.on_transcript_segment(
+        text="hello there", speaker_label="sarah", is_final=True, now=100.0,
+    )
+    assert r["player"] == "Sarah"
+    assert sk.players["Sarah"]["speaker_label"] == "sarah"
+    # Later segments with the migrated label resolve via the normal path.
+    r2 = sk.on_transcript_segment(
+        text="another line", speaker_label="sarah", is_final=True, now=101.0,
+    )
+    assert r2["player"] == "Sarah"
+
+
+def test_unrelated_labels_still_go_unrostered():
+    sk = LilyScorekeeper("test-room")
+    sk.bind_speaker("S0", "Rami")
+    r = sk.on_transcript_segment(
+        text="hello", speaker_label="S7", is_final=True, now=100.0,
+    )
+    assert r["player"] is None
+    assert r["unrostered"] is True
