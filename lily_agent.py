@@ -142,6 +142,36 @@ def _current_speech_id() -> str | None:
         return None
 
 
+def _coerce_confidence(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return max(0.0, min(1.0, float(value)))
+    return None
+
+
+def lily_diarization_confidence_from_nbest(nbest: dict | None) -> float | None:
+    """Best-effort diarization confidence from per-utterance n-best payload.
+
+    Speechmatics exposes no explicit per-segment diarization confidence on
+    UserInputTranscribedEvent; we blend:
+      - speaker_consistency: share of recovered words whose speaker tag
+        matched this segment's diarization label
+      - top_hypothesis_confidence: ASR confidence on hypothesis slot 0
+    """
+    if not isinstance(nbest, dict):
+        return None
+    consistency = _coerce_confidence(nbest.get("speaker_consistency"))
+    top = _coerce_confidence(nbest.get("top_hypothesis_confidence"))
+    if consistency is None and top is None:
+        return None
+    if consistency is None:
+        return round(top if top is not None else 0.0, 3)
+    if top is None:
+        return round(consistency, 3)
+    return round(consistency * 0.75 + top * 0.25, 3)
+
+
 # Answer-window opening (persistence-audit root-cause fix): the old hard
 # >=60% token-overlap gate meant a paraphrased question NEVER opened the
 # window and the whole deterministic pipeline stalled. Overlap is now a
@@ -256,6 +286,7 @@ class LilyGame:
         # patch armed; None = clean 1-best degradation) and the per-question
         # candidate-key -> drained n-best dict used by Tier-1/Tier-2.
         self.nbest_collector: "lily_nbest.LilyNBestCollector | None" = None
+        self.timestamp_reconciler = lily_nbest.LilyTimestampReconciler()
         self._nbest_by_key: dict[str, dict] = {}
         self._adjudicating = False
         self._question_transitioning = False
@@ -2045,12 +2076,16 @@ class LilyGame:
         # n-best telemetry (WO-ADDRESSEE-H1 Task 1): dispersion logged per
         # utterance — high dispersion is a deliberation signal.
         if nbest is not None:
+            timing = nbest.get("segment_timing") or {}
             logger.info(
-                "LILY_NBEST | dispersion=%s hypotheses=%d words=%d speaker=%s",
+                "LILY_NBEST | dispersion=%s hypotheses=%d words=%d speaker=%s "
+                "timing_source=%s drift_s=%s",
                 nbest.get("dispersion"),
                 len(nbest.get("hypotheses") or []),
                 nbest.get("word_count", 0),
                 result.get("player") or speaker_label or "UU",
+                timing.get("source"),
+                timing.get("drift_seconds"),
             )
 
         # B1 corpus row — logged BEFORE command handling so skipped-on and
@@ -2939,6 +2974,35 @@ class LilyGame:
         self.asked_history = await lily_bank.lily_load_asked_history(
             self.supabase, new_group_id
         )
+        # Refresh known_speakers under the resolved id. 1.6.4 applies this
+        # list at stream start, so this primarily protects reconnect paths.
+        if self.stt is not None:
+            try:
+                known_rows = await lily_persistence.lily_load_voiceprints(
+                    self.supabase, new_group_id
+                )
+                known_speakers = [
+                    SpeakerIdentifier(
+                        label=row["label"],
+                        speaker_identifiers=row["speaker_identifiers"],
+                    )
+                    for row in known_rows
+                    if row.get("label") and row.get("speaker_identifiers")
+                ]
+                opts = getattr(self.stt, "_stt_options", None)
+                if opts is not None:
+                    opts.known_speakers = known_speakers
+                    logger.info(
+                        "VOICEPRINT | refreshed known_speakers=%d group=%s",
+                        len(known_speakers),
+                        new_group_id,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "VOICEPRINT | known_speakers refresh failed group=%s: %s",
+                    new_group_id,
+                    e,
+                )
         if self.sk.question_number == 0:
             # Group prefs WO: the resolved group may have a stored 'usual'.
             # The re-key above already merged any session-written row under
@@ -3616,11 +3680,14 @@ class LilyGame:
         )
         # Voiceprint enrollment fires the moment the FIRST binding commits
         # (the speaker has spoken; Speechmatics needs ~5 words per voice —
-        # re-fired at game start, group-id upgrade, and session close for
-        # late binders, so an early empty result self-heals).
+        # re-fired at game start, group-id upgrade, and session close). A
+        # bind refresh also fires on every subsequent bind so late binders
+        # get another enrollment chance before teardown.
         if not self._enroll_started:
             self._enroll_started = True
             self.fire_enrollment("first_bind")
+        else:
+            self.fire_enrollment("bind_refresh")
         # Packet kind `player_bind` per the shipped frontend parser
         # (contract note said `bind`; the canonical prmpt_ui parser accepts
         # chip_bind/name_chip/player_bind — drift recorded for Rami).
@@ -4886,10 +4953,14 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         if not ev.is_final:
             return  # partials display, finals score — never the reverse
-        # UserInputTranscribedEvent carries no per-segment word timings at
-        # 1.6.4 — created_at (event arrival) decides answer order.
+        # Event arrival wall-clock (created_at) plus recovered STT
+        # stream-relative timings from the n-best collector feed the
+        # timestamp reconciler for "first answered first" ordering under
+        # jitter.
         created = getattr(ev, "created_at", None)
-        seg_ts = created.timestamp() if hasattr(created, "timestamp") else time.time()
+        arrival_ts = (
+            created.timestamp() if hasattr(created, "timestamp") else time.time()
+        )
         game.fragments.add(speaker_label or "UU", text)
         # n-best (WO-ADDRESSEE-H1 Task 1): drain the per-word alternatives
         # buffered off raw AddTranscript for this speaker's finalized
@@ -4900,21 +4971,49 @@ async def entrypoint(ctx: JobContext) -> None:
             if game.nbest_collector is not None
             else None
         )
+        reconciler = getattr(game, "timestamp_reconciler", None)
+        if reconciler is None:
+            reconciler = lily_nbest.LilyTimestampReconciler()
+            game.timestamp_reconciler = reconciler
+        timing = reconciler.reconcile(
+            arrival_ts=arrival_ts,
+            stream_start=(nbest or {}).get("stream_start_time"),
+            stream_end=(nbest or {}).get("stream_end_time"),
+        )
+        try:
+            seg_start_ts = float(timing.get("start_time"))
+        except Exception:
+            seg_start_ts = arrival_ts
+        try:
+            seg_end_ts = float(timing.get("end_time"))
+        except Exception:
+            seg_end_ts = seg_start_ts
+        if nbest is not None:
+            nbest["segment_timing"] = timing
+        diarization_confidence = lily_diarization_confidence_from_nbest(nbest)
+        acoustic_confidence = game.acoustic.addressee_confidence()
         result = scorekeeper.on_transcript_segment(
             text=text,
             speaker_label=speaker_label,
             is_final=True,
-            segment_start_time=seg_ts,
+            segment_start_time=seg_start_ts,
+            segment_end_time=seg_end_ts,
+            diarization_confidence=diarization_confidence,
+            acoustic_confidence=acoustic_confidence,
+            timestamp_source=timing.get("source"),
+            timing_drift_seconds=timing.get("drift_seconds"),
+            now=arrival_ts,
         )
         player = result.get("player")
         transcripts.add(
             text,
             speaker_label=speaker_label,
             speaker_name=player,
-            segment_start=seg_ts,
+            segment_start=seg_start_ts,
+            segment_end=seg_end_ts,
         )
         game.on_transcript_event(
-            result, text, speaker_label=speaker_label, segment_ts=seg_ts,
+            result, text, speaker_label=speaker_label, segment_ts=seg_start_ts,
             nbest=nbest,
         )
 

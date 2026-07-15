@@ -18,6 +18,7 @@ from lily_evaluation import (
 )
 from lily_nbest import (
     LilyNBestCollector,
+    LilyTimestampReconciler,
     lily_install_nbest_stt_patch,
     lily_nbest_dispersion,
     lily_synthesize_hypotheses,
@@ -290,7 +291,43 @@ def test_collector_buffer_is_capped():
 
 
 # ---------------------------------------------------------------------------
-# (4) Patch installer — defensive contract
+# (4) Stream-clock reconciliation
+# ---------------------------------------------------------------------------
+
+def test_timestamp_reconciler_falls_back_without_stream_times():
+    rec = LilyTimestampReconciler()
+    out = rec.reconcile(arrival_ts=123.45, stream_start=None, stream_end=None)
+    assert out["source"] == "arrival_time"
+    assert out["start_time"] == 123.45
+    assert out["end_time"] == 123.45
+    assert out["drift_seconds"] is None
+
+
+def test_timestamp_reconciler_tracks_stream_spacing_under_arrival_jitter():
+    rec = LilyTimestampReconciler(offset_smoothing=0.0)
+    first = rec.reconcile(arrival_ts=200.0, stream_start=10.0, stream_end=10.2)
+    second = rec.reconcile(arrival_ts=200.5, stream_start=10.3, stream_end=10.6)
+    assert first["source"] == "stt_stream_reconciled"
+    assert second["source"] == "stt_stream_reconciled"
+    # Stream spacing is 0.3s even though arrivals are 0.5s apart.
+    assert round(second["start_time"] - first["start_time"], 3) == 0.3
+
+
+def test_collector_drain_exposes_stream_and_speaker_confidence_fields():
+    col = LilyNBestCollector()
+    col.ingest_message(_add_transcript(
+        _raw_word("alpha", 0.8, speaker="S1", start=1.0),
+        _raw_word("beta", 0.7, speaker="S1", start=1.5),
+    ))
+    out = col.drain(speaker_label="S1")
+    assert out["stream_start_time"] == 1.0
+    assert out["stream_end_time"] == 1.8
+    assert out["speaker_consistency"] == 1.0
+    assert out["top_hypothesis_confidence"] == out["hypotheses"][0]["confidence"]
+
+
+# ---------------------------------------------------------------------------
+# (5) Patch installer — defensive contract
 # ---------------------------------------------------------------------------
 
 def _fake_base_client_module():
@@ -373,12 +410,16 @@ def test_patch_bad_base_client_module_falls_back_cleanly():
     ) is False
 
 
-def test_patch_disabled_below_two_alternatives():
+def test_patch_one_alternative_arms_tap_only_without_config_injection():
+    bc = _fake_base_client_module()
     assert lily_install_nbest_stt_patch(
         LilyNBestCollector(), 1,
-        _base_client_module=_fake_base_client_module(),
+        _base_client_module=bc,
         _voice_client_cls=_fake_voice_client_cls(),
-    ) is False
+    ) is True
+    assert "max_alternatives" not in (
+        bc.build_start_recognition_message()["transcription_config"]
+    )
 
 
 def test_patched_connect_survives_broken_on():

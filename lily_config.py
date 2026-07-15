@@ -308,6 +308,38 @@ def tier1_clarify_margin() -> float:
 
 
 # ---------------------------------------------------------------------------
+# Overlap addressee fusion (WO-LILY-CROSSTALK-FUSION)
+# ---------------------------------------------------------------------------
+
+def overlap_fusion_diarization_weight() -> float:
+    """Weight of diarization confidence in overlap addressee fusion.
+    Acoustic confidence receives the remaining mass (1 - weight)."""
+    return max(
+        0.0,
+        min(1.0, _get_float("LILY_OVERLAP_FUSION_DIARIZATION_WEIGHT", 0.75)),
+    )
+
+
+def overlap_fusion_min_confidence() -> float:
+    """Minimum fused confidence required to trust a rostered attribution
+    inside PRIOR_OVERLAP. Below this, the segment is conservatively treated
+    as open-floor (unrostered) rather than mis-attributed."""
+    return max(
+        0.0,
+        min(1.0, _get_float("LILY_OVERLAP_FUSION_MIN_CONFIDENCE", 0.42)),
+    )
+
+
+def overlap_fusion_neutral_confidence() -> float:
+    """Fallback confidence when no overlap-time confidence signal is
+    available from either diarization or acoustics."""
+    return max(
+        0.0,
+        min(1.0, _get_float("LILY_OVERLAP_FUSION_NEUTRAL_CONFIDENCE", 0.5)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # n-best ASR recovery (WO-LILY-ADDRESSEE-H1-001 Task 1)
 # ---------------------------------------------------------------------------
 
