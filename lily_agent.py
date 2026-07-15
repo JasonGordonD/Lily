@@ -731,7 +731,7 @@ class LilyGame:
             "for a second — nobody touched the scores, I counted'), "
             "then pick the game back up."
         )
-        if self.armed_question is not None:
+        if getattr(self, "armed_question", None) is not None:
             instructions += (
                 " The interrupted current question is restored in the "
                 "state block: ask it now, word for word, without advancing "
