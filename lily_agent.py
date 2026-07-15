@@ -245,6 +245,7 @@ class LilyGame:
         # game can never sit armed-less and silent.
         self._watchdog_task: asyncio.Task | None = None
         self._prefetch_stall_ticks = 0
+        self._armed_limbo_ticks = 0
         # True while the currently-open answer window is a steal window
         # (seam: rides answer_window JSON as the optional `steal` key).
         self._steal_window = False
@@ -1224,6 +1225,7 @@ class LilyGame:
         if task and not task.done():
             return
         self._prefetch_stall_ticks = 0
+        self._armed_limbo_ticks = 0
         self._watchdog_task = asyncio.ensure_future(self._idle_watchdog())
 
     async def _idle_watchdog(self) -> None:
@@ -1233,13 +1235,53 @@ class LilyGame:
                 if not self.game_started or self.game_over:
                     continue
                 if (
-                    self.armed_question is not None
-                    or self.sk.answer_window_open
+                    self.sk.answer_window_open
                     or self._adjudicating
                     or getattr(self, "_question_transitioning", False)
                 ):
                     self._prefetch_stall_ticks = 0
+                    self._armed_limbo_ticks = 0
                     continue
+                if self.armed_question is not None:
+                    # Armed with a CLOSED window and no ruling in flight.
+                    # Pre-delivery that's normal (the delivery-nudge
+                    # machinery owns it) — but if the delivery claim is
+                    # already CONFIRMED, this question was asked, played
+                    # out, and then the post-delivery chain died (live
+                    # 2026-07-15 04:05: adjudication crashed between the
+                    # answer commit and the reveal publish; the game
+                    # parked on Q3 forever while the watchdog trusted
+                    # "armed = in progress"). Recover deterministically.
+                    self._prefetch_stall_ticks = 0
+                    claim = self.say_registry.state(
+                        f"q_{self.sk.question_number}_delivery"
+                    )
+                    if claim == lily_say_gate.CLAIM_CONFIRMED:
+                        self._armed_limbo_ticks += 1
+                        if self._armed_limbo_ticks >= 2:
+                            self._armed_limbo_ticks = 0
+                            if self.sk.answer_candidates:
+                                logger.error(
+                                    "LILY_WATCHDOG | ARMED_LIMBO | session=%s "
+                                    "q=%d — delivery confirmed, window closed, "
+                                    "candidates waiting: forcing adjudication",
+                                    self.sk.session_id, self.sk.question_number,
+                                )
+                                asyncio.ensure_future(
+                                    self.adjudicate(steal_allowed=False)
+                                )
+                            else:
+                                logger.error(
+                                    "LILY_WATCHDOG | ARMED_LIMBO | session=%s "
+                                    "q=%d — delivery confirmed, window closed, "
+                                    "no candidates: reopening the window",
+                                    self.sk.session_id, self.sk.question_number,
+                                )
+                                self.open_window()
+                    else:
+                        self._armed_limbo_ticks = 0
+                    continue
+                self._armed_limbo_ticks = 0
                 # Game live but idle: nothing armed, no window, no ruling
                 # in flight. Someone must move the game — that someone is
                 # now guaranteed to exist.

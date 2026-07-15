@@ -121,6 +121,7 @@ def _make_game() -> LilyGame:
     game._window_timer = None
     game._watchdog_task = None
     game._prefetch_stall_ticks = 0
+    game._armed_limbo_ticks = 0
     game._steal_window = False
     game._adjudicating = False
     game._judged_keys = set()
@@ -359,6 +360,58 @@ def test_watchdog_restarts_dead_prefetch():
 
     # The watchdog relaunched the supply line at least once.
     assert game.reasoning.prefetch_calls >= 1
+
+
+def test_watchdog_recovers_armed_limbo_with_candidates():
+    # Live 2026-07-15 04:05: adjudication died between the answer commit
+    # and the reveal publish — armed question, closed window, confirmed
+    # delivery, candidates waiting, game parked forever.
+    game = _make_game()
+    game.sk.bind_speaker("S1", "Rami")
+    _arm(game, QUESTION)
+    key = f"q_{game.sk.question_number}_delivery"
+    game.say_registry.claim(key)
+    game.say_registry.confirm(key)
+    now = time.time()
+    game.sk.open_answer_window(duration=30.0, now=now)
+    _final(game, "Venice", "S1", now + 2)
+    game.sk.close_answer_window()  # post-delivery limbo: window closed,
+    # nothing adjudicating, candidate stranded
+
+    _run_watchdog_ticks(game, ticks=4)
+
+    # The forced adjudication ruled and revealed.
+    doc = _reveal_doc(game)
+    assert doc["reveal"]["answer"] == "the femur"
+
+
+def test_watchdog_reopens_window_in_candidateless_limbo():
+    game = _make_game()
+    game.sk.bind_speaker("S1", "Rami")
+    _arm(game, QUESTION)
+    key = f"q_{game.sk.question_number}_delivery"
+    game.say_registry.claim(key)
+    game.say_registry.confirm(key)
+    # Delivery confirmed but the playout-open event was lost: window never
+    # opened, no candidates.
+    assert game.sk.answer_window_open is False
+
+    _run_watchdog_ticks(game, ticks=4)
+
+    assert game.sk.answer_window_open is True
+
+
+def test_watchdog_leaves_predelivery_armed_question_alone():
+    # Armed but the delivery claim is absent — the question hasn't been
+    # asked yet; the delivery-nudge machinery owns it, not the watchdog.
+    game = _make_game()
+    game.sk.bind_speaker("S1", "Rami")
+    _arm(game, QUESTION)
+
+    _run_watchdog_ticks(game, ticks=4)
+
+    assert game.sk.answer_window_open is False
+    assert game.ctx.api.room.requests == []
 
 
 def test_watchdog_quiet_while_question_armed():
