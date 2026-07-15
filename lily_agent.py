@@ -3678,13 +3678,15 @@ class LilyGame:
             "LILY_STT | roster=%d (max_speakers fixed at construction)",
             self.sk.roster_size(),
         )
-        # Voiceprint enrollment fires the moment the FIRST binding commits
-        # (the speaker has spoken; Speechmatics needs ~5 words per voice —
-        # re-fired at game start, group-id upgrade, and session close for
-        # late binders, so an early empty result self-heals).
+        # Voiceprint enrollment fires on the first binding and every later
+        # bind. The write is idempotent and this closes the late-binder gap:
+        # a new guest joining after game start still lands under the
+        # resolved group id for the next rematch.
         if not self._enroll_started:
             self._enroll_started = True
             self.fire_enrollment("first_bind")
+        else:
+            self.fire_enrollment("speaker_bind")
         # Packet kind `player_bind` per the shipped frontend parser
         # (contract note said `bind`; the canonical prmpt_ui parser accepts
         # chip_bind/name_chip/player_bind — drift recorded for Rami).

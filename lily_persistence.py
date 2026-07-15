@@ -823,6 +823,42 @@ async def lily_enroll_voiceprints(
             for name, state in scorekeeper.players.items()
             if state.get("speaker_label")
         }
+        # Keep prior label->player_name bindings when a refresh happens
+        # before (re)binding catches up this session; otherwise a null
+        # player_name overwrite silently narrows next-session lookup
+        # (lily_load_voiceprints_by_players filters by player_name).
+        known_names_by_label: dict[str, str] = {}
+        entry_labels = sorted({
+            str(
+                getattr(entry, "label", None)
+                or (entry.get("label") if isinstance(entry, dict) else "")
+            ).strip()
+            for entry in flat
+            if str(
+                getattr(entry, "label", None)
+                or (entry.get("label") if isinstance(entry, dict) else "")
+            ).strip()
+        })
+        if gid and entry_labels:
+            try:
+                existing = await asyncio.to_thread(
+                    lambda: supabase.table("lily_speaker_voiceprints")
+                    .select("speaker_label, player_name")
+                    .eq("group_id", gid)
+                    .in_("speaker_label", entry_labels)
+                    .execute()
+                )
+                for row in existing.data or []:
+                    label = str((row or {}).get("speaker_label") or "").strip()
+                    player_name = str((row or {}).get("player_name") or "").strip()
+                    if label and player_name:
+                        known_names_by_label[label] = player_name
+            except Exception as e:
+                logger.warning(
+                    "LILY_ENROLL | EXISTING_LABEL_LOOKUP_FAILED | trigger=%s "
+                    "group=%s error=%s",
+                    trigger, gid, e,
+                )
         rows = []
         for entry in flat:
             label = getattr(entry, "label", None) or (
@@ -839,8 +875,11 @@ async def lily_enroll_voiceprints(
                 # Speechmatics may already return the enrolled player name as
                 # the label on a rematch (known_speakers are injected with
                 # player-name labels) — keep the roster mapping as fallback.
-                "player_name": label_to_name.get(label)
-                or (label if label in scorekeeper.players else None),
+                "player_name": (
+                    label_to_name.get(label)
+                    or (label if label in scorekeeper.players else None)
+                    or known_names_by_label.get(label)
+                ),
                 "speaker_identifiers": identifiers,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
