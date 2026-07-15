@@ -42,13 +42,19 @@ do-not-touch: no imports, no vendoring).
   sticky `mode` flag — removal fully reverts her.
 - **tts_node punctuation-flush guard is mandatory** — suspense holds ("The answer
   is…") deadlock the SegmentSynchronizer without it.
-- **Outbound speech passes the say gate** (`lily_say_gate.py`, P4): a
-  deterministic markdown/emoji strip runs in tts_node before the punctuation
-  guard — emphasis asterisks, backticks, headers, bullets and emoji never reach
-  the synthesizer, while `[bracket]` audio tags (ElevenLabs v3 controls) pass
-  through verbatim. Emoji-only turns strip to empty and fall into the
-  empty-candidate retry. The module is the designated choke point for all
-  outbound speech hygiene (the say-gate WO extends it).
+- **Outbound speech passes the say gate** (`lily_say_gate.py`): the designated
+  choke point for everything Lily may say out loud — the P4 markdown/emoji
+  strip (emphasis asterisks, backticks, headers, bullets and emoji never reach
+  the synthesizer, while `[bracket]` audio tags — ElevenLabs v3 controls —
+  pass through verbatim; emoji-only turns strip to empty and fall into the
+  empty-candidate retry), plus the say-gate WO extensions: idempotent
+  speech-act keys (double greeting / BUG-2 double question delivery), the
+  state-block leak filter, need-to-know ambient context, and the burn
+  protocol. See "The say gate" below.
+- **Tool gating principle:** gate tools that mutate game outcomes or emit
+  game events; leave observational/memory writes free. `lily_note_fact` is
+  deliberately ungated — its primary habitat is the pre-game lobby, and a
+  fact noted during phase confusion mutates nothing.
 - **Reasoning-node calls are structured output** (P1): generation and
   verification set `response_mime_type="application/json"` **and** a
   `response_schema` (question schema carries current + reserved fields:
@@ -110,6 +116,97 @@ transcript, verdict, eval_tier, awarded_points, ts)`) and real
 `scorekeeper.question_number`) flow from the existing write paths.
 Tests: `tests/test_round_loop.py`.
 
+## The say gate (speech-boundary bug class, 2026-07-14 WO)
+
+The live bug class — double greeting, double question delivery (BUG-2), a
+state block read aloud, and an answer leak (the Bosporus answer spoken
+BEFORE its question) — is closed by one gateway: `lily_say_gate.py`
+(pure stdlib, offline-tested) plus its wiring in `lily_agent.py`.
+
+### Idempotent speech acts
+
+Game-critical speech acts carry state keys — `session_greet`,
+`session_rejoin`, `q_{N}_delivery`, `q_{N}_reveal`, `round_{N}_scores`,
+`finale` — in a per-session `SpeechActRegistry` on `LilyGame`. Keys are
+claimed with an atomic check-and-set **at dispatch time** — never at
+playback completion, which is exactly the race window that produced the
+live duplicates. Lifecycle: **claim at dispatch → confirm at playout
+completion → release on playback failure** (a claimed-but-never-played
+act releases so a retry can redeliver — the 19:27:52 swallowed-delivery
+class; a confirmed act stays done forever). All code-triggered speech
+routes through `LilyGame.gated_say(key, act, instructions, source)`:
+a first claim logs `LILY_SAY | act=... | key=... | source=...`, a second
+claim logs `LILY_SAY_SUPPRESSED | reason=dup | key=...` and does NOT
+speak. The session opener has two trigger paths (agent `on_enter` and the
+entrypoint) — both dispatch the same instructions under `session_greet`,
+so the loser of the race is silent; a reconnect uses its own
+`session_rejoin` key and never trips `session_greet`. Keyless dispatches
+(steal window, skip, mode reverts, the prefetch nudge, game start) still
+log `LILY_SAY` for the audit trail.
+
+### BUG-2: one authoritative question delivery
+
+The `lily_begin_round` tool result carries the question payload (prompt +
+category) and the post-tool turn is the SOLE deliverer — `start_game`
+dispatches no racing instructed reply for the `host_tool` source, and the
+prompt states the contract (tool-call turn: transition line only; the
+next turn asks the question exactly once; the reveal repeats the answer,
+never the question). Enforcement is physical: `tts_node` detects an
+outbound question performance with the same verbatim detector that opens
+the answer window (`lily_question_spoken_ratio ≥ 0.6`) and claims
+`q_{N}_delivery`; a failed claim means question N was already delivered,
+and the duplicate turn is replaced with silence (no retry — suppressed,
+not swallowed).
+
+### Leak filter
+
+The injected state block rides as SYSTEM-role context wrapped in a
+sentinel envelope (`<lily_state>…</lily_state>`). `tts_node` runs
+`lily_filter_leaks` before the hygiene strip: whole envelopes, envelope
+fragments (chunk-boundary partials like `<lily_state`), and any line
+carrying a bracketed metadata marker (`[GAME STATE]`, `[room read:`,
+`[env:`, `[RETURNING TABLE]`) are deterministically removed and logged as
+`LILY_SAY_SUPPRESSED | reason=leak`. Ordinary `[bracket]` audio tags and
+clean text pass untouched.
+
+### Need-to-know ambient context
+
+The ambient state block **never** carries `canonical_answer`,
+`acceptable_answers`, `reveal_color`, or the full prefetched-question
+JSON: the scorekeeper's `current_question` line is prompt-only, and the
+`NEXT QUESTION` line carries prompt + category (+ `choices` when the
+format has them — spoken content, not answer material). The answer
+reaches the vocal node only through the reveal-time instructed reply, and
+the Tier-2 judge receives it in its dedicated non-spoken call. The vocal
+node cannot leak what it does not hold.
+
+### Burn protocol
+
+A leak-filter hit while a question is armed/prefetched means its answer
+may have gone out on air: the question is burned — `LILY_BURN |
+question_id=...`, bank rows (`kb_` ids) marked `lily_questions.status =
+'burned'` (migration 009), generated questions discarded, the prompt
+added to the session's avoid list — and a replacement is pulled through
+the existing bank/prefetch path. The bank fetcher serves only
+`status='active'` rows (a missing column reads as active). The status
+column is SHARED with the future tier-retirement sub-agent (e.g.
+`status='retired'`); scope is global today — per-group burn rides
+`lily_asked_history` later.
+
+### Callout gating
+
+Every tool that emits game-event packets on a live round carries the same
+`game_started=True` gate as `lily_award_bonus`, refusing with an
+LLM-readable recovery path ("call lily_begin_round first"), never a
+silent no-op: `lily_award_bonus` and `lily_log_clarify`.
+`lily_bind_speaker`'s `player_bind` packet is a roster event, not a game
+outcome — binding is core lobby behavior and stays ungated, per the tool
+gating principle above (as does `lily_note_fact`, deliberately).
+
+Tests: `tests/test_say_gate.py` (registry + leak filter, pure) and
+`tests/test_say_gate_dispatch.py` (dispatch dedupe, BUG-2 contract,
+need-to-know, burn, clarify gate).
+
 ## Latency discipline
 
 Nothing blocking runs on the event loop's hot path, and slow calls are moved
@@ -169,8 +266,9 @@ lily_reasoning.py    background node: prefetch + verification + judge transport
 lily_persistence.py  Supabase: sessions, transcripts, answers audit, voiceprints, KB bank
 lily_memory.py       persistent cross-session memory: session summaries, the
                      [RETURNING TABLE] block, KB-bank adult-mode guard (stdlib-only)
-lily_say_gate.py     outbound-speech hygiene gate: markdown/emoji strip, [tag]-preserving
-                     (the designated choke point — the say-gate WO extends it; stdlib-only)
+lily_say_gate.py     outbound-speech gate: markdown/emoji strip ([tag]-preserving),
+                     SpeechActRegistry (idempotent speech acts), state-block leak
+                     filter + sentinel envelope (the designated choke point; stdlib-only)
 lily_tts.py          ElevenLabs v3 wrapper (lbs_tts lift; byte-alignment carry, 5K split)
 lily_config.py       ALL env access lives here
 lily_audeering_client.py     devAIce Web API client + room-audio capture pipeline
@@ -189,9 +287,12 @@ migrations/006_lily_session_reports.sql lily_session_reports (write side; assess
 migrations/007_lily_memories_player_names.sql  lily_memories.player_names audit column (+GIN index)
 migrations/008_lily_acoustic_trajectories.sql  per-turn acoustic snapshots + addressee
                                                acoustic_snapshot column
-tests/               272 tests, run with `python -m pytest tests/` — no network; needs
+migrations/009_lily_question_status.sql  lily_questions.status lifecycle column
+                                         (burn protocol; shared with tier retirement)
+tests/               315 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
-                     (test_award_gate.py / test_context_blocks.py import livekit)
+                     (test_award_gate.py / test_context_blocks.py /
+                     test_say_gate_dispatch.py import livekit)
 ```
 
 ## Persistent memory (rematch)

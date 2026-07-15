@@ -13,9 +13,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lily_say_gate import (
+    CLAIM_CONFIRMED,
+    CLAIM_PENDING,
+    LILY_STATE_SENTINEL_CLOSE,
+    LILY_STATE_SENTINEL_OPEN,
+    SpeechActRegistry,
     lily_clean_for_speech,
+    lily_filter_leaks,
     lily_strip_emoji,
     lily_strip_markdown,
+    lily_wrap_state_block,
 )
 
 
@@ -181,3 +188,186 @@ def test_plain_text_unchanged():
 def test_punctuation_and_apostrophes_untouched():
     text = "who's winning? Sarah! by two... maybe three."
     assert lily_clean_for_speech(text) == text
+
+
+# ===========================================================================
+# Say-gate WO extensions (2026-07-14): SpeechActRegistry + leak filter
+# ===========================================================================
+
+# -- SpeechActRegistry: claim / confirm / release ------------------------------------
+
+def test_claim_is_atomic_check_and_set():
+    reg = SpeechActRegistry()
+    assert reg.claim("session_greet") is True
+    # The race window: a second dispatch of the same act must fail HERE,
+    # at dispatch time — never wait for playback completion.
+    assert reg.claim("session_greet") is False
+    assert reg.state("session_greet") == CLAIM_PENDING
+
+
+def test_distinct_keys_do_not_collide():
+    reg = SpeechActRegistry()
+    assert reg.claim("q_1_delivery") is True
+    assert reg.claim("q_1_reveal") is True
+    assert reg.claim("q_2_delivery") is True
+
+
+def test_rejoin_does_not_trip_greet():
+    # Reconnect keeps its distinct re-entry line under its own key.
+    reg = SpeechActRegistry()
+    assert reg.claim("session_rejoin") is True
+    assert reg.claim("session_greet") is True
+
+
+def test_confirm_pending_marks_played_acts():
+    reg = SpeechActRegistry()
+    reg.claim("q_3_delivery")
+    reg.claim("finale")
+    confirmed = reg.confirm_pending()
+    assert sorted(confirmed) == ["finale", "q_3_delivery"]
+    assert reg.state("q_3_delivery") == CLAIM_CONFIRMED
+    # Idempotent — nothing pending on the second pass.
+    assert reg.confirm_pending() == []
+
+
+def test_release_on_playback_failure_allows_redelivery():
+    # The 19:27:52 swallowed-delivery class: claimed at dispatch, the turn
+    # produced empty text, playback never happened — the claim must
+    # release so the retry can redeliver.
+    reg = SpeechActRegistry()
+    assert reg.claim("q_5_delivery") is True
+    released = reg.release_pending()
+    assert released == ["q_5_delivery"]
+    assert reg.state("q_5_delivery") is None
+    assert reg.claim("q_5_delivery") is True  # retry redelivers
+
+
+def test_confirmed_acts_never_release():
+    reg = SpeechActRegistry()
+    reg.claim("session_greet")
+    reg.confirm_pending()  # playout completed — genuinely spoken
+    assert reg.release("session_greet") is False
+    assert reg.release_pending() == []
+    assert reg.claim("session_greet") is False  # spoken acts stay done
+
+
+def test_release_single_key():
+    reg = SpeechActRegistry()
+    reg.claim("q_2_reveal")
+    assert reg.release("q_2_reveal") is True
+    assert reg.release("q_2_reveal") is False  # already released
+    assert reg.claim("q_2_reveal") is True
+
+
+def test_release_pending_leaves_confirmed_untouched():
+    reg = SpeechActRegistry()
+    reg.claim("session_greet")
+    reg.confirm_pending()
+    reg.claim("q_1_delivery")  # in flight
+    assert reg.release_pending() == ["q_1_delivery"]
+    assert reg.state("session_greet") == CLAIM_CONFIRMED
+
+
+# -- leak filter: sentinel envelope ---------------------------------------------------
+
+def test_sentinel_envelope_stripped():
+    leaked = (
+        "Alright table!\n"
+        f"{LILY_STATE_SENTINEL_OPEN}\n[GAME STATE]\nphase=round round=1/3\n"
+        f"current_question: 'This strait?'\n{LILY_STATE_SENTINEL_CLOSE}\n"
+        "Who's ready?"
+    )
+    filtered, reasons = lily_filter_leaks(leaked)
+    assert "sentinel_envelope" in reasons
+    assert "GAME STATE" not in filtered
+    assert "phase=round" not in filtered
+    assert "Alright table!" in filtered
+    assert "Who's ready?" in filtered
+
+
+def test_wrapped_block_round_trips_to_silence():
+    # A fully-echoed injected block must strip to nothing.
+    block = lily_wrap_state_block("[GAME STATE]\nphase=lobby\n(no players)")
+    filtered, reasons = lily_filter_leaks(block)
+    assert reasons
+    assert filtered == ""
+
+
+def test_sentinel_fragment_line_dropped():
+    # Chunk-boundary partial: the envelope open tag cut mid-way.
+    filtered, reasons = lily_filter_leaks(
+        "Next one's a beauty.\n<lily_state\nDave, you're up."
+    )
+    assert "sentinel_fragment" in reasons
+    assert "<lily_state" not in filtered
+    assert "Next one's a beauty." in filtered
+    assert "Dave, you're up." in filtered
+
+
+def test_closing_fragment_dropped():
+    filtered, reasons = lily_filter_leaks("lily_state> and the scores hold.")
+    assert "sentinel_fragment" in reasons
+    assert "lily_state" not in filtered
+
+
+# -- leak filter: bracketed metadata lines --------------------------------------------
+
+def test_game_state_header_line_dropped():
+    filtered, reasons = lily_filter_leaks(
+        "Big round coming.\n[GAME STATE] phase=round round=2/3\nHere we go."
+    )
+    assert any(r.startswith("metadata:") for r in reasons)
+    assert "phase=round" not in filtered
+    assert "Big round coming." in filtered
+    assert "Here we go." in filtered
+
+
+def test_room_read_env_and_returning_table_lines_dropped():
+    for marker in ("[room read: lively]", "[env: music]", "[RETURNING TABLE]"):
+        filtered, reasons = lily_filter_leaks(f"Hello!\n{marker} details\nOnward.")
+        assert reasons, marker
+        assert marker.split()[0].strip("[]").lower() not in filtered.lower()
+        assert "Hello!" in filtered
+
+
+def test_metadata_marker_case_insensitive():
+    _, reasons = lily_filter_leaks("[game state] phase=lobby")
+    assert reasons
+
+
+# -- leak filter: clean text passes, audio tags preserved ------------------------------
+
+def test_clean_text_passes_untouched():
+    text = "Sarah takes the round! [excited] Next question coming up."
+    filtered, reasons = lily_filter_leaks(text)
+    assert reasons == []
+    assert filtered == text
+
+
+def test_audio_tags_are_not_leaks():
+    text = "[whispering] the answer is... [pause] Tokyo."
+    filtered, reasons = lily_filter_leaks(text)
+    assert reasons == []
+    assert filtered == text
+
+
+def test_leak_filter_then_hygiene_preserves_tags():
+    # The tts_node order: leak filter first, then the markdown/emoji pass.
+    leaked = "[excited] **Sarah** wins!\n[GAME STATE] phase=round"
+    filtered, reasons = lily_filter_leaks(leaked)
+    assert reasons
+    assert lily_clean_for_speech(filtered) == "[excited] Sarah wins!"
+
+
+def test_empty_and_none_safe_for_leak_filter():
+    assert lily_filter_leaks("") == ("", [])
+    assert lily_filter_leaks(None) == ("", [])
+
+
+# -- sentinel wrapper -------------------------------------------------------------------
+
+def test_wrap_state_block_shape():
+    wrapped = lily_wrap_state_block("[GAME STATE]\nphase=lobby")
+    assert wrapped.startswith(LILY_STATE_SENTINEL_OPEN)
+    assert wrapped.endswith(LILY_STATE_SENTINEL_CLOSE)
+    assert "[GAME STATE]" in wrapped

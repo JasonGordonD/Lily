@@ -417,6 +417,12 @@ async def lily_fetch_bank_question(
         candidates = [
             r for r in pool
             if r.get("question") and r["question"] not in exclude_prompts
+            # Burn protocol (say-gate WO, migration 009): only status='active'
+            # rows are servable — 'burned' (answer leaked on air) and any
+            # future lifecycle value (e.g. the tier-retirement sub-agent's
+            # 'retired') are excluded. A missing column (pre-009 schema)
+            # reads as active.
+            and (r.get("status") or "active") == "active"
         ]
         if not candidates:
             return None
@@ -445,6 +451,35 @@ async def lily_fetch_bank_question(
     except Exception as e:
         logger.error("lily_fetch_bank_question error: %s", e)
         return None
+
+
+async def lily_burn_question(
+    supabase: SupabaseClient, question_id: str
+) -> bool:
+    """Burn protocol (say-gate WO): mark one lily_questions row
+    status='burned' after its answer leaked on air. Only bank questions
+    (id shape 'kb_<row id>') have a DB row to mark; generated questions
+    are simply discarded by the caller. Scope is GLOBAL today (migration
+    009 status column); per-group burn rides lily_asked_history later.
+    Returns True when a row was marked."""
+    qid = str(question_id or "")
+    if not qid.startswith("kb_"):
+        return False
+    try:
+        row_id = int(qid[3:])
+    except ValueError:
+        return False
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_questions")
+            .update({"status": "burned"})
+            .eq("id", row_id)
+            .execute()
+        )
+        return True
+    except Exception as e:
+        logger.error("lily_burn_question error for %s: %s", qid, e)
+        return False
 
 
 # ---------------------------------------------------------------------------

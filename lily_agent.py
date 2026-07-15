@@ -184,6 +184,16 @@ class LilyGame:
         self.finale_sent = False
         self.prewager_standings: list[dict] | None = None
 
+        # Say gate (say-gate WO): idempotent speech-act registry. Keys are
+        # claimed AT DISPATCH TIME (atomic check-and-set) so a racing
+        # second trigger path is physically silent, confirmed at playout
+        # completion, and released on playback failure so a retry can
+        # redeliver (the 19:27:52 swallowed-delivery class).
+        self.say_registry = lily_say_gate.SpeechActRegistry()
+        # Set by the entrypoint BEFORE session.start so on_enter knows
+        # whether to greet (session_greet) or rejoin (session_rejoin).
+        self.reconnected = False
+
         self.next_question: dict | None = None      # prefetched N+1
         self.armed_question: dict | None = None     # in state block, awaiting ask
         self.used_prompts: list[str] = []
@@ -370,6 +380,82 @@ class LilyGame:
             self._preemptive_paused = False
             self.agent.set_preemptive_generation(True)
 
+    # -- gated speech dispatch (say-gate WO §1) -------------------------------
+
+    def gated_say(
+        self,
+        key: str | None,
+        act: str,
+        instructions: str,
+        source: str,
+        extra_keys: tuple[str, ...] = (),
+    ) -> bool:
+        """THE dispatch helper for code-triggered speech. Game-critical
+        acts pass a state key (session_greet, session_rejoin,
+        q_{N}_reveal, round_{N}_scores, finale); the claim happens HERE,
+        at dispatch time — not at playback completion, which is the race
+        window that produced the live double greeting. A second claim on
+        the same key logs LILY_SAY_SUPPRESSED | reason=dup and does NOT
+        speak. Keyless dispatches (steal window, skip, mode reverts,
+        prefetch nudge) still log LILY_SAY for the audit trail.
+        extra_keys are claimed alongside (e.g. the finale rides the final
+        reveal's dispatch) without gating it."""
+        if key is not None and not self.say_registry.claim(key):
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=dup | key=%s | act=%s | source=%s",
+                key, act, source,
+            )
+            return False
+        for k in extra_keys:
+            self.say_registry.claim(k)
+        logger.info(
+            "LILY_SAY | act=%s | key=%s | source=%s", act, key or "-", source
+        )
+        self.instructed_reply(instructions)
+        return True
+
+    def greeting_instructions(self) -> str:
+        """The fresh-room landing line (single source of truth — both the
+        on_enter and entrypoint trigger paths dispatch THIS text under the
+        session_greet key; the gate makes the second path silent)."""
+        greeting = (
+            "The room just opened — this is your landing line. Greet the "
+            "table as Lily: two or three short, warm, excited sentences. "
+            "Tell them the deal (you host, they shout answers, the screen "
+            "keeps score) and ask who you've got at the table tonight — "
+            "conversationally, no roll-call. Bind names as people speak. "
+            "When the table feels ready — the first genuine group laugh — "
+            "call lily_begin_round to open round one; nothing scores until "
+            "you do."
+        )
+        if self.memory_block:
+            greeting += (
+                " This is a RETURNING table — the [RETURNING TABLE] context "
+                "has who they are. Greet them back by name, reference last "
+                "game's winner, and lean into the rematch energy."
+            )
+        else:
+            # Neutral-history rule: without memory data, never claim OR deny
+            # prior contact (memory may still resolve mid-lobby via a
+            # group-id upgrade).
+            greeting += (
+                " You have no memory of this table right now — do not claim "
+                "you remember them, and do not announce it's their first "
+                "time either. If a [RETURNING TABLE] block appears later, "
+                "you may reference it from then on."
+            )
+        return greeting
+
+    def rejoin_instructions(self) -> str:
+        """The reconnect re-entry line — its own key (session_rejoin) and
+        its own register; it must NOT trip session_greet."""
+        return (
+            "You just reconnected mid-game — the state block has the "
+            "scores intact. A quick in-character rejoin line ('lost you "
+            "for a second — nobody touched the scores, I counted'), "
+            "then pick the game back up."
+        )
+
     # -- question supply ------------------------------------------------------
 
     def _round_for_next_question(self) -> int:
@@ -444,12 +530,18 @@ class LilyGame:
                             "LILY_STATE | PREFETCH_AUTO_ADVANCE | session=%s q=%d",
                             self.sk.session_id, self.sk.question_number,
                         )
-                        self.session.generate_reply(
-                            instructions=(
+                        # Keyless nudge: the q_{N}_delivery claim happens in
+                        # tts_node when the question text actually goes out,
+                        # so a racing second deliverer stays silent.
+                        self.gated_say(
+                            None,
+                            "question_nudge",
+                            (
                                 "The next question just landed in the state "
                                 "block. Bridge in one short beat and ask it "
                                 "now, word for word."
-                            )
+                            ),
+                            source="prefetch_auto_advance",
                         )
             self.publish_attributes_nowait()
 
@@ -507,6 +599,15 @@ class LilyGame:
         # items are committed, the persistent context is stable again, so
         # preemptive generation can resume (P2).
         self._resume_preemptive()
+        # Say gate: playout completed — pending speech-act claims are now
+        # genuinely spoken. Confirmed acts never release (a confirmed act
+        # can never be redelivered); only a claimed-but-never-played act
+        # releases, on the tts_node playback-failure path.
+        confirmed = self.say_registry.confirm_pending()
+        if confirmed:
+            logger.info(
+                "LILY_SAY | CONFIRMED | keys=%s", ",".join(sorted(confirmed))
+            )
         if self._pending_reveal_event is not None:
             # Reveal speech finished without a speaking-start hook having
             # fired the packet (safety net) — emit now so the UI never hangs.
@@ -817,11 +918,14 @@ class LilyGame:
             if self.sk.mode == "adult":
                 self.sk.set_mode("general")  # sticky flag flips instantly
                 self.publish_attributes_nowait()
-                self.instructed_reply(
+                self.gated_say(
+                    None,
+                    "mode_revert",
                     "A player said 'back to normal'. Adult mode is now "
                     "OFF — committed, in code. Switch registers "
                     "instantly, no ceremony, no residue, straight into "
-                    "a regular category like nothing happened."
+                    "a regular category like nothing happened.",
+                    source="voice_command",
                 )
             return
         if command == "skip":
@@ -912,11 +1016,14 @@ class LilyGame:
         await self.publish_metadata("")
         await self.publish_attributes()
         self.arm_next_question()
-        self.instructed_reply(
+        self.gated_say(
+            None,
+            "skip",
             "That question was skipped. Move straight to the next "
             "question with zero commentary about the skip and no "
             "spotlight on who asked. If the state block has the next "
-            "question, ask it now."
+            "question, ask it now.",
+            source=f"skip_{source}",
         )
 
     # -- adjudication ---------------------------------------------------------
@@ -1076,10 +1183,13 @@ class LilyGame:
                 self.open_window(
                     duration=lily_config.steal_window_seconds(), steal=True
                 )
-                self.instructed_reply(
+                self.gated_say(
+                    None,
+                    "steal_window",
                     "Nobody landed it. Announce a five-second steal "
                     "window — quick and hot — anyone who hasn't "
-                    "answered can grab it."
+                    "answered can grab it.",
+                    source="adjudicate",
                 )
                 return
 
@@ -1105,8 +1215,13 @@ class LilyGame:
                     lily_persistence.lily_checkpoint(self.supabase, self.sk)
                 )
 
-            # Consume the question; round/phase bookkeeping.
+            # Consume the question; round/phase bookkeeping. Capture the
+            # question/round numbers NOW — arm_next_question() below
+            # advances both, and the say-gate keys must name the question
+            # being revealed, not the one being armed.
             self.armed_question = None
+            revealed_qnum = self.sk.question_number
+            revealed_round = self.sk.round
             round_over = (
                 self.sk.question_number % self.sk.questions_per_round == 0
             )
@@ -1125,7 +1240,23 @@ class LilyGame:
                 if round_over:
                     self._set_ui_phase("scores")
                 self.arm_next_question()
-            self.instructed_reply(reveal_instr)
+            # Gated reveal dispatch: the reveal claims q_{N}_reveal; a
+            # round-closing reveal also claims round_{N}_scores and the
+            # final reveal claims finale — one speech, every act it
+            # performs claimed, so no other path can re-deliver them.
+            extra: tuple[str, ...] = ()
+            act = "reveal"
+            if was_final:
+                extra, act = ("finale",), "reveal_finale"
+            elif round_over:
+                extra, act = (f"round_{revealed_round}_scores",), "reveal_scores"
+            self.gated_say(
+                f"q_{revealed_qnum}_reveal",
+                act,
+                reveal_instr,
+                source="adjudicate",
+                extra_keys=extra,
+            )
         finally:
             self._adjudicating = False
 
@@ -1318,6 +1449,16 @@ class LilyGame:
         await self.publish_attributes()
         self._enroll_started = True
         self.fire_enrollment("game_start")
+        if source == "host_tool":
+            # BUG-2 (double question delivery) authoritative-delivery
+            # contract: when the game starts via the lily_begin_round tool,
+            # the tool RESULT carries the question payload and the
+            # post-tool turn is the SOLE deliverer. Dispatching an
+            # instructed reply here as well produced two racing
+            # generations both told to ask the question — the observed
+            # double delivery. The prompt states the contract; the
+            # q_{N}_delivery claim in tts_node enforces it physically.
+            return
         instructions = (
             "The table is ready to start. Kick off round one with "
             "energy. If the state block has the next question, set "
@@ -1330,7 +1471,9 @@ class LilyGame:
                 "played with you before — one quick welcome-back beat "
                 "if you haven't done one yet, then into the game."
             )
-        self.instructed_reply(instructions)
+        self.gated_say(
+            None, "game_start", instructions, source=f"start_{source}"
+        )
 
     async def finish_game(self) -> None:
         """Finale: event fires AT OR BEFORE the phase=final attribute flip,
@@ -1411,9 +1554,24 @@ class LilyGame:
         except Exception:
             pass  # acoustic read is enrichment; never breaks the state block
         if self.armed_question is not None and not self.sk.answer_window_open:
+            # NEED-TO-KNOW (say-gate WO): the ambient context carries the
+            # PROMPT TEXT (+category/format) only — never canonical_answer,
+            # acceptable_answers, reveal_color, or the full question JSON.
+            # The reveal turn receives the answer via its instructed reply
+            # at reveal time; the Tier-2 judge gets it in its dedicated
+            # call. The vocal node cannot leak what it does not hold.
+            q = self.armed_question
+            need_to_know = {
+                "prompt": q.get("prompt", ""),
+                "category": q.get("category", ""),
+            }
+            if q.get("choices"):
+                # Multiple-choice format: the choices are spoken content,
+                # not answer material — they ride along.
+                need_to_know["choices"] = q["choices"]
             extra.append(
                 "NEXT QUESTION (perform it when the table is ready, "
-                "faithfully): " + json.dumps(self.armed_question, ensure_ascii=False)
+                "faithfully): " + json.dumps(need_to_know, ensure_ascii=False)
             )
         elif self.next_question is not None:
             extra.append("next question: prefetched and ready")
@@ -1436,6 +1594,58 @@ class LilyGame:
         if extra:
             block += "\n" + "\n".join(extra)
         return block
+
+    # -- burn protocol (say-gate WO §1) ------------------------------------------
+
+    def _burn_question(self, question: dict, reason: str) -> None:
+        """Mark one question burned: LILY_BURN log, status='burned' for
+        bank rows (kb_ ids — generated questions have no DB row and are
+        simply discarded), and the prompt joins used_prompts so the
+        generator never re-produces it this session. Scope is GLOBAL
+        today (migration 009 status column); per-group burn rides
+        lily_asked_history later."""
+        qid = question.get("id")
+        logger.warning(
+            "LILY_BURN | question_id=%s | session=%s | reason=%s",
+            qid, self.sk.session_id, reason,
+        )
+        prompt = question.get("prompt", "")
+        if prompt and prompt not in self.used_prompts:
+            self.used_prompts.append(prompt)
+        if self.supabase is not None:
+            asyncio.ensure_future(
+                lily_persistence.lily_burn_question(self.supabase, qid)
+            )
+
+    def on_answer_leak(self) -> None:
+        """Leak-filter hit while a question is armed/prefetched: its
+        answer may have gone out on air, so the question is dead. Burn
+        every question currently in flight (armed and prefetched — the
+        filter cannot attribute the leaked fragment to one of them),
+        then pull replacements through the existing bank/prefetch path."""
+        burned = False
+        if self.armed_question is not None:
+            self._burn_question(self.armed_question, reason="answer_leak")
+            if self._window_timer and not self._window_timer.done():
+                self._window_timer.cancel()
+            self.sk.close_answer_window()
+            self._stop_bed()
+            self.armed_question = None
+            self.sk.current_question = None
+            burned = True
+        if self.next_question is not None:
+            self._burn_question(self.next_question, reason="answer_leak")
+            self.next_question = None
+            burned = True
+        if not burned:
+            return
+        asyncio.ensure_future(self.publish_metadata(""))
+        self.publish_attributes_nowait()
+        if self.game_started and not self.game_over:
+            # Replacement via the existing supply path (arm_next_question
+            # falls through to start_prefetch when nothing is prefetched;
+            # the prefetch auto-advance nudge delivers it when it lands).
+            self.arm_next_question()
 
     # -- acoustic pipeline: child-signal veto + trajectory rows -----------------------
 
@@ -1463,15 +1673,16 @@ class LilyGame:
         self.sk.set_mode("general")  # sticky flag flips instantly, in code
         self.publish_attributes_nowait()
         if self.session is not None:
-            self.session.generate_reply(
-                instructions=(
-                    "Adult mode is now OFF — committed, in code. Switch back "
-                    "to the regular deck instantly with a light, in-character "
-                    "pivot line. Do NOT explain why, do NOT mention any "
-                    "system, audio, detection, or safety mechanism — just "
-                    "change gears like a host reading the room. Ask a "
-                    "general-category question next."
-                )
+            self.gated_say(
+                None,
+                "mode_revert",
+                "Adult mode is now OFF — committed, in code. Switch back "
+                "to the regular deck instantly with a light, in-character "
+                "pivot line. Do NOT explain why, do NOT mention any "
+                "system, audio, detection, or safety mechanism — just "
+                "change gears like a host reading the room. Ask a "
+                "general-category question next.",
+                source="child_signal",
             )
 
     def log_acoustic_trajectory(self) -> None:
@@ -1576,13 +1787,28 @@ class LilyAgent(Agent):
         # First speech also flips agent state to "speaking", which is the
         # holding-music teardown signal SessionHoldingMusic listens for
         # (useVoiceAssistant agent state — WO-ZUNA-OMNIBUS-001 contract).
-        self.session.generate_reply(
-            instructions=(
-                "You just joined the room. Say a short, warm, playful hello "
-                "as the trivia host and get the table talking — who's here "
-                "tonight?"
+        #
+        # Say gate: this is one of TWO trigger paths for the session
+        # opener (the entrypoint dispatches the other after
+        # session.start) — the live double greeting was both paths
+        # speaking. Both now dispatch the SAME instructions through
+        # gated_say under one key; whichever runs second is suppressed.
+        # A reconnect uses its own key (session_rejoin) and its own line,
+        # and must NOT trip session_greet.
+        if self._game.reconnected:
+            self._game.gated_say(
+                "session_rejoin",
+                "rejoin",
+                self._game.rejoin_instructions(),
+                source="on_enter",
             )
-        )
+        else:
+            self._game.gated_say(
+                "session_greet",
+                "greet",
+                self._game.greeting_instructions(),
+                source="on_enter",
+            )
 
     # -- tools ------------------------------------------------------------------
 
@@ -1652,6 +1878,16 @@ class LilyAgent(Agent):
         Args:
             player_name: The rostered player you are asking to clarify.
         """
+        # Gate (callout-gating WO §2): clarify emits a `clarify` game-event
+        # packet and only makes sense against a live answer flow. Same
+        # game_started gate as lily_award_bonus — an LLM-readable refusal
+        # naming the recovery path, never a silent no-op.
+        if not self._game.game_started:
+            return (
+                "Clarify can only be logged once a round is underway — "
+                "the game hasn't started. Call lily_begin_round first, "
+                "then ask the player to clarify."
+            )
         name = (player_name or "").strip()
         if name not in self._game.sk.players:
             return f"No rostered player named {name!r} — clarify not logged."
@@ -1701,9 +1937,26 @@ class LilyAgent(Agent):
         if self._game.game_started:
             return "Already running — the next question is in the state block."
         await self._game.start_game(source="host_tool")
+        # BUG-2 authoritative-delivery contract: this tool result carries
+        # the question payload, and the post-tool turn (this result's
+        # continuation) is the SOLE deliverer — start_game deliberately
+        # dispatched no instructed reply for the host_tool source. The
+        # q_{N}_delivery claim in tts_node makes any duplicate read of
+        # the same question physically silent.
+        q = self._game.armed_question
+        if q is not None:
+            return (
+                "Round one is armed and YOU deliver the first question in "
+                "this very turn — you are its sole deliverer. One short "
+                "transition beat (set the round-one category: "
+                f"{q.get('category', 'general')}), then ask exactly, word "
+                f"for word: {q.get('prompt', '')!r} Never re-ask it in a "
+                "later turn."
+            )
         return (
-            "Round one is armed. The next question is in the state block; "
-            "perform it faithfully."
+            "Round one is armed but the first question hasn't landed yet — "
+            "banter for a beat; deliver it when it appears in the state "
+            "block."
         )
 
     @function_tool()
@@ -1836,7 +2089,17 @@ class LilyAgent(Agent):
         # but ONLY when the rendered text changed. Leaving an unchanged
         # block untouched (same item id, same content, same position) is
         # what lets the preemptive equivalence check pass on quiet turns.
-        state = self._game.build_state_block()
+        #
+        # Say gate (leak filter): the block is wrapped in the
+        # <lily_state>...</lily_state> sentinel envelope, and it rides as
+        # SYSTEM-role context (ChatMessage(role="system") below — every
+        # injection path in this method is system-role; nothing injects
+        # ambient state as a user/assistant item). If any of it echoes
+        # into an outbound turn, tts_node's lily_filter_leaks strips it
+        # deterministically by that sentinel.
+        state = lily_say_gate.lily_wrap_state_block(
+            self._game.build_state_block()
+        )
         existing = [
             i for i, m in enumerate(items)
             if getattr(m, "role", None) == "system"
@@ -1900,6 +2163,20 @@ class LilyAgent(Agent):
             chunks.append(chunk)
         raw = "".join(chunks).strip()
 
+        # Say-gate leak filter (BEFORE hygiene): injected state-block
+        # context echoed into the outbound turn — the sentinel envelope,
+        # envelope fragments, or bracketed metadata lines ([GAME STATE],
+        # [room read:, [env:, [RETURNING TABLE]) — is deterministically
+        # stripped and triggers the burn protocol for any armed/prefetched
+        # question (its answer may have gone out on air).
+        filtered, leak_reasons = lily_say_gate.lily_filter_leaks(raw)
+        if leak_reasons:
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=leak | markers=%s",
+                ",".join(sorted(set(leak_reasons))),
+            )
+            self._game.on_answer_leak()
+
         # P4 spoken-markdown strip: deterministic hygiene via the say gate
         # (lily_say_gate — THE choke point for outbound speech hygiene)
         # BEFORE the punctuation-flush guard. Markdown emphasis, headers,
@@ -1907,16 +2184,30 @@ class LilyAgent(Agent):
         # [whispering], [pause], ...) are load-bearing ElevenLabs v3
         # controls and are preserved verbatim. Emoji-only turns strip to
         # "" and fall into the empty-candidate retry below.
-        full = lily_say_gate.lily_clean_for_speech(raw)
+        full = lily_say_gate.lily_clean_for_speech(filtered)
         if full != raw:
             logger.info(
-                "LILY_SAY_GATE | stripped %d chars of markdown/emoji",
+                "LILY_SAY_GATE | stripped %d chars of markdown/emoji/leaks",
                 len(raw) - len(full),
             )
 
         if len(full) < 3:
             # §11.1: an empty candidate (safety-filter mute, truncation) is a
             # loggable event with a retry — never silence.
+            #
+            # Say gate (19:27:52 swallowed-delivery fix): this speech was
+            # dispatched but will never play — any speech-act claims made
+            # for it must NOT stay claimed, or the retry below regenerates
+            # into a gate that suppresses the redelivery as a "duplicate".
+            # Claims are claim-at-dispatch / confirm-at-playout /
+            # release-on-failure: release the pending ones here and relog,
+            # so the retry can legitimately redeliver the act.
+            released = self._game.say_registry.release_pending()
+            for k in released:
+                logger.warning(
+                    "LILY_SAY | RELEASED | key=%s | reason=empty_candidate "
+                    "— retry may redeliver", k,
+                )
             if not self._empty_retry_pending:
                 self._empty_retry_pending = True
                 logger.warning(
@@ -1939,6 +2230,38 @@ class LilyAgent(Agent):
             return
 
         self._empty_retry_pending = False
+
+        # BUG-2 enforcement — ONE authoritative question delivery: if this
+        # outbound turn performs the armed question (same verbatim
+        # detector that opens the answer window), it must claim
+        # q_{N}_delivery at dispatch. A failed claim means another turn
+        # already delivered question N — this duplicate is made physically
+        # silent (no retry: the turn was suppressed, not swallowed).
+        game = self._game
+        armed = getattr(game, "armed_question", None)
+        if armed is not None and not game.sk.answer_window_open:
+            ratio = lily_evaluation.lily_question_spoken_ratio(
+                armed.get("prompt", ""), full
+            )
+            if ratio >= lily_evaluation.QUESTION_SPOKEN_VERBATIM_RATIO:
+                key = f"q_{game.sk.question_number}_delivery"
+                if game.say_registry.claim(key):
+                    logger.info(
+                        "LILY_SAY | act=question_delivery | key=%s | "
+                        "source=tts_node", key,
+                    )
+                else:
+                    logger.warning(
+                        "LILY_SAY_SUPPRESSED | reason=dup | key=%s | "
+                        "act=question_delivery | source=tts_node", key,
+                    )
+                    yield rtc.AudioFrame(
+                        data=b"\x00\x00" * 2400,
+                        sample_rate=24000,
+                        num_channels=1,
+                        samples_per_channel=2400,
+                    )
+                    return
 
         # MANDATORY punctuation-flush guard (Lovebirds fix): LilyTTS is
         # streaming=False, so the framework wraps it in StreamAdapter gated
@@ -2407,6 +2730,10 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.room.local_participant.register_rpc_method("lily_control.skip", _rpc_skip)
 
     # --- Start ---
+    # Say gate: on_enter (fired inside session.start) must know whether
+    # this is a fresh room (session_greet) or a reconnect (session_rejoin)
+    # — the two openers carry distinct keys and must never trip each other.
+    game.reconnected = reconnected
     agent = LilyAgent(
         game=game,
         instructions=LILY_SYSTEM_PROMPT,
@@ -2492,48 +2819,32 @@ async def entrypoint(ctx: JobContext) -> None:
     await game.publish_metadata("")
     game.start_prefetch()
 
+    # Session opener — SECOND trigger path (on_enter, inside session.start,
+    # was the first). Both route through gated_say under one key per act,
+    # so whichever path dispatched first wins and this one logs
+    # LILY_SAY_SUPPRESSED | reason=dup instead of producing the live
+    # double greeting. Kept as a belt-and-braces net: if on_enter ever
+    # fails to dispatch (M1 gate — silence is her failure mode), this
+    # path still opens the night.
     if reconnected:
         game.game_started = True
         game.ui_phase = "question"
         await game.publish_attributes()
-        session.generate_reply(
-            instructions=(
-                "You just reconnected mid-game — the state block has the "
-                "scores intact. A quick in-character rejoin line ('lost you "
-                "for a second — nobody touched the scores, I counted'), "
-                "then pick the game back up."
-            )
+        game.gated_say(
+            "session_rejoin",
+            "rejoin",
+            game.rejoin_instructions(),
+            source="entrypoint",
         )
     else:
         # Fresh room: Lily speaks FIRST (M1 gate — silence is her failure
         # mode). Short lobby landing, then conversational name-fishing.
-        greeting = (
-            "The room just opened — this is your landing line. Greet the "
-            "table as Lily: two or three short, warm, excited sentences. "
-            "Tell them the deal (you host, they shout answers, the screen "
-            "keeps score) and ask who you've got at the table tonight — "
-            "conversationally, no roll-call. Bind names as people speak. "
-            "When the table feels ready — the first genuine group laugh — "
-            "call lily_begin_round to open round one; nothing scores until "
-            "you do."
+        game.gated_say(
+            "session_greet",
+            "greet",
+            game.greeting_instructions(),
+            source="entrypoint",
         )
-        if game.memory_block:
-            greeting += (
-                " This is a RETURNING table — the [RETURNING TABLE] context "
-                "has who they are. Greet them back by name, reference last "
-                "game's winner, and lean into the rematch energy."
-            )
-        else:
-            # Neutral-history rule: without memory data, never claim OR deny
-            # prior contact (memory may still resolve mid-lobby via a
-            # group-id upgrade).
-            greeting += (
-                " You have no memory of this table right now — do not claim "
-                "you remember them, and do not announce it's their first "
-                "time either. If a [RETURNING TABLE] block appears later, "
-                "you may reference it from then on."
-            )
-        session.generate_reply(instructions=greeting)
 
 
 if __name__ == "__main__":

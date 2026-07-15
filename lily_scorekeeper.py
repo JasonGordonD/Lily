@@ -660,10 +660,13 @@ class LilyScorekeeper:
             lines.append("  (no players bound yet)")
         if self.current_question:
             q = self.current_question
-            lines.append(
-                f"current_question: {q.get('prompt', '-')!r} "
-                f"answer={q.get('canonical_answer', '-')!r}"
-            )
+            # NEED-TO-KNOW (say-gate WO): the ambient state block NEVER
+            # carries canonical_answer / acceptable_answers / reveal_color.
+            # A transcript showed the vocal node reading the Bosporus
+            # answer aloud BEFORE the question — the answer reaches the
+            # vocal node only via the reveal-time instructed reply, and
+            # the Tier-2 judge gets it in its dedicated call.
+            lines.append(f"current_question: {q.get('prompt', '-')!r}")
         window = "open" if self.is_window_open(now=now) else "closed"
         lines.append(f"answer_window={window} candidates={len(self.answer_candidates)}")
         if self.answer_candidates:
