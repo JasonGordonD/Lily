@@ -507,12 +507,29 @@ def test_back_to_normal_noop_outside_adult_mode():
 class _FakeQuery:
     def __init__(self, rows) -> None:
         self._rows = rows
+        self._filters = []
+        self._limit = None
 
-    def select(self, *_a):
+    def select(self, *_a, **_k):
+        self._filters = []
+        self._limit = None
+        return self
+
+    def eq(self, column, value):
+        self._filters.append(lambda row: row.get(column) == value)
+        return self
+
+    def limit(self, value):
+        self._limit = value
         return self
 
     def execute(self):
-        rows = self._rows
+        rows = [
+            row for row in self._rows
+            if all(predicate(row) for predicate in self._filters)
+        ]
+        if self._limit is not None:
+            rows = rows[:self._limit]
 
         class _R:
             data = rows

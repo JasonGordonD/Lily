@@ -740,6 +740,8 @@ class LilyReasoning:
         question_index: int,
         session_id: str,
         mode: str = "general",
+        exclude_ids: Optional[set] = None,
+        exclude_hashes: Optional[set] = None,
     ) -> Optional[dict]:
         """Picture-question supply at prefetch, reasoning-node-side by
         design (web tools + image generation stay off the vocal path; the
@@ -755,6 +757,26 @@ class LilyReasoning:
         (text-only fallback). Adult mode never gets web-sourced or
         generated images (safe-for-table rule): returns None."""
         if supabase is None or mode == "adult":
+            return None
+        # Picture builders use deterministic ids for a slot. Honour the
+        # shared supply interface's id exclusion before doing expensive web
+        # or image-generation work. Prompt hashes are intentionally not used
+        # here: picture formats reuse a small set of spoken templates, so a
+        # hash exclusion would disable otherwise distinct images.
+        excluded = {str(value) for value in (exclude_ids or set())}
+        candidate_id = (
+            f"roi_{question_index:04d}"
+            if kind == "real_or_imagined"
+            else f"pic_{question_index:04d}"
+            if kind == "real_entity"
+            else None
+        )
+        if candidate_id and candidate_id in excluded:
+            logger.info(
+                "LILY_REASONING | PICTURE_PREFETCH_SKIPPED | id=%s "
+                "reason=asked_history",
+                candidate_id,
+            )
             return None
         try:
             if kind == "real_or_imagined":

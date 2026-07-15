@@ -64,6 +64,16 @@ class _FakeSTT:
         self._stt_options = _FakeSTTOptions()
 
 
+class _FakeTranscripts:
+    def __init__(self) -> None:
+        self.discarded = False
+        self.disabled = False
+
+    async def discard_pending(self, *, disable=False) -> None:
+        self.discarded = True
+        self.disabled = disable
+
+
 def _make_game() -> LilyGame:
     game = LilyGame.__new__(LilyGame)
     game.ctx = _FakeCtx()
@@ -76,6 +86,7 @@ def _make_game() -> LilyGame:
     game.stt = _FakeSTT()
     game.memory_block = "[RETURNING TABLE]\nrematch energy."
     game.memory_total_games = 1
+    game.memory_player_names = ["Sarah"]
     game._memory_disclosure_offered = False
     game.reconnected = False
     # game_started=True keeps the lobby auto-start safety net (which needs
@@ -99,8 +110,10 @@ def _make_game() -> LilyGame:
     game._addressee_rows = {}
     game._user_turn_index = 0
     game.forget_state = "idle"
+    game.forget_spoken_confirmed = False
     game.forget_requester = None
     game._forget_target_group = None
+    game.transcripts = _FakeTranscripts()
     game.prefs = {}
     game._prefs_offer_made = False
     return game
@@ -127,6 +140,7 @@ async def _drive(game: LilyGame, *texts: str, label: str = "S1"):
 
 def test_spoken_forget_flow_yes_deletes_and_tears_down():
     game = _make_game()
+    game.sk.transcript_buffer = [{"speaker": "Sarah", "text": "private"}]
 
     async def _run():
         await _drive(game, "Lily, forget me")
@@ -152,6 +166,10 @@ def test_spoken_forget_flow_yes_deletes_and_tears_down():
     assert game.stt._stt_options.known_speakers == []
     # [RETURNING TABLE] injection stops immediately
     assert game.memory_block == ""
+    assert game.memory_player_names == []
+    assert game.sk.transcript_buffer == []
+    assert game.transcripts.discarded is True
+    assert game.transcripts.disabled is True
     # memory_forgotten packet emitted AFTER the cascade, with BOTH
     # discriminators spelled memory_forgotten
     packets = game.ctx.room.local_participant.packets
@@ -277,11 +295,14 @@ def test_tool_confirm_false_refuses_and_arms_the_deterministic_parse():
     # Nothing was deleted
     assert game.group_id == "grp_device_uuid"
     assert game.ctx.room.local_participant.packets == []
+    premature = _call_tool(
+        LilyAgent.lily_forget_group.__wrapped__(agent, None, True)
+    )
+    assert "NOT deleted" in premature
+    assert game.forget_state == "pending_confirm"
 
 
-def test_tool_confirm_true_deletes_even_before_game_started():
-    # UNGATED by game_started (tool-gating principle: deletion neither
-    # mutates game outcomes nor emits game events).
+def test_tool_confirm_true_requires_recorded_spoken_yes():
     game = _make_game()
     game.game_started = False
     agent = LilyAgent.__new__(LilyAgent)
@@ -289,18 +310,19 @@ def test_tool_confirm_true_deletes_even_before_game_started():
     result = _call_tool(
         LilyAgent.lily_forget_group.__wrapped__(agent, None, True)
     )
-    assert game.forget_state == "done"
-    assert "gone for good" in result
-    assert "warm" in result
-    assert game.group_id.startswith("anon_")
-    packet, _topic = game.ctx.room.local_participant.packets[0]
-    assert packet["type"] == "memory_forgotten"
+    assert game.forget_state == "idle"
+    assert "NOT deleted" in result
+    assert "spoken yes" in result
+    assert game.group_id == "grp_device_uuid"
+    assert game.ctx.room.local_participant.packets == []
 
 
 def test_tool_second_confirm_true_reports_already_done():
     game = _make_game()
     agent = LilyAgent.__new__(LilyAgent)
     agent._game = game
+    game.forget_state = "pending_confirm"
+    game.forget_spoken_confirmed = True
     _call_tool(LilyAgent.lily_forget_group.__wrapped__(agent, None, True))
     result = _call_tool(
         LilyAgent.lily_forget_group.__wrapped__(agent, None, True)

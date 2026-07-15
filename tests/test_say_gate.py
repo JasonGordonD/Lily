@@ -268,6 +268,27 @@ def test_release_pending_leaves_confirmed_untouched():
     assert reg.state("session_greet") == CLAIM_CONFIRMED
 
 
+def test_owner_scopes_confirmation_and_release():
+    reg = SpeechActRegistry()
+    assert reg.claim("q_1_delivery", owner="speech-a")
+    assert reg.claim("q_1_reveal", owner="speech-b")
+
+    assert reg.confirm_owner("speech-a") == ["q_1_delivery"]
+    assert reg.state("q_1_delivery") == CLAIM_CONFIRMED
+    assert reg.state("q_1_reveal") == CLAIM_PENDING
+
+    assert reg.release_owner("speech-b") == ["q_1_reveal"]
+    assert reg.state("q_1_reveal") is None
+
+
+def test_dispatch_reservation_reassigns_to_speech_handle():
+    reg = SpeechActRegistry()
+    assert reg.claim("session_greet", owner="dispatch-1")
+    assert reg.reassign_owner("dispatch-1", "speech-1") == ["session_greet"]
+    assert reg.confirm_owner("dispatch-1") == []
+    assert reg.confirm_owner("speech-1") == ["session_greet"]
+
+
 # -- leak filter: sentinel envelope ---------------------------------------------------
 
 def test_sentinel_envelope_stripped():

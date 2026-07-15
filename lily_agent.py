@@ -41,6 +41,7 @@ from livekit.agents import (
 )
 from livekit.agents.llm import ChatMessage
 from livekit.agents.voice import Agent, AgentSession
+from livekit.agents.voice.agent_activity import _SpeechHandleContextVar
 from livekit.agents.voice.background_audio import (
     AudioConfig,
     BackgroundAudioPlayer,
@@ -130,6 +131,15 @@ def _message_text(msg) -> str:
     if isinstance(content, list):
         return " ".join(str(c) for c in content)
     return str(content or "")
+
+
+def _current_speech_id() -> str | None:
+    """Return the pinned LiveKit 1.6.4 SpeechHandle id for this TTS task."""
+    try:
+        handle = _SpeechHandleContextVar.get(None)
+        return getattr(handle, "id", None)
+    except Exception:
+        return None
 
 
 # Answer-window opening (persistence-audit root-cause fix): the old hard
@@ -247,10 +257,12 @@ class LilyGame:
         self.nbest_collector: "lily_nbest.LilyNBestCollector | None" = None
         self._nbest_by_key: dict[str, dict] = {}
         self._adjudicating = False
+        self._question_transitioning = False
         self._bed_handle = None
         self._pending_reveal_event: dict | None = None
         self._pending_unbound_award: dict | None = None
         self._last_assistant_text = ""
+        self._suppressed_speech_ids: set[str] = set()
         self._enroll_started = False
         self._armed_speech_misses = 0  # agent turns finished w/o performing q
         # Structural delivery intent (desync WO Sub-agent B): question
@@ -299,6 +311,7 @@ class LilyGame:
         #   call) -> executing -> done (verified) | failed (retryable), or
         #   -> declined (a no drops it; only a fresh player request re-arms).
         self.forget_state: str = "idle"
+        self.forget_spoken_confirmed = False
         # Who asked (player name or speaker label): only THEIR yes/no
         # resolves the pending confirmation; None accepts any voice
         # (tool-initiated flow, where the requester is unattributed).
@@ -483,7 +496,7 @@ class LilyGame:
 
     # -- deterministic instruction speech (P2 preemptive repair) -------------
 
-    def instructed_reply(self, instructions: str) -> None:
+    def instructed_reply(self, instructions: str):
         """Fire a deterministic between-turn speech (reveal, steal window,
         skip, game start, mode revert) via generate_reply(instructions=...).
 
@@ -500,11 +513,11 @@ class LilyGame:
         turn_handling["preemptive_generation"]["enabled"] flag that 1.6.4
         exposes."""
         if self.session is None:
-            return
+            return None
         if self.agent is not None:
             self.agent.set_preemptive_generation(False)
             self._preemptive_paused = True
-        self.session.generate_reply(instructions=instructions)
+        return self.session.generate_reply(instructions=instructions)
 
     def _resume_preemptive(self) -> None:
         # G1 (WO-LILY-DESYNC-HONESTY-001): while the game is LIVE the
@@ -566,18 +579,22 @@ class LilyGame:
         prefetch nudge) still log LILY_SAY for the audit trail.
         extra_keys are claimed alongside (e.g. the finale rides the final
         reveal's dispatch) without gating it."""
-        if key is not None and not self.say_registry.claim(key):
+        reservation = f"dispatch_{uuid.uuid4().hex}"
+        if key is not None and not self.say_registry.claim(key, owner=reservation):
             logger.warning(
                 "LILY_SAY_SUPPRESSED | reason=dup | key=%s | act=%s | source=%s",
                 key, act, source,
             )
             return False
         for k in extra_keys:
-            self.say_registry.claim(k)
+            self.say_registry.claim(k, owner=reservation)
         logger.info(
             "LILY_SAY | act=%s | key=%s | source=%s", act, key or "-", source
         )
-        self.instructed_reply(instructions)
+        handle = self.instructed_reply(instructions)
+        speech_id = getattr(handle, "id", None)
+        if speech_id:
+            self.say_registry.reassign_owner(reservation, speech_id)
         return True
 
     # -- structural delivery claims (desync WO Sub-agent B) -------------------
@@ -618,7 +635,12 @@ class LilyGame:
             return True
         return False
 
-    def register_delivery_claim(self, spoken_text: str) -> str | None:
+    def register_delivery_claim(
+        self,
+        spoken_text: str,
+        *,
+        speech_id: str | None = None,
+    ) -> str | None:
         """The delivery-registration decision for ONE outbound spoken turn
         (called from tts_node at speech dispatch; pure decision + claim +
         screen publish, no audio plumbing — offline-testable). Returns:
@@ -642,7 +664,7 @@ class LilyGame:
         )
         if not structural and not textual:
             return None
-        if self.say_registry.claim(key):
+        if self.say_registry.claim(key, owner=speech_id):
             trigger = "structural" if structural else "core_sentence"
             logger.info(
                 "LILY_SAY | act=question_delivery | key=%s | "
@@ -817,12 +839,19 @@ class LilyGame:
     def rejoin_instructions(self) -> str:
         """The reconnect re-entry line — its own key (session_rejoin) and
         its own register; it must NOT trip session_greet."""
-        return (
+        instructions = (
             "You just reconnected mid-game — the state block has the "
             "scores intact. A quick in-character rejoin line ('lost you "
             "for a second — nobody touched the scores, I counted'), "
             "then pick the game back up."
         )
+        if getattr(self, "armed_question", None) is not None:
+            instructions += (
+                " The interrupted current question is restored in the "
+                "state block: ask it now, word for word, without advancing "
+                "the question number first."
+            )
+        return instructions
 
     # -- question supply ------------------------------------------------------
 
@@ -1074,6 +1103,7 @@ class LilyGame:
                     and self.armed_question is None
                     and not self.sk.answer_window_open
                     and not self._adjudicating
+                    and not getattr(self, "_question_transitioning", False)
                 ):
                     if self.arm_next_question() and self.session is not None:
                         logger.info(
@@ -1132,6 +1162,7 @@ class LilyGame:
                     self.armed_question is not None
                     or self.sk.answer_window_open
                     or self._adjudicating
+                    or getattr(self, "_question_transitioning", False)
                 ):
                     self._prefetch_stall_ticks = 0
                     continue
@@ -1366,9 +1397,51 @@ class LilyGame:
         self.start_prefetch()  # N+2 begins while N+1 plays out
         return True
 
+    def restore_reconnected_state(self) -> None:
+        """Restore the unresolved checkpoint question without incrementing.
+
+        ``arm_next_question`` cannot be used here because it calls
+        ``start_question`` and advances the question number. A reconnect
+        instead replays the checkpointed question into a fresh answer
+        window, while the normal supply task prepares N+1.
+        """
+        self.game_started = True
+        question = self.sk.current_question
+        if question is not None and self.sk.phase != "wrapup":
+            self.armed_question = dict(question)
+            self._register_draw(self.armed_question)
+            prompt = self.armed_question.get("prompt", "")
+            if prompt and prompt not in self.used_prompts:
+                self.used_prompts.append(prompt)
+            self._armed_speech_misses = 0
+            self._judged_keys = set()
+            self._spec_judge = {}
+            self._nbest_by_key = {}
+            self.ui_phase = "question"
+            logger.info(
+                "LILY_STATE | RECONNECT_RESTORED | session=%s q=%d id=%s",
+                self.sk.session_id,
+                self.sk.question_number,
+                self.armed_question.get("id"),
+            )
+        else:
+            self.armed_question = None
+            if self.sk.phase == "wrapup":
+                self.game_over = True
+                self.ui_phase = "final"
+            else:
+                self.ui_phase = "question"
+
     # -- answer window ---------------------------------------------------------
 
-    def on_agent_speech_finished(self, spoken_text: str) -> None:
+    def on_agent_speech_finished(
+        self,
+        spoken_text: str,
+        *,
+        speech_id: str | None = None,
+        interrupted: bool = False,
+        suppressed: bool = False,
+    ) -> None:
         """Called on TTS playback completion (agent stops speaking). If the
         armed question's delivery is REGISTERED (the q_{N}_delivery claim —
         structural, never text-similarity), the answer window opens HERE —
@@ -1381,7 +1454,27 @@ class LilyGame:
         # genuinely spoken. Confirmed acts never release (a confirmed act
         # can never be redelivered); only a claimed-but-never-played act
         # releases, on the tts_node playback-failure path.
-        confirmed = self.say_registry.confirm_pending()
+        if interrupted or suppressed:
+            released = (
+                self.say_registry.release_owner(speech_id)
+                if speech_id
+                else []
+            )
+            if released:
+                logger.warning(
+                    "LILY_SAY | RELEASED | keys=%s | reason=%s",
+                    ",".join(sorted(released)),
+                    "interrupted" if interrupted else "suppressed",
+                )
+                delivery_key = f"q_{self.sk.question_number}_delivery"
+                if delivery_key in released:
+                    self.expect_delivery()
+            return
+        confirmed = (
+            self.say_registry.confirm_owner(speech_id)
+            if speech_id
+            else self.say_registry.confirm_pending()
+        )
         if confirmed:
             logger.info(
                 "LILY_SAY | CONFIRMED | keys=%s", ",".join(sorted(confirmed))
@@ -1411,7 +1504,10 @@ class LilyGame:
                 self.sk.session_id, self.sk.question_number, ratio,
             )
             key = f"q_{self.sk.question_number}_delivery"
-            if self.say_registry.state(key) is not None:
+            if (
+                self.say_registry.state(key)
+                == lily_say_gate.CLAIM_CONFIRMED
+            ):
                 # Delivery is registered (claimed at dispatch, confirmed
                 # just above) and its turn finished playing — open.
                 self._armed_speech_misses = 0
@@ -1880,6 +1976,7 @@ class LilyGame:
             if self.forget_requester is None or speaker_key == self.forget_requester:
                 verdict = lily_forget.lily_parse_forget_confirmation(text)
                 if verdict == "yes":
+                    self.forget_spoken_confirmed = True
                     logger.info(
                         "LILY_FORGET | CONFIRMED | session=%s by=%s",
                         self.sk.session_id, speaker_key,
@@ -1890,6 +1987,7 @@ class LilyGame:
                     return
                 if verdict == "no":
                     self.forget_state = "declined"
+                    self.forget_spoken_confirmed = False
                     logger.info(
                         "LILY_FORGET | DECLINED | session=%s by=%s",
                         self.sk.session_id, speaker_key,
@@ -2105,33 +2203,44 @@ class LilyGame:
     async def skip_question(self, source: str) -> None:
         """Skip: identical for spoken 'skip' and the RPC tap — no comment,
         no spotlight on who asked."""
+        if self._adjudicating or getattr(self, "_question_transitioning", False):
+            logger.info(
+                "LILY_STATE | SKIP_IGNORED | session=%s source=%s "
+                "reason=question_transition",
+                self.sk.session_id, source,
+            )
+            return
         if self.armed_question is None and not self.sk.answer_window_open:
             return
-        logger.info("LILY_STATE | SKIP | session=%s source=%s q=%d",
-                    self.sk.session_id, source, self.sk.question_number)
-        if self._window_timer and not self._window_timer.done():
-            self._window_timer.cancel()
-        self.sk.close_answer_window()
-        self._stop_bed()
-        self.armed_question = None
-        self.sk.current_question = None
-        self._set_ui_phase("question")
-        await self.publish_metadata("")
-        await self.publish_attributes()
-        # Structural delivery claim (desync WO Sub-agent B): when the next
-        # question armed, the skip follow-up turn IS its delivery.
-        if self.arm_next_question():
-            self.expect_delivery()
-        self.gated_say(
-            None,
-            "skip",
-            "That question was skipped. Move straight to the next "
-            "question with zero commentary about the skip and no "
-            "spotlight on who asked. If the state block has the next "
-            "question, ask it now — its question sentence exactly as "
-            "written.",
-            source=f"skip_{source}",
-        )
+        self._question_transitioning = True
+        try:
+            logger.info("LILY_STATE | SKIP | session=%s source=%s q=%d",
+                        self.sk.session_id, source, self.sk.question_number)
+            if self._window_timer and not self._window_timer.done():
+                self._window_timer.cancel()
+            self.sk.close_answer_window()
+            self._stop_bed()
+            self.armed_question = None
+            self.sk.current_question = None
+            self._set_ui_phase("question")
+            await self.publish_metadata("")
+            await self.publish_attributes()
+            # Structural delivery claim: when the next question arms, the
+            # skip follow-up turn is its delivery.
+            if self.arm_next_question():
+                self.expect_delivery()
+            self.gated_say(
+                None,
+                "skip",
+                "That question was skipped. Move straight to the next "
+                "question with zero commentary about the skip and no "
+                "spotlight on who asked. If the state block has the next "
+                "question, ask it now — its question sentence exactly as "
+                "written.",
+                source=f"skip_{source}",
+            )
+        finally:
+            self._question_transitioning = False
 
     # -- adjudication ---------------------------------------------------------
 
@@ -2139,7 +2248,11 @@ class LilyGame:
         """Close the window and commit results. The scorekeeper decided
         ORDER by timestamps; Tier-1/Tier-2 decide CORRECTNESS; this commit
         happens BEFORE Lily narrates (§11.3 event-bound truth)."""
-        if self._adjudicating or self.armed_question is None:
+        if (
+            self._adjudicating
+            or getattr(self, "_question_transitioning", False)
+            or self.armed_question is None
+        ):
             return
         self._adjudicating = True
         # SCORING prior (WO-ADDRESSEE-H1 Task 2): mirror the in-flight flag
@@ -2428,11 +2541,6 @@ class LilyGame:
                 ),
                 self.publish_attributes(),
             )
-            if self.supabase is not None:
-                asyncio.ensure_future(
-                    lily_persistence.lily_checkpoint(self.supabase, self.sk)
-                )
-
             # Consume the question; round/phase bookkeeping. Capture the
             # question/round numbers NOW — arm_next_question() below
             # advances both, and the say-gate keys must name the question
@@ -2470,6 +2578,13 @@ class LilyGame:
                         "warmly for a beat; do NOT re-ask the last "
                         "question and do NOT invent one"
                     )
+            # Checkpoint only after the consumed question has either been
+            # replaced by N+1 or explicitly cleared. A reconnect must never
+            # resurrect a question whose result was already committed.
+            if self.supabase is not None:
+                asyncio.ensure_future(
+                    lily_persistence.lily_checkpoint(self.supabase, self.sk)
+                )
             # Gated reveal dispatch: the reveal claims q_{N}_reveal; a
             # round-closing reveal also claims round_{N}_scores and the
             # final reveal claims finale — one speech, every act it
@@ -2573,7 +2688,11 @@ class LilyGame:
         later group-id upgrade re-keys this session's rows."""
         fact = (fact or "").strip()
         name = (player_name or "").strip()
-        if not fact or self.supabase is None:
+        if (
+            not fact
+            or self.supabase is None
+            or not self.identity_persistence_allowed()
+        ):
             return
         key = (name.lower(), fact.lower())
         if key in self._group_facts_written:
@@ -2617,7 +2736,11 @@ class LilyGame:
         """Persist the whole opaque prefs dict on every preference change
         (lily_group_prefs whole-dict upsert under the CURRENT group id).
         Fire-and-forget; a later group-id upgrade re-keys the row."""
-        if self.supabase is None or not self.prefs:
+        if (
+            self.supabase is None
+            or not self.prefs
+            or not self.identity_persistence_allowed()
+        ):
             return
         asyncio.ensure_future(lily_persistence.lily_write_group_prefs(
             self.supabase, self.group_id, dict(self.prefs)
@@ -2644,7 +2767,11 @@ class LilyGame:
         """Voiceprint enrollment, fire-and-forget. group_id is passed as a
         callable so the upsert lands under whatever id is resolved by the
         time Speechmatics returns identifiers."""
-        if self.supabase is None or self.stt is None:
+        if (
+            self.supabase is None
+            or self.stt is None
+            or not self.identity_persistence_allowed()
+        ):
             return
         asyncio.ensure_future(lily_persistence.lily_enroll_voiceprints(
             self.stt, self.supabase, lambda: self.group_id, self.sk,
@@ -2787,6 +2914,10 @@ class LilyGame:
 
     # -- the right to be forgotten (WO-LILY-FORGETME-001) ------------------------
 
+    def identity_persistence_allowed(self) -> bool:
+        """Whether recognition/report data may still be written this session."""
+        return self.forget_state not in ("executing", "done", "failed")
+
     def _on_forget_requested(self, requester_key: str | None) -> None:
         """Spoken deletion request (deterministic scorekeeper detection —
         "forget me"/"forget us"/paraphrases): arm the pending-confirm
@@ -2808,6 +2939,7 @@ class LilyGame:
             )
             return
         self.forget_state = "pending_confirm"
+        self.forget_spoken_confirmed = False
         self.forget_requester = requester_key
         logger.info(
             "LILY_FORGET | REQUESTED | session=%s group=%s requester=%s",
@@ -2863,6 +2995,12 @@ class LilyGame:
             "LILY_FORGET | EXECUTE | session=%s group=%s source=%s retry=%s",
             self.sk.session_id, target, source, not first_attempt,
         )
+        if first_attempt:
+            discard = getattr(
+                getattr(self, "transcripts", None), "discard_pending", None
+            )
+            if discard is not None:
+                await discard(disable=True)
         if self.supabase is None:
             # Nothing was ever persisted (offline/dev session) — the
             # in-session teardown still runs so recognition state clears.
@@ -2909,6 +3047,9 @@ class LilyGame:
         # item on the next turn (symmetric removal path).
         self.memory_block = ""
         self.memory_total_games = 0
+        self.memory_player_names = []
+        self.sk.transcript_buffer = []
+        self.highlights = []
         # Group prefs WO interlock: the stored preferences were deleted by
         # the cascade (lily_group_prefs) — clear the in-session dict too,
         # so nothing re-persists the deleted 'usual' under the fresh id.
@@ -3067,7 +3208,7 @@ class LilyGame:
         self.sk.set_phase("wrapup")
         self.ui_phase = "final"
         await self.publish_attributes()
-        if self.supabase is not None:
+        if self.supabase is not None and self.identity_persistence_allowed():
             asyncio.ensure_future(lily_persistence.lily_checkpoint(
                 self.supabase, self.sk, final_standings=standings,
             ))
@@ -3885,6 +4026,7 @@ class LilyAgent(Agent):
             # never comes (requester unattributed -> any voice settles it).
             if game.forget_state in ("idle", "declined", "failed"):
                 game.forget_state = "pending_confirm"
+                game.forget_spoken_confirmed = False
                 game.forget_requester = None
             return (
                 "NOT deleted — deletion needs a spoken yes first. Ask the "
@@ -3894,6 +4036,15 @@ class LilyAgent(Agent):
                 "call lily_forget_group with confirm=true. On a no, drop "
                 "it for the night — never ask twice, never argue for being "
                 "remembered."
+            )
+        if (
+            game.forget_state not in ("executing", "done")
+            and not getattr(game, "forget_spoken_confirmed", False)
+        ):
+            return (
+                "NOT deleted — no verified spoken yes was recorded for the "
+                "pending request. Ask the confirmation once and wait for the "
+                "requesting player to answer."
             )
         result = await game.execute_forget(source="tool")
         return lily_forget.lily_forget_result_message(result)
@@ -4133,7 +4284,12 @@ class LilyAgent(Agent):
             # Claims are claim-at-dispatch / confirm-at-playout /
             # release-on-failure: release the pending ones here and relog,
             # so the retry can legitimately redeliver the act.
-            released = self._game.say_registry.release_pending()
+            speech_id = _current_speech_id()
+            released = (
+                self._game.say_registry.release_owner(speech_id)
+                if speech_id
+                else self._game.say_registry.release_pending()
+            )
             for k in released:
                 logger.warning(
                     "LILY_SAY | RELEASED | key=%s | reason=empty_candidate "
@@ -4183,7 +4339,18 @@ class LilyAgent(Agent):
         # swallowed) — but a turn that merely banters after the delivery
         # registered speaks normally. Decision + claim + screen publish
         # live in LilyGame.register_delivery_claim (offline-tested).
-        if self._game.register_delivery_claim(full) == "duplicate":
+        speech_id = _current_speech_id()
+        if self._game.register_delivery_claim(
+            full, speech_id=speech_id
+        ) == "duplicate":
+            if speech_id:
+                suppressed_ids = getattr(
+                    self._game, "_suppressed_speech_ids", None
+                )
+                if suppressed_ids is None:
+                    self._game._suppressed_speech_ids = set()
+                    suppressed_ids = self._game._suppressed_speech_ids
+                suppressed_ids.add(speech_id)
             yield rtc.AudioFrame(
                 data=b"\x00\x00" * 2400,
                 sample_rate=24000,
@@ -4627,8 +4794,14 @@ async def entrypoint(ctx: JobContext) -> None:
                         spoken += " " + _message_text(item)
             except Exception:
                 pass
+            suppressed_ids = getattr(game, "_suppressed_speech_ids", set())
+            suppressed = handle.id in suppressed_ids
+            suppressed_ids.discard(handle.id)
             game.on_agent_speech_finished(
-                spoken.strip() or game._last_assistant_text
+                spoken.strip() or game._last_assistant_text,
+                speech_id=handle.id,
+                interrupted=handle.interrupted,
+                suppressed=suppressed,
             )
 
         asyncio.ensure_future(_watch())
@@ -4682,6 +4855,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     supabase, scorekeeper,
                     final_standings=standings, metadata=metadata,
                 )
+                if not game.identity_persistence_allowed():
+                    logger.info(
+                        "LILY_FORGET | SESSION_CLOSE_IDENTITY_WRITES_SKIPPED "
+                        "| session=%s state=%s",
+                        scorekeeper.session_id, game.forget_state,
+                    )
+                    return
                 # Session memory — idempotent with the finish_game write
                 # (upsert on session_id); this path also covers sessions
                 # that end without reaching the final question.
@@ -4734,6 +4914,8 @@ async def entrypoint(ctx: JobContext) -> None:
     # this is a fresh room (session_greet) or a reconnect (session_rejoin)
     # — the two openers carry distinct keys and must never trip each other.
     game.reconnected = reconnected
+    if reconnected:
+        game.restore_reconnected_state()
     agent = LilyAgent(
         game=game,
         instructions=LILY_SYSTEM_PROMPT,
@@ -4827,11 +5009,10 @@ async def entrypoint(ctx: JobContext) -> None:
     # fails to dispatch (M1 gate — silence is her failure mode), this
     # path still opens the night.
     if reconnected:
-        game.game_started = True
         # G1: a reconnect resumes a LIVE game — same preemptive-off rule
         # as start_game (which this path bypasses).
         game.set_game_live_preemptive(True)
-        game.ui_phase = "question"
+        game.start_idle_watchdog()
         await game.publish_attributes()
         game.gated_say(
             "session_rejoin",
