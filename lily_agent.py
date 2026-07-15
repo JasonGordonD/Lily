@@ -217,6 +217,10 @@ class LilyGame:
         self.promoted_categories: list[str] = []
         self._prefetch_task: asyncio.Task | None = None
         self._window_timer: asyncio.Task | None = None
+        # Idle watchdog (live 2026-07-15 stall class): guarantees a live
+        # game can never sit armed-less and silent.
+        self._watchdog_task: asyncio.Task | None = None
+        self._prefetch_stall_ticks = 0
         # True while the currently-open answer window is a steal window
         # (seam: rides answer_window JSON as the optional `steal` key).
         self._steal_window = False
@@ -667,6 +671,26 @@ class LilyGame:
             return
 
         async def _prefetch() -> None:
+            try:
+                await _prefetch_inner()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # This coroutine runs as a fire-and-forget task: an escaped
+                # exception used to vanish ("Task exception was never
+                # retrieved") and the guard in start_prefetch would then
+                # block every retry — the 2026-07-15 silent-stall class.
+                logger.exception(
+                    "LILY_PREFETCH | CRASHED | session=%s q=%d",
+                    self.sk.session_id, self.sk.question_number,
+                )
+                self.sk.set_status_note(
+                    "question machine failure: the next question did not "
+                    "arrive — tell the table honestly and vamp; do not "
+                    "invent an explanation"
+                )
+
+        async def _prefetch_inner() -> None:
             rnd = self._round_for_next_question()
             category = self._category_for_round(rnd)
             tier = self._difficulty_for_round(rnd)
@@ -702,10 +726,16 @@ class LilyGame:
             if question is None:
                 from_bank = None
                 if lily_config.kb_only() and self.supabase is not None:
-                    from_bank = await lily_persistence.lily_fetch_bank_question(
-                        self.supabase, category, tier, self.used_prompts,
-                        mode=self.sk.mode,
-                        exclude_ids=history_ids, exclude_hashes=history_hashes,
+                    # Bounded: the sync client has no HTTP timeout of its
+                    # own — an unbounded hang here wedges the supply line.
+                    from_bank = await asyncio.wait_for(
+                        lily_persistence.lily_fetch_bank_question(
+                            self.supabase, category, tier, self.used_prompts,
+                            mode=self.sk.mode,
+                            exclude_ids=history_ids,
+                            exclude_hashes=history_hashes,
+                        ),
+                        timeout=20.0,
                     )
                 question = await self.reasoning.prefetch_question(
                     self.sk,
@@ -725,10 +755,15 @@ class LilyGame:
                     )
             if question is None and self.supabase is not None:
                 # Generation failed — curated bank is the insurance policy.
-                question = await lily_persistence.lily_fetch_bank_question(
-                    self.supabase, category, tier, self.used_prompts,
-                    mode=self.sk.mode,
-                    exclude_ids=history_ids, exclude_hashes=history_hashes,
+                # Bounded for the same reason as above: the insurance line
+                # must never hang the supply task.
+                question = await asyncio.wait_for(
+                    lily_persistence.lily_fetch_bank_question(
+                        self.supabase, category, tier, self.used_prompts,
+                        mode=self.sk.mode,
+                        exclude_ids=history_ids, exclude_hashes=history_hashes,
+                    ),
+                    timeout=20.0,
                 )
                 if question is not None:
                     self.sk.clear_status_notes()
@@ -779,6 +814,89 @@ class LilyGame:
             self.publish_attributes_nowait()
 
         self._prefetch_task = asyncio.ensure_future(_prefetch())
+
+    # -- idle watchdog (live 2026-07-15 stall class) --------------------------
+    #
+    # The supply line is fire-and-forget tasks gated on one-shot triggers
+    # (reveal-time arm, prefetch-completion auto-advance). The 2026-07-15
+    # session proved one silent task death wedges the whole game: nothing
+    # armed, nothing prefetching, no error spoken — Lily freestyles and the
+    # scoreboard freezes. The watchdog makes "game live but idle" a state
+    # that always self-heals within one tick.
+
+    WATCHDOG_INTERVAL_SECONDS = 10.0
+    PREFETCH_HARD_TIMEOUT_TICKS = 9  # ~90s: past every internal timeout
+
+    def start_idle_watchdog(self) -> None:
+        # getattr: test harnesses build LilyGame via __new__ without the
+        # full __init__ attribute set.
+        task = getattr(self, "_watchdog_task", None)
+        if task and not task.done():
+            return
+        self._prefetch_stall_ticks = 0
+        self._watchdog_task = asyncio.ensure_future(self._idle_watchdog())
+
+    async def _idle_watchdog(self) -> None:
+        while not self.game_over:
+            await asyncio.sleep(self.WATCHDOG_INTERVAL_SECONDS)
+            try:
+                if not self.game_started or self.game_over:
+                    continue
+                if (
+                    self.armed_question is not None
+                    or self.sk.answer_window_open
+                    or self._adjudicating
+                ):
+                    self._prefetch_stall_ticks = 0
+                    continue
+                # Game live but idle: nothing armed, no window, no ruling
+                # in flight. Someone must move the game — that someone is
+                # now guaranteed to exist.
+                if self.next_question is not None:
+                    if self.arm_next_question() and self.session is not None:
+                        logger.warning(
+                            "LILY_WATCHDOG | IDLE_REARM | session=%s q=%d",
+                            self.sk.session_id, self.sk.question_number,
+                        )
+                        self.gated_say(
+                            None,
+                            "question_nudge",
+                            (
+                                "The next question just landed in the state "
+                                "block. Bridge in one short beat and ask it "
+                                "now, word for word."
+                            ),
+                            source="idle_watchdog",
+                        )
+                    continue
+                task = self._prefetch_task
+                if task is None or task.done():
+                    self._prefetch_stall_ticks = 0
+                    logger.warning(
+                        "LILY_WATCHDOG | IDLE_REPREFETCH | session=%s q=%d",
+                        self.sk.session_id, self.sk.question_number,
+                    )
+                    self.start_prefetch()
+                    continue
+                # A prefetch task is alive but the game has been idle for
+                # this long — it outlived every internal timeout, so treat
+                # it as hung: cancel and let the next tick relaunch.
+                self._prefetch_stall_ticks += 1
+                if self._prefetch_stall_ticks >= self.PREFETCH_HARD_TIMEOUT_TICKS:
+                    self._prefetch_stall_ticks = 0
+                    logger.error(
+                        "LILY_WATCHDOG | PREFETCH_HARD_TIMEOUT | session=%s "
+                        "q=%d — cancelling the stuck supply task",
+                        self.sk.session_id, self.sk.question_number,
+                    )
+                    task.cancel()
+                    self.sk.set_status_note(
+                        "the question machine stalled and was restarted — "
+                        "vamp honestly for a beat; the next question is on "
+                        "its way"
+                    )
+            except Exception:
+                logger.exception("LILY_WATCHDOG | TICK_FAILED")
 
     def _curate_generated_question(
         self,
@@ -1480,20 +1598,52 @@ class LilyGame:
             judge_reason = ""
             uncertain: list[dict] = []
 
-            for cand in ordered:
+            # Self-correction (live 2026-07-15 fix): every in-window final a
+            # player committed is an attempt; the earliest CORRECT attempt
+            # across the whole table wins. A revision competes from its own
+            # (later) timestamp, so it can never jump the queue — but it can
+            # score, which "first final locks the slot" wrongly prevented
+            # ("the spine… no, the femur" lost a point it had earned).
+            attempts_timeline = sorted(
+                (
+                    (attempt.get("segment_start_time", cand["segment_start_time"]),
+                     cand, attempt["text"])
+                    for cand in ordered
+                    for attempt in (
+                        cand.get("attempts")
+                        or [{"text": cand["text"],
+                             "segment_start_time": cand["segment_start_time"]}]
+                    )
+                ),
+                key=lambda entry: entry[0],
+            )
+            for _, cand, attempt_text in attempts_timeline:
                 # Format dispatch (multiple-choice WO): MC questions match
                 # letters / positions / option text and may return a
                 # DEFINITIVE "incorrect" (clean wrong pick — no Tier-2);
                 # only "uncertain" (mumbles) escalates to the judge.
                 t1 = lily_evaluation.lily_tier1_evaluate_question(
-                    cand["text"], question
+                    attempt_text, question
                 )
-                cand["_tier1"] = t1
                 if t1["verdict"] == "correct":
+                    cand["_tier1"] = t1
+                    cand["text"] = attempt_text  # score the words that won
                     winner_candidate = cand
                     break
-                if t1["verdict"] == "uncertain":
-                    uncertain.append(cand)
+                # Keep the strongest per-candidate verdict for audit and
+                # Tier-2: an uncertain attempt outranks an incorrect one.
+                prev = cand.get("_tier1")
+                if prev is None or (
+                    prev["verdict"] == "incorrect" and t1["verdict"] == "uncertain"
+                ):
+                    cand["_tier1"] = t1
+                    if t1["verdict"] == "uncertain":
+                        cand["text"] = attempt_text  # judge these words
+            if winner_candidate is None:
+                uncertain = [
+                    c for c in ordered
+                    if c.get("_tier1", {}).get("verdict") == "uncertain"
+                ]
 
             if winner_candidate is None and uncertain:
                 # Tier 2. Prefer verdicts cached by speculative mid-window
@@ -1609,7 +1759,20 @@ class LilyGame:
                 self._apply_addressee_label(key, label, source)
 
             missed = winner_candidate is None
-            if missed and ordered and steal_allowed and not self.game_over:
+            # Steal needs someone who could actually steal (live 2026-07-15
+            # fix): candidates persist through the steal window and judged
+            # players are filtered, so with every rostered player already
+            # judged the window can never record anything — it burned five
+            # silent seconds and re-adjudicated an empty set. Solo tables
+            # therefore never steal; multiplayer steals only while an
+            # unjudged player exists.
+            stealers_exist = any(
+                name not in self._judged_keys for name in self.sk.players
+            )
+            if (
+                missed and ordered and steal_allowed
+                and stealers_exist and not self.game_over
+            ):
                 # Missed question opens a 5-second steal window.
                 self._stinger(correct=False)
                 self._adjudicating = False
@@ -1676,7 +1839,19 @@ class LilyGame:
                 )
                 if round_over:
                     self._set_ui_phase("scores")
-                self.arm_next_question()
+                if not self.arm_next_question():
+                    # Nothing prefetched yet (live 2026-07-15: the stalled
+                    # session re-asked the revealed question "for the
+                    # official record"). Make the gap honest in the state
+                    # block and clear the consumed question so nothing
+                    # tells her to perform it again; the idle watchdog and
+                    # prefetch auto-advance own recovery.
+                    self.sk.current_question = None
+                    self.sk.set_status_note(
+                        "the next question is still being written — vamp "
+                        "warmly for a beat; do NOT re-ask the last "
+                        "question and do NOT invent one"
+                    )
             # Gated reveal dispatch: the reveal claims q_{N}_reveal; a
             # round-closing reveal also claims round_{N}_scores and the
             # final reveal claims finale — one speech, every act it
@@ -1693,6 +1868,15 @@ class LilyGame:
                 reveal_instr,
                 source="adjudicate",
                 extra_keys=extra,
+            )
+        except Exception:
+            # Adjudication runs inside fire-and-forget timer tasks — an
+            # unlogged exception here is a silently wedged game (the
+            # 2026-07-15 stall class). Log loudly; the idle watchdog
+            # recovers the pipeline.
+            logger.exception(
+                "LILY_ADJUDICATE | CRASHED | session=%s q=%d",
+                self.sk.session_id, self.sk.question_number,
             )
         finally:
             self._adjudicating = False
@@ -2164,6 +2348,7 @@ class LilyGame:
         self.sk.set_phase("round")
         self.start_prefetch()
         self.arm_next_question()
+        self.start_idle_watchdog()
         await self.publish_attributes()
         self._enroll_started = True
         self.fire_enrollment("game_start")

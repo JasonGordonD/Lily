@@ -718,7 +718,10 @@ class LilyScorekeeper:
                 # attributed — recorded under its label for Lily to resolve
                 # in character ("great answer — and you are?").
                 key = f"unrostered:{speaker_label or 'UU'}"
-            if key not in self.answer_candidates:  # first final wins
+            existing = self.answer_candidates.get(key)
+            if existing is None:
+                # First final claims the player's slot — its timestamp is
+                # their position in the answer order.
                 self.answer_candidates[key] = {
                     "player": player,
                     "speaker_label": speaker_label,
@@ -726,12 +729,40 @@ class LilyScorekeeper:
                     "segment_start_time": seg_start,
                     "timestamp": ts,
                     "unrostered": player is None,
+                    # Every in-window final from this player, in order —
+                    # adjudication judges the whole set (self-correction,
+                    # live 2026-07-15: "the spine… no, the femur" must be
+                    # able to score on the femur).
+                    "attempts": [
+                        {"text": clean, "segment_start_time": seg_start,
+                         "timestamp": ts},
+                    ],
                 }
                 result["candidate_recorded"] = True
                 if player:
                     self.players[player]["answers_attempted"] += 1
                 logger.info(
                     "LILY_STATE | ANSWER_CANDIDATE | session=%s q=%d key=%s t=%.3f text=%r",
+                    self.session_id, self.question_number, key, seg_start, clean[:80],
+                )
+            else:
+                # Self-correction (live 2026-07-15 fix): a later final from
+                # the SAME player is a revision, not noise. It joins their
+                # attempt set and becomes their current answer; their ORDER
+                # position stays the first final (first-final-wins orders
+                # players against each other, it never locks a player out
+                # of revising). Adjudication scores the earliest CORRECT
+                # attempt across the table, so a revision can win only from
+                # its own (later) timestamp.
+                existing["text"] = clean
+                existing["timestamp"] = ts
+                existing.setdefault("attempts", []).append(
+                    {"text": clean, "segment_start_time": seg_start,
+                     "timestamp": ts}
+                )
+                result["candidate_recorded"] = True
+                logger.info(
+                    "LILY_STATE | ANSWER_REVISED | session=%s q=%d key=%s t=%.3f text=%r",
                     self.session_id, self.question_number, key, seg_start, clean[:80],
                 )
 

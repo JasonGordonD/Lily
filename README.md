@@ -67,6 +67,36 @@ do-not-touch: no imports, no vendoring).
 - **Event-bound truth:** she never announces a score the scorekeeper hasn't
   committed, never claims the next question is ready unless prefetch landed.
 
+## Live-session fixes (2026-07-15, the femur game)
+
+One live solo session exposed four deterministic failures; all are fixed
+with regression coverage in `tests/test_stall_recovery.py`:
+
+- **Self-correction scores.** Every in-window final a player commits is an
+  attempt; adjudication scores the earliest CORRECT attempt across the
+  table. A revision ("the spine… no, the femur") competes from its own
+  later timestamp — it can never jump the queue, but it can score, which
+  the old "first final locks the player's slot" wrongly prevented.
+- **Steal only with a possible stealer.** Candidates persist through the
+  steal window and judged players are filtered, so a solo table (or a
+  table where everyone answered) could never record a steal — the window
+  burned five silent seconds and re-adjudicated an empty set. The steal
+  now opens only while an unjudged rostered player exists.
+- **Idle watchdog.** The supply line is fire-and-forget tasks gated on
+  one-shot triggers; one silent task death used to wedge the whole game
+  (nothing armed, nothing prefetching, Lily freestyling over a frozen
+  scoreboard). A 10s watchdog makes "game live but idle" self-healing:
+  loaded question → arm + nudge; dead supply task → relaunch; supply task
+  alive past ~90s → cancel, honest status note, relaunch. All watchdog
+  actions log as `LILY_WATCHDOG | ...`.
+- **Arm-failure honesty.** When the reveal can't arm a next question, the
+  consumed question is cleared from the state block and a status note
+  tells Lily to vamp — never to re-ask the revealed question "for the
+  official record" and never to invent one. Bank fetches on the supply
+  path are also time-bounded (20s) so the insurance line can't hang, and
+  prefetch/adjudication crashes now log loudly instead of vanishing into
+  their tasks.
+
 ## Loop engagement (2026-07-14 persistence-audit root-cause fix)
 
 The live audit found every session with `round=0` / `question_number=0`,
@@ -365,7 +395,7 @@ migrations/012_lily_question_images.sql  lily_questions image_url/image_source/
                                          (visible error rows)
 migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
                                          forget-cascade + re-key interlocked)
-tests/               560 tests, run with `python -m pytest tests/` — no network; needs
+tests/               568 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /

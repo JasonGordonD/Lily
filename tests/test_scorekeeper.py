@@ -76,19 +76,28 @@ def test_lily_are_you_there_does_not_score_during_open_window():
 # Answer window
 # ---------------------------------------------------------------------------
 
-def test_first_final_wins_per_player():
+def test_first_final_orders_revision_updates_answer():
+    # Self-correction (live 2026-07-15 fix): a later final from the SAME
+    # player revises their answer (current text + attempts list) while the
+    # ORDER position stays their first final. One slot per player holds.
     sk = make_sk()
     sk.start_question({"prompt": "q", "canonical_answer": "Tungsten"})
     sk.open_answer_window(now=100.0)
     sk.on_transcript_segment(
         text="Iron", speaker_label="S1", now=101.0, segment_start_time=101.0
     )
-    sk.on_transcript_segment(
+    result = sk.on_transcript_segment(
         text="No wait, Tungsten", speaker_label="S1",
         now=102.0, segment_start_time=102.0,
     )
+    assert result["candidate_recorded"] is True
     assert len(sk.answer_candidates) == 1
-    assert sk.answer_candidates["Sarah"]["text"] == "Iron"
+    cand = sk.answer_candidates["Sarah"]
+    assert cand["text"] == "No wait, Tungsten"
+    assert cand["segment_start_time"] == 101.0  # order key: first final
+    assert [a["text"] for a in cand["attempts"]] == ["Iron", "No wait, Tungsten"]
+    # A revision is not a new attempt for the tally.
+    assert sk.players["Sarah"]["answers_attempted"] == 1
 
 
 def test_one_candidate_per_player_multiple_players():
@@ -105,7 +114,12 @@ def test_one_candidate_per_player_multiple_players():
         text="Copper", speaker_label="S2", now=102.0, segment_start_time=102.0
     )
     assert len(sk.answer_candidates) == 2
-    assert sk.answer_candidates["Dave"]["text"] == "Iron"
+    # Dave revised Iron -> Copper; his order position stays his first final.
+    assert sk.answer_candidates["Dave"]["text"] == "Copper"
+    assert sk.answer_candidates["Dave"]["segment_start_time"] == 101.0
+    assert [a["text"] for a in sk.answer_candidates["Dave"]["attempts"]] == [
+        "Iron", "Copper",
+    ]
 
 
 def test_order_by_segment_timestamp_not_arrival():
@@ -173,11 +187,14 @@ def test_steal_window_preserves_prior_candidates():
     )
     sk.close_answer_window()
     sk.open_answer_window(duration=5.0, now=110.0, reset_candidates=False)
-    # Sarah already committed — one candidate per player still holds.
+    # Sarah already committed — her steal-window final lands as a revision
+    # on her preserved slot (adjudication filters judged players, so a
+    # judged answerer still cannot steal).
     sk.on_transcript_segment(
         text="Tungsten", speaker_label="S1", now=111.0, segment_start_time=111.0
     )
-    assert sk.answer_candidates["Sarah"]["text"] == "Iron"
+    assert sk.answer_candidates["Sarah"]["text"] == "Tungsten"
+    assert sk.answer_candidates["Sarah"]["segment_start_time"] == 101.0
     # A new player can steal.
     sk.on_transcript_segment(
         text="Tungsten", speaker_label="S2", now=112.0, segment_start_time=112.0
