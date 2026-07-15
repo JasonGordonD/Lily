@@ -565,7 +565,7 @@ migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group pref
 migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt columns
 migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
-tests/               737 tests, run with `python -m pytest tests/` — no network; needs
+tests/               759 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -626,13 +626,17 @@ fire-and-forget, `LILY_MEMORY | GROUP_FACT`); `lily_load_group_memory`
 already reads them back into the `[RETURNING TABLE]` block on the next
 night.
 
-**Voiceprint enrollment** (`lily_speaker_voiceprints`) fires the moment the
-FIRST binding commits, again at game start / group-id upgrade, and once more
+**Voiceprint enrollment** (`lily_speaker_voiceprints`) fires on the first
+binding and every later binding (late guests included), again at game start /
+group-id upgrade, and once more
 — awaited, inside the shutdown gate, so teardown can't race it — at session
 close for late binders (unless forget ran, which disables enrollment for the
 remainder of that session). The upsert is idempotent on
 `(group_id, speaker_label)`, and the group id is read at write time (a
-callable), so a mid-session upgrade re-keys in-flight enrollments too.
+callable), so a mid-session upgrade re-keys in-flight enrollments too. Weak
+provisional room/name-set identities are re-keyed to the resolved group;
+refreshes preserve an existing player-name mapping when rebinding has not yet
+caught up, and lookup checks both `player_name` and enrolled speaker labels.
 No-silent-crash: every failure path logs a structured
 `LILY_ENROLL | FAILED | reason=...` (no client, plugin API drift, no
 identifiers yet, no usable rows, exception); success logs
@@ -841,11 +845,23 @@ inside the open window records a per-speaker span
 speaker identities flip `OVERLAP` when
 `min(end₁,end₂) − max(start₁,start₂) > LILY_OVERLAP_EPSILON_SECONDS`
 (default `0.3`, strict inequality — conservative by construction).
-Production caveat: `UserInputTranscribedEvent` carries no per-segment word
-timings at 1.6.4, so the entrypoint currently stamps `start == arrival` —
-degenerate point spans can never flip the flag until real segment timings
-flow through the transcript path (the n-best work widens exactly that
-path). The flag resets on every window open (steal windows included).
+`UserInputTranscribedEvent` still lacks word timing at 1.6.4, but the raw
+Speechmatics n-best tap now carries stream-relative word spans. A bounded
+`LilyTimestampReconciler` maps those spans onto the event-arrival wall clock,
+records drift/source telemetry, and falls back to arrival time when the stream
+clock is unavailable. The flag resets on every window open (steal windows
+included).
+
+**Confidence fusion:** diarization confidence (speaker consistency plus top
+ASR confidence, with event/attribution fallbacks) is combined with the latest
+audEERING trajectory confidence only when the acoustic capture timestamp is
+aligned with the reconciled segment clock. Misaligned samples log
+`LILY_SYNC | ACOUSTIC_SAMPLE_MISALIGNED` and fall back to diarization only.
+The fused value adds a bounded Tier-1 threshold penalty and, under
+`PRIOR_OVERLAP`, conservatively demotes low-confidence roster attribution to
+the open floor rather than crediting the wrong player. Separate diarization,
+acoustic, fused, timestamp-source, and drift values remain on candidate audit
+records.
 
 Every classification decision logs its prior:
 `LILY_PRIOR | state=OVERLAP threshold=1.010 overlap=True | ...` (scorekeeper
@@ -858,7 +874,14 @@ utterance persists its `prior_state` and `overlap_flag` to
 (0.84), `LILY_TIER1_THRESHOLD_OVERLAP` (1.01),
 `LILY_TIER1_THRESHOLD_HOST_SPEAKING` (1.01), `LILY_TIER1_THRESHOLD_SCORING`
 (1.01), `LILY_TIER1_THRESHOLD_IDLE` (0.88), `LILY_OVERLAP_EPSILON_SECONDS`
-(0.3), `LILY_TIER1_CLARIFY_MARGIN` (0.15).
+(0.3), `LILY_TIER1_CLARIFY_MARGIN` (0.15); fusion/alignment:
+`LILY_ADDRESSEE_FUSION_DIARIZATION_WEIGHT` (0.75),
+`LILY_ADDRESSEE_FUSION_ACOUSTIC_WEIGHT` (0.25),
+`LILY_ADDRESSEE_ACOUSTIC_MAX_STALENESS_SECONDS`,
+`LILY_ADDRESSEE_ACOUSTIC_MAX_FUTURE_SECONDS` (0.75),
+`LILY_ADDRESSEE_CONFIDENCE_NEUTRAL` (0.65),
+`LILY_ADDRESSEE_CONFIDENCE_PENALTY_MAX` (0.10), and
+`LILY_OVERLAP_FUSION_MIN_CONFIDENCE` (0.42).
 
 **Middle band (Task 4 surface):** `lily_evaluation.lily_tier1_band(similarity,
 threshold, clarify_margin)` splits Tier-1 similarity space into

@@ -142,6 +142,100 @@ def _current_speech_id() -> str | None:
         return None
 
 
+def _coerce_confidence(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return max(0.0, min(1.0, float(value)))
+    return None
+
+
+def lily_diarization_confidence_from_nbest(nbest: dict | None) -> float | None:
+    """Best-effort diarization confidence from per-utterance n-best payload.
+
+    Speechmatics exposes no explicit per-segment diarization confidence on
+    UserInputTranscribedEvent; we blend:
+      - speaker_consistency: share of recovered words whose speaker tag
+        matched this segment's diarization label
+      - top_hypothesis_confidence: ASR confidence on hypothesis slot 0
+    """
+    if not isinstance(nbest, dict):
+        return None
+    consistency = _coerce_confidence(nbest.get("speaker_consistency"))
+    top = _coerce_confidence(nbest.get("top_hypothesis_confidence"))
+    if consistency is None and top is None:
+        return None
+    if consistency is None:
+        return round(top if top is not None else 0.0, 3)
+    if top is None:
+        return round(consistency, 3)
+    return round(consistency * 0.75 + top * 0.25, 3)
+
+
+def _aligned_acoustic_confidence(
+    game: "LilyGame",
+    segment_ts: float | None,
+) -> float | None:
+    """Return acoustic confidence only when its capture clock is aligned."""
+    acoustic_inputs = {}
+    try:
+        acoustic_inputs = game.acoustic.addressee_fusion_inputs()
+    except Exception:
+        acoustic_inputs = {}
+    acoustic = None
+    acoustic_captured_at = acoustic_inputs.get("captured_at")
+    max_staleness = lily_config.addressee_acoustic_max_staleness_seconds()
+    max_future = lily_config.addressee_acoustic_max_future_seconds()
+    if lily_addressee.lily_acoustic_sample_aligned(
+        segment_ts,
+        acoustic_captured_at,
+        max_staleness_seconds=max_staleness,
+        max_future_seconds=max_future,
+    ):
+        try:
+            acoustic = game.acoustic.addressee_confidence()
+        except Exception:
+            acoustic = None
+    else:
+        skew_s = lily_addressee.lily_acoustic_alignment_skew_seconds(
+            segment_ts, acoustic_captured_at
+        )
+        if skew_s is not None:
+            logger.info(
+                "LILY_SYNC | ACOUSTIC_SAMPLE_MISALIGNED | segment_ts=%.3f "
+                "acoustic_ts=%.3f skew_s=%.3f bounds=[-%.3f,+%.3f] "
+                "action=diarization_only",
+                segment_ts, float(acoustic_captured_at), skew_s,
+                max_staleness, max_future,
+            )
+    return acoustic
+
+
+def _segment_addressee_confidence(
+    game: "LilyGame",
+    *,
+    event=None,
+    attribution: str | None = None,
+    speaker_label: str | None = None,
+    diarization_confidence: float | None = None,
+    acoustic_confidence: float | None = None,
+) -> float | None:
+    """Fuse the best diarization signal with aligned acoustic confidence."""
+    diar = _coerce_confidence(diarization_confidence)
+    if diar is None:
+        diar = lily_addressee.lily_extract_diarization_confidence(event)
+    if diar is None:
+        diar = lily_addressee.lily_fallback_diarization_confidence(
+            attribution, speaker_label
+        )
+    return lily_addressee.lily_fuse_addressee_confidence(
+        diar,
+        acoustic_confidence,
+        diarization_weight=lily_config.addressee_fusion_diarization_weight(),
+        acoustic_weight=lily_config.addressee_fusion_acoustic_weight(),
+    )
+
+
 # Answer-window opening (persistence-audit root-cause fix): the old hard
 # >=60% token-overlap gate meant a paraphrased question NEVER opened the
 # window and the whole deterministic pipeline stalled. Overlap is now a
@@ -256,6 +350,7 @@ class LilyGame:
         # patch armed; None = clean 1-best degradation) and the per-question
         # candidate-key -> drained n-best dict used by Tier-1/Tier-2.
         self.nbest_collector: "lily_nbest.LilyNBestCollector | None" = None
+        self.timestamp_reconciler = lily_nbest.LilyTimestampReconciler()
         self._nbest_by_key: dict[str, dict] = {}
         self._adjudicating = False
         self._question_transitioning = False
@@ -2045,12 +2140,16 @@ class LilyGame:
         # n-best telemetry (WO-ADDRESSEE-H1 Task 1): dispersion logged per
         # utterance — high dispersion is a deliberation signal.
         if nbest is not None:
+            timing = nbest.get("segment_timing") or {}
             logger.info(
-                "LILY_NBEST | dispersion=%s hypotheses=%d words=%d speaker=%s",
+                "LILY_NBEST | dispersion=%s hypotheses=%d words=%d speaker=%s "
+                "timing_source=%s drift_s=%s",
                 nbest.get("dispersion"),
                 len(nbest.get("hypotheses") or []),
                 nbest.get("word_count", 0),
                 result.get("player") or speaker_label or "UU",
+                timing.get("source"),
+                timing.get("drift_seconds"),
             )
 
         # B1 corpus row — logged BEFORE command handling so skipped-on and
@@ -2237,11 +2336,21 @@ class LilyGame:
             # auto-accept, so crosstalk candidates escalate instead of
             # instantly scoring.
             prior_now = self.sk.prior_state(now=ts)
-            tier1_threshold = lily_config.tier1_threshold_for_prior(prior_now)
+            seg_addressee_conf = result.get("addressee_confidence")
+            tier1_threshold = self.sk.tier1_threshold(
+                now=ts,
+                addressee_confidence=seg_addressee_conf,
+            )
             logger.info(
-                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s | "
+                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s "
+                "addressee_conf=%s | "
                 "session=%s q=%d source=instant_tier1",
                 prior_now, tier1_threshold, self.sk.overlap_flag,
+                (
+                    f"{seg_addressee_conf:.3f}"
+                    if isinstance(seg_addressee_conf, (int, float))
+                    else "None"
+                ),
                 self.sk.session_id, self.sk.question_number,
             )
             if ordered and acceptable:
@@ -2392,13 +2501,21 @@ class LilyGame:
             # OPEN_WINDOW) — never under the SCORING state this evaluation
             # itself runs in. overlap_flag persists across the close above.
             window_prior = self.sk.window_prior_state()
-            tier1_threshold = lily_config.tier1_threshold_for_prior(
-                window_prior
+            window_addressee_conf = self.sk.window_addressee_confidence()
+            tier1_threshold = self.sk.tier1_threshold_for_state(
+                window_prior,
+                addressee_confidence=window_addressee_conf,
             )
             logger.info(
-                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s | "
+                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s "
+                "addressee_conf=%s | "
                 "session=%s q=%d source=adjudicate",
                 window_prior, tier1_threshold, self.sk.overlap_flag,
+                (
+                    f"{window_addressee_conf:.3f}"
+                    if isinstance(window_addressee_conf, (int, float))
+                    else "None"
+                ),
                 self.sk.session_id, self.sk.question_number,
             )
 
@@ -2427,7 +2544,7 @@ class LilyGame:
             attempts_timeline = sorted(
                 (
                     (attempt.get("segment_start_time", cand["segment_start_time"]),
-                     cand, attempt["text"])
+                     cand, attempt["text"], attempt)
                     for cand in ordered
                     for attempt in (
                         cand.get("attempts")
@@ -2437,7 +2554,22 @@ class LilyGame:
                 ),
                 key=lambda entry: entry[0],
             )
-            for _, cand, attempt_text in attempts_timeline:
+            for _, cand, attempt_text, attempt in attempts_timeline:
+                attempt_conf = (
+                    attempt.get("addressee_confidence")
+                    if isinstance(attempt, dict)
+                    else None
+                )
+                if attempt_conf is None:
+                    attempt_conf = cand.get("addressee_confidence")
+                attempt_threshold = self.sk.tier1_threshold_for_state(
+                    window_prior,
+                    addressee_confidence=(
+                        attempt_conf
+                        if attempt_conf is not None
+                        else window_addressee_conf
+                    ),
+                )
                 # Format dispatch (multiple-choice WO): MC questions match
                 # letters / positions / option text and may return a
                 # DEFINITIVE "incorrect" (clean wrong pick — no Tier-2);
@@ -2449,7 +2581,7 @@ class LilyGame:
                 t1 = self._tier1_question(
                     attempt_text, question,
                     key=cand["player"] or f"unrostered:{cand['speaker_label']}",
-                    threshold=tier1_threshold,
+                    threshold=attempt_threshold,
                 )
                 if t1["verdict"] == "correct":
                     cand["_tier1"] = t1
@@ -2939,6 +3071,35 @@ class LilyGame:
         self.asked_history = await lily_bank.lily_load_asked_history(
             self.supabase, new_group_id
         )
+        # Refresh known_speakers under the resolved id. 1.6.4 applies this
+        # list at stream start, so this primarily protects reconnect paths.
+        if self.stt is not None:
+            try:
+                known_rows = await lily_persistence.lily_load_voiceprints(
+                    self.supabase, new_group_id
+                )
+                known_speakers = [
+                    SpeakerIdentifier(
+                        label=row["label"],
+                        speaker_identifiers=row["speaker_identifiers"],
+                    )
+                    for row in known_rows
+                    if row.get("label") and row.get("speaker_identifiers")
+                ]
+                opts = getattr(self.stt, "_stt_options", None)
+                if opts is not None:
+                    opts.known_speakers = known_speakers
+                    logger.info(
+                        "VOICEPRINT | refreshed known_speakers=%d group=%s",
+                        len(known_speakers),
+                        new_group_id,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "VOICEPRINT | known_speakers refresh failed group=%s: %s",
+                    new_group_id,
+                    e,
+                )
         if self.sk.question_number == 0:
             # Group prefs WO: the resolved group may have a stored 'usual'.
             # The re-key above already merged any session-written row under
@@ -3598,13 +3759,16 @@ class LilyGame:
             "LILY_STT | roster=%d (max_speakers fixed at construction)",
             self.sk.roster_size(),
         )
-        # Voiceprint enrollment fires the moment the FIRST binding commits
-        # (the speaker has spoken; Speechmatics needs ~5 words per voice —
-        # re-fired at game start, group-id upgrade, and session close for
-        # late binders, so an early empty result self-heals).
+        # Voiceprint enrollment fires on the first binding and every later
+        # bind. The write is idempotent and this closes the late-binder gap:
+        # a new guest joining after game start still lands under the
+        # resolved group id for the next rematch. Speechmatics needs about
+        # five words per voice, so game-start and group-upgrade retries remain.
         if not self._enroll_started:
             self._enroll_started = True
             self.fire_enrollment("first_bind")
+        else:
+            self.fire_enrollment("bind_refresh")
         # Packet kind `player_bind` per the shipped frontend parser
         # (contract note said `bind`; the canonical prmpt_ui parser accepts
         # chip_bind/name_chip/player_bind — drift recorded for Rami).
@@ -4869,10 +5033,14 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         if not ev.is_final:
             return  # partials display, finals score — never the reverse
-        # UserInputTranscribedEvent carries no per-segment word timings at
-        # 1.6.4 — created_at (event arrival) decides answer order.
+        # Event arrival wall-clock (created_at) plus recovered STT
+        # stream-relative timings from the n-best collector feed the
+        # timestamp reconciler for "first answered first" ordering under
+        # jitter.
         created = getattr(ev, "created_at", None)
-        seg_ts = created.timestamp() if hasattr(created, "timestamp") else time.time()
+        arrival_ts = (
+            created.timestamp() if hasattr(created, "timestamp") else time.time()
+        )
         game.fragments.add(speaker_label or "UU", text)
         # n-best (WO-ADDRESSEE-H1 Task 1): drain the per-word alternatives
         # buffered off raw AddTranscript for this speaker's finalized
@@ -4883,21 +5051,59 @@ async def entrypoint(ctx: JobContext) -> None:
             if game.nbest_collector is not None
             else None
         )
+        reconciler = getattr(game, "timestamp_reconciler", None)
+        if reconciler is None:
+            reconciler = lily_nbest.LilyTimestampReconciler()
+            game.timestamp_reconciler = reconciler
+        timing = reconciler.reconcile(
+            arrival_ts=arrival_ts,
+            stream_start=(nbest or {}).get("stream_start_time"),
+            stream_end=(nbest or {}).get("stream_end_time"),
+        )
+        try:
+            seg_start_ts = float(timing.get("start_time"))
+        except Exception:
+            seg_start_ts = arrival_ts
+        try:
+            seg_end_ts = float(timing.get("end_time"))
+        except Exception:
+            seg_end_ts = seg_start_ts
+        if nbest is not None:
+            nbest["segment_timing"] = timing
+        diarization_confidence = lily_diarization_confidence_from_nbest(nbest)
+        acoustic_confidence = _aligned_acoustic_confidence(
+            game, seg_start_ts
+        )
+        fused_conf = _segment_addressee_confidence(
+            game,
+            event=ev,
+            speaker_label=speaker_label,
+            diarization_confidence=diarization_confidence,
+            acoustic_confidence=acoustic_confidence,
+        )
         result = scorekeeper.on_transcript_segment(
             text=text,
             speaker_label=speaker_label,
             is_final=True,
-            segment_start_time=seg_ts,
+            segment_start_time=seg_start_ts,
+            segment_end_time=seg_end_ts,
+            diarization_confidence=diarization_confidence,
+            acoustic_confidence=acoustic_confidence,
+            timestamp_source=timing.get("source"),
+            timing_drift_seconds=timing.get("drift_seconds"),
+            now=arrival_ts,
+            addressee_confidence=fused_conf,
         )
         player = result.get("player")
         transcripts.add(
             text,
             speaker_label=speaker_label,
             speaker_name=player,
-            segment_start=seg_ts,
+            segment_start=seg_start_ts,
+            segment_end=seg_end_ts,
         )
         game.on_transcript_event(
-            result, text, speaker_label=speaker_label, segment_ts=seg_ts,
+            result, text, speaker_label=speaker_label, segment_ts=seg_start_ts,
             nbest=nbest,
         )
 

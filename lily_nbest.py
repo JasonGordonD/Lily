@@ -56,6 +56,117 @@ MAX_BUFFER_WORDS = 200
 
 
 # ---------------------------------------------------------------------------
+# STT stream-clock reconciliation (WO-LILY-LATENCY-HARDENING)
+# ---------------------------------------------------------------------------
+
+class LilyTimestampReconciler:
+    """Reconcile STT stream-relative timings to wall-clock timestamps.
+
+    Speechmatics word timings are stream-relative (seconds from stream start),
+    while transcript events arrive with wall-clock timestamps. Arrival jitter
+    means ordering by event arrival alone can invert "who answered first"
+    during crosstalk. This reconciler keeps a conservative stream->wall offset
+    estimate and converts word-level start/end into wall time.
+
+    Design:
+      - offset candidate = arrival_ts - stream_end
+      - offset tracks the minimum candidate (one-way delay is non-negative),
+        with a slow upward smoothing path for long sessions
+      - reconciled end is clamped to at most arrival_ts + max_forward_skew_s
+        so a bad offset estimate can never place speech implausibly in the
+        future relative to event arrival.
+    """
+
+    def __init__(
+        self,
+        max_forward_skew_s: float = 0.12,
+        offset_smoothing: float = 0.05,
+        stream_reset_backtrack_s: float = 0.5,
+    ) -> None:
+        self.max_forward_skew_s = max(0.0, float(max_forward_skew_s))
+        self.offset_smoothing = min(max(float(offset_smoothing), 0.0), 1.0)
+        self.stream_reset_backtrack_s = max(0.0, float(stream_reset_backtrack_s))
+        self._offset_s: Optional[float] = None
+        self._last_stream_end: Optional[float] = None
+
+    @staticmethod
+    def _coerce_float(value: Any) -> Optional[float]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    def reconcile(
+        self,
+        arrival_ts: float,
+        stream_start: Optional[float],
+        stream_end: Optional[float],
+    ) -> dict:
+        """Return reconciled segment times in wall-clock seconds.
+
+        Output shape:
+          {
+            "start_time": float,
+            "end_time": float,
+            "source": "arrival_time" | "stt_stream_reconciled",
+            "drift_seconds": float | None,  # arrival_ts - reconciled_end
+          }
+        """
+        arrival = self._coerce_float(arrival_ts)
+        if arrival is None:
+            arrival = 0.0
+        start = self._coerce_float(stream_start)
+        end = self._coerce_float(stream_end)
+        if start is None or end is None:
+            return {
+                "start_time": arrival,
+                "end_time": arrival,
+                "source": "arrival_time",
+                "drift_seconds": None,
+            }
+        if end < start:
+            start, end = end, start
+
+        # Stream reset / reconnection: relative time moved backward.
+        if (
+            self._last_stream_end is not None
+            and end + self.stream_reset_backtrack_s < self._last_stream_end
+        ):
+            self._offset_s = None
+        self._last_stream_end = end
+
+        candidate_offset = arrival - end
+        if self._offset_s is None:
+            self._offset_s = candidate_offset
+        elif candidate_offset < self._offset_s:
+            # Better lower-bound on one-way delay.
+            self._offset_s = candidate_offset
+        else:
+            # Slow upward drift for long-lived sessions.
+            alpha = self.offset_smoothing
+            self._offset_s = (1.0 - alpha) * self._offset_s + alpha * candidate_offset
+
+        start_ts = self._offset_s + start
+        end_ts = self._offset_s + end
+
+        # Guard against future-dated reconciled speech from a stale offset.
+        max_end = arrival + self.max_forward_skew_s
+        if end_ts > max_end:
+            shift = end_ts - max_end
+            start_ts -= shift
+            end_ts -= shift
+        if end_ts < start_ts:
+            end_ts = start_ts
+        return {
+            "start_time": round(start_ts, 6),
+            "end_time": round(end_ts, 6),
+            "source": "stt_stream_reconciled",
+            "drift_seconds": round(arrival - end_ts, 6),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Dispersion — the deliberation signal (report Track 1 feature table)
 # ---------------------------------------------------------------------------
 
@@ -225,11 +336,13 @@ class LilyNBestCollector:
         Returns None when nothing was buffered. Never raises."""
         try:
             if speaker_label:
-                taken = [
-                    w for w in self._words
-                    if w.get("speaker") in (speaker_label, None)
-                ]
-                self._words = [w for w in self._words if w not in taken]
+                taken, kept = [], []
+                for w in self._words:
+                    if w.get("speaker") in (speaker_label, None):
+                        taken.append(w)
+                    else:
+                        kept.append(w)
+                self._words = kept
             else:
                 taken, self._words = self._words, []
             if not taken:
@@ -238,10 +351,30 @@ class LilyNBestCollector:
             hypotheses = lily_synthesize_hypotheses(taken, self.max_hypotheses)
             if not hypotheses:
                 return None
+            starts = [
+                float(w["start_time"])
+                for w in taken
+                if isinstance(w.get("start_time"), (int, float))
+            ]
+            ends = [
+                float(w["end_time"])
+                for w in taken
+                if isinstance(w.get("end_time"), (int, float))
+            ]
+            stream_start = min(starts) if starts else None
+            stream_end = max(ends) if ends else None
+            speaker_consistency = None
+            if speaker_label:
+                exact = sum(1 for w in taken if w.get("speaker") == speaker_label)
+                speaker_consistency = round(exact / len(taken), 4) if taken else None
             return {
                 "hypotheses": hypotheses,
                 "dispersion": lily_nbest_dispersion(hypotheses),
                 "word_count": len(taken),
+                "stream_start_time": stream_start,
+                "stream_end_time": stream_end,
+                "top_hypothesis_confidence": hypotheses[0].get("confidence"),
+                "speaker_consistency": speaker_consistency,
                 "source": "per_word_synthesis",
             }
         except Exception as e:
@@ -275,62 +408,65 @@ def lily_install_nbest_stt_patch(
          collector's `ingest_message` for raw `AddTranscript` events before
          connecting (the voice client itself keeps only `alternatives[0]`).
 
-    Returns True when armed. `max_alternatives < 2` disables the patch
-    (nothing to recover). Any failure — plugin internals shifted, imports
-    missing — logs `LILY_NBEST | patch=failed` and returns False; the
-    pipeline degrades cleanly to 1-best. NEVER raises.
+    Returns True when armed. `max_alternatives == 1` now installs the raw
+    AddTranscript tap only (no config injection) so timing/confidence recovery
+    stays available under the default-safe no-injection mode. Any failure —
+    plugin internals shifted, imports missing — logs
+    `LILY_NBEST | patch=failed` and returns False; the pipeline degrades
+    cleanly to 1-best. NEVER raises.
 
     `_base_client_module` / `_voice_client_cls` are test injection points;
     production callers pass neither and the real speechmatics modules are
     imported lazily here."""
     try:
         max_alternatives = int(max_alternatives)
-        if max_alternatives < 2:
+        if max_alternatives < 1:
             logger.info(
                 "LILY_NBEST | patch=disabled max_alternatives=%d (1-best)",
                 max_alternatives,
             )
             return False
 
-        bc = _base_client_module
-        if bc is None:
-            import speechmatics.rt._base_client as bc  # type: ignore
         vac = _voice_client_cls
         if vac is None:
             from speechmatics.voice import VoiceAgentClient as vac  # type: ignore
 
-        orig_build: Callable = bc.build_start_recognition_message
-        if not callable(orig_build):
-            raise TypeError("build_start_recognition_message is not callable")
         orig_connect: Callable = vac.connect
         if not callable(orig_connect):
             raise TypeError("VoiceAgentClient.connect is not callable")
 
-        # 1) Config injection (idempotent).
-        if not getattr(bc, _PATCH_FLAG, False):
-            def _lily_build_start_recognition(*args: Any, **kwargs: Any) -> Any:
-                msg = orig_build(*args, **kwargs)
-                try:
-                    tc = msg.get("transcription_config")
-                    if isinstance(tc, dict):
-                        tc["max_alternatives"] = max_alternatives
-                        logger.info(
-                            "LILY_NBEST | config_injected max_alternatives=%d",
-                            max_alternatives,
-                        )
-                    else:
+        # 1) Config injection (idempotent, only when alternatives > 1).
+        if max_alternatives >= 2:
+            bc = _base_client_module
+            if bc is None:
+                import speechmatics.rt._base_client as bc  # type: ignore
+            orig_build: Callable = bc.build_start_recognition_message
+            if not callable(orig_build):
+                raise TypeError("build_start_recognition_message is not callable")
+            if not getattr(bc, _PATCH_FLAG, False):
+                def _lily_build_start_recognition(*args: Any, **kwargs: Any) -> Any:
+                    msg = orig_build(*args, **kwargs)
+                    try:
+                        tc = msg.get("transcription_config")
+                        if isinstance(tc, dict):
+                            tc["max_alternatives"] = max_alternatives
+                            logger.info(
+                                "LILY_NBEST | config_injected max_alternatives=%d",
+                                max_alternatives,
+                            )
+                        else:
+                            logger.warning(
+                                "LILY_NBEST | config_injection skipped — "
+                                "unexpected StartRecognition shape; 1-best only"
+                            )
+                    except Exception as e:
                         logger.warning(
-                            "LILY_NBEST | config_injection skipped — "
-                            "unexpected StartRecognition shape; 1-best only"
+                            "LILY_NBEST | config_injection failed: %s — 1-best only", e
                         )
-                except Exception as e:
-                    logger.warning(
-                        "LILY_NBEST | config_injection failed: %s — 1-best only", e
-                    )
-                return msg
+                    return msg
 
-            bc.build_start_recognition_message = _lily_build_start_recognition
-            setattr(bc, _PATCH_FLAG, True)
+                bc.build_start_recognition_message = _lily_build_start_recognition
+                setattr(bc, _PATCH_FLAG, True)
 
         # 2) Raw AddTranscript tap (idempotent).
         if not getattr(vac, _PATCH_FLAG, False):
@@ -347,8 +483,11 @@ def lily_install_nbest_stt_patch(
             vac.connect = _lily_connect
             setattr(vac, _PATCH_FLAG, True)
 
+        mode = "full" if max_alternatives >= 2 else "tap_only"
         logger.info(
-            "LILY_NBEST | patch=armed max_alternatives=%d", max_alternatives
+            "LILY_NBEST | patch=armed mode=%s max_alternatives=%d",
+            mode,
+            max_alternatives,
         )
         return True
     except Exception as e:

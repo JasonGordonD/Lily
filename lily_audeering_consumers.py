@@ -106,6 +106,69 @@ def _maybe_float(value: Any) -> float | None:
     return None
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def acoustic_addressee_confidence(
+    snapshot: dict[str, Any] | None,
+    *,
+    child_veto: bool = False,
+) -> float | None:
+    """Room-level acoustic confidence for addressee arbitration.
+
+    This is intentionally coarse and conservative: one room-level scalar used
+    only as a confidence signal in crosstalk arbitration.
+
+    Inputs:
+      - child signal (speakerAttributes.gender.child): high child confidence
+        down-weights host-directed confidence for this moment.
+      - audio quality (snr): low SNR down-weights confidence.
+
+    Returns a 0..1 confidence value, or None when no usable acoustic signal is
+    present.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+
+    child_max = None
+    segs = ((snapshot.get("speaker_attributes") or {}).get("segments") or [])
+    child_scores = [
+        _clamp01(c)
+        for c in (
+            _maybe_float(seg.get("child"))
+            for seg in segs
+            if isinstance(seg, dict)
+        )
+        if c is not None
+    ]
+    if child_scores:
+        child_max = max(child_scores)
+
+    snr = _maybe_float((snapshot.get("audio_quality") or {}).get("snr"))
+    quality = None
+    if snr is not None:
+        # Map around the reliability gate with room on both sides.
+        floor = lily_config.audeering_min_snr_db() - 6.0
+        ceiling = lily_config.audeering_min_snr_db() + 12.0
+        span = max(1.0, ceiling - floor)
+        quality = _clamp01((snr - floor) / span)
+
+    if child_max is None and quality is None:
+        return None
+    if child_max is not None and quality is not None:
+        conf = (1.0 - child_max) * 0.75 + quality * 0.25
+    elif child_max is not None:
+        conf = 1.0 - child_max
+    else:
+        conf = quality
+    if child_veto:
+        # When the ladder is actively vetoing, this signal should remain low
+        # regardless of transient quality movement.
+        conf = min(conf, 0.35)
+    return round(_clamp01(conf), 3)
+
+
 # ---------------------------------------------------------------------------
 # Reliability gate (INTERNAL, never injected) — runs FIRST
 # ---------------------------------------------------------------------------
@@ -569,6 +632,38 @@ class LilyAcousticState:
             if self._breaker_open or self._latest_snapshot is None:
                 return None
             return dict(self._latest_snapshot)
+
+    def addressee_confidence(self) -> float | None:
+        """Acoustic addressee confidence (0..1) for overlap arbitration.
+
+        None means "no usable acoustic signal right now" and callers should
+        fall back to neutral weighting.
+        """
+        with self._lock:
+            if self._breaker_open or self._latest_snapshot is None:
+                return None
+            snap = dict(self._latest_snapshot)
+            veto = child_veto_active(self.baseline)
+        return acoustic_addressee_confidence(snap, child_veto=veto)
+
+    def addressee_fusion_inputs(self) -> dict[str, Any]:
+        """Current acoustic inputs for addressee-confidence fusion."""
+        with self._lock:
+            room_read = None
+            if isinstance(self._room_line, str):
+                raw = self._room_line.strip()
+                if raw.startswith("[room read:") and raw.endswith("]"):
+                    room_read = raw[len("[room read:") : -1].strip()
+            return {
+                "room_read": room_read,
+                "child_veto_active": child_veto_active(self.baseline),
+                "breaker_open": bool(self._breaker_open),
+                "captured_at": (
+                    (self._latest_snapshot or {}).get("captured_at")
+                    if isinstance(self._latest_snapshot, dict)
+                    else None
+                ),
+            }
 
 
 def _snapshot_from_parsed(parsed: dict[str, Any]) -> dict[str, Any]:

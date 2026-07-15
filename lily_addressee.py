@@ -19,6 +19,7 @@ Label vocabulary:
                                               are you thinking out loud?")
 """
 
+import math
 import re as _re
 from typing import Optional
 
@@ -38,6 +39,166 @@ AGENT_ACTION_SCORED = "scored"
 AGENT_ACTION_IGNORED = "ignored"
 AGENT_ACTION_CLARIFIED = "clarified"
 AGENT_ACTION_ADJUDICATED_OTHER = "adjudicated_other"
+
+
+# -----------------------------------------------------------------------------
+# Addressee-confidence fusion (Speechmatics diarization + acoustic read)
+# -----------------------------------------------------------------------------
+
+_DIARIZATION_CONF_FIELDS = (
+    "speaker_confidence",
+    "diarization_confidence",
+    "speaker_id_confidence",
+    "confidence",
+)
+
+_ROOM_READ_TO_ACOUSTIC_CONFIDENCE = {
+    "agitated / on edge": 0.35,
+    "hot / riding high": 0.48,
+    "valence sagging": 0.58,
+    "flat / low energy": 0.74,
+}
+
+
+def _clamp_confidence(value) -> Optional[float]:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return round(v, 3)
+
+
+def lily_extract_diarization_confidence(event) -> Optional[float]:
+    """Best-effort Speechmatics diarization confidence extraction.
+
+    The 1.6.4 event shape has drifted in the field across wrappers, so this
+    helper checks common attribute names and an optional dict payload before
+    giving up.
+    """
+    if event is None:
+        return None
+    for field in _DIARIZATION_CONF_FIELDS:
+        val = getattr(event, field, None)
+        conf = _clamp_confidence(val)
+        if conf is not None:
+            return conf
+    if isinstance(event, dict):
+        for field in _DIARIZATION_CONF_FIELDS:
+            conf = _clamp_confidence(event.get(field))
+            if conf is not None:
+                return conf
+    return None
+
+
+def lily_fallback_diarization_confidence(
+    attribution: Optional[str],
+    speaker_label: Optional[str],
+) -> float:
+    """Deterministic fallback when no explicit diarization confidence exists."""
+    if attribution == "speaker_id":
+        return 0.90
+    if attribution == "label_match":
+        return 0.86
+    if attribution == "name_match":
+        return 0.80
+    if attribution == "self_introduction":
+        return 0.70
+    return 0.65 if speaker_label else 0.50
+
+
+def lily_acoustic_addressee_confidence(
+    room_read: Optional[str],
+    child_veto_active: bool,
+    *,
+    breaker_open: bool = False,
+) -> Optional[float]:
+    """Acoustic-side confidence from room-read banding + child ladder.
+
+    Returns None when the acoustic pipeline is unavailable (breaker open),
+    so fusion can fall back to diarization-only confidence.
+    """
+    if breaker_open:
+        return None
+    confidence = _ROOM_READ_TO_ACOUSTIC_CONFIDENCE.get(
+        str(room_read or "").strip().lower(),
+        0.62,
+    )
+    if child_veto_active:
+        confidence = min(confidence, 0.38)
+    return round(confidence, 3)
+
+
+def lily_fuse_addressee_confidence(
+    diarization_confidence: Optional[float],
+    acoustic_confidence: Optional[float],
+    *,
+    diarization_weight: float = 0.75,
+    acoustic_weight: float = 0.25,
+) -> Optional[float]:
+    """Weighted addressee-confidence fusion.
+
+    The score remains additive to existing overlap logic: callers feed this
+    into thresholding; they do not replace overlap/state priors with it.
+    """
+    diar = _clamp_confidence(diarization_confidence)
+    acu = _clamp_confidence(acoustic_confidence)
+    if diar is None and acu is None:
+        return None
+    if diar is None:
+        return acu
+    if acu is None:
+        return diar
+    dw = max(0.0, float(diarization_weight))
+    aw = max(0.0, float(acoustic_weight))
+    if dw + aw <= 0:
+        return round((diar + acu) / 2.0, 3)
+    score = (diar * dw + acu * aw) / (dw + aw)
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def lily_acoustic_alignment_skew_seconds(
+    segment_timestamp: Optional[float],
+    acoustic_captured_at: Optional[float],
+) -> Optional[float]:
+    """Acoustic-minus-transcript clock skew in seconds.
+
+    Positive skew means the acoustic sample is stamped AFTER the transcript
+    segment; negative means it is older/staler.
+    """
+    try:
+        seg = float(segment_timestamp)
+        acu = float(acoustic_captured_at)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(seg) and math.isfinite(acu)):
+        return None
+    return round(acu - seg, 3)
+
+
+def lily_acoustic_sample_aligned(
+    segment_timestamp: Optional[float],
+    acoustic_captured_at: Optional[float],
+    *,
+    max_staleness_seconds: float = 8.0,
+    max_future_seconds: float = 0.75,
+) -> bool:
+    """Whether an acoustic sample is time-aligned with a transcript segment.
+
+    Alignment is required before fusion so a delayed (or future-stamped)
+    acoustic window does not skew addressee confidence for buzzer ordering.
+    """
+    skew = lily_acoustic_alignment_skew_seconds(
+        segment_timestamp, acoustic_captured_at
+    )
+    if skew is None:
+        return False
+    stale = max(0.0, float(max_staleness_seconds))
+    future = max(0.0, float(max_future_seconds))
+    return -stale <= skew <= future
 
 
 # -----------------------------------------------------------------------------
