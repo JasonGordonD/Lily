@@ -383,6 +383,88 @@ class LilyReasoning:
             raise RuntimeError(f"empty candidate from {model} after retry")
         return text
 
+    async def approve_entity_image(
+        self,
+        image_bytes: bytes,
+        content_type: str,
+        entity: str,
+    ) -> tuple[bool, str]:
+        """Content gate for web-sourced images (OR amendment W1): before a
+        fetched image is CACHED it must be approved image-vs-question by
+        the reasoning node — the Exa retrieval path has no moderation of
+        its own (generation does), and one bad cached image serves
+        forever. FAIL CLOSED: any error, timeout, or unparseable verdict
+        rejects (the round degrades to text-only, which is always safe).
+
+        Judge-never-invents discipline applies: the model judges only
+        whether THIS image plausibly shows the named entity and is
+        appropriate — it supplies no facts of its own."""
+        reason = "unknown"
+        try:
+            config = genai_types.GenerateContentConfig(
+                thinking_config=genai_types.ThinkingConfig(
+                    thinking_level="low"
+                ),
+                safety_settings=_SAFETY_SETTINGS,
+                max_output_tokens=lily_config.judge_max_output_tokens(),
+                response_mime_type="application/json",
+                response_schema=genai_types.Schema(
+                    type=genai_types.Type.OBJECT,
+                    properties={
+                        "approved": genai_types.Schema(
+                            type=genai_types.Type.BOOLEAN
+                        ),
+                        "reason": genai_types.Schema(
+                            type=genai_types.Type.STRING
+                        ),
+                    },
+                    required=["approved", "reason"],
+                ),
+            )
+            mime = (
+                content_type.split(";", 1)[0].strip().lower()
+                or "image/jpeg"
+            )
+            prompt = (
+                "You are a strict content gate for a family-friendly trivia "
+                "game played on a shared screen. Approve this photograph "
+                f"ONLY if BOTH hold: (1) it plausibly depicts {entity!r} — "
+                "the actual subject, not a map, diagram, logo, screenshot "
+                "of text, or unrelated scene; (2) it is appropriate for a "
+                "general audience (no nudity, gore, violence, or shock "
+                "content). When unsure, reject. Answer in the JSON schema."
+            )
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._client.models.generate_content,
+                    model=self._model,
+                    contents=[
+                        genai_types.Part.from_bytes(
+                            data=image_bytes, mime_type=mime
+                        ),
+                        prompt,
+                    ],
+                    config=config,
+                ),
+                timeout=20.0,
+            )
+            verdict = json.loads(getattr(response, "text", "") or "{}")
+            approved = bool(verdict.get("approved"))
+            reason = str(verdict.get("reason", ""))[:300]
+            logger.log(
+                logging.INFO if approved else logging.WARNING,
+                "LILY_REASONING | IMAGE_CONTENT_GATE | entity=%r "
+                "approved=%s reason=%r", entity, approved, reason,
+            )
+            return approved, reason
+        except Exception as e:
+            logger.warning(
+                "LILY_REASONING | IMAGE_CONTENT_GATE | entity=%r "
+                "approved=False (fail closed) error_class=%s error=%s",
+                entity, type(e).__name__, e,
+            )
+            return False, f"gate error ({type(e).__name__}): {e}"
+
     # -- question prefetch + verification -----------------------------------
 
     async def generate_question(
@@ -678,10 +760,12 @@ class LilyReasoning:
             if kind == "real_or_imagined":
                 return await lily_imagegen.lily_build_real_or_imagined_question(
                     supabase, index=question_index, session_id=session_id,
+                    approve=self.approve_entity_image,
                 )
             if kind == "real_entity":
                 return await lily_search.lily_build_real_entity_picture_question(
                     supabase, index=question_index, session_id=session_id,
+                    approve=self.approve_entity_image,
                 )
             logger.warning(
                 "LILY_REASONING | PICTURE_PREFETCH | unknown kind=%r", kind

@@ -415,6 +415,7 @@ async def lily_build_real_entity_picture_question(
     index: int,
     session_id: str,
     difficulty_tier: int = 2,
+    approve=None,
 ) -> Optional[dict]:
     """Build one 'name this landmark' picture question from the curated
     real-subject list: Exa-source the image (conservative filter), store
@@ -430,8 +431,44 @@ async def lily_build_real_entity_picture_question(
             # A conservative pass is a decision, not a failure — logged by
             # the finder; no error row for declining to show an image.
             return None
-        stored_url = await lily_images.lily_fetch_url_to_bucket(
-            supabase, candidate["image_url"], source="web"
+        # Content gate (OR amendment W1): the reasoning node approves
+        # image-vs-question BEFORE anything is cached — one bad cached
+        # image serves forever. `approve` is an async (bytes, content_type,
+        # entity) -> (approved, reason); production always passes it.
+        fetched = await lily_images.lily_fetch_image_bytes(
+            candidate["image_url"]
+        )
+        if fetched is None:
+            await lily_images.lily_record_image_attempt(
+                supabase, session_id=session_id,
+                question_id=f"pic_{index:04d}", source="web", prompt=entity,
+                status=lily_images.ATTEMPT_ERROR,
+                failure_reason=(
+                    "fetch failed for accepted candidate "
+                    f"{candidate['image_url'][:300]}"
+                ),
+            )
+            return None
+        image_bytes, content_type = fetched
+        if approve is not None:
+            approved, gate_reason = await approve(
+                image_bytes, content_type, entity
+            )
+            if not approved:
+                await lily_images.lily_record_image_attempt(
+                    supabase, session_id=session_id,
+                    question_id=f"pic_{index:04d}", source="web",
+                    prompt=entity, status=lily_images.ATTEMPT_REJECTED,
+                    failure_reason=f"content gate: {gate_reason}"[:500],
+                )
+                return None
+        else:
+            logger.warning(
+                "LILY_SEARCH | CONTENT_GATE_SKIPPED | entity=%r — no "
+                "approver supplied (test/direct call path)", entity,
+            )
+        stored_url = await lily_images.lily_upload_image_bytes(
+            supabase, image_bytes, source="web", content_type=content_type
         )
         if stored_url is None:
             await lily_images.lily_record_image_attempt(
@@ -439,7 +476,7 @@ async def lily_build_real_entity_picture_question(
                 question_id=f"pic_{index:04d}", source="web", prompt=entity,
                 status=lily_images.ATTEMPT_ERROR,
                 failure_reason=(
-                    "fetch/store failed for accepted candidate "
+                    "store failed for approved candidate "
                     f"{candidate['image_url'][:300]}"
                 ),
             )

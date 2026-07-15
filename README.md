@@ -183,6 +183,16 @@ Tests: `tests/test_round_loop.py`.
 
 ## The say gate (speech-boundary bug class, 2026-07-14 WO)
 
+**Standing suppression-health rule (OR amendment R6):** the post-session
+health criterion is `LILY_SAY_SUPPRESSED ≈ zero`, and the corollary is
+policy — EVERY suppression in any log bundle is a defect report against
+the upstream path that generated the duplicate, root-caused, never
+accepted as cost of business. The gate's job is to make failures
+survivable, not invisible; a working safety net is exactly the mechanism
+by which the bugs it catches stop getting fixed (the Lovebirds
+generation-gate lesson). Post-DESYNC Sub-agent B, the known suppression
+source is gone — anything remaining is new signal.
+
 The live bug class — double greeting, double question delivery (BUG-2), a
 state block read aloud, and an answer leak (the Bosporus answer spoken
 BEFORE its question) — is closed by one gateway: `lily_say_gate.py`
@@ -743,6 +753,36 @@ code (`lily_forget.lily_parse_forget_confirmation`, same pattern as the
 clarify resolution — ambiguity does nothing destructive). A yes runs the
 cascade; a no drops it for the night (only a fresh player-initiated request
 re-arms).
+
+**Vendor-side voiceprint truth (OR amendment R4, verified against the
+installed SDK 2026-07-15):** Speechmatics speaker identifiers are
+client-held opaque strings — the SDK docs describe them as "any stable
+identifiers relevant to your application (for example device IDs, prior
+session speaker IDs)"; we mint nothing vendor-side and re-inject them
+each session as `known_speakers` hints. The installed
+`speechmatics.rt`/`livekit-plugins-speechmatics` surface exposes **no
+delete/deregister API** for identifiers. What the forget cascade
+provably deletes is OUR copy (`lily_speaker_voiceprints`), which removes
+Lily's ability to ever re-identify the voice; whether Speechmatics
+retains derived data account-side is a vendor-policy question no code
+path here can answer. Consequences: (a) the spoken scope line is
+deliberately phrased as "everything I keep — your voices as I know
+them" — Lily speaks for her own memory, never for other systems; (b)
+run-sheet note: if a vendor-side deletion request is ever needed,
+snapshot the `lily_speaker_voiceprints` identifiers BEFORE running the
+forget arc — post-cascade they are untargetable.
+
+**Recognition false-positive path (OR amendment W2 — defined, not yet
+built; H1 tail or next Lily WO):** the greeting currently keys on device
+identity (`lily_group_id`) before any voice is heard — a known device
+with different humans produces a confident greeting of absent people,
+the desync class in miniature. Expected behavior when built: the
+device-keyed greeting SOFTENS to a recognition-shaped but non-committal
+open ("this device knows me — who've we got tonight?" register), and
+full by-name recognition upgrades only once a first utterance matches an
+enrolled voiceprint; a device match with zero voice matches after the
+first exchanges DOWNGRADES gracefully to the new-table path, with no
+names asserted that no voice has confirmed.
 
 **The cascade (`lily_forget_group(confirm)`, two-step, UNGATED):** per the
 tool-gating principle above, deletion neither mutates game outcomes nor

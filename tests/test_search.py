@@ -251,13 +251,19 @@ def test_build_real_entity_question_success(monkeypatch):
                 "page_url": "https://en.wikipedia.org/wiki/E",
                 "title": "E"}
 
-    async def fake_fetch(supabase, url, **kw):
+    async def fake_fetch_bytes(url, **kw):
+        return b"imgbytes", "image/jpeg"
+
+    async def fake_upload(supabase, data, **kw):
         return "https://cdn.example/lily-images/web/abc.jpg"
 
     capture = _AttemptCapture()
     monkeypatch.setattr(lily_search, "lily_find_real_entity_image", fake_find)
     monkeypatch.setattr(
-        lily_search.lily_images, "lily_fetch_url_to_bucket", fake_fetch
+        lily_search.lily_images, "lily_fetch_image_bytes", fake_fetch_bytes
+    )
+    monkeypatch.setattr(
+        lily_search.lily_images, "lily_upload_image_bytes", fake_upload
     )
     monkeypatch.setattr(
         lily_search.lily_images, "lily_record_image_attempt", capture.record
@@ -295,13 +301,19 @@ def test_build_real_entity_question_store_failure_writes_error_row(monkeypatch):
         return {"image_url": "https://upload.wikimedia.org/e.jpg",
                 "page_url": "https://en.wikipedia.org/wiki/E", "title": "E"}
 
-    async def fake_fetch(supabase, url, **kw):
+    async def fake_fetch_bytes(url, **kw):
+        return b"imgbytes", "image/jpeg"
+
+    async def fake_upload(supabase, data, **kw):
         return None  # storage failed
 
     capture = _AttemptCapture()
     monkeypatch.setattr(lily_search, "lily_find_real_entity_image", fake_find)
     monkeypatch.setattr(
-        lily_search.lily_images, "lily_fetch_url_to_bucket", fake_fetch
+        lily_search.lily_images, "lily_fetch_image_bytes", fake_fetch_bytes
+    )
+    monkeypatch.setattr(
+        lily_search.lily_images, "lily_upload_image_bytes", fake_upload
     )
     monkeypatch.setattr(
         lily_search.lily_images, "lily_record_image_attempt", capture.record
@@ -311,7 +323,7 @@ def test_build_real_entity_question_store_failure_writes_error_row(monkeypatch):
     ))
     assert q is None
     assert capture.rows[0]["status"] == lily_images.ATTEMPT_ERROR
-    assert "fetch/store failed" in capture.rows[0]["failure_reason"]
+    assert "store failed" in capture.rows[0]["failure_reason"]
 
 
 def test_build_real_entity_question_never_raises(monkeypatch):

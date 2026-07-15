@@ -195,7 +195,10 @@ def test_real_or_imagined_even_index_is_real_web_sourced(monkeypatch):
         return {"image_url": "https://upload.wikimedia.org/e.jpg",
                 "page_url": "https://en.wikipedia.org/wiki/E", "title": "E"}
 
-    async def fake_fetch(supabase, url, **kw):
+    async def fake_fetch_bytes(url, **kw):
+        return b"imgbytes", "image/jpeg"
+
+    async def fake_upload(supabase, data, **kw):
         assert kw["source"] == "web"
         return "https://cdn.example/lily-images/web/abc.jpg"
 
@@ -204,7 +207,10 @@ def test_real_or_imagined_even_index_is_real_web_sourced(monkeypatch):
         lily_imagegen.lily_search, "lily_find_real_entity_image", fake_find
     )
     monkeypatch.setattr(
-        lily_imagegen.lily_images, "lily_fetch_url_to_bucket", fake_fetch
+        lily_imagegen.lily_images, "lily_fetch_image_bytes", fake_fetch_bytes
+    )
+    monkeypatch.setattr(
+        lily_imagegen.lily_images, "lily_upload_image_bytes", fake_upload
     )
     monkeypatch.setattr(
         lily_imagegen.lily_images, "lily_record_image_attempt", capture.record

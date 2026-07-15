@@ -2319,12 +2319,14 @@ class LilyGame:
             "forget_confirm",
             "A player just asked you to forget them. Ask for ONE plain "
             "spoken confirmation, naming the full scope: everything you "
-            "keep for this table — voices, games, facts — gone for good, "
-            "and tonight's game keeps going. Something like: 'Happy to. "
-            "That wipes everything I keep for this table — voices, games, "
-            "facts — gone for good. Tonight's game keeps going. Say yes "
-            "and it's done.' One question only — never ask twice, never "
-            "argue for being remembered.",
+            "keep for this table — voices as you know them, games, facts "
+            "— gone for good, and tonight's game keeps going. Something "
+            "like: 'Happy to. That wipes everything I keep for this "
+            "table — your voices as I know them, your games, your facts "
+            "— gone for good. Tonight's game keeps going. Say yes and "
+            "it's done.' The scope is always what YOU keep — you speak "
+            "for your own memory, never for other systems. One question "
+            "only — never ask twice, never argue for being remembered.",
             source="voice_command",
         )
 

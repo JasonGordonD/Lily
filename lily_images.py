@@ -122,15 +122,15 @@ async def lily_upload_image_bytes(
         return None
 
 
-async def lily_fetch_url_to_bucket(
-    supabase,
+async def lily_fetch_image_bytes(
     url: str,
     *,
-    source: str = "web",
     timeout: float = FETCH_TIMEOUT_SECONDS,
-) -> Optional[str]:
-    """Fetch an image URL -> bytes -> `lily-images` bucket; return the
-    public URL, or None on any failure (logged — never raises)."""
+) -> Optional[tuple[bytes, str]]:
+    """Fetch an image URL -> (bytes, content_type), or None on any failure
+    (logged — never raises). Split out of lily_fetch_url_to_bucket so the
+    content gate (OR amendment W1) can inspect the bytes BEFORE anything
+    is cached — one bad cached image serves forever."""
     if not url or not str(url).lower().startswith(("http://", "https://")):
         logger.warning("LILY_IMAGES | FETCH_SKIPPED | reason=bad_url url=%r", str(url)[:120])
         return None
@@ -152,13 +152,28 @@ async def lily_fetch_url_to_bucket(
                 "content_type=%r url=%s", content_type, url[:200],
             )
             return None
-        data = resp.content
+        return resp.content, content_type
     except Exception as e:
         logger.warning(
             "LILY_IMAGES | FETCH_FAILED | url=%s error_class=%s error=%s",
             url[:200], type(e).__name__, e,
         )
         return None
+
+
+async def lily_fetch_url_to_bucket(
+    supabase,
+    url: str,
+    *,
+    source: str = "web",
+    timeout: float = FETCH_TIMEOUT_SECONDS,
+) -> Optional[str]:
+    """Fetch an image URL -> bytes -> `lily-images` bucket; return the
+    public URL, or None on any failure (logged — never raises)."""
+    fetched = await lily_fetch_image_bytes(url, timeout=timeout)
+    if fetched is None:
+        return None
+    data, content_type = fetched
     return await lily_upload_image_bytes(
         supabase, data, source=source, content_type=content_type
     )

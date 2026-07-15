@@ -348,6 +348,7 @@ async def lily_build_real_or_imagined_question(
     index: int,
     session_id: str,
     difficulty_tier: int = 2,
+    approve=None,
 ) -> Optional[dict]:
     """Build one 'real or imagined' question: even indexes serve a REAL
     photo (Exa-sourced, sub-agent I), odd indexes a GENERATED plausible
@@ -364,8 +365,31 @@ async def lily_build_real_or_imagined_question(
             candidate = await lily_search.lily_find_real_entity_image(entity)
             if candidate is None:
                 return None
-            url = await lily_images.lily_fetch_url_to_bucket(
-                supabase, candidate["image_url"], source="web"
+            # Content gate (OR amendment W1) — same rule as the
+            # real-entity builder: web-sourced bytes are approved
+            # image-vs-question BEFORE caching; the generated branch has
+            # its own moderation-visible pipeline.
+            fetched = await lily_images.lily_fetch_image_bytes(
+                candidate["image_url"]
+            )
+            if fetched is None:
+                return None
+            image_bytes, content_type = fetched
+            if approve is not None:
+                approved, gate_reason = await approve(
+                    image_bytes, content_type, entity
+                )
+                if not approved:
+                    await lily_images.lily_record_image_attempt(
+                        supabase, session_id=session_id,
+                        question_id=f"roi_{index:04d}", source="web",
+                        prompt=entity, status=lily_images.ATTEMPT_REJECTED,
+                        failure_reason=f"content gate: {gate_reason}"[:500],
+                    )
+                    return None
+            url = await lily_images.lily_upload_image_bytes(
+                supabase, image_bytes, source="web",
+                content_type=content_type,
             )
             if url is None:
                 await lily_images.lily_record_image_attempt(
