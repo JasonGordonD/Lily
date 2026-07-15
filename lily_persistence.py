@@ -25,6 +25,7 @@ from typing import Optional
 import httpx
 from postgrest.exceptions import APIError as PostgrestAPIError
 from supabase import Client as SupabaseClient, create_client as create_supabase_client
+from supabase.client import ClientOptions as SupabaseClientOptions
 
 import lily_bank
 import lily_config
@@ -45,7 +46,14 @@ def lily_create_supabase_client() -> Optional[SupabaseClient]:
                      bool(url), bool(key))
         return None
     try:
-        return create_supabase_client(url, key)
+        # HTTP timeouts at the client root (live 2026-07-15: one hanging
+        # postgrest call froze the heartbeat loop mid-session — checkpoints
+        # and the last_active_at beat stopped at 01:40 while the game ran
+        # on). The sync client ships with NO timeout by default.
+        return create_supabase_client(url, key, options=SupabaseClientOptions(
+            postgrest_client_timeout=10,
+            storage_client_timeout=20,
+        ))
     except Exception as e:
         logger.error("LILY_INIT | SUPABASE_CLIENT_CREATE_FAILED | error_class=%s error=%s",
                      type(e).__name__, e)
@@ -150,11 +158,16 @@ async def lily_checkpoint(
         }
         # to_thread: the postgrest client is synchronous — running it inline
         # blocks the event loop (and therefore the live audio pipeline) for a
-        # full cross-region HTTP round trip on every score change.
-        await asyncio.to_thread(
-            lambda: supabase.table("lily_sessions")
-            .upsert(payload, on_conflict="session_id")
-            .execute()
+        # full cross-region HTTP round trip on every score change. wait_for:
+        # belt on top of the client-level timeout — a hang here previously
+        # froze the heartbeat loop for the rest of the session.
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: supabase.table("lily_sessions")
+                .upsert(payload, on_conflict="session_id")
+                .execute()
+            ),
+            timeout=15.0,
         )
     except Exception as e:
         logger.error("lily_checkpoint error: %s", e)
@@ -175,14 +188,20 @@ async def lily_heartbeat(
         await asyncio.sleep(delay)
         if stop_event.is_set():
             break
-        extra = {}
-        if metadata_provider is not None:
-            try:
-                extra["metadata"] = metadata_provider()
-            except Exception as e:
-                logger.debug("heartbeat metadata_provider failed: %s", e)
-        await lily_checkpoint(supabase, scorekeeper, **extra)
-        logger.debug("Heartbeat checkpoint — phase=%s", scorekeeper.phase)
+        try:
+            extra = {}
+            if metadata_provider is not None:
+                try:
+                    extra["metadata"] = metadata_provider()
+                except Exception as e:
+                    logger.debug("heartbeat metadata_provider failed: %s", e)
+            await lily_checkpoint(supabase, scorekeeper, **extra)
+            logger.debug("Heartbeat checkpoint — phase=%s", scorekeeper.phase)
+        except Exception:
+            # The heartbeat must outlive any single bad beat — a crash here
+            # silently ends checkpoints AND the last_active_at freshness the
+            # frontend watchdog keys on.
+            logger.exception("LILY_HEARTBEAT | BEAT_FAILED — continuing")
 
 
 async def lily_session_end(
@@ -710,6 +729,24 @@ async def lily_enroll_voiceprints(
             logger.error(
                 "LILY_ENROLL | FAILED | trigger=%s reason=no_get_speaker_ids_api "
                 "(plugin drift vs livekit-plugins-speechmatics 1.6.4)", trigger
+            )
+            return False
+        # Live 2026-07-15 finding: the plugin's get_speaker_ids() returns
+        # empty for any stream whose websocket is already closed — at the
+        # session_close trigger that is ALWAYS the case, so 21 minutes of
+        # speech still enrolled nothing and the failure read as "not enough
+        # words". Detect the dead-stream case and name it, so mid-game
+        # triggers (first_bind / game_start / round_complete) are visibly
+        # the ones that must succeed.
+        streams = getattr(stt, "_streams", None)
+        if streams is not None and not any(
+            getattr(getattr(s, "_client", None), "_is_connected", False)
+            for s in streams
+        ):
+            logger.error(
+                "LILY_ENROLL | FAILED | trigger=%s reason=stt_stream_disconnected "
+                "(GET_SPEAKERS needs a live STT session — enrollment must fire "
+                "before teardown)", trigger,
             )
             return False
         # get_speaker_ids() is ASYNC at 1.6.4 and needs ~5 spoken words per

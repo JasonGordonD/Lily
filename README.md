@@ -97,6 +97,26 @@ with regression coverage in `tests/test_stall_recovery.py`:
   prefetch/adjudication crashes now log loudly instead of vanishing into
   their tasks.
 
+### Persistence + enrollment hardening (same live session, log sweep)
+
+- **Supabase client now has HTTP timeouts** (`postgrest_client_timeout=10`);
+  one hanging postgrest call froze the heartbeat loop at 01:40 — checkpoints
+  and the `last_active_at` beat stopped for the rest of the session while
+  the game ran on. Checkpoints also carry a 15s `wait_for` belt, and the
+  heartbeat loop survives any single bad beat
+  (`LILY_HEARTBEAT | BEAT_FAILED — continuing`).
+- **Voiceprint enrollment names the dead-stream case.** The plugin's
+  `get_speaker_ids()` returns empty for a disconnected STT stream — at the
+  `session_close` trigger that is always true, so 21 minutes of speech read
+  as "not enough words". The failure now logs
+  `reason=stt_stream_disconnected`; the mid-game triggers (first_bind /
+  game_start / group_id_upgrade) are the ones that must land.
+- **Known-noise log lines** (framework-internal, benign): "preemptive
+  generation enabled but chat context changed" (the state-block injection
+  invalidates the speculative reply by design) and
+  "on_playback_started called after start_fut is set" (double
+  playback-start notification in the transcript synchronizer).
+
 ## Loop engagement (2026-07-14 persistence-audit root-cause fix)
 
 The live audit found every session with `round=0` / `question_number=0`,
