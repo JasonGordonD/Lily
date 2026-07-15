@@ -11,7 +11,7 @@ Retained from the Lovebirds baseline:
   - empty-text guard
   - 5K sentence-boundary split
   - voice_settings: stability 0.4, similarity 0.9, style 0.0,
-    speaker_boost, speed 0.95 (principal adjustment 2026-07-15; Raven's
+    speaker_boost, speed 0.90 (principal adjustment 2026-07-15; Raven's
     baseline was 0.93)
 """
 
@@ -48,7 +48,7 @@ VOICE_SETTINGS = {
     "similarity_boost": 0.9,
     "style": 0.0,
     "use_speaker_boost": True,
-    "speed": 0.95,
+    "speed": 0.90,
 }
 
 
