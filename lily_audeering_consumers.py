@@ -481,12 +481,27 @@ class LilyAcousticState:
         # Optional veto callback, wired by the entrypoint to the game's
         # adult-mode exit path. Called OUTSIDE the lock.
         self.on_child_signal: Optional[Callable[[dict], None]] = None
+        # Optional breaker-open callback (WO-LILY-DESYNC-HONESTY-001
+        # Sub-agent A), wired by the entrypoint to the game's child-gate
+        # loss path: sensor down while adult mode is active -> exit adult
+        # mode, fail CLOSED. Called OUTSIDE the lock, on the CLOSED->OPEN
+        # transition only.
+        self.on_breaker_open: Optional[Callable[[str], None]] = None
 
     # -- pipeline side ------------------------------------------------------
 
-    def set_breaker_open(self, is_open: bool) -> None:
+    def set_breaker_open(self, is_open: bool, reason: str = "unspecified") -> None:
         with self._lock:
+            was_open = self._breaker_open
             self._breaker_open = bool(is_open)
+        if is_open and not was_open and self.on_breaker_open is not None:
+            try:
+                self.on_breaker_open(reason)
+            except Exception as exc:  # noqa: BLE001 — hook never breaks the pipeline
+                logger.error(
+                    "LILY_AUDEERING_BREAKER | on_breaker_open hook failed "
+                    "exc_type=%s exc=%s", type(exc).__name__, str(exc)[:200],
+                )
 
     @property
     def breaker_open(self) -> bool:

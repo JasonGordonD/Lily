@@ -874,6 +874,29 @@ Actions (veto-only, BOTH tiers):
   checks `acoustic.child_veto_active()` and refuses, telling Lily to keep
   the general deck with a light in-character deflection.
 
+**Safety gate — the sensor and the adult deck deploy as one unit
+(WO-LILY-DESYNC-HONESTY-001 Sub-agent A).** Sensor down means deck down,
+fail CLOSED. `lily_audeering_client.lily_child_gate_ready()` is the single
+readiness flag — acoustic pipeline configured AND started AND breaker
+CLOSED — and `lily_enter_adult_mode` reads that flag only:
+
+- **Gate unavailable** (missing `AUDEERING_API_KEY`, failed preflight, or
+  breaker OPEN) → every adult entry refuses
+  (`LILY_ADULT_GATE | ADULT_MODE_DECLINED | reason=child_gate_unavailable`),
+  with an honest in-character line ("the grown-up deck needs one of my
+  systems that isn't running tonight — general deck it is") and no
+  mechanism named to players. Table consensus and retries cannot override
+  it — consensus stays necessary, never sufficient.
+- **Mid-session breaker OPEN while adult mode is active** → automatic exit
+  through the SAME sticky-flag revert path as the spoken "back to normal"
+  (`LilyGame.on_child_gate_lost`, wired as the acoustic state's
+  `on_breaker_open` callback; fires on the CLOSED→OPEN transition only):
+  `sk.set_mode("general")` + attribute publish + deterministic revert
+  speech, general question next.
+- `AUDEERING_API_KEY` absence is now **safe rather than silent**: the
+  acoustic pipeline stays off AND the adult deck stays off. Operator item:
+  set the key to restore adult mode.
+
 Framing, stamped doc-verbatim at every emit site
 (`lily_audeering_consumers.PERCEIVED_FRAMING`): the module estimates "how
 the speaker sounds, not necessarily the actual attributes of the speaker";

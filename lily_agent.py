@@ -2615,6 +2615,44 @@ class LilyGame:
                 source="child_signal",
             )
 
+    def on_child_gate_lost(self, reason: str) -> None:
+        """SAFETY GATE (WO-LILY-DESYNC-HONESTY-001 Sub-agent A): the
+        acoustic circuit breaker OPENED mid-session, so the child-signal
+        sensor stopped watching the room. The sensor and the adult deck
+        deploy as one unit — sensor down means deck down, FAIL CLOSED.
+
+        Adult mode ACTIVE + breaker trips -> exit through the SAME
+        sticky-flag revert path as the spoken "back to normal" command and
+        the child-signal veto: sk.set_mode("general") + attribute publish
+        + deterministic revert flow. Honest, minimal, in-character line —
+        no mechanism named to players. Wired as the acoustic state's
+        on_breaker_open callback (fires on the CLOSED->OPEN transition
+        only); a no-op outside adult mode, so the startup breaker-open
+        (missing key before any adult play) stays silent here — entry is
+        already refused by the tool gate."""
+        if self.sk.mode != "adult":
+            return
+        logger.warning(
+            "LILY_ADULT_GATE | ADULT_MODE_EXIT | session=%s "
+            "reason=child_gate_lost breaker_reason=%s fail=closed",
+            self.sk.session_id, reason,
+        )
+        self.sk.set_mode("general")  # sticky flag flips instantly, in code
+        self.publish_attributes_nowait()
+        if self.session is not None:
+            self.gated_say(
+                None,
+                "mode_revert",
+                "Adult mode is now OFF — committed, in code. Shift back to "
+                "the regular deck with one honest, light, in-character "
+                "line — the shape of 'the grown-up deck needs one of my "
+                "systems and it just dropped out — general deck from "
+                "here.' Do NOT name or describe any system, audio, "
+                "detection, or safety mechanism, and never invent an "
+                "explanation. Ask a general-category question next.",
+                source="child_gate",
+            )
+
     def log_acoustic_trajectory(self) -> None:
         """One lily_acoustic_trajectories row per finalized user turn —
         fire-and-forget (to_thread inside the persistence helper)."""
@@ -2832,6 +2870,32 @@ class LilyAgent(Agent):
         """Switch the game to the adult deck. Call ONLY after the whole
         table has verbally agreed — you asked the room directly and got a
         yes from the table, not one enthusiast."""
+        # WO-LILY-DESYNC-HONESTY-001 Sub-agent A safety gate: the
+        # child-signal SENSOR and the adult deck deploy as ONE unit. The
+        # gate is a single readiness flag — acoustic pipeline configured
+        # AND breaker CLOSED. No sensor = no adult mode, FAIL CLOSED:
+        # a missing AUDEERING_API_KEY, a failed preflight, or a tripped
+        # breaker all refuse entry, and table consensus cannot override
+        # it (consensus is necessary, never sufficient).
+        if not lily_audeering_client.lily_child_gate_ready():
+            logger.warning(
+                "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
+                "reason=child_gate_unavailable | session=%s | fail=closed "
+                "(child-signal sensor down: pipeline missing or breaker "
+                "OPEN; sensor and adult deck deploy as one unit)",
+                self._game.sk.session_id,
+            )
+            return (
+                "Adult mode is NOT available tonight — one of the systems "
+                "the adult deck depends on is not running, so the general "
+                "deck is the only deck this session. Tell the table "
+                "honestly and lightly, in character — the shape of 'the "
+                "grown-up deck needs one of my systems that isn't running "
+                "tonight — general deck it is.' Do NOT name or describe "
+                "any system, audio, detection, or safety mechanism, and do "
+                "NOT retry this tool this session: table consensus cannot "
+                "override this."
+            )
         # WO-LILY-AUDEERING-001 Task 4 decline gate: the child-signal ladder
         # VETOES entry. The acoustic signal can EXIT or BLOCK adult mode,
         # NEVER authorize it — whole-room verbal consensus remains necessary
@@ -2852,8 +2916,9 @@ class LilyAgent(Agent):
                 "and do not retry this tool this round."
             )
         self._game.sk.set_mode("adult")  # sticky flag — reverts only via
-        # the deterministic "back to normal" path, a fresh consensus, or the
-        # child-signal ladder veto (on_child_signal — same sticky path).
+        # the deterministic "back to normal" path, a fresh consensus, the
+        # child-signal ladder veto (on_child_signal), or a mid-session
+        # breaker trip (on_child_gate_lost) — all the same sticky path.
         await self._game.publish_attributes()
         return "Adult mode is ON (sticky). The layer is active; same house rules."
 
@@ -3604,6 +3669,12 @@ async def entrypoint(ctx: JobContext) -> None:
     acoustic_state = lily_audeering_consumers.lily_reset_acoustic_state()
     game.acoustic = acoustic_state
     acoustic_state.on_child_signal = game.on_child_signal
+    # Safety gate (WO-LILY-DESYNC-HONESTY-001 Sub-agent A): a mid-session
+    # breaker OPEN while adult mode is active exits adult mode through the
+    # same sticky-flag revert path as "back to normal" — sensor down means
+    # deck down, fail closed. Wired BEFORE the pipeline is constructed so
+    # even a startup breaker-open lands on a live hook.
+    acoustic_state.on_breaker_open = game.on_child_gate_lost
 
     # Late-arrival upgrade hook: if the initial resolution fell through to a
     # weak id (room name / name-set hash) and a participant with

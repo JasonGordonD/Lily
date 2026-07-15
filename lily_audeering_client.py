@@ -493,6 +493,31 @@ class _BreakerState(enum.Enum):
     OPEN = "OPEN"
 
 
+# The session's active pipeline, registered at construction time by
+# lily_start_audeering_pipeline (registered even when the breaker opened at
+# construction, so the gate below tracks the REAL breaker state rather than
+# inferring it). WO-LILY-DESYNC-HONESTY-001 Sub-agent A.
+_ACTIVE_PIPELINE: "LilyAudeeringPipeline | None" = None
+
+
+def lily_child_gate_ready() -> bool:
+    """THE single readiness flag for the adult-mode safety gate
+    (WO-LILY-DESYNC-HONESTY-001 Sub-agent A): True only when the acoustic
+    pipeline is configured AND started AND the circuit breaker is CLOSED —
+    i.e. the child-signal sensor is actually watching the room.
+
+    The child-signal sensor and the adult deck deploy as ONE unit: no
+    pipeline (missing AUDEERING_API_KEY), a failed preflight, or a
+    mid-session breaker OPEN all read as not-ready, and adult mode FAILS
+    CLOSED. `lily_enter_adult_mode` reads this flag only."""
+    pipeline = _ACTIVE_PIPELINE
+    return (
+        pipeline is not None
+        and pipeline.started
+        and not pipeline.breaker_open
+    )
+
+
 def _mask_key(key: str) -> str:
     if not key or len(key) < 8:
         return "****"
@@ -559,7 +584,9 @@ class LilyAudeeringPipeline:
             return
         self._breaker = _BreakerState.OPEN
         try:
-            self._state.set_breaker_open(True)
+            # Reason rides along so the state's on_breaker_open hook (the
+            # adult-mode safety gate) can log WHY the sensor went down.
+            self._state.set_breaker_open(True, reason=reason)
         except Exception:
             pass
         if not self._open_logged:
@@ -731,9 +758,15 @@ async def lily_start_audeering_pipeline(
     state: "lily_audeering_consumers.LilyAcousticState | None" = None,
 ) -> LilyAudeeringPipeline | None:
     """Create and start the pipeline. Returns None when the key is missing
-    (breaker open, one structured log, session unaffected). Never raises."""
+    (breaker open, one structured log, session unaffected). Never raises.
+
+    The constructed pipeline is registered as the child-gate source even
+    when it fails to start — lily_child_gate_ready() reads the live breaker
+    state, and the adult deck fails CLOSED with the sensor down."""
+    global _ACTIVE_PIPELINE
     try:
         pipeline = LilyAudeeringPipeline(state)
+        _ACTIVE_PIPELINE = pipeline
         if pipeline.breaker_open:
             return None
         await pipeline.start()
