@@ -335,10 +335,27 @@ def test_build_real_entity_question_never_raises(monkeypatch):
 # Import tripwire (pure check; full inspection lives in test_web_guardrails)
 # ---------------------------------------------------------------------------
 
-def test_forbid_vocal_import_raises_for_vocal_frames():
+def test_forbid_vocal_import_raises_for_direct_vocal_import():
+    # A direct `import lily_search` in lily_agent (module body or lazy,
+    # in-function): the first real frame under the machinery is lily_agent.
     with pytest.raises(RuntimeError):
-        lily_search.lily_forbid_vocal_import(["tests.x", "lily_agent", "main"])
+        lily_search.lily_forbid_vocal_import(
+            ["lily_search", "importlib._bootstrap", "lily_agent", "main"]
+        )
 
 
-def test_forbid_vocal_import_allows_reasoning_frames():
-    lily_search.lily_forbid_vocal_import(["lily_reasoning", "lily_imagegen", "main"])
+def test_forbid_vocal_import_allows_the_reasoning_seam():
+    # The designed path — lily_agent -> lily_reasoning -> lily_search —
+    # is legal: the DIRECT importer is the reasoning module.
+    lily_search.lily_forbid_vocal_import([
+        "lily_search", "importlib._bootstrap", "importlib._bootstrap",
+        "lily_reasoning", "importlib._bootstrap", "lily_agent", "main",
+    ])
+    lily_search.lily_forbid_vocal_import(["lily_imagegen", "main"])
+
+
+def test_direct_importer_resolution():
+    assert lily_search.lily_direct_importer(
+        ["lily_search", "importlib._bootstrap", "lily_reasoning", "lily_agent"]
+    ) == "lily_reasoning"
+    assert lily_search.lily_direct_importer(["", "lily_search"]) == ""

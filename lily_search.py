@@ -46,17 +46,31 @@ logger = logging.getLogger("lily_search")
 FORBIDDEN_IMPORTERS = ("lily_agent",)
 
 
-def lily_forbid_vocal_import(stack_module_names) -> None:
-    """Raise if any frame on the importing stack belongs to the vocal node.
-    Pure (takes the module-name list) so the tripwire is unit-testable."""
+def lily_direct_importer(stack_module_names) -> str:
+    """The module DIRECTLY importing lily_search: the first stack frame
+    that is neither this module nor import machinery. Pure (takes the
+    module-name list) so the tripwire is unit-testable."""
     for name in stack_module_names:
-        if name in FORBIDDEN_IMPORTERS:
-            raise RuntimeError(
-                "LILY_SEARCH | GUARDRAIL | lily_search is reasoning-node-only "
-                f"and must never be imported from the vocal path ({name}). "
-                "Web results reach Lily only as bank rows or state-block "
-                "facts prepared by the reasoning node."
-            )
+        if not name or name == "lily_search" or "importlib" in name:
+            continue
+        return name
+    return ""
+
+
+def lily_forbid_vocal_import(stack_module_names) -> None:
+    """Raise if the DIRECT importer is the vocal node. The designed seam —
+    lily_agent -> lily_reasoning -> lily_search — is legal (the reasoning
+    module is the one place web results are turned into question payloads
+    and state-block facts); a direct `import lily_search` in lily_agent is
+    not, and neither is a lazy in-function import there."""
+    importer = lily_direct_importer(stack_module_names)
+    if importer in FORBIDDEN_IMPORTERS:
+        raise RuntimeError(
+            "LILY_SEARCH | GUARDRAIL | lily_search is reasoning-node-only "
+            f"and must never be imported from the vocal path ({importer}). "
+            "Web results reach Lily only as bank rows or state-block "
+            "facts prepared by the reasoning node."
+        )
 
 
 lily_forbid_vocal_import(
