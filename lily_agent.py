@@ -583,9 +583,11 @@ class LilyGame:
                 _task.cancel()
         self._spec_judge = {}
         self._set_ui_phase("question")
-        asyncio.ensure_future(
-            self.publish_metadata(self.armed_question.get("prompt", ""))
-        )
+        # Metadata publish moved to DELIVERY time (the q_{N}_delivery claim
+        # in tts_node, with a window-open fallback): publishing here clobbered
+        # the reveal metadata milliseconds after adjudication (no visible
+        # verdict) and put the next question on screen while Lily was still
+        # mid-celebration — screen truth must equal spoken truth.
         self.start_prefetch()  # N+2 begins while N+1 plays out
         return True
 
@@ -654,6 +656,14 @@ class LilyGame:
         self.sk.open_answer_window(duration=dur, reset_candidates=not steal)
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
+        # Fallback screen sync (LWW-idempotent with the delivery-claim
+        # publish): a paraphrased ask below the verbatim ratio never fires
+        # the claim, but the tiered window-open detector still caught it —
+        # the question must be on the glass once answers are live.
+        if not steal and self.armed_question is not None:
+            asyncio.ensure_future(
+                self.publish_metadata(self.armed_question.get("prompt", ""))
+            )
         self._start_bed()
         if self._window_timer and not self._window_timer.done():
             self._window_timer.cancel()
@@ -2249,6 +2259,12 @@ class LilyAgent(Agent):
                     logger.info(
                         "LILY_SAY | act=question_delivery | key=%s | "
                         "source=tts_node", key,
+                    )
+                    # Screen syncs to the spoken question at delivery, not
+                    # at arm (arm-time publish spoiled the reveal and led
+                    # the voice by a whole celebration beat).
+                    asyncio.ensure_future(
+                        game.publish_metadata(armed.get("prompt", ""))
                     )
                 else:
                     logger.warning(
