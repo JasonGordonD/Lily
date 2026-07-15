@@ -747,6 +747,18 @@ house rule (answers are said TO Lily) stays live and stated in the lobby.
 
 ### n-best adjudication (WO-ADDRESSEE-H1 Task 1)
 
+> **INCIDENT 2026-07-14 23:31 — injection DEFAULT IS NOW OFF.** Session
+> `lily-B0CB8B-13a65381`: the Speechmatics VOICE endpoint's schema
+> rejects the injected field at the protocol level ("Additional property
+> max_alternatives is not allowed" → websocket 1003 → AgentSession
+> unrecoverable close ~8s in — every new session died at startup). The
+> defensive fallback covered plugin-shape drift, not a server-side
+> schema rejection after the handshake, which no client-side guard can
+> intercept. `LILY_STT_MAX_ALTERNATIVES` now defaults to **1** (patch
+> disarmed, clean 1-best; the whole n-best pipeline no-ops on
+> single-hypothesis sets). Do not raise it until the injected config is
+> validated against the live voice-endpoint schema.
+
 Tier-2 used to judge the 1-best transcript; deliberation and STT mangling
 produce exactly the high-variance hypothesis sets where 1-best fails
 ("mad at gas car" / "madagascar"). Task 1 recovers the recognizer's
