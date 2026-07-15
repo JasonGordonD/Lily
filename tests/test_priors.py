@@ -382,6 +382,29 @@ def test_degenerate_zero_length_spans_never_flip(monkeypatch):
     assert sk.overlap_flag is False
 
 
+def test_missing_segment_end_uses_segment_clock_not_processing_now():
+    sk = make_sk()
+    sk.open_answer_window(now=100.0)
+    # Delayed arrivals: now is much later than segment timestamps. Without
+    # a segment_end_time, overlap math must stay on the segment clock.
+    sk.on_transcript_segment(
+        text="Madagascar",
+        speaker_label="S1",
+        is_final=True,
+        segment_start_time=101.0,
+        now=110.0,
+    )
+    r = sk.on_transcript_segment(
+        text="Mauritius",
+        speaker_label="S2",
+        is_final=True,
+        segment_start_time=102.0,
+        now=111.0,
+    )
+    assert r["prior_state"] == PRIOR_OPEN_WINDOW
+    assert sk.overlap_flag is False
+
+
 def test_overlap_outside_window_is_ignored():
     sk = make_sk()
     # No window open — overlapping table talk is game-inert.
@@ -464,6 +487,34 @@ def test_tier1_band_under_overlap_everything_below_accept():
     assert lily_tier1_band(0.5, thr, margin) == BAND_REJECT
 
 
+def test_addressee_confidence_adds_penalty_to_active_prior_threshold():
+    sk = make_sk()
+    sk.open_answer_window(now=100.0)
+    sk.on_transcript_segment(
+        text="Canberra",
+        speaker_label="S1",
+        is_final=True,
+        now=101.0,
+        segment_start_time=101.0,
+        addressee_confidence=0.2,
+    )
+    assert sk.tier1_threshold(now=101.0) > lily_config.tier1_threshold_open_window()
+
+
+def test_high_addressee_confidence_keeps_open_window_baseline():
+    sk = make_sk()
+    sk.open_answer_window(now=100.0)
+    sk.on_transcript_segment(
+        text="Canberra",
+        speaker_label="S1",
+        is_final=True,
+        now=101.0,
+        segment_start_time=101.0,
+        addressee_confidence=0.95,
+    )
+    assert sk.tier1_threshold(now=101.0) == lily_config.tier1_threshold_open_window()
+
+
 # ---------------------------------------------------------------------------
 # (5) Env knobs through lily_config — correct defaults, env-tunable.
 # ---------------------------------------------------------------------------
@@ -480,6 +531,8 @@ def test_threshold_env_defaults(monkeypatch):
         "LILY_OVERLAP_FUSION_DIARIZATION_WEIGHT",
         "LILY_OVERLAP_FUSION_MIN_CONFIDENCE",
         "LILY_OVERLAP_FUSION_NEUTRAL_CONFIDENCE",
+        "LILY_ADDRESSEE_ACOUSTIC_MAX_STALENESS_SECONDS",
+        "LILY_ADDRESSEE_ACOUSTIC_MAX_FUTURE_SECONDS",
     ):
         monkeypatch.delenv(var, raising=False)
     assert lily_config.tier1_threshold_open_window() == 0.84
@@ -492,6 +545,12 @@ def test_threshold_env_defaults(monkeypatch):
     assert lily_config.overlap_fusion_diarization_weight() == 0.75
     assert lily_config.overlap_fusion_min_confidence() == 0.42
     assert lily_config.overlap_fusion_neutral_confidence() == 0.5
+    assert lily_config.addressee_acoustic_max_staleness_seconds() == (
+        lily_config.audeering_window_seconds()
+        + lily_config.audeering_capture_interval_seconds()
+        + 1.5
+    )
+    assert lily_config.addressee_acoustic_max_future_seconds() == 0.75
     # Lowered / raised relative to the baseline, by construction.
     assert lily_config.tier1_threshold_open_window() < 0.88
     assert lily_config.tier1_threshold_overlap() > 1.0
@@ -505,6 +564,8 @@ def test_thresholds_read_from_env(monkeypatch):
     monkeypatch.setenv("LILY_OVERLAP_FUSION_DIARIZATION_WEIGHT", "0.6")
     monkeypatch.setenv("LILY_OVERLAP_FUSION_MIN_CONFIDENCE", "0.3")
     monkeypatch.setenv("LILY_OVERLAP_FUSION_NEUTRAL_CONFIDENCE", "0.55")
+    monkeypatch.setenv("LILY_ADDRESSEE_ACOUSTIC_MAX_STALENESS_SECONDS", "4.5")
+    monkeypatch.setenv("LILY_ADDRESSEE_ACOUSTIC_MAX_FUTURE_SECONDS", "0.2")
     assert lily_config.tier1_threshold_open_window() == 0.7
     assert lily_config.tier1_threshold_overlap() == 0.98
     assert lily_config.overlap_epsilon_seconds() == 0.5
@@ -512,6 +573,8 @@ def test_thresholds_read_from_env(monkeypatch):
     assert lily_config.overlap_fusion_diarization_weight() == 0.6
     assert lily_config.overlap_fusion_min_confidence() == 0.3
     assert lily_config.overlap_fusion_neutral_confidence() == 0.55
+    assert lily_config.addressee_acoustic_max_staleness_seconds() == 4.5
+    assert lily_config.addressee_acoustic_max_future_seconds() == 0.2
     # Scorekeeper picks the env value up live.
     sk = make_sk()
     sk.open_answer_window(now=100.0)

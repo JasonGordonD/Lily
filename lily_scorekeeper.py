@@ -534,6 +534,18 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _clamp_confidence(value) -> Optional[float]:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return round(v, 3)
+
+
 class LilyScorekeeper:
     """Pure local game state for one Lily session."""
 
@@ -597,6 +609,12 @@ class LilyScorekeeper:
         # speaker identity -> [(segment_start, segment_end), ...] recorded
         # inside the current window only; cleared at every window open.
         self._window_speaker_spans: dict[str, list[tuple[float, float]]] = {}
+        # Fused addressee-confidence values recorded during the active
+        # answer window (Speechmatics diarization + acoustic read). The
+        # scorekeeper's thresholding uses the window aggregate additively on
+        # top of PRIOR_* thresholds.
+        self._window_addressee_confidences: list[float] = []
+        self._last_addressee_confidence: float | None = None
 
         # Rolling tagged transcript buffer (last 30 lines)
         self.transcript_buffer: list[dict] = []
@@ -752,6 +770,8 @@ class LilyScorekeeper:
         # the deliberation prior is about what happens INSIDE this window).
         self.overlap_flag = False
         self._window_speaker_spans = {}
+        self._window_addressee_confidences = []
+        self._last_addressee_confidence = None
         logger.info(
             "LILY_STATE | ANSWER_WINDOW_OPEN | session=%s q=%d deadline_in=%.1fs",
             self.session_id, self.question_number,
@@ -807,10 +827,44 @@ class LilyScorekeeper:
         CAPTURED in, not the SCORING state the evaluation runs in."""
         return PRIOR_OVERLAP if self.overlap_flag else PRIOR_OPEN_WINDOW
 
-    def tier1_threshold(self, now: Optional[float] = None) -> float:
-        """The state-driven Tier-1 acceptance threshold (env-tunable via
-        lily_config; see lily_config.tier1_threshold_for_prior)."""
-        return lily_config.tier1_threshold_for_prior(self.prior_state(now=now))
+    def window_addressee_confidence(self) -> float | None:
+        """Mean fused addressee-confidence seen in the active window."""
+        if self._window_addressee_confidences:
+            values = self._window_addressee_confidences
+            return round(sum(values) / len(values), 3)
+        return self._last_addressee_confidence
+
+    def tier1_threshold_for_state(
+        self,
+        prior_state: str,
+        *,
+        addressee_confidence: Optional[float] = None,
+    ) -> float:
+        """Tier-1 threshold for a specific PRIOR_* state, plus the additive
+        addressee-confidence penalty."""
+        base = lily_config.tier1_threshold_for_prior(prior_state)
+        conf = (
+            addressee_confidence
+            if addressee_confidence is not None
+            else self.window_addressee_confidence()
+        )
+        return base + lily_config.tier1_addressee_penalty(conf)
+
+    def tier1_threshold(
+        self,
+        now: Optional[float] = None,
+        *,
+        addressee_confidence: Optional[float] = None,
+    ) -> float:
+        """The active Tier-1 acceptance threshold.
+
+        PRIOR_* drives the base threshold; fused addressee-confidence adds a
+        small penalty when confidence is low.
+        """
+        return self.tier1_threshold_for_state(
+            self.prior_state(now=now),
+            addressee_confidence=addressee_confidence,
+        )
 
     def _note_speaker_span(
         self, key: str, start: float, end: float
@@ -843,6 +897,15 @@ class LilyScorekeeper:
         if len(spans) > _MAX_SPANS_PER_SPEAKER:
             del spans[:-_MAX_SPANS_PER_SPEAKER]
 
+    def _note_addressee_confidence(self, confidence: Optional[float]) -> None:
+        conf = _clamp_confidence(confidence)
+        if conf is None:
+            return
+        self._last_addressee_confidence = conf
+        self._window_addressee_confidences.append(conf)
+        if len(self._window_addressee_confidences) > 120:
+            del self._window_addressee_confidences[:-120]
+
     # -- transcript ingestion ----------------------------------------------
 
     def on_transcript_segment(
@@ -860,6 +923,7 @@ class LilyScorekeeper:
         timing_drift_seconds: Optional[float] = None,
         now: Optional[float] = None,
         timestamp: Optional[str] = None,
+        addressee_confidence: Optional[float] = None,
     ) -> dict:
         """
         Process one transcript segment. Called on every STT event.
@@ -873,6 +937,7 @@ class LilyScorekeeper:
             "control_command": "skip" | "back_to_normal" | None,
             "candidate_recorded": bool,
             "unrostered": bool,
+            "addressee_confidence": float | None,
             "prior_state": PRIOR_* string (WO-ADDRESSEE-H1 Task 2),
             "overlap_flag": bool,
             "addressee_fused_confidence": float in [0,1],
@@ -881,6 +946,7 @@ class LilyScorekeeper:
         """
         t = now if now is not None else time.time()
         ts = timestamp or _now_iso()
+        segment_conf = _clamp_confidence(addressee_confidence)
         result = {
             "player": None,
             "attribution": None,
@@ -889,6 +955,7 @@ class LilyScorekeeper:
             "media_choice": None,
             "candidate_recorded": False,
             "unrostered": False,
+            "addressee_confidence": segment_conf,
             # Prior state (WO-ADDRESSEE-H1 Task 2) — additive keys, refined
             # below for finals after overlap detection runs.
             "prior_state": self.prior_state(now=t),
@@ -919,19 +986,45 @@ class LilyScorekeeper:
         if self.is_window_open(now=t):
             span_key = player or speaker_label
             if span_key:
+                seg_start = segment_start_time if segment_start_time is not None else t
+                seg_end = (
+                    segment_end_time
+                    if segment_end_time is not None
+                    else seg_start
+                )
                 self._note_speaker_span(
                     str(span_key),
-                    segment_start_time if segment_start_time is not None else t,
-                    segment_end_time if segment_end_time is not None else t,
+                    seg_start,
+                    seg_end,
                 )
         prior = self.prior_state(now=t)
         result["prior_state"] = prior
         result["overlap_flag"] = self.overlap_flag
+        # One canonical fused confidence feeds both threshold weighting and
+        # conservative overlap attribution. The agent may provide an
+        # alignment-checked fused value; otherwise derive it locally from
+        # the separate telemetry signals.
+        has_separate_signal = (
+            _coerce_confidence(diarization_confidence) is not None
+            or _coerce_confidence(acoustic_confidence) is not None
+        )
+        fused_conf = _clamp_confidence(segment_conf)
+        if fused_conf is None:
+            fused_conf = lily_overlap_fused_confidence(
+                diarization_confidence, acoustic_confidence
+            )
+            segment_conf = fused_conf if has_separate_signal else None
+        else:
+            segment_conf = fused_conf
+        result["addressee_confidence"] = segment_conf
+        result["addressee_fused_confidence"] = fused_conf
         # Every classification decision logs its active prior state.
         logger.info(
             "LILY_PRIOR | state=%s threshold=%.3f overlap=%s | session=%s "
             "q=%d speaker=%s",
-            prior, lily_config.tier1_threshold_for_prior(prior),
+            prior, self.tier1_threshold(
+                now=t, addressee_confidence=segment_conf
+            ),
             self.overlap_flag, self.session_id, self.question_number,
             player or speaker_label or "?",
         )
@@ -940,10 +1033,6 @@ class LilyScorekeeper:
         # active, fuse diarization confidence with room-level acoustic
         # confidence and conservatively demote low-confidence roster
         # attributions to open-floor utterances.
-        fused_conf = lily_overlap_fused_confidence(
-            diarization_confidence, acoustic_confidence
-        )
-        result["addressee_fused_confidence"] = fused_conf
         if (
             prior == PRIOR_OVERLAP
             and player
@@ -1065,6 +1154,16 @@ class LilyScorekeeper:
             if existing is None:
                 # First final claims the player's slot — its timestamp is
                 # their position in the answer order.
+                attempt_entry = {
+                    "text": clean,
+                    "segment_start_time": seg_start,
+                    "segment_end_time": seg_end,
+                    "timestamp": ts,
+                    "timestamp_source": timestamp_source,
+                    "timing_drift_seconds": timing_drift_seconds,
+                }
+                if segment_conf is not None:
+                    attempt_entry["addressee_confidence"] = segment_conf
                 self.answer_candidates[key] = {
                     "player": player,
                     "speaker_label": speaker_label,
@@ -1076,6 +1175,7 @@ class LilyScorekeeper:
                     "addressee_fused_confidence": result.get(
                         "addressee_fused_confidence"
                     ),
+                    "addressee_confidence": segment_conf,
                     "diarization_confidence": _coerce_confidence(
                         diarization_confidence
                     ),
@@ -1086,18 +1186,10 @@ class LilyScorekeeper:
                     # adjudication judges the whole set (self-correction,
                     # live 2026-07-15: "the spine… no, the femur" must be
                     # able to score on the femur).
-                    "attempts": [
-                        {
-                            "text": clean,
-                            "segment_start_time": seg_start,
-                            "segment_end_time": seg_end,
-                            "timestamp": ts,
-                            "timestamp_source": timestamp_source,
-                            "timing_drift_seconds": timing_drift_seconds,
-                        },
-                    ],
+                    "attempts": [attempt_entry],
                 }
                 result["candidate_recorded"] = True
+                self._note_addressee_confidence(segment_conf)
                 if player:
                     self.players[player]["answers_attempted"] += 1
                 logger.info(
@@ -1119,6 +1211,8 @@ class LilyScorekeeper:
                 existing["addressee_fused_confidence"] = result.get(
                     "addressee_fused_confidence"
                 )
+                if segment_conf is not None:
+                    existing["addressee_confidence"] = segment_conf
                 existing["diarization_confidence"] = _coerce_confidence(
                     diarization_confidence
                 )
@@ -1135,9 +1229,15 @@ class LilyScorekeeper:
                         "timestamp": ts,
                         "timestamp_source": timestamp_source,
                         "timing_drift_seconds": timing_drift_seconds,
+                        **(
+                            {"addressee_confidence": segment_conf}
+                            if segment_conf is not None
+                            else {}
+                        ),
                     }
                 )
                 result["candidate_recorded"] = True
+                self._note_addressee_confidence(segment_conf)
                 logger.info(
                     "LILY_STATE | ANSWER_REVISED | session=%s q=%d key=%s t=%.3f text=%r",
                     self.session_id, self.question_number, key, seg_start, clean[:80],
