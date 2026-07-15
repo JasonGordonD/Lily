@@ -1033,11 +1033,16 @@ class LilyGame:
         segment_ts: float,
         agent_action: str,
         system_directed: bool,
+        prior_state: str | None = None,
+        overlap_flag: bool | None = None,
     ) -> dict:
         """Build one lily_addressee_log row. fuzzy_matched_answer is the
         Tier-1 verdict against the LIVE question's acceptable_answers (null
         when no live question); seconds_into_window comes off the
-        scorekeeper's window opened_at."""
+        scorekeeper's window opened_at. prior_state / overlap_flag
+        (WO-ADDRESSEE-H1 Task 2, schema amendment 5a) are passed through
+        from the scorekeeper's per-segment result when available, else
+        recomputed from the live scorekeeper state at segment_ts."""
         question = self.sk.current_question or {}
         acceptable = question.get("acceptable_answers") or []
         fuzzy = None
@@ -1068,6 +1073,19 @@ class LilyGame:
             "fuzzy_matched_answer": fuzzy,
             "system_directed_hit": bool(system_directed),
             "agent_action": agent_action,
+            # WO-ADDRESSEE-H1 Task 2 (columns exist per schema amendment
+            # 5a): the prior state the utterance was classified under and
+            # whether crosstalk had flipped inside its window.
+            "prior_state": (
+                prior_state
+                if prior_state is not None
+                else self.sk.prior_state(now=segment_ts)
+            ),
+            "overlap_flag": (
+                bool(overlap_flag)
+                if overlap_flag is not None
+                else bool(self.sk.overlap_flag)
+            ),
             "label": None,
             "label_source": None,
             # Task 6 addressee synergy: the key is ALWAYS present — a dict
@@ -1113,6 +1131,8 @@ class LilyGame:
             segment_ts=segment_ts,
             agent_action=action,
             system_directed=result.get("system_directed", False),
+            prior_state=result.get("prior_state"),
+            overlap_flag=result.get("overlap_flag"),
         )
         task = asyncio.ensure_future(
             lily_persistence.lily_log_addressee(self.supabase, row)
@@ -1366,6 +1386,18 @@ class LilyGame:
             question = self.sk.current_question or {}
             acceptable = question.get("acceptable_answers") or []
             ordered = self.sk.ordered_candidates()
+            # State-prior threshold (WO-ADDRESSEE-H1 Task 2): OPEN_WINDOW
+            # lowers the bar; OVERLAP / HOST_SPEAKING raise it past
+            # auto-accept, so crosstalk candidates escalate instead of
+            # instantly scoring.
+            prior_now = self.sk.prior_state(now=ts)
+            tier1_threshold = lily_config.tier1_threshold_for_prior(prior_now)
+            logger.info(
+                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s | "
+                "session=%s q=%d source=instant_tier1",
+                prior_now, tier1_threshold, self.sk.overlap_flag,
+                self.sk.session_id, self.sk.question_number,
+            )
             if ordered and acceptable:
                 first = ordered[0]
                 if first.get("text") == text or len(ordered) == 1:
@@ -1373,7 +1405,7 @@ class LilyGame:
                     # four choices runs the MC matcher (letters, positions,
                     # option text); freeform runs acceptable_answers.
                     t1 = lily_evaluation.lily_tier1_evaluate_question(
-                        first["text"], question
+                        first["text"], question, threshold=tier1_threshold
                     )
                     if t1["verdict"] == "correct":
                         asyncio.ensure_future(self.adjudicate(steal_allowed=False))
@@ -1390,7 +1422,7 @@ class LilyGame:
                     if key in self._spec_judge or cand.get("text") != text:
                         continue
                     t1 = lily_evaluation.lily_tier1_evaluate_question(
-                        cand["text"], question
+                        cand["text"], question, threshold=tier1_threshold
                     )
                     if t1["verdict"] == "uncertain":
                         self._spec_judge[key] = asyncio.ensure_future(
@@ -1458,11 +1490,30 @@ class LilyGame:
         if self._adjudicating or self.armed_question is None:
             return
         self._adjudicating = True
+        # SCORING prior (WO-ADDRESSEE-H1 Task 2): mirror the in-flight flag
+        # onto the pure scorekeeper so segments arriving DURING adjudication
+        # classify under SCORING (backchannels expected, nothing scoreable).
+        self.sk.adjudicating = True
         try:
             if self._window_timer and not self._window_timer.done():
                 self._window_timer.cancel()
             self.sk.close_answer_window()
             self._stop_bed()
+
+            # Candidates are evaluated under the prior their window was
+            # CAPTURED in (OVERLAP if crosstalk flipped inside it, else
+            # OPEN_WINDOW) — never under the SCORING state this evaluation
+            # itself runs in. overlap_flag persists across the close above.
+            window_prior = self.sk.window_prior_state()
+            tier1_threshold = lily_config.tier1_threshold_for_prior(
+                window_prior
+            )
+            logger.info(
+                "LILY_PRIOR | state=%s threshold=%.3f overlap=%s | "
+                "session=%s q=%d source=adjudicate",
+                window_prior, tier1_threshold, self.sk.overlap_flag,
+                self.sk.session_id, self.sk.question_number,
+            )
 
             question = self.armed_question
             acceptable = question.get("acceptable_answers") or [
@@ -1486,7 +1537,7 @@ class LilyGame:
                 # DEFINITIVE "incorrect" (clean wrong pick — no Tier-2);
                 # only "uncertain" (mumbles) escalates to the judge.
                 t1 = lily_evaluation.lily_tier1_evaluate_question(
-                    cand["text"], question
+                    cand["text"], question, threshold=tier1_threshold
                 )
                 cand["_tier1"] = t1
                 if t1["verdict"] == "correct":
@@ -1613,6 +1664,7 @@ class LilyGame:
                 # Missed question opens a 5-second steal window.
                 self._stinger(correct=False)
                 self._adjudicating = False
+                self.sk.adjudicating = False
                 self.open_window(
                     duration=lily_config.steal_window_seconds(), steal=True
                 )
@@ -1696,6 +1748,7 @@ class LilyGame:
             )
         finally:
             self._adjudicating = False
+            self.sk.adjudicating = False
 
     def _reveal_instructions(
         self,
@@ -3649,6 +3702,13 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("agent_state_changed")
     def _on_agent_state(ev) -> None:
+        # HOST_SPEAKING prior (WO-ADDRESSEE-H1 Task 2): the framework's
+        # agent-state machine is the speech lifecycle at 1.6.4 — verified
+        # in agent_activity.py: `speaking` is entered when TTS playout
+        # actually starts (started_speaking_at) and left for
+        # listening/thinking when playout ends or is interrupted. The pure
+        # scorekeeper only holds the flag; this is the one wiring point.
+        scorekeeper.host_speaking = ev.new_state == "speaking"
         if ev.new_state == "speaking" and game._pending_reveal_event is not None:
             # Reveal packet keyed to TTS PLAYBACK start of the reveal turn
             # (visuals may lead audio; never keyed to LLM generation).

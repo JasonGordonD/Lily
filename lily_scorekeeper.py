@@ -18,6 +18,10 @@ Owns:
     period/fragment-proof, enforced deterministically at the
     transcript-event layer (the prompt is texture, not the mechanism)
   - the compact state block injected before each Lily turn
+  - the prior-state machine (WO-ADDRESSEE-H1 Task 2): OPEN_WINDOW /
+    OVERLAP / HOST_SPEAKING / SCORING / IDLE, with cross-speaker
+    timestamp-overlap detection inside the open window — drives the
+    Tier-1 acceptance threshold (env-tunable via lily_config)
 
 The scorekeeper owns ORDER; the LLM owns CORRECTNESS.
 """
@@ -28,11 +32,39 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import lily_config
+
 logger = logging.getLogger("lily_scorekeeper")
 
 TRANSCRIPT_BUFFER_SIZE = 30
 DEFAULT_ANSWER_WINDOW_SECONDS = 15.0
 FRAGMENT_JOIN_WINDOW_SECONDS = 2.0  # ASR fragment accumulation for commands
+
+# ---------------------------------------------------------------------------
+# Prior states (WO-LILY-ADDRESSEE-H1-001 Task 2) — scorekeeper-owned game
+# states driving the Tier-1 acceptance threshold. String values are also
+# the lily_addressee_log.prior_state column vocabulary and the keys of
+# lily_config.tier1_threshold_for_prior (spelled literally there because
+# this module imports lily_config, not the other way around).
+#
+# Precedence (most specific wins): SCORING > HOST_SPEAKING > OVERLAP >
+# OPEN_WINDOW > IDLE.
+# ---------------------------------------------------------------------------
+
+PRIOR_OPEN_WINDOW = "OPEN_WINDOW"    # window open, no crosstalk — lowered bar
+PRIOR_OVERLAP = "OVERLAP"            # >=2 overlapping speakers in-window
+PRIOR_HOST_SPEAKING = "HOST_SPEAKING"  # Lily on air — backchannels expected
+PRIOR_SCORING = "SCORING"            # adjudication in flight
+PRIOR_IDLE = "IDLE"                  # window closed, nothing special
+
+PRIOR_STATES = (
+    PRIOR_OPEN_WINDOW, PRIOR_OVERLAP, PRIOR_HOST_SPEAKING,
+    PRIOR_SCORING, PRIOR_IDLE,
+)
+
+# Per-speaker span-list cap inside one window (a 15–30s window can't need
+# more; keeps a pathologically chatty table bounded).
+_MAX_SPANS_PER_SPEAKER = 20
 
 # Round formats (multiple-choice WO): freeform is the classic open ask;
 # multiple_choice reads four options aloud. The default session includes
@@ -390,6 +422,21 @@ class LilyScorekeeper:
         # player_name (or "unrostered:<label>") -> candidate dict
         self.answer_candidates: dict[str, dict] = {}
 
+        # Prior-state inputs (WO-ADDRESSEE-H1 Task 2). host_speaking is SET
+        # by the agent layer on the framework's agent-state transitions
+        # (TTS playback start/end) — the scorekeeper stays pure, it only
+        # holds the flag. adjudicating mirrors LilyGame._adjudicating for
+        # the same reason. overlap_flag flips on diarization-timestamp
+        # overlap inside the open window (deliberation prior) and persists
+        # until the NEXT window opens, so adjudication of the just-closed
+        # window still sees it.
+        self.host_speaking: bool = False
+        self.adjudicating: bool = False
+        self.overlap_flag: bool = False
+        # speaker identity -> [(segment_start, segment_end), ...] recorded
+        # inside the current window only; cleared at every window open.
+        self._window_speaker_spans: dict[str, list[tuple[float, float]]] = {}
+
         # Rolling tagged transcript buffer (last 30 lines)
         self.transcript_buffer: list[dict] = []
 
@@ -540,6 +587,10 @@ class LilyScorekeeper:
         )
         if reset_candidates:
             self.answer_candidates = {}
+        # Fresh window, fresh crosstalk assessment (steal windows included:
+        # the deliberation prior is about what happens INSIDE this window).
+        self.overlap_flag = False
+        self._window_speaker_spans = {}
         logger.info(
             "LILY_STATE | ANSWER_WINDOW_OPEN | session=%s q=%d deadline_in=%.1fs",
             self.session_id, self.question_number,
@@ -572,6 +623,65 @@ class LilyScorekeeper:
             key=lambda c: c["segment_start_time"],
         )
 
+    # -- prior states (WO-ADDRESSEE-H1 Task 2) --------------------------------
+
+    def prior_state(self, now: Optional[float] = None) -> str:
+        """The active prior state, most specific first: SCORING
+        (adjudication in flight) > HOST_SPEAKING (Lily on air) > OVERLAP
+        (crosstalk detected inside the open window) > OPEN_WINDOW (window
+        open, floor clean) > IDLE (window closed)."""
+        if self.adjudicating:
+            return PRIOR_SCORING
+        if self.host_speaking:
+            return PRIOR_HOST_SPEAKING
+        if self.is_window_open(now=now):
+            return PRIOR_OVERLAP if self.overlap_flag else PRIOR_OPEN_WINDOW
+        return PRIOR_IDLE
+
+    def window_prior_state(self) -> str:
+        """The prior of the most recent answer window — OVERLAP if
+        crosstalk flipped inside it, else OPEN_WINDOW. Valid after the
+        window closes (overlap_flag persists until the next open), so
+        adjudication evaluates candidates under the state they were
+        CAPTURED in, not the SCORING state the evaluation runs in."""
+        return PRIOR_OVERLAP if self.overlap_flag else PRIOR_OPEN_WINDOW
+
+    def tier1_threshold(self, now: Optional[float] = None) -> float:
+        """The state-driven Tier-1 acceptance threshold (env-tunable via
+        lily_config; see lily_config.tier1_threshold_for_prior)."""
+        return lily_config.tier1_threshold_for_prior(self.prior_state(now=now))
+
+    def _note_speaker_span(
+        self, key: str, start: float, end: float
+    ) -> None:
+        """Overlap detection — pure timestamp arithmetic, zero models.
+        Record one speaker's segment span [start, end] inside the open
+        window and flip overlap_flag when it overlaps a DIFFERENT
+        speaker's recorded span by more than the epsilon
+        (LILY_OVERLAP_EPSILON_SECONDS — strict inequality, so degenerate
+        zero-length spans never flip it)."""
+        if end < start:
+            start, end = end, start
+        epsilon = lily_config.overlap_epsilon_seconds()
+        for other_key, spans in self._window_speaker_spans.items():
+            if other_key == key:
+                continue
+            for other_start, other_end in spans:
+                overlap_s = min(end, other_end) - max(start, other_start)
+                if overlap_s > epsilon:
+                    if not self.overlap_flag:
+                        logger.info(
+                            "LILY_PRIOR | OVERLAP_DETECTED | session=%s q=%d "
+                            "speakers=%s,%s overlap_s=%.3f epsilon=%.3f",
+                            self.session_id, self.question_number,
+                            other_key, key, overlap_s, epsilon,
+                        )
+                    self.overlap_flag = True
+        spans = self._window_speaker_spans.setdefault(key, [])
+        spans.append((start, end))
+        if len(spans) > _MAX_SPANS_PER_SPEAKER:
+            del spans[:-_MAX_SPANS_PER_SPEAKER]
+
     # -- transcript ingestion ----------------------------------------------
 
     def on_transcript_segment(
@@ -598,6 +708,8 @@ class LilyScorekeeper:
             "control_command": "skip" | "back_to_normal" | None,
             "candidate_recorded": bool,
             "unrostered": bool,
+            "prior_state": PRIOR_* string (WO-ADDRESSEE-H1 Task 2),
+            "overlap_flag": bool,
           }
         """
         t = now if now is not None else time.time()
@@ -610,6 +722,10 @@ class LilyScorekeeper:
             "media_choice": None,
             "candidate_recorded": False,
             "unrostered": False,
+            # Prior state (WO-ADDRESSEE-H1 Task 2) — additive keys, refined
+            # below for finals after overlap detection runs.
+            "prior_state": self.prior_state(now=t),
+            "overlap_flag": self.overlap_flag,
         }
 
         if not text or not text.strip():
@@ -625,6 +741,31 @@ class LilyScorekeeper:
         )
         result["player"] = player
         result["attribution"] = method
+
+        # Overlap detection (WO-ADDRESSEE-H1 Task 2): inside the open
+        # window, record this final's [segment_start, end≈now] span per
+        # speaker and flip OVERLAP on cross-speaker timestamp overlap.
+        # Runs BEFORE the prior is stamped so this very segment is
+        # classified under the state it just created.
+        if self.is_window_open(now=t):
+            span_key = player or speaker_label
+            if span_key:
+                self._note_speaker_span(
+                    str(span_key),
+                    segment_start_time if segment_start_time is not None else t,
+                    segment_end_time if segment_end_time is not None else t,
+                )
+        prior = self.prior_state(now=t)
+        result["prior_state"] = prior
+        result["overlap_flag"] = self.overlap_flag
+        # Every classification decision logs its active prior state.
+        logger.info(
+            "LILY_PRIOR | state=%s threshold=%.3f overlap=%s | session=%s "
+            "q=%d speaker=%s",
+            prior, lily_config.tier1_threshold_for_prior(prior),
+            self.overlap_flag, self.session_id, self.question_number,
+            player or speaker_label or "?",
+        )
 
         # System-directed classification — "Lily, are you there?" must not
         # count as an answer attempt during an open window.
