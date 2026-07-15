@@ -69,7 +69,14 @@ def test_plan_covers_every_table_with_correct_keys():
         assert op["optional"] is False
     # Session-keyed deletes (no group_id column on these tables) — deduped,
     # sorted session ids
-    for table in ("lily_addressee_log", "lily_acoustic_trajectories"):
+    for table in (
+        "lily_transcripts",
+        "lily_answers",
+        "lily_addressee_log",
+        "lily_acoustic_trajectories",
+        "lily_session_reports",
+        "lily_image_attempts",
+    ):
         op = by_table[table]
         assert op["action"] == "delete"
         assert op["column"] == "session_id"
@@ -93,10 +100,10 @@ def test_plan_covers_every_table_with_correct_keys():
     # Deletes run BEFORE the re-key (a timeout can never strand
     # identity-bearing rows behind a moved key).
     assert plan[-1]["table"] == "lily_sessions"
-    # lily_answers is RETAINED (no group_id column, migration 001) — it
-    # must never appear in the plan.
-    assert "lily_answers" not in by_table
-    assert "lily_answers" in lily_forget.RETAINED_SESSION_KEYED_TABLES
+    # Raw session content is deleted rather than merely detached from a
+    # group id.
+    assert by_table["lily_answers"]["action"] == "delete"
+    assert by_table["lily_transcripts"]["action"] == "delete"
 
 
 def test_plan_tolerates_empty_sessions():
@@ -226,8 +233,22 @@ def _seed(with_asked_history=False, with_prefs=True):
             {"session_id": "room-2", "turn_index": 1},
             {"session_id": "room-x", "turn_index": 1},
         ],
+        "lily_transcripts": [
+            {"session_id": "room-1", "text": "private one"},
+            {"session_id": "room-2", "text": "private two"},
+            {"session_id": "room-x", "text": "other group"},
+        ],
         "lily_answers": [
             {"session_id": "room-1", "verdict": "correct"},
+            {"session_id": "room-x", "verdict": "incorrect"},
+        ],
+        "lily_session_reports": [
+            {"session_id": "room-1", "transcript": [{"text": "private"}]},
+            {"session_id": "room-x", "transcript": [{"text": "other"}]},
+        ],
+        "lily_image_attempts": [
+            {"session_id": "room-2", "prompt": "private entity"},
+            {"session_id": "room-x", "prompt": "other entity"},
         ],
     }
     if with_asked_history:
@@ -261,8 +282,12 @@ def test_cascade_deletes_verifies_and_tombstones():
         "lily_memories": 1,
         "lily_group_facts": 1,
         "lily_group_prefs": 1,
+        "lily_transcripts": 2,
+        "lily_answers": 1,
         "lily_addressee_log": 2,
         "lily_acoustic_trajectories": 1,
+        "lily_session_reports": 1,
+        "lily_image_attempts": 1,
     }
     # lily_asked_history isn't applied yet -> skipped, never failed
     assert result["skipped"] == ["lily_asked_history"]
@@ -275,8 +300,9 @@ def test_cascade_deletes_verifies_and_tombstones():
     # Every touched table verified (count queries came back 0)
     assert set(result["verified"]) == {
         "lily_speaker_voiceprints", "lily_memories", "lily_group_facts",
-        "lily_group_prefs", "lily_addressee_log",
-        "lily_acoustic_trajectories", "lily_sessions",
+        "lily_group_prefs", "lily_transcripts", "lily_answers",
+        "lily_addressee_log", "lily_acoustic_trajectories",
+        "lily_session_reports", "lily_image_attempts", "lily_sessions",
     }
     # Other groups untouched
     assert db.tables["lily_speaker_voiceprints"] == [
@@ -289,8 +315,18 @@ def test_cascade_deletes_verifies_and_tombstones():
     ]
     assert db.tables["lily_memories"] == [{"group_id": "gB", "session_id": "room-x"}]
     assert [r["session_id"] for r in db.tables["lily_addressee_log"]] == ["room-x"]
-    # lily_answers RETAINED untouched (session-keyed, no group_id column)
-    assert db.tables["lily_answers"] == [{"session_id": "room-1", "verdict": "correct"}]
+    assert db.tables["lily_answers"] == [
+        {"session_id": "room-x", "verdict": "incorrect"}
+    ]
+    assert db.tables["lily_transcripts"] == [
+        {"session_id": "room-x", "text": "other group"}
+    ]
+    assert db.tables["lily_session_reports"] == [
+        {"session_id": "room-x", "transcript": [{"text": "other"}]}
+    ]
+    assert db.tables["lily_image_attempts"] == [
+        {"session_id": "room-x", "prompt": "other entity"}
+    ]
 
 
 def test_cascade_deletes_asked_history_when_present():
@@ -328,6 +364,20 @@ def test_cascade_includes_current_session_even_if_unlisted():
     assert result["deleted"]["lily_acoustic_trajectories"] == 1
 
 
+def test_cascade_retry_discovers_tombstoned_sessions():
+    db = _seed()
+    tomb = lily_tombstone_group_id("gA")
+    for row in db.tables["lily_sessions"]:
+        if row["group_id"] == "gA":
+            row["group_id"] = tomb
+
+    result = _run_cascade(db, group_id="gA", session_id="room-2")
+
+    assert result["ok"] is True
+    assert [r["session_id"] for r in db.tables["lily_transcripts"]] == ["room-x"]
+    assert [r["session_id"] for r in db.tables["lily_answers"]] == ["room-x"]
+
+
 def test_cascade_partial_failure_is_honest_and_names_tables():
     db = _seed()
 
@@ -343,7 +393,10 @@ def test_cascade_partial_failure_is_honest_and_names_tables():
     assert "lily_memories" in result["failed"]
     # Everything else still ran and verified
     assert "lily_speaker_voiceprints" in result["verified"]
-    assert "lily_sessions" in result["rekeyed"] or "lily_sessions" in result["failed"]
+    assert "lily_sessions" not in result["rekeyed"]
+    assert {
+        r["group_id"] for r in failing.tables["lily_sessions"]
+    } == {"gA", "gB"}
     # The message layer names succeeded AND failed tables, honestly
     msg = lily_forget_result_message(result)
     assert "PARTIAL" in msg

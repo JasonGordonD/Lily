@@ -60,6 +60,10 @@ def _make_game() -> LilyGame:
     game.supabase = None
     game._window_timer = None
     game._bed_handle = None
+    game._adjudicating = False
+    game._pending_reveal_event = None
+    game._armed_speech_misses = 0
+    game.ui_phase = "lobby"
     game._pending_unbound_award = None
     game.acoustic = lily_audeering_consumers.LilyAcousticState()
     game.prefs = {}
@@ -127,6 +131,41 @@ def test_swallowed_dispatch_releases_and_redelivers():
     assert released == ["q_4_reveal"]
     assert game.gated_say("q_4_reveal", "reveal", "the answer is...", "retry")
     assert game.session.instructions.count("the answer is...") == 2
+
+
+def test_suppressed_speech_cannot_confirm_or_open_question():
+    game = _make_game()
+    question = {
+        "prompt": "Which colorful sea lies between Europe and Asia?",
+        "canonical_answer": "Black Sea",
+        "acceptable_answers": ["black sea"],
+    }
+    game.armed_question = question
+    game.sk.start_question(question)
+    game.ui_phase = "question"
+    game.say_registry.claim("q_1_delivery", owner="speech-real")
+
+    game.on_agent_speech_finished(
+        question["prompt"],
+        speech_id="speech-duplicate",
+        suppressed=True,
+    )
+
+    assert game.say_registry.state("q_1_delivery") == lily_say_gate.CLAIM_PENDING
+    assert game.sk.answer_window_open is False
+
+
+def test_interrupted_speech_releases_only_its_claims():
+    game = _make_game()
+    game.say_registry.claim("session_greet", owner="speech-a")
+    game.say_registry.claim("q_1_delivery", owner="speech-b")
+
+    game.on_agent_speech_finished(
+        "", speech_id="speech-a", interrupted=True,
+    )
+
+    assert game.say_registry.state("session_greet") is None
+    assert game.say_registry.state("q_1_delivery") == lily_say_gate.CLAIM_PENDING
 
 
 # -- BUG-2: one authoritative question delivery -------------------------------------------
@@ -326,21 +365,48 @@ class _FakeQuery:
     def __init__(self, rows) -> None:
         self._rows = rows
         self.updates: list[tuple] = []
+        self._action = "select"
+        self._filters = []
+        self._limit = None
 
-    def select(self, *_a):
+    def select(self, *_a, **_k):
+        self._action = "select"
+        self._filters = []
+        self._limit = None
         return self
 
     def update(self, payload):
+        self._action = "update"
         self._pending_update = payload
         return self
 
     def eq(self, col, val):
-        self.updates.append((col, val, self._pending_update))
+        if self._action == "update":
+            self.updates.append((col, val, self._pending_update))
+        elif col == "status":
+            self._filters.append(
+                lambda row: (row.get("status") or "active") == val
+            )
+        elif col == "adult":
+            self._filters.append(lambda row: bool(row.get("adult")) == val)
+        else:
+            self._filters.append(lambda row: row.get(col) == val)
+        return self
+
+    def limit(self, value):
+        self._limit = value
         return self
 
     def execute(self):
+        rows = [
+            row for row in self._rows
+            if all(predicate(row) for predicate in self._filters)
+        ]
+        if self._limit is not None:
+            rows = rows[:self._limit]
+
         class _R:
-            data = self._rows
+            data = rows
         return _R()
 
 
@@ -361,11 +427,27 @@ def test_bank_fetcher_excludes_burned_rows():
         {"id": 3, "question": "active q", "canonical_answer": "z",
          "category": "academic", "difficulty_tier": 1, "status": "active"},
     ]
+    fake = _FakeSupabase(rows)
     q = asyncio.new_event_loop().run_until_complete(
-        lily_fetch_bank_question(_FakeSupabase(rows), "academic", 1, [])
+        lily_fetch_bank_question(fake, "academic", 1, [])
     )
     assert q is not None
     assert q["prompt"] == "active q"
+    assert fake.query._limit == 100
+
+
+def test_bank_fetcher_randomizes_bounded_candidates(monkeypatch):
+    rows = [
+        {"id": 1, "question": "first", "canonical_answer": "a",
+         "category": "academic", "difficulty_tier": 1, "status": "active"},
+        {"id": 2, "question": "second", "canonical_answer": "b",
+         "category": "academic", "difficulty_tier": 1, "status": "active"},
+    ]
+    monkeypatch.setattr("lily_persistence.random.choice", lambda values: values[-1])
+    q = asyncio.new_event_loop().run_until_complete(
+        lily_fetch_bank_question(_FakeSupabase(rows), "academic", 1, [])
+    )
+    assert q["prompt"] == "second"
 
 
 def test_bank_fetcher_treats_missing_status_as_active():

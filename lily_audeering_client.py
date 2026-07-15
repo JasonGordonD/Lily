@@ -461,10 +461,21 @@ async def _poll_once(client, upload_id: str, headers: dict[str, str]) -> dict[st
                     return parse_devaice_response(await resp.json(content_type=None))
                 if resp.status == 202:
                     logger.info(
-                        "LILY_AUDEERING | result pending upload_id=%s; dropping",
-                        upload_id,
+                        "LILY_AUDEERING | result pending upload_id=%s "
+                        "attempt=%d/%d",
+                        upload_id, attempt + 1, _RETRY_MAX_ATTEMPTS,
                     )
-                    return None
+                    if attempt + 1 >= _RETRY_MAX_ATTEMPTS:
+                        logger.warning(
+                            "LILY_AUDEERING | poll exhausted upload_id=%s",
+                            upload_id,
+                        )
+                        return None
+                    retry_after = _parse_retry_after(
+                        resp.headers.get("Retry-After")
+                    )
+                    await _sleep_for_retry(attempt, retry_after)
+                    continue
                 if resp.status == 429:
                     retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
                     if attempt + 1 >= _RETRY_MAX_ATTEMPTS:

@@ -711,5 +711,78 @@ class TestCircuitBreaker(_EnvCase):
         self.assertIsNone(client._parse_retry_after(None))
 
 
+class _PollResponse:
+    def __init__(self, status, payload=None, headers=None):
+        self.status = status
+        self.payload = payload or {}
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def json(self, content_type=None):
+        return self.payload
+
+
+class _PollClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def get(self, *_args, **_kwargs):
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+
+class TestAsyncResultPolling(unittest.IsolatedAsyncioTestCase):
+    async def test_pending_results_are_polled_until_ready(self):
+        fake = _PollClient([
+            _PollResponse(202),
+            _PollResponse(202),
+            _PollResponse(200, {"ready": True}),
+        ])
+        sleeps = []
+        original_sleep = client._sleep_for_retry
+        original_parse = client.parse_devaice_response
+
+        async def _no_sleep(attempt, retry_after):
+            sleeps.append((attempt, retry_after))
+
+        client._sleep_for_retry = _no_sleep
+        client.parse_devaice_response = lambda payload: payload
+        try:
+            result = await client._poll_once(fake, "upload-1", {})
+        finally:
+            client._sleep_for_retry = original_sleep
+            client.parse_devaice_response = original_parse
+
+        self.assertEqual(result, {"ready": True})
+        self.assertEqual(fake.calls, 3)
+        self.assertEqual(len(sleeps), 2)
+
+    async def test_repeated_pending_results_exhaust_bound(self):
+        fake = _PollClient([
+            _PollResponse(202)
+            for _ in range(client._RETRY_MAX_ATTEMPTS)
+        ])
+        original_sleep = client._sleep_for_retry
+
+        async def _no_sleep(*_args):
+            return None
+
+        client._sleep_for_retry = _no_sleep
+        try:
+            result = await client._poll_once(fake, "upload-2", {})
+        finally:
+            client._sleep_for_retry = original_sleep
+
+        self.assertIsNone(result)
+        self.assertEqual(fake.calls, client._RETRY_MAX_ATTEMPTS)
+
+
 if __name__ == "__main__":
     unittest.main()

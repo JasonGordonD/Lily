@@ -158,6 +158,57 @@ def _reveal_doc(game: LilyGame) -> dict:
     return json.loads(game.ctx.api.room.requests[-1].metadata)
 
 
+def test_skip_is_ignored_while_adjudication_is_in_flight():
+    game = _make_game()
+    _arm(game, QUESTION)
+    game._adjudicating = True
+
+    asyncio.run(game.skip_question("rpc"))
+
+    assert game.armed_question["id"] == QUESTION["id"]
+    assert game.sk.current_question["id"] == QUESTION["id"]
+
+
+def test_adjudication_is_ignored_while_skip_transition_is_in_flight():
+    game = _make_game()
+    _arm(game, QUESTION)
+    game._question_transitioning = True
+
+    asyncio.run(game.adjudicate())
+
+    assert game.armed_question["id"] == QUESTION["id"]
+    assert game.sk.current_question["id"] == QUESTION["id"]
+
+
+def test_reconnect_restores_question_without_incrementing():
+    game = _make_game()
+    game.game_started = False
+    game.sk.start_question(dict(QUESTION))
+    original_number = game.sk.question_number
+    game.armed_question = None
+
+    game.restore_reconnected_state()
+
+    assert game.game_started is True
+    assert game.sk.question_number == original_number
+    assert game.armed_question["id"] == QUESTION["id"]
+    assert game.ui_phase == "question"
+    assert "word for word" in game.rejoin_instructions()
+
+
+def test_reconnect_without_current_question_waits_for_supply():
+    game = _make_game()
+    game.game_started = False
+    game.sk.question_number = 4
+    game.sk.current_question = None
+
+    game.restore_reconnected_state()
+
+    assert game.game_started is True
+    assert game.sk.question_number == 4
+    assert game.armed_question is None
+
+
 # ─── 1. self-correction scores ───────────────────────────────────────────────
 
 def test_revision_scores_at_adjudication():

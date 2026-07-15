@@ -51,11 +51,13 @@ def lily_tombstone_group_id(group_id: str) -> str:
 #
 # Schemas verified against migrations/ (2026-07-15):
 #   001: lily_speaker_voiceprints(group_id), lily_group_facts(group_id),
-#        lily_sessions(session_id PK, group_id), lily_answers(session_id
-#        only — NO group_id column)
+#        lily_sessions(session_id PK, group_id), lily_answers and
+#        lily_transcripts (session_id only — NO group_id column)
 #   003: lily_memories(group_id)
 #   005: lily_addressee_log(session_id only — NO group_id column)
+#   006: lily_session_reports(session_id)
 #   008: lily_acoustic_trajectories(session_id only — NO group_id column)
+#   012: lily_image_attempts(session_id)
 #   013: lily_group_prefs(group_id PK) — a forgotten table's preferences
 #        are recognition data (group prefs WO interlock).
 #   lily_asked_history: lands with a future WO — optional, absent-table
@@ -73,8 +75,12 @@ HARD_DELETE_GROUP_TABLES = (
 # group's session ids (lily_sessions where group_id = X, plus the current
 # session id).
 SESSION_KEYED_DELETE_TABLES = (
+    "lily_transcripts",
+    "lily_answers",
     "lily_addressee_log",
     "lily_acoustic_trajectories",
+    "lily_session_reports",
+    "lily_image_attempts",
 )
 
 # HARD-DELETE if present — a missing table is skipped gracefully (via the
@@ -94,13 +100,6 @@ OPTIONAL_GROUP_TABLES = (
 # RETAINED but re-keyed to the tombstone: operational records survive
 # without linkable identity.
 REKEY_TABLE = "lily_sessions"
-
-# RETAINED untouched: lily_answers has NO group_id column (migration 001 —
-# keyed by session_id only), so it needs no re-key; once lily_sessions is
-# tombstoned the audit rows carry no linkable identity. lily_transcripts
-# is likewise session-keyed and covered by the same tombstone re-key.
-RETAINED_SESSION_KEYED_TABLES = ("lily_answers", "lily_transcripts")
-
 
 def lily_build_forget_plan(group_id: str, session_ids) -> list:
     """Ordered per-table operation plan for the forget cascade. Each op:
