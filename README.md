@@ -201,7 +201,11 @@ LLM-readable recovery path ("call lily_begin_round first"), never a
 silent no-op: `lily_award_bonus` and `lily_log_clarify`.
 `lily_bind_speaker`'s `player_bind` packet is a roster event, not a game
 outcome — binding is core lobby behavior and stays ungated, per the tool
-gating principle above (as does `lily_note_fact`, deliberately).
+gating principle above (as does `lily_note_fact`, deliberately, and the
+WO-LILY-FORGETME-001 pair `lily_explain_memory` / `lily_forget_group`:
+explaining memory and deleting it neither mutate game outcomes nor emit
+game events — `memory_forgotten` is a memory-transparency packet — and the
+deletion right must work from the lobby onward).
 
 Tests: `tests/test_say_gate.py` (registry + leak filter, pure) and
 `tests/test_say_gate_dispatch.py` (dispatch dedupe, BUG-2 contract,
@@ -269,6 +273,9 @@ lily_memory.py       persistent cross-session memory: session summaries, the
 lily_say_gate.py     outbound-speech gate: markdown/emoji strip ([tag]-preserving),
                      SpeechActRegistry (idempotent speech acts), state-block leak
                      filter + sentinel envelope (the designated choke point; stdlib-only)
+lily_forget.py       right-to-be-forgotten pure logic: tombstone, cascade plan,
+                     yes/no confirm parser, explain-memory + result shapes,
+                     disclosure cap (stdlib-only)
 lily_tts.py          ElevenLabs v3 wrapper (lbs_tts lift; byte-alignment carry, 5K split)
 lily_config.py       ALL env access lives here
 lily_audeering_client.py     devAIce Web API client + room-audio capture pipeline
@@ -289,10 +296,10 @@ migrations/008_lily_acoustic_trajectories.sql  per-turn acoustic snapshots + add
                                                acoustic_snapshot column
 migrations/009_lily_question_status.sql  lily_questions.status lifecycle column
                                          (burn protocol; shared with tier retirement)
-tests/               315 tests, run with `python -m pytest tests/` — no network; needs
+tests/               355 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
-                     test_say_gate_dispatch.py import livekit)
+                     test_say_gate_dispatch.py / test_forget_flow.py import livekit)
 ```
 
 ## Persistent memory (rematch)
@@ -423,6 +430,117 @@ Labels land three ways (`label_source`):
   `label=host_directed`; negative/thinking ("no", "just thinking",
   "talking to him") → `label=deliberation`; unparseable → `label=unknown`.
   The reply parser is pure and offline-tested (`lily_addressee.py`).
+
+## The right to be forgotten (WO-LILY-FORGETME-001)
+
+**Principle stamp: recognition data is held FOR the players, at their
+pleasure — the explanation is honest and plain when pressed; deletion is
+immediate, complete, verified, and costs only the recognition itself.**
+Known granularity limit: identity is group-keyed, so deletion is
+all-or-nothing per table of players — per-player deletion is v2. Lily
+remembers tables, not individuals.
+
+**Transparency (`lily_explain_memory`, read-only, ungated):** counts only,
+never raw contents — voiceprints (voices remembered), `lily_memories` rows
+(games, plus last `played_at`), facts kept, and how recognition happened
+THIS session (plain-language mapping of `resolve_group_identity`'s logged
+source chain: device metadata / voiceprint match / name-set match / fresh /
+post-forget anonymous — never naming vendors, tables, or mechanisms beyond
+device-and-voice). A cold group gets the honest "nothing yet" shape; a
+failed read gets an honest can't-check shape, never guessed counts. No new
+storage anywhere in the path.
+
+**The prompt contract** (`## MEMORY, HONESTY, AND FORGETTING` in
+`lily_system.txt`, say-gate compatible): the first "how did you know?" may
+keep the mystery ONCE; pressed, serious, or any discomfort → plain honesty
+in one beat ("your device and your voice — I'm built to remember my
+regulars") with the standing offer in the SAME breath ("say 'Lily, forget
+me' and it's all gone"). Never argue for being remembered, never re-raise
+after a no, never ask twice. Post-deletion: one warm line, zero mourning,
+the game continues.
+
+**The spoken flow is deterministic, not prompt-whim:** the scorekeeper
+command layer detects the request (`lily_detect_control_command` →
+`forget_me`) — paraphrase-tolerant ("forget me/us", "delete what you know
+about us", "erase my data", ...), negation-guarded ("don't forget us" never
+fires), fragment-proof (same 2s join as "back to normal"). Detection only
+ARMS a pending-confirm state and dispatches ONE plain confirmation naming
+the scope ("everything — voices, games, facts — gone for good, tonight's
+game keeps going"); the requester's next parseable yes/no is resolved in
+code (`lily_forget.lily_parse_forget_confirmation`, same pattern as the
+clarify resolution — ambiguity does nothing destructive). A yes runs the
+cascade; a no drops it for the night (only a fresh player-initiated request
+re-arms).
+
+**The cascade (`lily_forget_group(confirm)`, two-step, UNGATED):** per the
+tool-gating principle above, deletion neither mutates game outcomes nor
+emits game events, so the tool carries NO `game_started` gate — the right
+works from the lobby onward. `confirm=false` is refused (and arms the
+deterministic yes/no parse); `confirm=true` runs
+`lily_persistence.lily_forget_group_data`: HARD-DELETE of all group rows in
+`lily_speaker_voiceprints`, `lily_memories`, `lily_group_facts`, plus the
+session-keyed `lily_addressee_log` and `lily_acoustic_trajectories` via the
+group's session ids (from `lily_sessions`, plus the current session), plus
+`lily_asked_history` IF the table exists (it lands with a future WO —
+absent-table errors are skipped and logged, never failed). `lily_sessions`
+is RETAINED but re-keyed to the tombstone `forgotten_<sha1-12 of the old
+group id>` — operational records survive without linkable identity;
+`lily_answers` is retained untouched because it has no `group_id` column
+(migration 001 — session-keyed only). Deletion is awaited, count-VERIFIED
+per table (zero rows under the old key), capped at ~10s, and reports
+honestly on partial failure — the tool result names which tables succeeded
+and tells Lily what to say; a partial failure stays retryable against the
+ORIGINAL id. Logs `LILY_FORGET | group=... | tables=... | rows=...` with
+per-table counts.
+
+**In-session teardown:** STT `_stt_options.known_speakers` is cleared
+(1.6.4 limitation, documented in code: the Speechmatics plugin has no live
+de-enrollment API — `update_speakers()` only takes focus/ignore/focus_mode
+and `known_speakers` ride the one-shot StartRecognition message, so the
+clear guarantees any STT reconnect starts unenrolled while the open stream
+keeps its labels until it closes); the game re-binds to a FRESH ANONYMOUS
+group id (`anon_<random>`, source `post_forget_anonymous`) and the current
+game continues normally — writes continue under the fresh id, but the
+device metadata id is dead (the frontend cleared it) and
+`resolve_group_identity` / `upgrade_group_id` are suppressed for the rest
+of the session so the name-set hash can never silently rebuild the deleted
+group; `memory_block` is cleared and `_apply_context_blocks` now REMOVES
+the stale `[RETURNING TABLE]` item (symmetric with the adult layer), so
+injection stops immediately. The `memory_forgotten` packet (both
+discriminators spelled `memory_forgotten`) is emitted on `lily.events` only
+AFTER the cascade verified — the frontend clears the device localStorage
+group id and shows a transient confirmation.
+
+**Lobby disclosure (frequency-capped):** on a RETURNING-group greet only,
+one natural clause folds disclosure into the charm ("...I remember my
+regulars — any time you want me to forget, just say so") — on the first
+rematch, then every 5th stored game. The persistent counter is the
+`lily_memories` row count itself (`total_games`) — one row lands per played
+session, so it survives sessions at zero new columns: **no migration 010
+needed**. Cold groups disclose nothing; the clause is latched to at most
+once per session.
+
+**Dynamic session greeting (principal addendum, rides the same WO):** the
+landing is no longer a canned monologue — Lily introduces herself in ONE
+breath, asks whether it's the table's first time, and either walks
+first-timers through their options naturally or offers a returning table
+ONE refresher ("want a refresher on the options, or straight in?"). Both
+draw exclusively on the prompt's **`## WHAT THE TABLE CAN ASK FOR`** block —
+the single options inventory (freeform play, multiple-choice on request,
+the grown-up deck, skip, the steal window, the 50/50 lifeline, "back to
+normal", "Lily, forget me") that future WOs extend one line each (the
+queued multiple-choice round format and picture rounds land there). The
+walkthrough/refresher happens at most once per session; when the memory
+block already marks the table returning, the first-time question is
+skipped entirely and the Task-4 disclosure clause lands in the same
+welcome-back beat (one natural breath, `session_greet` say-gate key covers
+the whole landing).
+
+Tests: `tests/test_forget.py` (tombstone, cascade plan + executor against a
+fake postgrest client, yes/no parser, explain-memory shapes, disclosure
+cap), `tests/test_forget_flow.py` (spoken flow end-to-end, tool two-step,
+teardown, suppression, greeting interlock), and the `forget_me` detection
+suite in `tests/test_commands.py`.
 
 ## Acoustic pipeline (Audeering devAIce)
 

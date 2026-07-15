@@ -16,6 +16,7 @@ lbs_agent.py session-init hardening):
 """
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from postgrest.exceptions import APIError as PostgrestAPIError
 from supabase import Client as SupabaseClient, create_client as create_supabase_client
 
 import lily_config
+import lily_forget
 import lily_memory
 
 logger = logging.getLogger("lily_persistence")
@@ -692,6 +694,202 @@ async def lily_rekey_group(
                 "LILY_MEMORY | REKEY_FAILED | table=%s session=%s error=%s",
                 table, session_id, e,
             )
+
+
+# ---------------------------------------------------------------------------
+# The right to be forgotten (WO-LILY-FORGETME-001 Task 1)
+# ---------------------------------------------------------------------------
+
+# Hard cap on the whole cascade (deletes + verification counts). Deletion
+# is NOT fire-and-forget: it must complete and be VERIFIED before the tool
+# acknowledges — but it must also never hang a live table.
+FORGET_CASCADE_TIMEOUT_SECONDS = 10.0
+
+
+async def lily_forget_group_data(
+    supabase: SupabaseClient,
+    group_id: str,
+    session_id: str,
+) -> dict:
+    """The delete cascade for one group — awaited, verified, time-capped.
+
+    HARD-DELETES all group rows from lily_speaker_voiceprints,
+    lily_memories, lily_group_facts; deletes the session-keyed
+    lily_addressee_log and lily_acoustic_trajectories rows via the group's
+    session ids (lily_sessions where group_id = X, plus the CURRENT
+    session id); deletes lily_asked_history IF the table exists (it lands
+    with a future WO — absent-table errors are skipped, never failed);
+    then re-keys lily_sessions to the `forgotten_<sha1-12>` tombstone so
+    operational records survive without linkable identity. lily_answers
+    is RETAINED untouched — it has no group_id column (migration 001,
+    session_id-keyed only), so no re-key is needed; once lily_sessions is
+    tombstoned the audit rows carry no linkable identity.
+
+    Every table is VERIFIED with a count query after its delete/re-key
+    (remaining rows under the old key must be 0). All DB calls run via
+    asyncio.to_thread; the whole cascade is capped at
+    FORGET_CASCADE_TIMEOUT_SECONDS. Returns an honest result dict:
+    {ok, tombstone, deleted {table: n}, rekeyed {table: n},
+    skipped [table], failed {table: reason}, verified [table], timed_out}
+    — ok=True only when nothing failed and everything verified. The
+    caller's message layer names the succeeded/failed tables so Lily can
+    report honestly on partial failure."""
+    result: dict = {
+        "ok": False,
+        "tombstone": lily_forget.lily_tombstone_group_id(group_id),
+        "deleted": {},
+        "rekeyed": {},
+        "skipped": [],
+        "failed": {},
+        "verified": [],
+        "timed_out": False,
+    }
+    if supabase is None or not group_id:
+        result["failed"]["_client"] = "no supabase client or empty group id"
+        return result
+
+    def _session_ids():
+        res = (
+            supabase.table("lily_sessions")
+            .select("session_id")
+            .eq("group_id", group_id)
+            .execute()
+        )
+        return [r["session_id"] for r in (res.data or []) if r.get("session_id")]
+
+    def _apply(op):
+        table = supabase.table(op["table"])
+        if op["action"] == "rekey":
+            q = table.update({"group_id": op["new_group_id"]})
+        else:
+            q = table.delete()
+        if len(op["values"]) == 1:
+            q = q.eq(op["column"], op["values"][0])
+        else:
+            q = q.in_(op["column"], op["values"])
+        return q.execute()
+
+    def _count_remaining(op):
+        q = supabase.table(op["table"]).select(op["column"], count="exact")
+        if len(op["values"]) == 1:
+            q = q.eq(op["column"], op["values"][0])
+        else:
+            q = q.in_(op["column"], op["values"])
+        return q.limit(1).execute()
+
+    async def _run() -> None:
+        try:
+            ids = await asyncio.to_thread(_session_ids)
+        except Exception as e:
+            ids = []
+            result["failed"]["lily_sessions:session_scan"] = (
+                f"{type(e).__name__}: {str(e)[:200]}"
+            )
+        session_ids = sorted(set(ids) | {session_id})
+        for op in lily_forget.lily_build_forget_plan(group_id, session_ids):
+            if not op["values"]:
+                continue
+            try:
+                res = await asyncio.to_thread(_apply, op)
+                rows = len(getattr(res, "data", None) or [])
+                bucket = "rekeyed" if op["action"] == "rekey" else "deleted"
+                result[bucket][op["table"]] = rows
+            except Exception as e:
+                msg = str(e)
+                if op.get("optional") and lily_forget.lily_is_absent_table_error(msg):
+                    result["skipped"].append(op["table"])
+                    logger.info(
+                        "LILY_FORGET | SKIPPED | table=%s (not applied yet): %s",
+                        op["table"], msg[:120],
+                    )
+                    continue
+                result["failed"][op["table"]] = f"{type(e).__name__}: {msg[:200]}"
+                continue
+            # Verification — count queries, not trust: zero rows may remain
+            # under the old key.
+            try:
+                chk = await asyncio.to_thread(_count_remaining, op)
+                remaining = getattr(chk, "count", None)
+                if remaining == 0:
+                    result["verified"].append(op["table"])
+                else:
+                    result["failed"][op["table"]] = (
+                        f"verify: {remaining} row(s) still keyed to the old group"
+                    )
+            except Exception as e:
+                result["failed"][op["table"]] = (
+                    f"verify failed: {type(e).__name__}: {str(e)[:120]}"
+                )
+
+    try:
+        await asyncio.wait_for(_run(), timeout=FORGET_CASCADE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        result["timed_out"] = True
+        result["failed"]["_timeout"] = (
+            f"cascade exceeded {FORGET_CASCADE_TIMEOUT_SECONDS:.0f}s — tables "
+            "not listed as verified are unconfirmed"
+        )
+    result["ok"] = not result["failed"]
+    logger.info(
+        "LILY_FORGET | group=%s | session=%s | ok=%s | tombstone=%s | "
+        "tables=%s | rows=%s | skipped=%s | failed=%s",
+        group_id, session_id, result["ok"], result["tombstone"],
+        ",".join(result["verified"]) or "-",
+        json.dumps({**result["deleted"], **result["rekeyed"]}),
+        ",".join(result["skipped"]) or "-",
+        json.dumps(result["failed"]) if result["failed"] else "-",
+    )
+    return result
+
+
+async def lily_count_group_memory(
+    supabase: SupabaseClient,
+    group_id: str,
+) -> Optional[dict]:
+    """Read-only counts for the lily_explain_memory tool — counts only,
+    never raw contents, no new storage. Returns
+    {voiceprints, games, last_played_at, facts} for the group, or None on
+    any error (the tool's message layer reports the honest can't-check
+    shape rather than guessing)."""
+    if supabase is None or not group_id:
+        return None
+    try:
+        vp, mem, facts = await asyncio.gather(
+            asyncio.to_thread(
+                lambda: supabase.table("lily_speaker_voiceprints")
+                .select("group_id", count="exact")
+                .eq("group_id", group_id)
+                .limit(1)
+                .execute()
+            ),
+            asyncio.to_thread(
+                lambda: supabase.table("lily_memories")
+                .select("played_at", count="exact")
+                .eq("group_id", group_id)
+                .order("played_at", desc=True)
+                .limit(1)
+                .execute()
+            ),
+            asyncio.to_thread(
+                lambda: supabase.table("lily_group_facts")
+                .select("group_id", count="exact")
+                .eq("group_id", group_id)
+                .limit(1)
+                .execute()
+            ),
+        )
+        last_played = None
+        if mem.data:
+            last_played = (mem.data[0] or {}).get("played_at")
+        return {
+            "voiceprints": getattr(vp, "count", None) or 0,
+            "games": getattr(mem, "count", None) or 0,
+            "last_played_at": last_played,
+            "facts": getattr(facts, "count", None) or 0,
+        }
+    except Exception as e:
+        logger.error("lily_count_group_memory error: %s", e)
+        return None
 
 
 async def lily_load_voiceprints(
