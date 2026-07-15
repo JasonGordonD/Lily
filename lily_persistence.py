@@ -459,7 +459,7 @@ async def lily_fetch_bank_question(
         acceptable = row.get("acceptable_answers")
         if not isinstance(acceptable, list) or not acceptable:
             acceptable = [str(answer).lower()]
-        return {
+        out = {
             "id": f"kb_{row.get('id', 0)}",
             "category": row.get("category") or category,
             "difficulty_tier": row.get("difficulty_tier") or difficulty_tier,
@@ -468,6 +468,16 @@ async def lily_fetch_bank_question(
             "acceptable_answers": acceptable,
             "reveal_color": row.get("reveal_color") or "",
         }
+        # Bank image wiring (migration 012, sub-agent H): the stored image
+        # triplet rides along when the row carries it — CACHE-FIRST means a
+        # bank row with an image is never re-sourced. The agent layer strips
+        # it again in voice_only mode (pictures are a lobby choice).
+        if row.get("image_url"):
+            out["image_url"] = row["image_url"]
+            out["image_source"] = row.get("image_source") or "web"
+            if row.get("image_license_note"):
+                out["image_license_note"] = row["image_license_note"]
+        return out
     except Exception as e:
         logger.error("lily_fetch_bank_question error: %s", e)
         return None

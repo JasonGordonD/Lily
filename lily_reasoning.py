@@ -35,8 +35,29 @@ from google.genai import types as genai_types
 
 import lily_config
 import lily_evaluation
+# Web tools + image pipeline (WO-LILY-OMNIBUS-002): lily_search and
+# lily_imagegen are REASONING-NODE-ONLY — this module is their one legal
+# consumer seam. The vocal node (lily_agent) must never import them; web
+# results and images reach it only as finished question payloads, bank
+# rows, or state-block facts (guardrail: lily_search import tripwire +
+# tests/test_web_guardrails.py).
+import lily_imagegen
+import lily_search
 
 logger = logging.getLogger("lily_reasoning")
+
+# Reference picture round (sub-agent J) — re-exported so the agent layer
+# can gate WHICH rounds are picture rounds without importing the image
+# stack itself.
+REAL_OR_IMAGINED_ROUND = lily_imagegen.REAL_OR_IMAGINED_ROUND
+
+# Current-events categories get a fresh-facts brief from the web at
+# prefetch (Tavily; reasoning node only). Anything else generates from
+# model knowledge.
+_CURRENT_EVENTS_RE = re.compile(
+    r"\b(current events?|news|this (?:week|month|year)|headlines?)\b",
+    re.IGNORECASE,
+)
 
 REASONING_THINKING_LEVEL = "medium"  # spec §4.4: thinking_level, never thinking_budget
 JUDGE_THINKING_LEVEL = "low"
@@ -381,6 +402,21 @@ class LilyReasoning:
         )
         if multiple_choice:
             prompt += _MC_CHOICES_ADDENDUM
+        # Current-events sourcing at prefetch (WO-LILY-OMNIBUS-002 K):
+        # Tavily brief on the reasoning node only; failure or a missing
+        # key just means evergreen model knowledge (never blocks).
+        if _CURRENT_EVENTS_RE.search(category or "") and lily_config.tavily_api_key():
+            try:
+                brief = await lily_search.lily_current_events_brief(category)
+            except Exception as e:
+                logger.warning("LILY_REASONING | CURRENT_EVENTS_BRIEF failed: %s", e)
+                brief = None
+            if brief:
+                prompt += (
+                    "\n\nFRESH WEB FACTS (sourced by the reasoning node at "
+                    "prefetch — ground the question in one of these, and only "
+                    "in what they actually say):\n" + brief
+                )
         raw = await self._generate(
             self._model,
             prompt,
@@ -417,6 +453,27 @@ class LilyReasoning:
         prompt = _VERIFICATION_PROMPT.format(
             question_json=json.dumps(question, ensure_ascii=False)
         )
+        # Web-grounded verification (WO-LILY-OMNIBUS-002 K): one bounded
+        # Tavily fact block, reasoning node only, prefetch-time only.
+        # Failure or a missing key means model-knowledge verification —
+        # exactly the pre-WO behavior.
+        if lily_config.tavily_api_key():
+            try:
+                web_context = await lily_search.lily_web_verification_context(
+                    question.get("prompt", ""),
+                    str(question.get("canonical_answer", "")),
+                )
+            except Exception as e:
+                logger.warning(
+                    "LILY_REASONING | VERIFY_WEB_CONTEXT failed: %s", e
+                )
+                web_context = None
+            if web_context:
+                prompt += (
+                    "\n\nWEB CONTEXT (fetched by the reasoning node — use it "
+                    "to check the fact; distrust it if it conflicts with "
+                    "strong knowledge):\n" + web_context
+                )
         raw = await self._generate(
             self._model,
             prompt,
@@ -588,6 +645,54 @@ class LilyReasoning:
             scorekeeper.set_status_note(
                 "question machine failure: the next question did not arrive — "
                 "tell the table honestly and vamp; do not invent an explanation"
+            )
+            return None
+
+    # -- picture-question supply (WO-LILY-OMNIBUS-002 H/I/J) ------------------
+
+    async def prefetch_picture_question(
+        self,
+        supabase,
+        *,
+        kind: str,
+        question_index: int,
+        session_id: str,
+        mode: str = "general",
+    ) -> Optional[dict]:
+        """Picture-question supply at prefetch, reasoning-node-side by
+        design (web tools + image generation stay off the vocal path; the
+        agent layer only decides WHICH slots are picture slots and only in
+        media_mode='pictures').
+
+        kind: 'real_or_imagined' (reference round, sub-agent J — generated
+        plausible fake vs Exa-sourced real photo) or 'real_entity' ("name
+        this landmark", sub-agent I — web-sourced ONLY, never generated).
+
+        Returns the §4.2 question shape with image attached, or None on
+        ANY failure — the caller falls back to the standard text supply
+        (text-only fallback). Adult mode never gets web-sourced or
+        generated images (safe-for-table rule): returns None."""
+        if supabase is None or mode == "adult":
+            return None
+        try:
+            if kind == "real_or_imagined":
+                return await lily_imagegen.lily_build_real_or_imagined_question(
+                    supabase, index=question_index, session_id=session_id,
+                )
+            if kind == "real_entity":
+                return await lily_search.lily_build_real_entity_picture_question(
+                    supabase, index=question_index, session_id=session_id,
+                )
+            logger.warning(
+                "LILY_REASONING | PICTURE_PREFETCH | unknown kind=%r", kind
+            )
+            return None
+        except Exception as e:
+            # Builders are no-silent-crash themselves; this is the last-
+            # resort belt so picture supply can never break text supply.
+            logger.error(
+                "LILY_REASONING | PICTURE_PREFETCH_FAILED | kind=%s "
+                "error_class=%s error=%s", kind, type(e).__name__, e,
             )
             return None
 

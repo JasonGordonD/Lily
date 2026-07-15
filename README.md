@@ -315,7 +315,14 @@ lily_binding.py      lily_bind_speaker name extraction (2s fragment accumulation
 lily_addressee.py    addressee-label corpus (B1) pure logic: clarify-reply parser,
                      seconds-into-window, implicit label derivation (stdlib-only)
 lily_evaluation.py   Tier-1 matcher + Tier-2 judge contract
-lily_reasoning.py    background node: prefetch + verification + judge transport
+lily_reasoning.py    background node: prefetch + verification + judge transport +
+                     picture-question dispatch (the ONE legal web/image seam)
+lily_images.py       lily-images bucket storage ({source}/{sha1}.{ext}), cache-first
+                     bank helpers, visible lily_image_attempts rows
+lily_search.py       Exa + Tavily native lifts (httpx) — REASONING NODE ONLY (import
+                     tripwire); conservative real-entity image sourcing
+lily_imagegen.py     JRVS image-gen clone: aspect clamp, Gemini generation for
+                     invented content, 'real or imagined' reference round
 lily_persistence.py  Supabase: sessions, transcripts, answers audit, voiceprints, KB bank
 lily_memory.py       persistent cross-session memory: session summaries, the
                      [RETURNING TABLE] block, KB-bank adult-mode guard (stdlib-only)
@@ -353,9 +360,12 @@ migrations/009_lily_question_status.sql  lily_questions.status lifecycle column
 migrations/010_lily_asked_history.sql    per-group served-question ledger (no-repeat
                                          guard + tuning exposure floor)
 migrations/011_lily_category_candidates.sql  gated category proposals tally
+migrations/012_lily_question_images.sql  lily_questions image_url/image_source/
+                                         image_license_note + lily_image_attempts
+                                         (visible error rows)
 migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
                                          forget-cascade + re-key interlocked)
-tests/               467 tests, run with `python -m pytest tests/` — no network; needs
+tests/               551 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -849,12 +859,15 @@ speaker verification, Hume, any gender-conditional behavior.
 
 - **Participant attributes** (LWW, per question beat): `phase`
   (`lobby|question|answering|reveal|scores|final`), `round`, `question_number`,
-  `mode` (`general|adult`, sticky), `players` (JSON `[{name,score,streak,leader}]`),
+  `mode` (`general|adult`, sticky), `media_mode` (`voice_only|pictures`, sticky
+  lobby choice), `players` (JSON `[{name,score,streak,leader}]`),
   `answer_window` (JSON `{open,duration_ms,opened_at}`), `last_active_at`
   (epoch-seconds heartbeat).
-- **Room metadata**: `{question, reveal:{answer,winner,correct}, wager}` via
-  `ctx.api.room.update_room_metadata` (rtc has no room-metadata setter);
-  `wager` drives the frontend's final-round palette shift. Seam addition
+- **Room metadata**: `{question, reveal:{answer,winner,correct}, wager,
+  image_url}` via `ctx.api.room.update_room_metadata` (rtc has no
+  room-metadata setter); `wager` drives the frontend's final-round palette
+  shift; `image_url` (additive, optional — empty when not a picture question)
+  is published at delivery time alongside the question text. Seam addition
   (multiple-choice WO): when the armed question is multiple choice the
   document also carries `choices` (array of exactly 4 strings) and
   `eliminated` (array of 0-based indices into `choices` crossed out by a
@@ -871,6 +884,86 @@ speaker verification, Hume, any gender-conditional behavior.
 - **RPCs registered**: `lily_control.start`, `lily_control.skip` (identical to the
   spoken "skip": no commentary, no spotlight — the adult-mode consent affordance).
 
+## Picture rounds & web tools (WO-LILY-OMNIBUS-002 H/I/J/K)
+
+### Media mode — the lobby choice
+
+`media_mode` is a **sticky, deterministic flag** on the scorekeeper
+(`voice_only` default | `pictures`), offered once in the lobby and flipped in
+code by the spoken-choice detector (`lily_scorekeeper.lily_detect_media_choice`
+— same punctuation/fragment-proof command-layer pattern as "skip"/"back to
+normal"): "pictures on" / "picture rounds" / "use the screen" → `pictures`;
+"voice only" / "no pictures" / "pictures off" → `voice_only` (the OFF
+direction wins a collision). Published as the agent attribute `media_mode`.
+**Picture questions are excluded entirely in voice_only** — the supply path
+never calls a picture builder and strips any cached bank image before arming.
+
+### Image storage (cache-first)
+
+`lily_images.py` puts image bytes (or a fetched web image) into the public
+Supabase Storage bucket **`lily-images`** at the content-addressed path
+`{source}/{sha1}.{ext}` and returns the public URL. Uploads are idempotent —
+an already-exists conflict is a cache hit. Migration 012 adds
+`image_url` / `image_source` (`generated|web|none`) / `image_license_note` to
+`lily_questions`: **the bank row is the cache** — any image need checks the
+row's `image_url` BEFORE generating or fetching, and successful
+sourcing/generation writes back so the next session cache-hits. Picture
+questions carry `image_url` into the room-metadata payload at delivery time
+(screen truth = spoken truth; the frontend already renders it).
+
+### Real-image sourcing — Exa (real entities)
+
+`lily_search.py` is a NATIVE lift of the `prmpt_common` Exa/Tavily modules
+(do-not-import donor) on httpx. At prefetch, real-entity picture questions
+("name this landmark", curated subject list) source ONE candidate image via
+Exa under a **conservative, reject-on-doubt filter**: safelisted hosts only
+(wikipedia/wikimedia/britannica/nasa/si/nps/loc), https direct image, every
+significant entity token on the page, no bare-number entities. Provenance
+lands in `image_license_note` (`web image via Exa: page=... image=...`).
+Any failure is a **text-only fallback**; real entities are **NEVER
+generated** — a plausible-but-wrong landmark is a lie on the screen.
+
+### Image generation — JRVS clone (invented content only)
+
+`lily_imagegen.py` is a native lift of the maya_jrvs image stack onto Lily's
+Gemini infra (`LILY_IMAGEGEN_MODEL`, default `gemini-2.5-flash-image`):
+
+- **background-task pattern** — generation runs at prefetch time only, never
+  inside a live turn;
+- **aspect-ratio clamp** (fleet WO) — off-list ratios clamp to the
+  orientation-preserving nearest supported value before the wire (the donor
+  crash class: an off-list value 400'd AFTER a successful render and the
+  image vanished); garbage falls back to `auto`;
+- **no-silent-crash / visible error rows** — the rule originated in this
+  donor stack: EVERY generation/fetch attempt writes one
+  `lily_image_attempts` row (migration 012); rejection/error rows carry the
+  actual provider message in `failure_reason`.
+
+`image_source='generated'` only. **Reference round: "real or imagined"**
+(round 2 in pictures mode) — a generated plausible-fake photo alternates
+with an Exa-sourced real photo; the table guesses; adjudication accepts
+real/fake/imagined variants via the existing tier-1 matcher. Chosen over
+"emoji story" because the donor is a photorealistic single-image pipeline —
+exactly the plausible-fake generator the round needs — and it composes with
+the real-photo sourcing above. In pictures mode the first question of every
+other round is a real-entity picture slot; the wager round is always text.
+
+### HARD GUARDRAIL — no web tool on the vocal path, ever
+
+Exa and Tavily are bound to the **reasoning node ONLY** (question
+verification + current-events sourcing at prefetch; `verify_question` gets a
+bounded Tavily fact block, current-events categories get a fresh-facts
+brief). A web round-trip on the vocal path is a multi-second stall in live
+audio, and raw web text reaching the vocal LLM is an injection surface.
+**Web results reach Lily only as bank rows or state-block facts** prepared
+by the reasoning node. Enforced twice: an import tripwire in
+`lily_search.py` raises if the vocal node (`lily_agent`) ever directly
+imports it (the `lily_agent -> lily_reasoning -> lily_search` seam is the
+one legal path), and `tests/test_web_guardrails.py` inspects the vocal
+module for any web/image-stack reference. Missing `EXA_API_KEY` /
+`TAVILY_API_KEY` simply disables the tool — text-only behavior, never a
+boot failure.
+
 ## Environment
 
 `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` · `GOOGLE_API_KEY` ·
@@ -883,7 +976,10 @@ speaker verification, Hume, any gender-conditional behavior.
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
 `LILY_JOB_MEMORY_LIMIT_MB`, `LILY_REASONING_MAX_OUTPUT_TOKENS` (default 4096) /
 `LILY_JUDGE_MAX_OUTPUT_TOKENS` (default 1024) — dedicated reasoning/judge budgets
-(thinking tokens count toward `max_output_tokens` on Gemini 3.x) · acoustic
+(thinking tokens count toward `max_output_tokens` on Gemini 3.x) · web tools
+(reasoning node only): `EXA_API_KEY` / `TAVILY_API_KEY` (missing key = tool
+disabled, text-only behavior) · `LILY_IMAGEGEN_MODEL` (default
+`gemini-2.5-flash-image`, invented-content picture questions) · acoustic
 pipeline: `AUDEERING_API_KEY` plus the `AUDEERING_*` tunables listed in the
 acoustic-pipeline section (missing key = breaker open, session unaffected).
 No secrets in this repo — configure via the deployment
