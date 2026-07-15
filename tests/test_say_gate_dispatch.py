@@ -60,6 +60,10 @@ def _make_game() -> LilyGame:
     game.supabase = None
     game._window_timer = None
     game._bed_handle = None
+    game._adjudicating = False
+    game._pending_reveal_event = None
+    game._armed_speech_misses = 0
+    game.ui_phase = "lobby"
     game._pending_unbound_award = None
     game.acoustic = lily_audeering_consumers.LilyAcousticState()
     game.prefs = {}
@@ -127,6 +131,41 @@ def test_swallowed_dispatch_releases_and_redelivers():
     assert released == ["q_4_reveal"]
     assert game.gated_say("q_4_reveal", "reveal", "the answer is...", "retry")
     assert game.session.instructions.count("the answer is...") == 2
+
+
+def test_suppressed_speech_cannot_confirm_or_open_question():
+    game = _make_game()
+    question = {
+        "prompt": "Which colorful sea lies between Europe and Asia?",
+        "canonical_answer": "Black Sea",
+        "acceptable_answers": ["black sea"],
+    }
+    game.armed_question = question
+    game.sk.start_question(question)
+    game.ui_phase = "question"
+    game.say_registry.claim("q_1_delivery", owner="speech-real")
+
+    game.on_agent_speech_finished(
+        question["prompt"],
+        speech_id="speech-duplicate",
+        suppressed=True,
+    )
+
+    assert game.say_registry.state("q_1_delivery") == lily_say_gate.CLAIM_PENDING
+    assert game.sk.answer_window_open is False
+
+
+def test_interrupted_speech_releases_only_its_claims():
+    game = _make_game()
+    game.say_registry.claim("session_greet", owner="speech-a")
+    game.say_registry.claim("q_1_delivery", owner="speech-b")
+
+    game.on_agent_speech_finished(
+        "", speech_id="speech-a", interrupted=True,
+    )
+
+    assert game.say_registry.state("session_greet") is None
+    assert game.say_registry.state("q_1_delivery") == lily_say_gate.CLAIM_PENDING
 
 
 # -- BUG-2: one authoritative question delivery -------------------------------------------

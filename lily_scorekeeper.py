@@ -848,6 +848,7 @@ class LilyScorekeeper:
             self.is_window_open(now=t)
             and not is_sys
             and not command
+            and not result.get("media_choice")
         ):
             seg_start = (
                 segment_start_time if segment_start_time is not None else t

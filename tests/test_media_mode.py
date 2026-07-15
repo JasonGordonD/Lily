@@ -99,6 +99,23 @@ def test_transcript_segment_detects_media_choice():
     assert sk.media_mode == "voice_only"
 
 
+def test_media_choice_is_not_recorded_as_an_answer():
+    sk = LilyScorekeeper("test-room")
+    sk.bind_speaker("S1", "Sarah")
+    sk.start_question({
+        "prompt": "Which sea?",
+        "canonical_answer": "Bosporus",
+        "acceptable_answers": ["bosporus"],
+    })
+    sk.open_answer_window(duration=30.0, now=100.0)
+    result = sk.on_transcript_segment(
+        text="pictures on", speaker_label="S1", is_final=True, now=101.0,
+    )
+    assert result["media_choice"] == "pictures"
+    assert result["candidate_recorded"] is False
+    assert sk.answer_candidates == {}
+
+
 def test_transcript_segment_fragment_joined_choice():
     sk = LilyScorekeeper("test-room")
     sk.bind_speaker("S1", "Sarah")
@@ -281,3 +298,52 @@ def test_picture_builder_failure_falls_back_to_text(monkeypatch):
     q = game.next_question
     assert q["id"] == "q_0001"
     assert "image_url" not in q
+
+
+def test_real_picture_prefetch_accepts_supply_exclusions(monkeypatch):
+    reasoning = lily_reasoning.LilyReasoning.__new__(lily_reasoning.LilyReasoning)
+    reasoning.approve_entity_image = None
+    calls = []
+
+    async def _builder(supabase, **kwargs):
+        calls.append(kwargs)
+        return {"id": "pic_0003", "prompt": "Name it"}
+
+    monkeypatch.setattr(
+        lily_reasoning.lily_search,
+        "lily_build_real_entity_picture_question",
+        _builder,
+    )
+
+    result = asyncio.run(reasoning.prefetch_picture_question(
+        object(),
+        kind="real_entity",
+        question_index=3,
+        session_id="room",
+        exclude_ids={"kb_2"},
+        exclude_hashes={"hash"},
+    ))
+    assert result["id"] == "pic_0003"
+    assert calls
+
+
+def test_excluded_picture_id_skips_builder(monkeypatch):
+    reasoning = lily_reasoning.LilyReasoning.__new__(lily_reasoning.LilyReasoning)
+    reasoning.approve_entity_image = None
+
+    async def _unexpected(*args, **kwargs):
+        raise AssertionError("excluded picture should not invoke builder")
+
+    monkeypatch.setattr(
+        lily_reasoning.lily_search,
+        "lily_build_real_entity_picture_question",
+        _unexpected,
+    )
+    result = asyncio.run(reasoning.prefetch_picture_question(
+        object(),
+        kind="real_entity",
+        question_index=3,
+        session_id="room",
+        exclude_ids={"pic_0003"},
+    ))
+    assert result is None

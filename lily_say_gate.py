@@ -214,13 +214,16 @@ class SpeechActRegistry:
 
     def __init__(self) -> None:
         self._acts: dict[str, str] = {}  # key -> pending | confirmed
+        self._owners: dict[str, str] = {}  # pending key -> speech/reservation id
 
-    def claim(self, key: str) -> bool:
+    def claim(self, key: str, owner: str | None = None) -> bool:
         """Atomic check-and-set at dispatch time. True = caller may speak;
         False = the act was already claimed (duplicate — suppress)."""
         if key in self._acts:
             return False
         self._acts[key] = CLAIM_PENDING
+        if owner:
+            self._owners[key] = owner
         return True
 
     def state(self, key: str):
@@ -231,6 +234,40 @@ class SpeechActRegistry:
         """Playout completed — the act was genuinely spoken."""
         if key in self._acts:
             self._acts[key] = CLAIM_CONFIRMED
+            self._owners.pop(key, None)
+
+    def reassign_owner(self, old_owner: str, new_owner: str) -> list[str]:
+        """Move pending claims from a dispatch reservation to its concrete
+        SpeechHandle id. Returns the keys moved."""
+        moved = [
+            key for key, owner in self._owners.items()
+            if owner == old_owner and self._acts.get(key) == CLAIM_PENDING
+        ]
+        for key in moved:
+            self._owners[key] = new_owner
+        return moved
+
+    def confirm_owner(self, owner: str) -> list[str]:
+        """Confirm only pending claims performed by one speech handle."""
+        confirmed = [
+            key for key, claim_owner in self._owners.items()
+            if claim_owner == owner and self._acts.get(key) == CLAIM_PENDING
+        ]
+        for key in confirmed:
+            self._acts[key] = CLAIM_CONFIRMED
+            self._owners.pop(key, None)
+        return confirmed
+
+    def release_owner(self, owner: str) -> list[str]:
+        """Release only pending claims belonging to one failed speech."""
+        released = [
+            key for key, claim_owner in self._owners.items()
+            if claim_owner == owner and self._acts.get(key) == CLAIM_PENDING
+        ]
+        for key in released:
+            self._acts.pop(key, None)
+            self._owners.pop(key, None)
+        return released
 
     def confirm_pending(self) -> list[str]:
         """Confirm every pending claim (agent playout completed). Returns
@@ -238,6 +275,7 @@ class SpeechActRegistry:
         confirmed = [k for k, v in self._acts.items() if v == CLAIM_PENDING]
         for k in confirmed:
             self._acts[k] = CLAIM_CONFIRMED
+            self._owners.pop(k, None)
         return confirmed
 
     def release(self, key: str) -> bool:
@@ -246,6 +284,7 @@ class SpeechActRegistry:
         act stays done forever. True if released."""
         if self._acts.get(key) == CLAIM_PENDING:
             del self._acts[key]
+            self._owners.pop(key, None)
             return True
         return False
 
@@ -256,4 +295,5 @@ class SpeechActRegistry:
         released = [k for k, v in self._acts.items() if v == CLAIM_PENDING]
         for k in released:
             del self._acts[k]
+            self._owners.pop(k, None)
         return released
