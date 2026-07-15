@@ -131,6 +131,26 @@ def supabase_service_role_key() -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Web tools (WO-LILY-OMNIBUS-002 I/K) — REASONING NODE ONLY, see lily_search.py.
+# Missing keys disable the corresponding tool (text-only fallback); never
+# required at boot.
+# ---------------------------------------------------------------------------
+
+def exa_api_key() -> Optional[str]:
+    return _get("EXA_API_KEY")
+
+
+def tavily_api_key() -> Optional[str]:
+    return _get("TAVILY_API_KEY")
+
+
+def imagegen_model() -> str:
+    """Gemini image model for invented-content picture questions
+    (sub-agent J; image_source='generated' only, prefetch-time only)."""
+    return _get("LILY_IMAGEGEN_MODEL", "gemini-2.5-flash-image")
+
+
+# ---------------------------------------------------------------------------
 # Game tunables
 # ---------------------------------------------------------------------------
 
