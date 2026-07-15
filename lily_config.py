@@ -446,3 +446,12 @@ def audeering_child_halt_enabled() -> bool:
 def audeering_child_step_up_enabled() -> bool:
     """Borderline tier — also TRUE for Lily (veto-only, both tiers)."""
     return _get_bool("AUDEERING_CHILD_STEP_UP_ENABLED", True)
+
+
+def architect_mode() -> bool:
+    """Server-authenticated operator override for controlled testing.
+
+    This can only be enabled through deployment configuration; a player
+    saying "I'm the architect" never changes it.
+    """
+    return _get_bool("LILY_ARCHITECT_MODE", False)

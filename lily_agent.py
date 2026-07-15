@@ -3380,6 +3380,11 @@ class LilyGame:
             extra.extend(self.acoustic.state_block_lines())
         except Exception:
             pass  # acoustic read is enrichment; never breaks the state block
+        if lily_config.architect_mode():
+            extra.append(
+                "architect mode: server-authenticated override ACTIVE — "
+                "operator testing may bypass adult age/signal vetoes"
+            )
         if self.armed_question is not None and not self.sk.answer_window_open:
             # NEED-TO-KNOW (say-gate WO): the ambient context carries the
             # PROMPT TEXT (+category/format) only — never canonical_answer,
@@ -3515,6 +3520,13 @@ class LilyGame:
         """
         if self.sk.mode != "adult":
             return
+        if lily_config.architect_mode():
+            logger.warning(
+                "LILY_ADULT_GATE | ARCHITECT_OVERRIDE | session=%s "
+                "action=child_signal_ignored tier=%s",
+                self.sk.session_id, event.get("tier"),
+            )
+            return
         logger.warning(
             "LILY_AUDEERING_VETO | ADULT_MODE_EXIT | session=%s tier=%s %s",
             self.sk.session_id, event.get("tier"),
@@ -3540,47 +3552,19 @@ class LilyGame:
             )
 
     def on_child_gate_lost(self, reason: str) -> None:
-        """SAFETY GATE (WO-LILY-DESYNC-HONESTY-001 Sub-agent A): the
-        acoustic circuit breaker OPENED mid-session, so the child-signal
-        sensor stopped watching the room. The sensor and the adult deck
-        deploy as one unit — sensor down means deck down, FAIL CLOSED.
+        """Record loss of optional young-voice monitoring.
 
-        Adult mode ACTIVE + breaker trips -> exit through the SAME
-        sticky-flag revert path as the spoken "back to normal" command and
-        the child-signal veto: sk.set_mode("general") + attribute publish
-        + deterministic revert flow. Honest, minimal, in-character line —
-        no mechanism named to players. Wired as the acoustic state's
-        on_breaker_open callback (fires on the CLOSED->OPEN transition
-        only); a no-op outside adult mode, so the startup breaker-open
-        (missing key before any adult play) stays silent here — entry is
-        already refused by the tool gate."""
+        audEERING availability does not authorize adult mode and therefore
+        cannot revoke it. Only an actual young-voice signal may veto an
+        active adult session (unless architect mode is enabled).
+        """
         if self.sk.mode != "adult":
             return
         logger.warning(
-            "LILY_ADULT_GATE | ADULT_MODE_EXIT | session=%s "
-            "reason=child_gate_lost breaker_reason=%s fail=closed",
+            "LILY_ADULT_GATE | MONITORING_UNAVAILABLE | session=%s "
+            "breaker_reason=%s adult_mode_continues=true",
             self.sk.session_id, reason,
         )
-        self.sk.set_mode("general")  # sticky flag flips instantly, in code
-        # D: the auto-revert exits through the same flush as the spoken
-        # revert — the armed adult question is dead, general re-draws now.
-        self.flush_for_mode_switch(source="child_gate")
-        self.publish_attributes_nowait()
-        if self.session is not None:
-            self.gated_say(
-                None,
-                "mode_revert",
-                "Adult mode is now OFF — committed, in code. Shift back to "
-                "the regular deck with one honest, light, in-character "
-                "line — the shape of 'the grown-up deck needs one of my "
-                "systems and it just dropped out — general deck from "
-                "here.' Do NOT name or describe any system, audio, "
-                "detection, or safety mechanism, and never invent an "
-                "explanation. The general deck is re-drawing; ask the "
-                "next question when it lands in the state block — never "
-                "continue the adult one.",
-                source="child_gate",
-            )
 
     def log_acoustic_trajectory(self) -> None:
         """One lily_acoustic_trajectories row per finalized user turn —
@@ -3823,43 +3807,40 @@ class LilyAgent(Agent):
         )
 
     @function_tool()
-    async def lily_enter_adult_mode(self, context: RunContext) -> str:
-        """Switch the game to the adult deck. Call ONLY after the whole
-        table has verbally agreed — you asked the room directly and got a
-        yes from the table, not one enthusiast."""
-        # WO-LILY-DESYNC-HONESTY-001 Sub-agent A safety gate: the
-        # child-signal SENSOR and the adult deck deploy as ONE unit. The
-        # gate is a single readiness flag — acoustic pipeline configured
-        # AND breaker CLOSED. No sensor = no adult mode, FAIL CLOSED:
-        # a missing AUDEERING_API_KEY, a failed preflight, or a tripped
-        # breaker all refuse entry, and table consensus cannot override
-        # it (consensus is necessary, never sufficient).
-        if not lily_audeering_client.lily_child_gate_ready():
+    async def lily_enter_adult_mode(
+        self,
+        context: RunContext,
+        confirmed_all_18_plus: bool = False,
+    ) -> str:
+        """Switch to the adult deck after every player verbally confirms 18+.
+
+        Architect mode is a deployment-authenticated override. A player
+        merely claiming to be the architect does not enable it.
+        """
+        architect = lily_config.architect_mode()
+        if not architect and not confirmed_all_18_plus:
             logger.warning(
                 "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
-                "reason=child_gate_unavailable | session=%s | fail=closed "
-                "(child-signal sensor down: pipeline missing or breaker "
-                "OPEN; sensor and adult deck deploy as one unit)",
+                "reason=age_confirmation_required | session=%s",
                 self._game.sk.session_id,
             )
             return (
-                "Adult mode is NOT available tonight — one of the systems "
-                "the adult deck depends on is not running, so the general "
-                "deck is the only deck this session. Tell the table "
-                "honestly and lightly, in character — the shape of 'the "
-                "grown-up deck needs one of my systems that isn't running "
-                "tonight — general deck it is.' Do NOT name or describe "
-                "any system, audio, detection, or safety mechanism, and do "
-                "NOT retry this tool this session: table consensus cannot "
-                "override this."
+                "Adult mode is NOT enabled yet. Ask every player directly: "
+                "'Please confirm that you are 18 or older and want the "
+                "grown-up deck.' Call this tool again with "
+                "confirmed_all_18_plus=true only after every player gives "
+                "an explicit verbal yes."
             )
-        # WO-LILY-AUDEERING-001 Task 4 decline gate: the child-signal ladder
-        # VETOES entry. The acoustic signal can EXIT or BLOCK adult mode,
-        # NEVER authorize it — whole-room verbal consensus remains necessary
-        # and is no longer sufficient. The module estimates how the speaker
-        # sounds, not necessarily the actual attributes of the speaker
-        # (age MAE ±8.46yr).
-        if self._game.acoustic.child_veto_active():
+        if architect:
+            logger.warning(
+                "LILY_ADULT_GATE | ARCHITECT_OVERRIDE | session=%s "
+                "action=adult_mode_entry",
+                self._game.sk.session_id,
+            )
+        # audEERING is veto-only: readiness never authorizes or blocks entry.
+        # A young-voice signal already active may still block normal entry;
+        # architect mode deliberately overrides it for controlled testing.
+        if not architect and self._game.acoustic.child_veto_active():
             logger.warning(
                 "LILY_AUDEERING_VETO | ADULT_MODE_DECLINED | session=%s %s",
                 self._game.sk.session_id,
@@ -3882,7 +3863,9 @@ class LilyAgent(Agent):
         self._game.flush_for_mode_switch(source="enter_adult")
         await self._game.publish_attributes()
         return (
-            "Adult mode is ON (sticky). The layer is active; same house "
+            "Adult mode is ON (sticky"
+            + (", architect override" if architect else ", 18+ confirmed")
+            + "). The layer is active; same house "
             "rules. The deck switched with it: any earlier question is "
             "flushed, and the first adult question is being drawn now — "
             "it lands in the state block in a beat. NEVER serve a "

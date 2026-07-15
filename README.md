@@ -565,7 +565,7 @@ migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group pref
 migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt columns
 migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
-tests/               735 tests, run with `python -m pytest tests/` — no network; needs
+tests/               737 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -1275,37 +1275,31 @@ Actions (veto-only, BOTH tiers):
   in-character line WITHOUT explaining the mechanism, general category next.
 - **Adult mode REQUESTED while tripped** → the `lily_enter_adult_mode` tool
   checks `acoustic.child_veto_active()` and refuses, telling Lily to keep
-  the general deck with a light in-character deflection.
+  the general deck with a light in-character deflection, unless
+  server-authenticated architect mode is active.
 
-**Safety gate — the sensor and the adult deck deploy as one unit
-(WO-LILY-DESYNC-HONESTY-001 Sub-agent A).** Sensor down means deck down,
-fail CLOSED. `lily_audeering_client.lily_child_gate_ready()` is the single
-readiness flag — acoustic pipeline configured AND started AND breaker
-CLOSED — and `lily_enter_adult_mode` reads that flag only:
+**Adult entry policy:** audEERING is optional veto telemetry, never an
+authorization service. `lily_enter_adult_mode` requires Lily to ask every
+player to explicitly confirm aloud that they are 18 or older and want the
+grown-up deck, then call with `confirmed_all_18_plus=true`.
 
-- **Gate unavailable** (missing `AUDEERING_API_KEY`, failed preflight, or
-  breaker OPEN) → every adult entry refuses
-  (`LILY_ADULT_GATE | ADULT_MODE_DECLINED | reason=child_gate_unavailable`),
-  with an honest in-character line ("the grown-up deck needs one of my
-  systems that isn't running tonight — general deck it is") and no
-  mechanism named to players. Table consensus and retries cannot override
-  it — consensus stays necessary, never sufficient.
-- **Mid-session breaker OPEN while adult mode is active** → automatic exit
-  through the SAME sticky-flag revert path as the spoken "back to normal"
-  (`LilyGame.on_child_gate_lost`, wired as the acoustic state's
-  `on_breaker_open` callback; fires on the CLOSED→OPEN transition only):
-  `sk.set_mode("general")` + attribute publish + deterministic revert
-  speech, general question next.
-- `AUDEERING_API_KEY` absence is now **safe rather than silent**: the
-  acoustic pipeline stays off AND the adult deck stays off. Operator item:
-  set the key to restore adult mode.
+- Missing `AUDEERING_API_KEY`, failed preflight, quota exhaustion, or a
+  breaker opening never blocks entry and never exits an active adult game.
+  Monitoring loss logs
+  `LILY_ADULT_GATE | MONITORING_UNAVAILABLE | adult_mode_continues=true`.
+- An actual sustained young-voice signal may still block entry or exit an
+  active adult game through `LilyGame.on_child_signal`.
+- `LILY_ARCHITECT_MODE=1` is a deployment-authenticated testing override:
+  it bypasses verbal confirmation and young-voice vetoes. Merely saying
+  "I'm the architect" never activates it. Every use logs
+  `LILY_ADULT_GATE | ARCHITECT_OVERRIDE`.
 
 Framing, stamped doc-verbatim at every emit site
 (`lily_audeering_consumers.PERCEIVED_FRAMING`): the module estimates "how
 the speaker sounds, not necessarily the actual attributes of the speaker";
 age MAE is ±8.46yr — the signal can EXIT or BLOCK adult mode, NEVER
-authorize it; whole-room verbal consensus remains necessary and is no
-longer sufficient. Age/gender are otherwise telemetry-only, stamped
+authorize it. Explicit whole-table 18+ verbal confirmation authorizes entry.
+Age/gender are otherwise telemetry-only, stamped
 `PERCEIVED_NOT_VERIFIED`, never spoken, never in the prompt.
 
 **Persistence (migration 008):** one `lily_acoustic_trajectories` row per
@@ -1326,7 +1320,8 @@ at 5), `AUDEERING_CAPTURE_INTERVAL_SECONDS` (5),
 `AUDEERING_CHILD_HALT_THRESHOLD_HIGH` (0.85),
 `AUDEERING_CHILD_HALT_THRESHOLD_BORDERLINE` (0.5),
 `AUDEERING_CHILD_HALT_SUSTAINED_N` (2), `AUDEERING_CHILD_HALT_ENABLED`
-(true), `AUDEERING_CHILD_STEP_UP_ENABLED` (true).
+(true), `AUDEERING_CHILD_STEP_UP_ENABLED` (true). Testing override:
+`LILY_ARCHITECT_MODE` (default false; server/deployment configuration only).
 
 Out of scope (deliberate): per-speaker AVD attribution, the `asr` module,
 speaker verification, Hume, any gender-conditional behavior.
@@ -1457,6 +1452,7 @@ the `LILY_TIER1_THRESHOLD_*` / `LILY_OVERLAP_EPSILON_SECONDS` /
 thresholds section),
 `LILY_AUTO_START_MIN_PLAYERS` / `LILY_AUTO_START_LOBBY_GRACE_SECONDS`
 (lobby auto-start safety net), `LILY_GROUP_ID` (group-identity override),
+`LILY_ARCHITECT_MODE` (server-authenticated adult-mode testing override),
 `LILY_GREETING_MEMORY_BUDGET_SECONDS` (default 1.5) /
 `LILY_MEMORY_MIN_QUESTIONS` (default 3) — memory-at-the-door gates,
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
