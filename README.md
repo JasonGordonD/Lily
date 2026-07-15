@@ -264,9 +264,38 @@ sentinel envelope (`<lily_state>…</lily_state>`). `tts_node` runs
 `lily_filter_leaks` before the hygiene strip: whole envelopes, envelope
 fragments (chunk-boundary partials like `<lily_state`), and any line
 carrying a bracketed metadata marker (`[GAME STATE]`, `[room read:`,
-`[env:`, `[RETURNING TABLE]`) are deterministically removed and logged as
-`LILY_SAY_SUPPRESSED | reason=leak`. Ordinary `[bracket]` audio tags and
-clean text pass untouched.
+`[env:`, `[RETURNING TABLE]`, `[state note:`) are deterministically
+removed and logged as `LILY_SAY_SUPPRESSED | reason=leak`. Ordinary
+`[bracket]` audio tags and clean text pass untouched. A leak whose ONLY
+marker is `[state note:` (the honesty assist below — committed scores,
+never answer material) is stripped but does NOT trigger the burn
+protocol.
+
+### The honesty rule (WO-LILY-DESYNC-HONESTY-001 C)
+
+When state and experience visibly disagree — a lagging board, a
+repeated-feeling question, a score a player disputes — Lily says the
+honest minimal thing ("you're right — let me re-sync, one sec") and
+moves on. She may acknowledge a hiccup; she may never explain one with
+fiction (live evidence, twice: "the digital board takes a second to
+refresh once I submit to the database", "my system had to do a little
+reboot" — both invented). The prompt contract is the `WHEN THE ROOM SEES
+A GLITCH` block (positive framing, zero scalars — same lint discipline
+as the room-read rubric); it also forbids confirming or denying what's
+on a screen she cannot see (the 23:04 "Romney misspelling" class).
+
+Paired deterministic assist: when a player's utterance makes a checkable
+claim about their published score
+(`lily_scorekeeper.lily_detect_state_contradiction` — conservative:
+score/board anchor word plus a concrete value claim or a stuck/desync
+phrase, resolved rostered player required), the agent layer injects one
+grounded `[state note: …]` line into the next turn's state block
+(`LILY_HONESTY | STATE_NOTE` log), built from the score the scorekeeper
+actually committed: "player is correct — …" when the claim matches
+committed truth, the committed number with an explicit
+never-validate-uncommitted-numbers instruction when it doesn't. The note
+is one-shot (consumed when her acknowledging turn finishes playing) and
+is context only — the leak filter above keeps it off the air.
 
 ### Need-to-know ambient context
 

@@ -75,7 +75,7 @@ from lily_binding import (
     lily_is_valid_name,
 )
 from lily_reasoning import LilyReasoning
-from lily_scorekeeper import LilyScorekeeper
+from lily_scorekeeper import LilyScorekeeper, lily_detect_state_contradiction
 from lily_tts import LilyTTS, lily_prewarm_tts_connection
 
 logger = logging.getLogger("lily_agent")
@@ -253,6 +253,12 @@ class LilyGame:
         # code-dispatched to perform — that turn claims q_{N}_delivery at
         # dispatch regardless of phrasing. None = no delivery in flight.
         self._pending_delivery_qnum: int | None = None
+        # Honesty assist (desync WO Sub-agent C): one grounded
+        # `[state note: …]` line, set when a player's utterance makes a
+        # checkable claim about published state, rendered into the state
+        # block for her next turn, cleared when that turn finishes playing.
+        # The leak filter keeps the note itself off the air.
+        self._state_note: str | None = None
         self._group_facts_written: set = set()  # per-session fact dedupe
 
         # Persistent cross-session memory (rematch): the [RETURNING TABLE]
@@ -1275,6 +1281,9 @@ class LilyGame:
             logger.info(
                 "LILY_SAY | CONFIRMED | keys=%s", ",".join(sorted(confirmed))
             )
+        # Honesty assist (desync WO Sub-agent C): the state note serviced
+        # the turn that just finished playing — one-shot, consumed here.
+        self._state_note = None
         if self._pending_reveal_event is not None:
             # Reveal speech finished without a speaking-start hook having
             # fired the packet (safety net) — emit now so the UI never hangs.
@@ -1736,6 +1745,24 @@ class LilyGame:
             self._resolve_clarify(player, text)
 
         command = result.get("control_command")
+
+        # Honesty assist (desync WO Sub-agent C): a player calling out the
+        # board/score gets answered from PUBLISHED truth, never guesswork.
+        # The detector is conservative (score/board anchor + a checkable
+        # claim); commands and media choices never double as callouts. The
+        # note rides the state block as context — the say-gate leak filter
+        # keeps it off the air if echoed.
+        if command is None and not result.get("media_choice"):
+            note = lily_detect_state_contradiction(
+                text, player, self.sk.players
+            )
+            if note is not None:
+                self._state_note = f"[state note: {note}]"
+                logger.info(
+                    "LILY_HONESTY | STATE_NOTE | session=%s player=%s "
+                    "note=%r",
+                    self.sk.session_id, player, note[:120],
+                )
 
         # WO-LILY-FORGETME-001: pending forget confirmation resolves
         # DETERMINISTICALLY (same pattern as the clarify resolution) — the
@@ -3005,6 +3032,13 @@ class LilyGame:
                 f"({self._pending_unbound_award['speaker_label']}) has a "
                 "point waiting — get their name and bind them"
             )
+        # Honesty assist (desync WO Sub-agent C): the grounded truth for a
+        # player's state callout — context only, never speech (the leak
+        # filter drops the line if it ever echoes outbound). getattr: test
+        # harnesses build LilyGame via __new__.
+        state_note = getattr(self, "_state_note", None)
+        if state_note:
+            extra.append(state_note)
         if not self.game_started:
             extra.append(
                 "game not started: you are in the lobby — bind names, fish "
@@ -3919,7 +3953,15 @@ class LilyAgent(Agent):
                 "LILY_SAY_SUPPRESSED | reason=leak | markers=%s",
                 ",".join(sorted(set(leak_reasons))),
             )
-            self._game.on_answer_leak()
+            # Burn protocol: only for leaks that could carry answer
+            # material. The honesty state note (desync WO Sub-agent C)
+            # holds committed scores, never answers — it is stripped
+            # above, and burning a live question over it would punish the
+            # table for calling out the board.
+            if any(
+                r != "metadata:[state note:" for r in leak_reasons
+            ):
+                self._game.on_answer_leak()
 
         # P4 spoken-markdown strip: deterministic hygiene via the say gate
         # (lily_say_gate — THE choke point for outbound speech hygiene)

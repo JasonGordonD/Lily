@@ -43,7 +43,10 @@ import lily_audeering_consumers
 import lily_evaluation
 import lily_say_gate
 from lily_agent import WINDOW_FALLBACK_AGENT_TURNS, LilyGame
-from lily_scorekeeper import LilyScorekeeper
+from lily_scorekeeper import (
+    LilyScorekeeper,
+    lily_detect_state_contradiction,
+)
 
 
 class _FakeSession:
@@ -91,6 +94,13 @@ def _make_game() -> LilyGame:
     game.acoustic = lily_audeering_consumers.LilyAcousticState()
     game.prefs = {}
     game._prefs_offer_made = False
+
+    game.pending_clarify = {}
+    game.forget_state = "idle"
+    game.forget_requester = None
+    game._state_note = None
+    game._user_turn_index = 0
+    game.promoted_categories = []
 
     game.metadata_publishes: list[str] = []
     game.attribute_publishes: list[bool] = []
@@ -454,3 +464,177 @@ def test_stale_delivery_intent_dies_at_next_arm():
     assert game._pending_delivery_qnum is None
     assert game.consume_pending_delivery(2) is False
 
+
+
+# ==============================================================================
+# Sub-agent C — honesty grounded on published state
+# ==============================================================================
+#
+# 01:37 replay: "my score is not updating, it's still showing zero" — the
+# point had NOT committed (score truly 0), and Lily invented "the digital
+# board takes a second to refresh once I submit to the database". The
+# deterministic assist injects a grounded [state note: …] so her
+# acknowledgment speaks to committed truth; the leak filter guarantees the
+# note itself never speaks.
+
+
+def _bind(game: LilyGame, name: str, label: str, score: int = 0) -> None:
+    game.sk.bind_speaker(label, name)
+    game.sk.players[name]["score"] = score
+
+
+def test_0137_replay_player_correct_note_is_grounded():
+    # The point never committed: the player is RIGHT that the board shows
+    # zero. The note says so — grounded, with the anti-fiction instruction.
+    note = lily_detect_state_contradiction(
+        "my score is not updating, it's still showing zero",
+        "Rami",
+        {"Rami": {"score": 0}},
+    )
+    assert note is not None
+    assert note.startswith("player is correct — Rami's committed score is 0")
+    assert "never invent a mechanism" in note
+
+
+def test_0137_replay_injects_state_note_into_context():
+    # Full agent-layer path: the finalized utterance flows through
+    # on_transcript_event and the note lands in the next turn's state
+    # block, then consumes itself once her reply finishes playing.
+    game = _make_game()
+    _bind(game, "Rami", "S1", score=0)
+
+    async def scenario():
+        result = {
+            "player": "Rami",
+            "attribution": "label_match",
+            "system_directed": False,
+            "control_command": None,
+            "media_choice": None,
+            "candidate_recorded": False,
+            "unrostered": False,
+        }
+        game.on_transcript_event(
+            result,
+            "my score is not updating, it's still showing zero",
+            speaker_label="S1",
+        )
+        block = game.build_state_block()
+        assert "[state note: player is correct — Rami's committed score is 0" in block
+        # One-shot: consumed when the acknowledging turn finishes playing.
+        game.on_agent_speech_finished("good catch — let me re-sync, one sec")
+        assert game._state_note is None
+        assert "[state note:" not in game.build_state_block()
+        await _drain()
+
+    _run(scenario(), game)
+
+
+def test_2304_replay_uncommitted_number_is_never_validated():
+    # 22:54 session, 23:04: she narrated "you should actually have three
+    # points" off a player's complaint — validating a number the
+    # scorekeeper never committed. The note grounds the mismatch case.
+    note = lily_detect_state_contradiction(
+        "hold on, I should actually have three points",
+        "Rami",
+        {"Rami": {"score": 1}},
+    )
+    assert note is not None
+    assert "player says 3" in note
+    assert "committed score is 1" in note
+    assert "never validate" in note
+
+
+def test_stuck_board_callout_without_number_grounds_committed_score():
+    note = lily_detect_state_contradiction(
+        "the scoreboard is frozen",
+        "Sarah",
+        {"Sarah": {"score": 2}},
+    )
+    assert note is not None
+    assert "Sarah's committed score is 2" in note
+
+
+def test_detector_is_conservative():
+    players = {"Rami": {"score": 1}}
+    # No anchor word — trivia answers and table talk never fire:
+    assert lily_detect_state_contradiction(
+        "the answer is zero degrees", "Rami", players
+    ) is None
+    # Anchor without a checkable claim:
+    assert lily_detect_state_contradiction(
+        "what a scoreboard we have tonight", "Rami", players
+    ) is None
+    # Unresolved speaker — nothing to ground against:
+    assert lily_detect_state_contradiction(
+        "my score is still showing zero", None, players
+    ) is None
+    assert lily_detect_state_contradiction(
+        "my score is still showing zero", "Ghost", players
+    ) is None
+
+
+def test_commands_never_double_as_state_callouts():
+    # "turn the screen off" carries the anchor word but is a media command
+    # — the agent layer routes it to the media flow, and no note is set.
+    game = _make_game()
+    _bind(game, "Rami", "S1", score=0)
+
+    async def scenario():
+        result = {
+            "player": "Rami",
+            "attribution": "label_match",
+            "system_directed": False,
+            "control_command": None,
+            "media_choice": "voice_only",
+            "candidate_recorded": False,
+            "unrostered": False,
+        }
+        game.on_transcript_event(result, "screen off please", speaker_label="S1")
+        assert game._state_note is None
+        await _drain()
+
+    _run(scenario(), game)
+
+
+# -- the note never speaks -------------------------------------------------------
+
+
+def test_state_note_never_speaks_through_leak_filter():
+    # If the note echoes into an outbound turn, the say-gate leak filter
+    # drops the line whole and the spoken text carries no trace of it.
+    note_line = (
+        "[state note: player is correct — Rami's committed score is 0; "
+        "nothing more has been committed]"
+    )
+    outbound = (
+        "You're right, let me re-sync.\n"
+        f"{note_line}\n"
+        "Good catch — the board's behind me. Next question!"
+    )
+    filtered, reasons = lily_say_gate.lily_filter_leaks(outbound)
+    assert "metadata:[state note:" in reasons
+    assert "[state note:" not in filtered
+    assert "committed score" not in filtered
+    spoken = lily_say_gate.lily_clean_for_speech(filtered)
+    assert "state note" not in spoken.lower()
+    assert "re-sync" in spoken
+
+
+def test_state_note_leak_reason_is_pinned_for_the_burn_guard():
+    # tts_node skips the burn protocol when the ONLY leak is the state
+    # note (it carries scores, never answers). Pin the exact reason
+    # string that guard compares against.
+    filtered, reasons = lily_say_gate.lily_filter_leaks(
+        "[state note: player is correct — the board is right]"
+    )
+    assert reasons == ["metadata:[state note:"]
+    assert filtered == ""
+
+
+def test_ordinary_audio_tags_still_pass_the_extended_filter():
+    # The new marker must not widen the filter: [excited]/[pause] and
+    # normal speech pass untouched.
+    text = "[excited] Rami takes the point! [pause] Next one."
+    filtered, reasons = lily_say_gate.lily_filter_leaks(text)
+    assert reasons == []
+    assert filtered == text
