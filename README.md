@@ -442,11 +442,7 @@ migrations/012_lily_question_images.sql  lily_questions image_url/image_source/
                                          (visible error rows)
 migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
                                          forget-cascade + re-key interlocked)
-<<<<<<< HEAD
 tests/               671 tests, run with `python -m pytest tests/` — no network; needs
-=======
-tests/               671 tests, run with `python -m pytest tests/` — no network; needs
->>>>>>> wt-h1-nbest
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -653,7 +649,6 @@ Labels land three ways (`label_source`):
   "talking to him") → `label=deliberation`; unparseable → `label=unknown`.
   The reply parser is pure and offline-tested (`lily_addressee.py`).
 
-<<<<<<< HEAD
 ### State-prior thresholds (WO-ADDRESSEE-H1 Task 2)
 
 The Tier-1 acceptance threshold is no longer static — a scorekeeper-owned
@@ -721,7 +716,7 @@ classification, write the implicit label as wired in B1).
 H1 honesty note: these priors **narrow the clarifying question's workload**
 — they do not retire it. Text+context plateaus around 24–27% EER, so the
 house rule (answers are said TO Lily) stays live and stated in the lobby.
-=======
+
 ### n-best adjudication (WO-ADDRESSEE-H1 Task 1)
 
 Tier-2 used to judge the 1-best transcript; deliberation and STT mangling
@@ -786,7 +781,6 @@ judge instead of scoring. Edge contract: single hypothesis → 0.0, no
 hypotheses → null. Both the hypothesis set (`asr_n_best`) and the
 dispersion land on the `lily_addressee_log` row when available (absent →
 SQL NULL; columns from schema amendment 5a).
->>>>>>> wt-h1-nbest
 
 ## Bank curation loop (WO-LILY-OMNIBUS-002 D/E/F)
 
