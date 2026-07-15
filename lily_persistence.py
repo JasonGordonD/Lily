@@ -445,6 +445,16 @@ async def lily_fetch_bank_question(
             .execute()
         )
         pool = lily_memory.lily_bank_mode_filter(rows.data or [], mode)
+        if (mode or "general") == "adult":
+            # Adult mode serves the ADULT DECK ONLY (WO-LILY-DESYNC-
+            # HONESTY-001 D). The consent guard above is one-directional
+            # (it hard-excludes adult rows from general mode but admits
+            # general rows into adult mode) — and a general row served in
+            # the adult segment is the live "wait, THAT's the adult
+            # section?" defect, mislabeled with a round-family category on
+            # top. Deck exhaustion falls through to mode-aware generation,
+            # never to the general bank.
+            pool = [r for r in pool if (r or {}).get("adult")]
         candidates = [
             r for r in pool
             if r.get("question") and r["question"] not in exclude_prompts

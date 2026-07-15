@@ -606,7 +606,35 @@ deleted only when it was the room-random session id.
 **Adult-column guard (consent-safety):** `lily_questions.adult` marks
 adult-register bank rows; `lily_fetch_bank_question` takes the session `mode`
 and hard-excludes `adult=true` rows unless `mode == 'adult'` — an adult
-question can never surface at a general-mode table.
+question can never surface at a general-mode table. The deck cut is
+two-directional (WO-LILY-DESYNC-HONESTY-001 D): in adult mode the bank serves
+`adult=true` rows ONLY — a general row never surfaces in the adult segment
+(the live "wait, THAT's the adult section?" defect); adult-deck exhaustion
+falls through to mode-aware generation, never to the general bank.
+
+**Adult deck = same armed pipeline (WO-LILY-DESYNC-HONESTY-001 D):** adult
+questions flow through the identical identity chain as general — prefetch →
+`arm_next_question` → `q_{N}_delivery` claim in `tts_node` → answer window →
+`q_{N}_reveal` in `adjudicate`. No question reaches speech without an armed
+`q_N` identity, so every adult reveal is keyed and dedup-able (the 2026-07-15
+double-played reveals came from identity-less freestyle presentation during a
+supply gap). **Mode switches flush and re-arm** (`flush_for_mode_switch`, both
+directions — `lily_enter_adult_mode`, spoken "back to normal", the
+child-signal veto, and the breaker-trip auto-revert): the armed and prefetched
+questions were drawn from the old deck, so they are flushed (and stay in the
+drawn-set — never re-served), the in-flight draw is cancelled with a
+`supply_mode` commit guard discarding any straggler
+(`LILY_PREFETCH | MODE_SWITCH_DISCARD`), and `start_prefetch()` relaunches
+immediately — the prefetch auto-advance re-arms and the idle watchdog
+backstops. The one-beat gap is honest: a status note in the state block says
+the new deck is drawing (cleared by the next successful draw), and Lily is
+told to vamp, never to re-ask the old deck or invent a question. **Categories
+follow the bank:** adult rows carry their own categories (`adult_couples`,
+`adult_kink`, migration 014); the round-family rotation is mode-aware
+(`_category_for_round` rotates the adult families in adult mode) and never
+overwrites or announces over a served question's own label — adult questions
+are never introduced as "academic category". She can style the category out
+loud; the published label follows the row.
 
 **Session reports:** one `lily_session_reports` row per session at close
 (idempotent upsert on `session_id`): the in-memory transcript (the

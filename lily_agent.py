@@ -94,6 +94,11 @@ _ADULT_LAYER_MARKER = "# ADULT MODE"
 _STATE_BLOCK_MARKER = "[GAME STATE]"
 
 CATEGORY_FAMILIES = ["academic", "pop culture", "wordplay", "lifestyle-potpourri"]
+# Adult-deck round families (WO-LILY-DESYNC-HONESTY-001 D): the migration-014
+# bank rows carry these as their OWN categories (adult_couples, adult_kink) —
+# the general round-family rotation must never overwrite or announce over
+# them (live defect: adult questions introduced as "academic category").
+ADULT_CATEGORY_FAMILIES = ["adult_couples", "adult_kink"]
 
 EVENTS_TOPIC = "lily.events"
 
@@ -724,6 +729,17 @@ class LilyGame:
         )
 
     def _category_for_round(self, rnd: int) -> str:
+        # Adult identity (WO-LILY-DESYNC-HONESTY-001 D): the adult deck
+        # rotates through ITS OWN families — the general round-family
+        # rotation never labels an adult question (live defect: adult
+        # questions announced as "academic category"). Bank rows keep the
+        # category they carry (the fetch prefers a family match but always
+        # serves the row's own label); this family is what generation and
+        # bank preference ask for.
+        if self.sk.mode == "adult":
+            return ADULT_CATEGORY_FAMILIES[
+                (rnd - 1) % len(ADULT_CATEGORY_FAMILIES)
+            ]
         return CATEGORY_FAMILIES[(rnd - 1) % len(CATEGORY_FAMILIES)]
 
     def _difficulty_for_round(self, rnd: int) -> int:
@@ -803,6 +819,12 @@ class LilyGame:
                 )
 
         async def _prefetch_inner() -> None:
+            # Deck identity for THIS draw (WO-LILY-DESYNC-HONESTY-001 D):
+            # captured once at the top — if the sticky mode flips while the
+            # draw is in flight (adult entry / back-to-normal), the commit
+            # guard below discards the wrong-deck question instead of
+            # serving it (the "wait, THAT's the adult section?" class).
+            supply_mode = self.sk.mode
             rnd = self._round_for_next_question()
             category = self._category_for_round(rnd)
             tier = self._difficulty_for_round(rnd)
@@ -843,7 +865,7 @@ class LilyGame:
                     kind=picture_kind,
                     question_index=self.sk.question_number,
                     session_id=self.sk.session_id,
-                    mode=self.sk.mode,
+                    mode=supply_mode,
                     exclude_ids=history_ids, exclude_hashes=history_hashes,
                 )
 
@@ -858,7 +880,7 @@ class LilyGame:
                     from_bank = await asyncio.wait_for(
                         lily_persistence.lily_fetch_bank_question(
                             self.supabase, category, tier, self.used_prompts,
-                            mode=self.sk.mode,
+                            mode=supply_mode,
                             exclude_ids=history_ids,
                             exclude_hashes=history_hashes,
                         ),
@@ -887,7 +909,7 @@ class LilyGame:
                 question = await asyncio.wait_for(
                     lily_persistence.lily_fetch_bank_question(
                         self.supabase, category, tier, self.used_prompts,
-                        mode=self.sk.mode,
+                        mode=supply_mode,
                         exclude_ids=history_ids, exclude_hashes=history_hashes,
                     ),
                     timeout=20.0,
@@ -909,6 +931,21 @@ class LilyGame:
                     "id=%s prompt=%r",
                     self.sk.session_id, question.get("id"),
                     str(question.get("prompt", ""))[:80],
+                )
+                question = None
+            # Mode-switch commit guard (WO-LILY-DESYNC-HONESTY-001 D): the
+            # sticky mode flipped while this draw was in flight — the
+            # question came from the OLD deck. Discard it; the mode-switch
+            # flush already relaunched a fresh draw from the new deck (and
+            # the idle watchdog backstops). The question stays in the
+            # drawn-set on purpose: a flushed/discarded draw is never
+            # re-served this session.
+            if question is not None and self.sk.mode != supply_mode:
+                logger.info(
+                    "LILY_PREFETCH | MODE_SWITCH_DISCARD | session=%s "
+                    "drawn_for=%s mode_now=%s id=%s",
+                    self.sk.session_id, supply_mode, self.sk.mode,
+                    question.get("id"),
                 )
                 question = None
             if question is not None and self.sk.media_mode != "pictures":
@@ -1038,6 +1075,74 @@ class LilyGame:
                     )
             except Exception:
                 logger.exception("LILY_WATCHDOG | TICK_FAILED")
+
+    # -- mode-switch flush + re-arm (WO-LILY-DESYNC-HONESTY-001 D) -------------
+    #
+    # The 2026-07-15 adult segment opened on a LEFTOVER general question
+    # ("powerhouse of the cell" — user: "wait, THAT's the adult section?")
+    # because the armed queue survived the mode switch, and then served
+    # identity-less freestyle questions because the supply gap left nothing
+    # armed. The flush closes both: no question survives a deck change, and
+    # the immediate re-prefetch keeps the gap to one honest beat.
+
+    def flush_for_mode_switch(self, source: str) -> None:
+        """Sticky mode just flipped (EITHER direction — adult entry,
+        spoken "back to normal", child-signal veto, breaker trip): the
+        armed and prefetched questions were drawn from the OLD deck, so
+        they are dead. Flush them, cancel the in-flight draw, and start a
+        fresh prefetch from the new deck immediately — the prefetch
+        auto-advance re-arms and nudges when it lands, and the idle
+        watchdog backstops. Flushed questions STAY in the drawn-set
+        (_register_draw): a question that touched the wrong segment is
+        never re-served this session. The state block is honest about the
+        one-beat gap via a status note the next successful draw clears.
+
+        Call AFTER sk.set_mode(...) — the flush reads the NEW mode."""
+        mode = self.sk.mode
+        logger.info(
+            "LILY_STATE | MODE_FLUSH | session=%s mode_now=%s source=%s "
+            "flushed_armed=%s flushed_prefetched=%s",
+            self.sk.session_id, mode, source,
+            (self.armed_question or {}).get("id"),
+            (self.next_question or {}).get("id"),
+        )
+        if self._window_timer and not self._window_timer.done():
+            self._window_timer.cancel()
+        self.sk.close_answer_window()
+        self._stop_bed()
+        self._steal_window = False
+        self.armed_question = None
+        self.next_question = None
+        self.sk.current_question = None
+        self._armed_speech_misses = 0
+        # Cancel the in-flight draw: it is pulling from the wrong deck.
+        # Clearing the handle lets start_prefetch() relaunch NOW instead
+        # of waiting for the cancellation to land; if the stale task is
+        # already past its last await, its own commit guard (supply_mode
+        # check in _prefetch_inner) discards whatever it returns. Reset
+        # the stall counter so the idle watchdog cooperates with the
+        # fresh task instead of racing the cancelled one.
+        task = self._prefetch_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._prefetch_task = None
+        self._prefetch_stall_ticks = 0
+        if self.game_started and not self.game_over:
+            deck = "adult" if mode == "adult" else "general"
+            self.sk.set_status_note(
+                f"deck switch committed: the next question is being drawn "
+                f"from the {deck} deck and lands in the state block in a "
+                "beat. Vamp honestly until it does — never re-ask, finish, "
+                "or reveal anything from the previous deck, and never "
+                "invent a question"
+            )
+            self._set_ui_phase("question")
+            # Clear the old deck's question off the glass — screen truth
+            # must match the switch the room just heard.
+            asyncio.ensure_future(self.publish_metadata(""))
+        self.publish_attributes_nowait()
+        if not self.game_over:
+            self.start_prefetch()
 
     def _curate_generated_question(
         self,
@@ -1643,14 +1748,21 @@ class LilyGame:
         if command == "back_to_normal":
             if self.sk.mode == "adult":
                 self.sk.set_mode("general")  # sticky flag flips instantly
+                # D: no question survives the deck change — the armed
+                # adult question is flushed and the general deck re-draws
+                # immediately.
+                self.flush_for_mode_switch(source="back_to_normal")
                 self.publish_attributes_nowait()
                 self.gated_say(
                     None,
                     "mode_revert",
                     "A player said 'back to normal'. Adult mode is now "
                     "OFF — committed, in code. Switch registers "
-                    "instantly, no ceremony, no residue, straight into "
-                    "a regular category like nothing happened.",
+                    "instantly, no ceremony, no residue. The general "
+                    "deck is re-drawing: the next question lands in the "
+                    "state block in a beat — never re-ask, finish, or "
+                    "reveal the adult question; vamp lightly until the "
+                    "new one appears.",
                     source="voice_command",
                 )
             return
@@ -2953,6 +3065,9 @@ class LilyGame:
             lily_audeering_consumers.PERCEIVED_FRAMING,
         )
         self.sk.set_mode("general")  # sticky flag flips instantly, in code
+        # D: same flush as every other mode switch — the armed adult
+        # question is dead and the general deck re-draws immediately.
+        self.flush_for_mode_switch(source="child_signal")
         self.publish_attributes_nowait()
         if self.session is not None:
             self.gated_say(
@@ -2962,8 +3077,9 @@ class LilyGame:
                 "to the regular deck instantly with a light, in-character "
                 "pivot line. Do NOT explain why, do NOT mention any "
                 "system, audio, detection, or safety mechanism — just "
-                "change gears like a host reading the room. Ask a "
-                "general-category question next.",
+                "change gears like a host reading the room. The general "
+                "deck is re-drawing; ask the next question when it lands "
+                "in the state block — never continue the adult one.",
                 source="child_signal",
             )
 
@@ -2990,6 +3106,9 @@ class LilyGame:
             self.sk.session_id, reason,
         )
         self.sk.set_mode("general")  # sticky flag flips instantly, in code
+        # D: the auto-revert exits through the same flush as the spoken
+        # revert — the armed adult question is dead, general re-draws now.
+        self.flush_for_mode_switch(source="child_gate")
         self.publish_attributes_nowait()
         if self.session is not None:
             self.gated_say(
@@ -3001,7 +3120,9 @@ class LilyGame:
                 "systems and it just dropped out — general deck from "
                 "here.' Do NOT name or describe any system, audio, "
                 "detection, or safety mechanism, and never invent an "
-                "explanation. Ask a general-category question next.",
+                "explanation. The general deck is re-drawing; ask the "
+                "next question when it lands in the state block — never "
+                "continue the adult one.",
                 source="child_gate",
             )
 
@@ -3299,8 +3420,20 @@ class LilyAgent(Agent):
         # the deterministic "back to normal" path, a fresh consensus, the
         # child-signal ladder veto (on_child_signal), or a mid-session
         # breaker trip (on_child_gate_lost) — all the same sticky path.
+        # D: no question survives the deck change — the leftover general
+        # question is flushed (the live "powerhouse of the cell" defect)
+        # and the adult deck starts drawing immediately.
+        self._game.flush_for_mode_switch(source="enter_adult")
         await self._game.publish_attributes()
-        return "Adult mode is ON (sticky). The layer is active; same house rules."
+        return (
+            "Adult mode is ON (sticky). The layer is active; same house "
+            "rules. The deck switched with it: any earlier question is "
+            "flushed, and the first adult question is being drawn now — "
+            "it lands in the state block in a beat. NEVER serve a "
+            "leftover general question as adult material and NEVER "
+            "freestyle one; vamp for a beat until the state block shows "
+            "the adult question, then ask it word for word."
+        )
 
     @function_tool()
     async def lily_begin_round(self, context: RunContext) -> str:
