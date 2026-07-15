@@ -314,7 +314,10 @@ lily_scorekeeper.py  N-player roster, per-player state, answer windows, system-d
 lily_binding.py      lily_bind_speaker name extraction (2s fragment accumulation, stopwords)
 lily_addressee.py    addressee-label corpus (B1) pure logic: clarify-reply parser,
                      seconds-into-window, implicit label derivation (stdlib-only)
-lily_evaluation.py   Tier-1 matcher + Tier-2 judge contract
+lily_evaluation.py   Tier-1 matcher (incl. n-best wrapper) + Tier-2 judge contract
+lily_nbest.py        n-best ASR recovery (WO-ADDRESSEE-H1 Task 1): per-word
+                     alternatives tap + config injection, utterance synthesis,
+                     dispersion signal (stdlib-only core; defensive installer)
 lily_reasoning.py    background node: prefetch + verification + judge transport +
                      picture-question dispatch (the ONE legal web/image seam)
 lily_images.py       lily-images bucket storage ({source}/{sha1}.{ext}), cache-first
@@ -365,7 +368,7 @@ migrations/012_lily_question_images.sql  lily_questions image_url/image_source/
                                          (visible error rows)
 migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group prefs jsonb;
                                          forget-cascade + re-key interlocked)
-tests/               560 tests, run with `python -m pytest tests/` — no network; needs
+tests/               590 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -544,6 +547,71 @@ Labels land three ways (`label_source`):
   `label=host_directed`; negative/thinking ("no", "just thinking",
   "talking to him") → `label=deliberation`; unparseable → `label=unknown`.
   The reply parser is pure and offline-tested (`lily_addressee.py`).
+
+### n-best adjudication (WO-ADDRESSEE-H1 Task 1)
+
+Tier-2 used to judge the 1-best transcript; deliberation and STT mangling
+produce exactly the high-variance hypothesis sets where 1-best fails
+("mad at gas car" / "madagascar"). Task 1 recovers the recognizer's
+alternatives and runs BOTH tiers across the whole set (`lily_nbest.py`).
+
+**Verified plugin behavior** (installed source of
+livekit-plugins-speechmatics 1.6.4 / speechmatics-voice 0.2.8 /
+speechmatics-rt 1.1.0 — read, not recalled):
+
+- **There is NO per-utterance n-best anywhere in the stack.** The voice
+  client collapses every recognition result to `alternatives[0]`
+  (`speechmatics/voice/_client.py`, `_add_speech_fragments`) and the
+  LiveKit plugin emits exactly one `SpeechData` per segment
+  (`stt.py::_send_frames`). What IS recoverable is **per-WORD
+  alternatives**: raw `AddTranscript` messages carry the full
+  `results[i].alternatives` list (content + confidence + speaker), and the
+  client's EventEmitter re-emits the raw message by name, so an extra
+  `client.on("AddTranscript", ...)` handler taps them losslessly. **The
+  per-word→per-utterance delta matters:** utterance-level hypotheses are
+  SYNTHESIZED here, not recognizer-ranked — a 1-best backbone plus bounded
+  single-word substitutions ranked by mean word confidence (no
+  combinatorial paths, hard ceiling 8). Treat the synthesized set as a
+  recall-widener, never as a true lattice.
+- **There is no supported config knob for the count.** The plugin's
+  `transcription_config=` kwarg is deprecated and ignored at 1.6.4, and the
+  `VoiceAgentConfig.advanced_engine_control` merge is silently dropped from
+  the wire (`TranscriptionConfig.to_dict()` is `dataclasses.asdict` —
+  declared fields only, and `max_alternatives` is not declared anywhere in
+  the installed SDKs). The working injection point is the StartRecognition
+  message builder (`speechmatics.rt._base_client
+  .build_start_recognition_message`), wrapped to add `max_alternatives` to
+  the outgoing `transcription_config` dict. **Ceiling:** no client-side cap
+  exists to document; the count on the wire is exactly
+  `LILY_STT_MAX_ALTERNATIVES` (default 3, clamped to 1..8). Whether the RT
+  service honors >1 per word is a server-side contract we cannot verify
+  offline — if the server ever rejects the field, set
+  `LILY_STT_MAX_ALTERNATIVES=1` (the injection kill switch).
+- **Defensive by contract:** the installer (`lily_install_nbest_stt_patch`)
+  never raises — any shift in plugin internals logs
+  `LILY_NBEST | patch=failed` and returns False, and every downstream
+  consumer treats the absent hypothesis dict as plain 1-best.
+
+**Adjudication semantics:** Tier-1 fuzzy matching runs across all
+hypotheses (`lily_tier1_evaluate_nbest`; precedence correct > uncertain >
+incorrect — existing single-text functions untouched). Tier-2 receives the
+set in the judge prompt as "the player may have said any of" with
+confidences. **The judge-never-invents rule is unchanged:** the n-best list
+widens what counts as the player having SAID the answer, never what the
+answer IS — the judge still rules only against the supplied canonical
+answer / acceptable variants, and the prompt restates that rule whenever
+hypotheses appear.
+
+**Dispersion signal:** `n_best_dispersion` (confidence variance across the
+hypothesis set) is computed per utterance and logged
+(`LILY_NBEST | dispersion=… hypotheses=…`). High dispersion is a
+deliberation signal (report Track 1): above
+`LILY_NBEST_DISPERSION_THRESHOLD` (default 0.02) a definitive Tier-1
+verdict is demoted to "uncertain" — fractured deliberation escalates to the
+judge instead of scoring. Edge contract: single hypothesis → 0.0, no
+hypotheses → null. Both the hypothesis set (`asr_n_best`) and the
+dispersion land on the `lily_addressee_log` row when available (absent →
+SQL NULL; columns from schema amendment 5a).
 
 ## Bank curation loop (WO-LILY-OMNIBUS-002 D/E/F)
 
@@ -979,6 +1047,8 @@ boot failure.
 `LILY_AUTO_START_MIN_PLAYERS` / `LILY_AUTO_START_LOBBY_GRACE_SECONDS`
 (lobby auto-start safety net), `LILY_GROUP_ID` (group-identity override),
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
+`LILY_STT_MAX_ALTERNATIVES` (default 3; 1 = n-best injection kill switch) /
+`LILY_NBEST_DISPERSION_THRESHOLD` (default 0.02 — deliberation escalation),
 `LILY_JOB_MEMORY_LIMIT_MB`, `LILY_REASONING_MAX_OUTPUT_TOKENS` (default 4096) /
 `LILY_JUDGE_MAX_OUTPUT_TOKENS` (default 1024) — dedicated reasoning/judge budgets
 (thinking tokens count toward `max_output_tokens` on Gemini 3.x) · web tools

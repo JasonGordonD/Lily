@@ -65,6 +65,7 @@ import lily_config
 import lily_evaluation
 import lily_forget
 import lily_memory
+import lily_nbest
 import lily_persistence
 import lily_reasoning
 import lily_say_gate
@@ -222,6 +223,12 @@ class LilyGame:
         self._steal_window = False
         self._judged_keys: set[str] = set()
         self._spec_judge: dict[str, asyncio.Task] = {}
+        # n-best ASR recovery (WO-LILY-ADDRESSEE-H1-001 Task 1): the
+        # per-session collector (set by the entrypoint ONLY when the STT
+        # patch armed; None = clean 1-best degradation) and the per-question
+        # candidate-key -> drained n-best dict used by Tier-1/Tier-2.
+        self.nbest_collector: "lily_nbest.LilyNBestCollector | None" = None
+        self._nbest_by_key: dict[str, dict] = {}
         self._adjudicating = False
         self._bed_handle = None
         self._pending_reveal_event: dict | None = None
@@ -879,6 +886,7 @@ class LilyGame:
             if not _task.done():
                 _task.cancel()
         self._spec_judge = {}
+        self._nbest_by_key = {}  # n-best dicts are per-question
         self._set_ui_phase("question")
         # Metadata publish moved to DELIVERY time (the q_{N}_delivery claim
         # in tts_node, with a window-open fallback): publishing here clobbered
@@ -1025,6 +1033,41 @@ class LilyGame:
 
     # -- addressee-label corpus (B1) ----------------------------------------------
 
+    def _nbest_lookup(self, key: str | None) -> dict | None:
+        """The drained n-best dict recorded for a candidate key, tolerating
+        the two unrostered spellings in play ("unrostered:S2" vs the
+        scorekeeper's 'UU' fallback for label-less voices). Default-safe on
+        partially-constructed games (offline test harnesses build LilyGame
+        via __new__)."""
+        if not key:
+            return None
+        store = getattr(self, "_nbest_by_key", None) or {}
+        found = store.get(key)
+        if found is None and key == "unrostered:None":
+            found = store.get("unrostered:UU")
+        return found
+
+    def _tier1_question(
+        self, text: str, question: dict, key: str | None = None
+    ) -> dict:
+        """Tier-1 format dispatch, n-best aware: when a drained hypothesis
+        set exists for this candidate, fuzzy matching runs across ALL
+        hypotheses (correct > uncertain > incorrect precedence) and the
+        dispersion gate can demote a definitive verdict to "uncertain"
+        (deliberation escalates instead of scoring). Without hypotheses
+        this is exactly the existing single-text path."""
+        nbest = self._nbest_lookup(key)
+        hyps = (nbest or {}).get("hypotheses") or []
+        if nbest is not None and len(hyps) > 1:
+            return lily_evaluation.lily_tier1_evaluate_nbest(
+                text,
+                question,
+                hypotheses=hyps,
+                dispersion=nbest.get("dispersion"),
+                dispersion_threshold=lily_config.nbest_dispersion_threshold(),
+            )
+        return lily_evaluation.lily_tier1_evaluate_question(text, question)
+
     def _addressee_row(
         self,
         text: str,
@@ -1033,21 +1076,36 @@ class LilyGame:
         segment_ts: float,
         agent_action: str,
         system_directed: bool,
+        nbest: dict | None = None,
     ) -> dict:
         """Build one lily_addressee_log row. fuzzy_matched_answer is the
         Tier-1 verdict against the LIVE question's acceptable_answers (null
         when no live question); seconds_into_window comes off the
-        scorekeeper's window opened_at."""
+        scorekeeper's window opened_at. When an n-best dict is supplied the
+        fuzzy flag is hypothesis-aware (a hit in ANY slot counts — no
+        dispersion gate here, the corpus wants the raw match signal) and the
+        asr_n_best / n_best_dispersion columns are written; absent -> the
+        keys are omitted (SQL NULL, schema amendment 5a)."""
         question = self.sk.current_question or {}
         acceptable = question.get("acceptable_answers") or []
         fuzzy = None
         if self.sk.current_question is not None and acceptable:
-            fuzzy = (
-                lily_evaluation.lily_tier1_evaluate(text, acceptable)["verdict"]
-                == "correct"
-            )
+            hyps = (nbest or {}).get("hypotheses") or []
+            if nbest is not None and len(hyps) > 1:
+                fuzzy = (
+                    lily_evaluation.lily_tier1_evaluate_nbest(
+                        text, {"acceptable_answers": acceptable},
+                        hypotheses=hyps,
+                    )["verdict"]
+                    == "correct"
+                )
+            else:
+                fuzzy = (
+                    lily_evaluation.lily_tier1_evaluate(text, acceptable)["verdict"]
+                    == "correct"
+                )
         window_open = self.sk.is_window_open(now=segment_ts)
-        return {
+        row = {
             "session_id": self.sk.session_id,
             "utterance_ts": datetime.datetime.fromtimestamp(
                 segment_ts, datetime.timezone.utc
@@ -1076,6 +1134,13 @@ class LilyGame:
             # has been captured.
             "acoustic_snapshot": self.acoustic.addressee_snapshot(),
         }
+        # Task 1 (WO-ADDRESSEE-H1): hypotheses + dispersion, only when the
+        # n-best pipeline delivered for this utterance — absent means the
+        # columns stay NULL, never an empty-list sentinel.
+        if nbest is not None and nbest.get("hypotheses"):
+            row["asr_n_best"] = nbest["hypotheses"]
+            row["n_best_dispersion"] = nbest.get("dispersion")
+        return row
 
     def _log_addressee_segment(
         self,
@@ -1083,6 +1148,7 @@ class LilyGame:
         text: str,
         speaker_label: str | None,
         segment_ts: float,
+        nbest: dict | None = None,
     ) -> None:
         """B1: one insert per finalized segment while an answer window is
         open, plus any finalized segment the agent acts on (scored,
@@ -1113,6 +1179,7 @@ class LilyGame:
             segment_ts=segment_ts,
             agent_action=action,
             system_directed=result.get("system_directed", False),
+            nbest=nbest,
         )
         task = asyncio.ensure_future(
             lily_persistence.lily_log_addressee(self.supabase, row)
@@ -1220,13 +1287,29 @@ class LilyGame:
         text: str,
         speaker_label: str | None = None,
         segment_ts: float | None = None,
+        nbest: dict | None = None,
     ) -> None:
-        """Deterministic enforcement layer (§11.4) — runs on every final."""
+        """Deterministic enforcement layer (§11.4) — runs on every final.
+        `nbest` is the per-utterance hypothesis dict drained from the
+        LilyNBestCollector (None when the recovery patch is not armed or
+        nothing was buffered) — optional and additive, existing callers
+        unchanged."""
         ts = segment_ts if segment_ts is not None else time.time()
+
+        # n-best telemetry (WO-ADDRESSEE-H1 Task 1): dispersion logged per
+        # utterance — high dispersion is a deliberation signal.
+        if nbest is not None:
+            logger.info(
+                "LILY_NBEST | dispersion=%s hypotheses=%d words=%d speaker=%s",
+                nbest.get("dispersion"),
+                len(nbest.get("hypotheses") or []),
+                nbest.get("word_count", 0),
+                result.get("player") or speaker_label or "UU",
+            )
 
         # B1 corpus row — logged BEFORE command handling so skipped-on and
         # system-directed segments are captured too (fire-and-forget).
-        self._log_addressee_segment(result, text, speaker_label, ts)
+        self._log_addressee_segment(result, text, speaker_label, ts, nbest=nbest)
 
         # Task 6: one acoustic-trajectory row per finalized user turn
         # (fire-and-forget; no-op when no capture has landed).
@@ -1357,6 +1440,16 @@ class LilyGame:
 
         # Instant Tier-1 path: a clean earliest answer scores immediately.
         if result.get("candidate_recorded") and self.sk.answer_window_open:
+            # n-best (WO-ADDRESSEE-H1 Task 1): the drained hypothesis set
+            # for THIS utterance rides with the candidate key so Tier-1 /
+            # Tier-2 at adjudication time can widen the match.
+            cand_key = (
+                result.get("player") or f"unrostered:{speaker_label or 'UU'}"
+            )
+            if nbest is not None:
+                if not hasattr(self, "_nbest_by_key"):
+                    self._nbest_by_key = {}  # __new__-built test harnesses
+                self._nbest_by_key[cand_key] = nbest
             # Seam contract `lock` beat: one packet per recorded candidate
             # (first final per player — the scorekeeper dedupes) so the
             # frontend can mark the answer as locked in. Carries the name
@@ -1372,8 +1465,13 @@ class LilyGame:
                     # Format dispatch (multiple-choice WO): a question with
                     # four choices runs the MC matcher (letters, positions,
                     # option text); freeform runs acceptable_answers.
-                    t1 = lily_evaluation.lily_tier1_evaluate_question(
-                        first["text"], question
+                    # n-best aware: fuzzy matching runs across ALL
+                    # hypotheses, and high dispersion demotes a definitive
+                    # verdict to "uncertain" (deliberation escalates).
+                    t1 = self._tier1_question(
+                        first["text"], question,
+                        key=first["player"]
+                        or f"unrostered:{first['speaker_label']}",
                     )
                     if t1["verdict"] == "correct":
                         asyncio.ensure_future(self.adjudicate(steal_allowed=False))
@@ -1389,20 +1487,29 @@ class LilyGame:
                     key = cand["player"] or f"unrostered:{cand['speaker_label']}"
                     if key in self._spec_judge or cand.get("text") != text:
                         continue
-                    t1 = lily_evaluation.lily_tier1_evaluate_question(
-                        cand["text"], question
-                    )
+                    t1 = self._tier1_question(cand["text"], question, key=key)
                     if t1["verdict"] == "uncertain":
                         self._spec_judge[key] = asyncio.ensure_future(
-                            self._speculative_judge(question, cand["text"], key)
+                            self._speculative_judge(
+                                question, cand["text"], key,
+                                nbest=self._nbest_lookup(key),
+                            )
                         )
 
     async def _speculative_judge(
-        self, question: dict, attempt_text: str, key: str
+        self,
+        question: dict,
+        attempt_text: str,
+        key: str,
+        nbest: dict | None = None,
     ) -> dict | None:
         """One single-attempt Tier-2 call, fired mid-window. Returns the
-        parsed verdict dict or None. Never raises."""
+        parsed verdict dict or None. Never raises. When an n-best dict is
+        supplied its hypotheses ride the judge prompt as competing
+        transcriptions of the same utterance (judge-never-invents:
+        they widen what was SAID, never what the answer IS)."""
         try:
+            hyps = (nbest or {}).get("hypotheses") or []
             raw = await self.reasoning.judge(
                 lily_evaluation.LILY_JUDGE_INSTRUCTIONS,
                 lily_evaluation.lily_build_judge_prompt(
@@ -1410,6 +1517,9 @@ class LilyGame:
                     str(question.get("canonical_answer", "")),
                     [(key, attempt_text)],
                     acceptable_answers=question.get("acceptable_answers") or [],
+                    hypotheses_by_speaker=(
+                        {key: hyps} if len(hyps) > 1 else None
+                    ),
                 ),
             )
             verdict = lily_evaluation.lily_parse_judge_response(raw)
@@ -1485,8 +1595,11 @@ class LilyGame:
                 # letters / positions / option text and may return a
                 # DEFINITIVE "incorrect" (clean wrong pick — no Tier-2);
                 # only "uncertain" (mumbles) escalates to the judge.
-                t1 = lily_evaluation.lily_tier1_evaluate_question(
-                    cand["text"], question
+                # n-best aware (WO-ADDRESSEE-H1 Task 1): fuzzy matching
+                # runs across all hypotheses; high dispersion escalates.
+                t1 = self._tier1_question(
+                    cand["text"], question,
+                    key=cand["player"] or f"unrostered:{cand['speaker_label']}",
                 )
                 cand["_tier1"] = t1
                 if t1["verdict"] == "correct":
@@ -1526,6 +1639,19 @@ class LilyGame:
                         (c["player"] or f"unbound voice {c['speaker_label']}", c["text"])
                         for c in uncertain
                     ]
+                    # n-best hypotheses per attempt (WO-ADDRESSEE-H1 Task 1),
+                    # keyed by the attempt's speaker string.
+                    hyp_map: dict[str, list] = {}
+                    for c in uncertain:
+                        nb = self._nbest_lookup(
+                            c["player"] or f"unrostered:{c['speaker_label']}"
+                        )
+                        nb_hyps = (nb or {}).get("hypotheses") or []
+                        if len(nb_hyps) > 1:
+                            hyp_map[
+                                c["player"]
+                                or f"unbound voice {c['speaker_label']}"
+                            ] = nb_hyps
                     try:
                         raw = await self.reasoning.judge(
                             lily_evaluation.LILY_JUDGE_INSTRUCTIONS,
@@ -1534,6 +1660,7 @@ class LilyGame:
                                 str(question.get("canonical_answer", "")),
                                 attempts,
                                 acceptable_answers=acceptable,
+                                hypotheses_by_speaker=hyp_map or None,
                             ),
                         )
                         verdict = lily_evaluation.lily_parse_judge_response(raw)
@@ -3488,6 +3615,16 @@ async def entrypoint(ctx: JobContext) -> None:
         if row.get("label") and row.get("speaker_identifiers")
     ]
 
+    # --- n-best ASR recovery (WO-LILY-ADDRESSEE-H1-001 Task 1) ---
+    # Armed BEFORE STT construction so the config injection covers the
+    # session's StartRecognition. On any failure the installer logs
+    # LILY_NBEST | patch=failed and returns False — the collector stays
+    # detached and every downstream path runs clean 1-best.
+    _nbest_max = lily_config.stt_max_alternatives()
+    _nbest_collector = lily_nbest.LilyNBestCollector(max_hypotheses=_nbest_max)
+    if lily_nbest.lily_install_nbest_stt_patch(_nbest_collector, _nbest_max):
+        game.nbest_collector = _nbest_collector
+
     # --- STT: Speechmatics multi-speaker fleet profile (Part II §1.1) ---
     # NOTE: livekit-plugins-speechmatics 1.6.4 does not expose a `model=`
     # kwarg — `operating_point` is the only path to select ENHANCED, and the
@@ -3608,6 +3745,15 @@ async def entrypoint(ctx: JobContext) -> None:
         created = getattr(ev, "created_at", None)
         seg_ts = created.timestamp() if hasattr(created, "timestamp") else time.time()
         game.fragments.add(speaker_label or "UU", text)
+        # n-best (WO-ADDRESSEE-H1 Task 1): drain the per-word alternatives
+        # buffered off raw AddTranscript for this speaker's finalized
+        # utterance. None when the patch isn't armed or nothing buffered —
+        # every consumer treats None as plain 1-best.
+        nbest = (
+            game.nbest_collector.drain(speaker_label=speaker_label)
+            if game.nbest_collector is not None
+            else None
+        )
         result = scorekeeper.on_transcript_segment(
             text=text,
             speaker_label=speaker_label,
@@ -3622,7 +3768,8 @@ async def entrypoint(ctx: JobContext) -> None:
             segment_start=seg_ts,
         )
         game.on_transcript_event(
-            result, text, speaker_label=speaker_label, segment_ts=seg_ts
+            result, text, speaker_label=speaker_label, segment_ts=seg_ts,
+            nbest=nbest,
         )
 
     # --- Answer window opens on TTS playback completion (per-utterance

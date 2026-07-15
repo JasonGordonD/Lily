@@ -212,6 +212,28 @@ def group_id_override() -> Optional[str]:
     return _get("LILY_GROUP_ID")
 
 
+# ---------------------------------------------------------------------------
+# n-best ASR recovery (WO-LILY-ADDRESSEE-H1-001 Task 1)
+# ---------------------------------------------------------------------------
+
+def stt_max_alternatives() -> int:
+    """Alternatives count injected into the Speechmatics StartRecognition
+    transcription_config (per-word alternatives; there is no per-utterance
+    n-best at plugin 1.6.4 — see lily_nbest.py). 1 disables the injection
+    patch entirely (clean 1-best kill switch if the server ever rejects
+    the field). Bounded to the lily_nbest synthesis ceiling."""
+    return max(1, min(_get_int("LILY_STT_MAX_ALTERNATIVES", 3), 8))
+
+
+def nbest_dispersion_threshold() -> float:
+    """Confidence-variance threshold above which a definitive Tier-1
+    verdict on an n-best set is demoted to "uncertain" (escalate to the
+    Tier-2 judge — high dispersion is a deliberation signal, report
+    Track 1). Variance of [0,1] confidences: tight sets sit under ~0.002,
+    fractured ones above ~0.05."""
+    return _get_float("LILY_NBEST_DISPERSION_THRESHOLD", 0.02)
+
+
 # SFX assets — optional file paths; hooks are wired but silent when unset.
 def thinking_bed_path() -> Optional[str]:
     """60 BPM ticking thinking-bed played during answer windows."""
