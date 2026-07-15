@@ -19,6 +19,7 @@ Label vocabulary:
                                               are you thinking out loud?")
 """
 
+import math
 import re as _re
 from typing import Optional
 
@@ -157,6 +158,47 @@ def lily_fuse_addressee_confidence(
         return round((diar + acu) / 2.0, 3)
     score = (diar * dw + acu * aw) / (dw + aw)
     return round(max(0.0, min(1.0, score)), 3)
+
+
+def lily_acoustic_alignment_skew_seconds(
+    segment_timestamp: Optional[float],
+    acoustic_captured_at: Optional[float],
+) -> Optional[float]:
+    """Acoustic-minus-transcript clock skew in seconds.
+
+    Positive skew means the acoustic sample is stamped AFTER the transcript
+    segment; negative means it is older/staler.
+    """
+    try:
+        seg = float(segment_timestamp)
+        acu = float(acoustic_captured_at)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(seg) and math.isfinite(acu)):
+        return None
+    return round(acu - seg, 3)
+
+
+def lily_acoustic_sample_aligned(
+    segment_timestamp: Optional[float],
+    acoustic_captured_at: Optional[float],
+    *,
+    max_staleness_seconds: float = 8.0,
+    max_future_seconds: float = 0.75,
+) -> bool:
+    """Whether an acoustic sample is time-aligned with a transcript segment.
+
+    Alignment is required before fusion so a delayed (or future-stamped)
+    acoustic window does not skew addressee confidence for buzzer ordering.
+    """
+    skew = lily_acoustic_alignment_skew_seconds(
+        segment_timestamp, acoustic_captured_at
+    )
+    if skew is None:
+        return False
+    stale = max(0.0, float(max_staleness_seconds))
+    future = max(0.0, float(max_future_seconds))
+    return -stale <= skew <= future
 
 
 # -----------------------------------------------------------------------------

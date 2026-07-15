@@ -940,10 +940,16 @@ class LilyScorekeeper:
         if self.is_window_open(now=t):
             span_key = player or speaker_label
             if span_key:
+                seg_start = segment_start_time if segment_start_time is not None else t
+                seg_end = (
+                    segment_end_time
+                    if segment_end_time is not None
+                    else seg_start
+                )
                 self._note_speaker_span(
                     str(span_key),
-                    segment_start_time if segment_start_time is not None else t,
-                    segment_end_time if segment_end_time is not None else t,
+                    seg_start,
+                    seg_end,
                 )
         prior = self.prior_state(now=t)
         result["prior_state"] = prior

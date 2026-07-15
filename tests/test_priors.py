@@ -307,6 +307,29 @@ def test_degenerate_zero_length_spans_never_flip(monkeypatch):
     assert sk.overlap_flag is False
 
 
+def test_missing_segment_end_uses_segment_clock_not_processing_now():
+    sk = make_sk()
+    sk.open_answer_window(now=100.0)
+    # Delayed arrivals: now is much later than segment timestamps. Without
+    # a segment_end_time, overlap math must stay on the segment clock.
+    sk.on_transcript_segment(
+        text="Madagascar",
+        speaker_label="S1",
+        is_final=True,
+        segment_start_time=101.0,
+        now=110.0,
+    )
+    r = sk.on_transcript_segment(
+        text="Mauritius",
+        speaker_label="S2",
+        is_final=True,
+        segment_start_time=102.0,
+        now=111.0,
+    )
+    assert r["prior_state"] == PRIOR_OPEN_WINDOW
+    assert sk.overlap_flag is False
+
+
 def test_overlap_outside_window_is_ignored():
     sk = make_sk()
     # No window open — overlapping table talk is game-inert.
@@ -430,6 +453,8 @@ def test_threshold_env_defaults(monkeypatch):
         "LILY_TIER1_THRESHOLD_IDLE",
         "LILY_OVERLAP_EPSILON_SECONDS",
         "LILY_TIER1_CLARIFY_MARGIN",
+        "LILY_ADDRESSEE_ACOUSTIC_MAX_STALENESS_SECONDS",
+        "LILY_ADDRESSEE_ACOUSTIC_MAX_FUTURE_SECONDS",
     ):
         monkeypatch.delenv(var, raising=False)
     assert lily_config.tier1_threshold_open_window() == 0.84
@@ -439,6 +464,12 @@ def test_threshold_env_defaults(monkeypatch):
     assert lily_config.tier1_threshold_idle() == 0.88
     assert lily_config.overlap_epsilon_seconds() == 0.3
     assert lily_config.tier1_clarify_margin() == 0.15
+    assert lily_config.addressee_acoustic_max_staleness_seconds() == (
+        lily_config.audeering_window_seconds()
+        + lily_config.audeering_capture_interval_seconds()
+        + 1.5
+    )
+    assert lily_config.addressee_acoustic_max_future_seconds() == 0.75
     # Lowered / raised relative to the baseline, by construction.
     assert lily_config.tier1_threshold_open_window() < 0.88
     assert lily_config.tier1_threshold_overlap() > 1.0
@@ -449,10 +480,14 @@ def test_thresholds_read_from_env(monkeypatch):
     monkeypatch.setenv("LILY_TIER1_THRESHOLD_OVERLAP", "0.98")
     monkeypatch.setenv("LILY_OVERLAP_EPSILON_SECONDS", "0.5")
     monkeypatch.setenv("LILY_TIER1_CLARIFY_MARGIN", "0.2")
+    monkeypatch.setenv("LILY_ADDRESSEE_ACOUSTIC_MAX_STALENESS_SECONDS", "4.5")
+    monkeypatch.setenv("LILY_ADDRESSEE_ACOUSTIC_MAX_FUTURE_SECONDS", "0.2")
     assert lily_config.tier1_threshold_open_window() == 0.7
     assert lily_config.tier1_threshold_overlap() == 0.98
     assert lily_config.overlap_epsilon_seconds() == 0.5
     assert lily_config.tier1_clarify_margin() == 0.2
+    assert lily_config.addressee_acoustic_max_staleness_seconds() == 4.5
+    assert lily_config.addressee_acoustic_max_future_seconds() == 0.2
     # Scorekeeper picks the env value up live.
     sk = make_sk()
     sk.open_answer_window(now=100.0)

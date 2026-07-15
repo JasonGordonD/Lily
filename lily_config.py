@@ -300,6 +300,27 @@ def addressee_fusion_acoustic_weight() -> float:
     return max(0.0, _get_float("LILY_ADDRESSEE_FUSION_ACOUSTIC_WEIGHT", 0.25))
 
 
+def addressee_acoustic_max_staleness_seconds() -> float:
+    """Largest allowed transcript->acoustic lag for confidence fusion."""
+    default = (
+        audeering_window_seconds()
+        + audeering_capture_interval_seconds()
+        + 1.5
+    )
+    return max(
+        0.5,
+        _get_float("LILY_ADDRESSEE_ACOUSTIC_MAX_STALENESS_SECONDS", default),
+    )
+
+
+def addressee_acoustic_max_future_seconds() -> float:
+    """Largest allowed acoustic lead over transcript timestamps."""
+    return max(
+        0.0,
+        _get_float("LILY_ADDRESSEE_ACOUSTIC_MAX_FUTURE_SECONDS", 0.75),
+    )
+
+
 def addressee_confidence_neutral() -> float:
     """Confidence level where no threshold penalty is applied."""
     return max(0.05, min(_get_float("LILY_ADDRESSEE_CONFIDENCE_NEUTRAL", 0.65), 1.0))

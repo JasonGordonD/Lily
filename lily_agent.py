@@ -148,6 +148,7 @@ def _segment_addressee_confidence(
     event=None,
     attribution: str | None = None,
     speaker_label: str | None = None,
+    segment_ts: float | None = None,
 ) -> float | None:
     """Fused confidence: Speechmatics diarization + acoustic read."""
     diar = lily_addressee.lily_extract_diarization_confidence(event)
@@ -160,11 +161,33 @@ def _segment_addressee_confidence(
         acoustic_inputs = game.acoustic.addressee_fusion_inputs()
     except Exception:
         acoustic_inputs = {}
-    acoustic = lily_addressee.lily_acoustic_addressee_confidence(
-        acoustic_inputs.get("room_read"),
-        bool(acoustic_inputs.get("child_veto_active")),
-        breaker_open=bool(acoustic_inputs.get("breaker_open")),
-    )
+    acoustic = None
+    acoustic_captured_at = acoustic_inputs.get("captured_at")
+    max_staleness = lily_config.addressee_acoustic_max_staleness_seconds()
+    max_future = lily_config.addressee_acoustic_max_future_seconds()
+    if lily_addressee.lily_acoustic_sample_aligned(
+        segment_ts,
+        acoustic_captured_at,
+        max_staleness_seconds=max_staleness,
+        max_future_seconds=max_future,
+    ):
+        acoustic = lily_addressee.lily_acoustic_addressee_confidence(
+            acoustic_inputs.get("room_read"),
+            bool(acoustic_inputs.get("child_veto_active")),
+            breaker_open=bool(acoustic_inputs.get("breaker_open")),
+        )
+    else:
+        skew_s = lily_addressee.lily_acoustic_alignment_skew_seconds(
+            segment_ts, acoustic_captured_at
+        )
+        if skew_s is not None:
+            logger.info(
+                "LILY_SYNC | ACOUSTIC_SAMPLE_MISALIGNED | segment_ts=%.3f "
+                "acoustic_ts=%.3f skew_s=%.3f bounds=[-%.3f,+%.3f] "
+                "action=diarization_only",
+                segment_ts, float(acoustic_captured_at), skew_s,
+                max_staleness, max_future,
+            )
     return lily_addressee.lily_fuse_addressee_confidence(
         diar,
         acoustic,
@@ -4967,7 +4990,7 @@ async def entrypoint(ctx: JobContext) -> None:
             else None
         )
         fused_conf = _segment_addressee_confidence(
-            game, event=ev, speaker_label=speaker_label
+            game, event=ev, speaker_label=speaker_label, segment_ts=seg_ts
         )
         result = scorekeeper.on_transcript_segment(
             text=text,

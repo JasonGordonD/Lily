@@ -18,6 +18,8 @@ from lily_addressee import (
     LABEL_SOURCE_IMPLICIT_SCORED,
     LABEL_UNKNOWN,
     lily_acoustic_addressee_confidence,
+    lily_acoustic_alignment_skew_seconds,
+    lily_acoustic_sample_aligned,
     lily_candidate_key,
     lily_extract_diarization_confidence,
     lily_fallback_diarization_confidence,
@@ -147,6 +149,31 @@ def test_fusion_weighted_average_and_missing_inputs():
     assert lily_fuse_addressee_confidence(None, 0.4) == 0.4
     assert lily_fuse_addressee_confidence(0.6, None) == 0.6
     assert lily_fuse_addressee_confidence(None, None) is None
+
+
+def test_acoustic_alignment_skew_and_bounds():
+    assert lily_acoustic_alignment_skew_seconds(100.0, 99.2) == -0.8
+    assert lily_acoustic_alignment_skew_seconds(100.0, 100.4) == 0.4
+    assert lily_acoustic_sample_aligned(
+        100.0,
+        99.2,
+        max_staleness_seconds=1.0,
+        max_future_seconds=0.5,
+    ) is True
+    assert lily_acoustic_sample_aligned(
+        100.0,
+        98.7,
+        max_staleness_seconds=1.0,
+        max_future_seconds=0.5,
+    ) is False
+    assert lily_acoustic_sample_aligned(
+        100.0,
+        100.7,
+        max_staleness_seconds=1.0,
+        max_future_seconds=0.5,
+    ) is False
+    assert lily_acoustic_sample_aligned(None, 99.0) is False
+    assert lily_acoustic_sample_aligned(100.0, None) is False
 
 
 # ---------------------------------------------------------------------------
