@@ -144,13 +144,47 @@ _START_GAME_RE = _re.compile(
     r")\b"
 )
 
+# "Forget me" — the deletion right (WO-LILY-FORGETME-001). Deterministic,
+# paraphrase-tolerant detection at the command layer, like "back to
+# normal": the prompt drives the spoken confirmation, but the REQUEST is
+# never left to prompt whim. Detection only ARMS a pending-confirm state
+# — nothing is deleted until a deterministic spoken yes — so a rare false
+# positive costs one polite question, never data.
+_FORGET_PATTERNS = (
+    # "forget me" / "forget us" / "forget about us" / "forget this table"
+    r"\bforget (?:about )?(?:me|us|this table)\b",
+    # "forget everything/what you know (about me/us)"
+    r"\bforget (?:everything|all|anything|whatever|what)"
+    r"(?: (?:about (?:me|us|this table)|you (?:know|remember|have)))\b",
+    # "delete/erase/wipe/remove/clear what you know about us"
+    r"\b(?:delete|erase|wipe|remove|clear) "
+    r"(?:everything|all|anything|whatever|what) you (?:know|remember|have)\b",
+    # "delete me" / "erase us" / "wipe us"
+    r"\b(?:delete|erase|wipe|remove) (?:me|us)\b",
+    # "delete my data" / "wipe our history" / "erase our memories"
+    r"\b(?:delete|erase|wipe|remove|clear) (?:my|our) "
+    r"(?:data|memory|memories|history|info|information|file|profile|voice|voices)\b",
+)
+_FORGET_RE = _re.compile("|".join(_FORGET_PATTERNS))
+# Negation guard: "don't forget us", "never forget me" must NOT fire —
+# they are the opposite request. (Apostrophes normalize to spaces, so
+# "don't" arrives as "don t".)
+_FORGET_NEGATION_RE = _re.compile(
+    r"\b(?:don t|dont|do not|never|won t|wont|will not|can t|cant|cannot|"
+    r"couldn t|couldnt|didn t|didnt|not)\s+(?:ever\s+)?forget\b"
+)
+
 
 def lily_detect_control_command(text: str) -> Optional[str]:
     """
     Detect a sticky player command in an utterance.
-    Returns "back_to_normal", "skip", "start_game", or None.
+    Returns "back_to_normal", "forget_me", "skip", "start_game", or None.
 
     Punctuation-proof: "Back. To normal." and "back to... normal" both fire.
+    "forget_me" fires on paraphrase-tolerant deletion requests ("forget
+    me/us", "delete what you know about us", "erase my data" — negated
+    forms like "don't forget us" never fire) and takes priority over
+    "skip" ("forget us and skip this one" is a deletion request).
     "skip" fires as a standalone word ("skip", "can we skip this one"),
     never inside other words ("skipper" does not fire). "start the game" /
     "let's start" / "let's play" / "start round one" fire "start_game"
@@ -161,6 +195,8 @@ def lily_detect_control_command(text: str) -> Optional[str]:
         return None
     if "back to normal" in normalized:
         return "back_to_normal"
+    if _FORGET_RE.search(normalized) and not _FORGET_NEGATION_RE.search(normalized):
+        return "forget_me"
     if _re.search(r"\bskip\b", normalized):
         return "skip"
     if _START_GAME_RE.search(normalized):

@@ -135,3 +135,100 @@ def test_command_detection_survives_repeat():
     assert r1["control_command"] == "back_to_normal"
     r2 = sk.on_transcript_segment(text="thanks", speaker_label="S1", now=100.5)
     assert r2["control_command"] is None
+
+
+# ---------------------------------------------------------------------------
+# "Forget me" — the deletion right (WO-LILY-FORGETME-001), paraphrase-
+# tolerant, negation-guarded, fragment-proof
+# ---------------------------------------------------------------------------
+
+def test_forget_me_core_phrases():
+    for phrase in (
+        "forget me",
+        "Forget us!",
+        "Lily, forget me.",
+        "forget about us",
+        "forget this table",
+        "forget everything about me",
+        "forget everything you know about us",
+        "forget what you know about me",
+    ):
+        assert lily_detect_control_command(phrase) == "forget_me", phrase
+
+
+def test_forget_me_delete_paraphrases():
+    for phrase in (
+        "delete what you know about me",
+        "Delete everything you know about us.",
+        "erase everything you know",
+        "wipe what you know about this table",
+        "delete my data",
+        "delete our history",
+        "erase our memories",
+        "wipe my file",
+        "clear our data",
+        "erase us",
+        "wipe me",
+        "remove everything you have on us",
+    ):
+        assert lily_detect_control_command(phrase) == "forget_me", phrase
+
+
+def test_forget_me_punctuation_and_fragment_proof():
+    assert lily_detect_control_command("Forget. Me.") == "forget_me"
+    assert lily_detect_control_command("delete... what you know about us") == "forget_me"
+    # Cross-segment ASR fragments join through the scorekeeper's 2s window.
+    sk = make_sk()
+    r1 = sk.on_transcript_segment(
+        text="Delete everything.", speaker_label="S1", now=100.0
+    )
+    assert r1["control_command"] is None
+    r2 = sk.on_transcript_segment(
+        text="You know about us.", speaker_label="S1", now=101.0
+    )
+    assert r2["control_command"] == "forget_me"
+
+
+def test_forget_me_negations_do_not_fire():
+    for phrase in (
+        "don't forget me",
+        "Don't ever forget us!",
+        "never forget me",
+        "you won't forget us, right",
+        "do not forget about me",
+        "she didn't forget us",
+    ):
+        assert lily_detect_control_command(phrase) != "forget_me", phrase
+
+
+def test_forget_me_ordinary_speech_does_not_fire():
+    for phrase in (
+        "I forget the answer",
+        "oh forget it",
+        "I forgot my keys",
+        "forget the second clue",
+        "she can never remember my name",
+        "delete that last point, that was wrong",  # score appeal, not deletion
+        "wipe the floor with them",
+    ):
+        assert lily_detect_control_command(phrase) != "forget_me", phrase
+
+
+def test_forget_me_wins_over_skip():
+    assert (
+        lily_detect_control_command("forget us and skip this one")
+        == "forget_me"
+    )
+
+
+def test_forget_me_not_recorded_as_answer_candidate():
+    sk = make_sk()
+    sk.start_question({"prompt": "q", "canonical_answer": "Tungsten"})
+    sk.open_answer_window(now=100.0)
+    result = sk.on_transcript_segment(
+        text="Lily, forget me", speaker_label="S1", now=101.0,
+        segment_start_time=101.0,
+    )
+    assert result["control_command"] == "forget_me"
+    assert result["candidate_recorded"] is False
+    assert sk.answer_candidates == {}
