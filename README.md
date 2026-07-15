@@ -207,6 +207,54 @@ Tests: `tests/test_say_gate.py` (registry + leak filter, pure) and
 `tests/test_say_gate_dispatch.py` (dispatch dedupe, BUG-2 contract,
 need-to-know, burn, clarify gate).
 
+## Multiple-choice rounds (WO-LILY-OMNIBUS-002, sub-agent G)
+
+Two round formats: `freeform` (the classic open ask) and `multiple_choice`
+(four options read aloud). The default session runs exactly ONE
+multiple-choice round — round 2 — and the table can ask for the format
+any time ("can we do multiple choice"): Lily grants it via the
+`lily_set_round_format` tool, callable in any phase, effective on the
+current/next round and sticky until changed again.
+
+- **Flag**: `LilyScorekeeper.round_format` (`freeform|multiple_choice`) plus
+  the sticky `round_format_override` set by the tool; both ride
+  snapshot/rehydrate, and the state block's header line carries
+  `format=...`. Round boundaries apply the schedule/override in
+  `arm_next_question` (`apply_round_format_for_round`).
+- **Generation**: when the target round runs MC, the generation prompt
+  demands a `choices` array — exactly 4, canonical answer verbatim among
+  them, two plausible distractors plus exactly ONE clearly-comically-wrong
+  laugh option (pub convention), order randomized. The `choices` slot in
+  the question `response_schema` (reserved since the P1 fix) is now
+  active. KB-bank questions (and any generated MC question whose choices
+  fail validation) get 3 synthesized distractors at prefetch — reasoning
+  node only (`LilyReasoning.ensure_choices`); synthesis failure degrades
+  the question honestly to freeform, never a broken 3-option read.
+- **Delivery**: the prompt contract has Lily read the question and the four
+  options exactly ONCE (never re-read unless asked). The room-metadata
+  document gains two optional keys when the armed question carries
+  choices: `choices` (the 4 option strings) and `eliminated` (50/50
+  indices into `choices`) — published at the `q_{N}_delivery` claim, the
+  window-open fallback, and the reveal; absent for freeform questions.
+- **50/50 lifeline**: `lily_use_fifty_fifty(player_name)` spends the
+  player's one lifeline on the live MC question —
+  `lily_fifty_fifty_eliminations` keeps the canonical answer plus one
+  random distractor and eliminates the other two (never blind: if the
+  canonical answer can't be located among the choices the lifeline is
+  refunded). The eliminated indices ride the metadata; the tool result
+  names the two dead options for Lily to cross out aloud, once.
+- **Tier-1 MC matching** (`lily_tier1_evaluate_mc`, dispatched via
+  `lily_tier1_evaluate_question`): letters ("B", "letter b", "option c" —
+  a bare "a" survives article stripping), positions ("the second one",
+  "number three"), or fuzzy/phonetic option text. A resolved wrong pick is
+  a DEFINITIVE Tier-1 `incorrect` (no judge call); only mumbles escalate
+  to Tier-2, and a malformed sheet (answer missing from choices) always
+  escalates rather than ruling.
+
+Tests: `tests/test_multiple_choice.py` (generation shape + synthesis,
+letter/positional/text matching, 50/50, flag snapshot, metadata seam,
+both tools).
+
 ## Latency discipline
 
 Nothing blocking runs on the event loop's hot path, and slow calls are moved
@@ -289,10 +337,11 @@ migrations/008_lily_acoustic_trajectories.sql  per-turn acoustic snapshots + add
                                                acoustic_snapshot column
 migrations/009_lily_question_status.sql  lily_questions.status lifecycle column
                                          (burn protocol; shared with tier retirement)
-tests/               315 tests, run with `python -m pytest tests/` — no network; needs
+tests/               356 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
-                     test_say_gate_dispatch.py import livekit)
+                     test_say_gate_dispatch.py / test_multiple_choice.py
+                     import livekit)
 ```
 
 ## Persistent memory (rematch)
@@ -564,7 +613,12 @@ speaker verification, Hume, any gender-conditional behavior.
   (epoch-seconds heartbeat).
 - **Room metadata**: `{question, reveal:{answer,winner,correct}, wager}` via
   `ctx.api.room.update_room_metadata` (rtc has no room-metadata setter);
-  `wager` drives the frontend's final-round palette shift.
+  `wager` drives the frontend's final-round palette shift. Seam addition
+  (multiple-choice WO): when the armed question is multiple choice the
+  document also carries `choices` (array of exactly 4 strings) and
+  `eliminated` (array of 0-based indices into `choices` crossed out by a
+  50/50, `[]` until one fires); both keys are absent for freeform
+  questions.
 - **`lily.events`** reliable packets (discriminator key `type`, matched to the
   shipped prmpt_ui parser — kind-name drift from the original contract note is
   deliberate): `player_bind` `{player:{name},name,speaker_label}`; `reveal`

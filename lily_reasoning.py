@@ -26,6 +26,7 @@ question machine" instead of inventing an explanation.
 import asyncio
 import json
 import logging
+import random
 import re
 from typing import Optional
 
@@ -33,6 +34,7 @@ from google import genai as google_genai
 from google.genai import types as genai_types
 
 import lily_config
+import lily_evaluation
 
 logger = logging.getLogger("lily_reasoning")
 
@@ -68,7 +70,8 @@ _SAFETY_SETTINGS = [
 #
 # The question schema carries ALL fields — current plus reserved-for-later
 # sub-agents — so downstream schema evolution is additive, never breaking:
-#   choices            (exactly 4 strings; multiple-choice, sub-agent G)
+#   choices            (exactly 4 strings; multiple-choice, sub-agent G — ACTIVE:
+#                       populated when the round runs multiple choice)
 #   image_url / image_source (generated|web|none; images, sub-agent H)
 #   proposed_category  (category proposals, sub-agent F)
 _QUESTION_RESPONSE_SCHEMA = genai_types.Schema(
@@ -184,6 +187,52 @@ Respond with ONLY a JSON object, no markdown fences:
 {{"verdict": "pass" | "fail", "reason": "<one line>",
  "corrected_canonical_answer": "<only if a small correction fixes it, else null>"}}"""
 
+# Multiple-choice generation (sub-agent G): appended to the generation
+# prompt when the active round runs multiple choice. The `choices` slot
+# already exists in _QUESTION_RESPONSE_SCHEMA (exactly 4 strings, nullable).
+_MC_CHOICES_ADDENDUM = """
+This is a MULTIPLE-CHOICE question. ALSO include a "choices" array in the
+JSON object — EXACTLY 4 options, each short and speakable:
+- The canonical_answer appears VERBATIM as one of the 4.
+- Two distractors are genuinely plausible — same category, same shape,
+  the kind a confident table argues over.
+- Exactly ONE distractor is clearly, comically wrong — the pub-quiz laugh
+  option: wrong enough to get the laugh, on-topic enough to be said with
+  a straight face.
+- RANDOMIZE the order of the 4 (never alphabetical, never answer-first).
+Add to the JSON object:
+ "choices": ["<option>", "<option>", "<option>", "<option>"]"""
+
+# Distractor synthesis for questions that arrive WITHOUT choices (KB-bank
+# rows, or a generated MC question whose choices failed validation) — runs
+# on the reasoning node only, at prefetch time.
+_DISTRACTOR_PROMPT = """You write wrong-answer options for a live pub-trivia host.
+Question: {prompt}
+Correct answer: {canonical_answer}
+
+Write EXACTLY 3 distractors for a four-option multiple-choice read of this
+question:
+- Two genuinely plausible — same category, same shape as the correct answer.
+- Exactly one clearly, comically wrong — the pub-quiz laugh option.
+- None correct or arguably correct; none a restatement of the answer.
+- Each short and speakable.
+
+Respond with ONLY a JSON object, no markdown fences:
+{{"distractors": ["<plausible>", "<plausible>", "<clearly wrong>"]}}"""
+
+_DISTRACTOR_RESPONSE_SCHEMA = genai_types.Schema(
+    type=genai_types.Type.OBJECT,
+    properties={
+        "distractors": genai_types.Schema(
+            type=genai_types.Type.ARRAY,
+            items=genai_types.Schema(type=genai_types.Type.STRING),
+            min_items=3,
+            max_items=3,
+        ),
+    },
+    required=["distractors"],
+)
+
 
 def _strip_fences(text: str) -> str:
     t = (text or "").strip()
@@ -209,6 +258,27 @@ def _shape_question(data) -> Optional[dict]:
     data.setdefault("difficulty_tier", 2)
     data.setdefault("reveal_color", "")
     return data
+
+
+def lily_valid_choices(question: Optional[dict]) -> bool:
+    """Multiple-choice shape check (pure): exactly 4 non-empty, mutually
+    distinct options with the canonical answer among them (normalized
+    equality — the generation prompt demands verbatim inclusion)."""
+    if not isinstance(question, dict):
+        return False
+    choices = question.get("choices")
+    if not isinstance(choices, list) or len(choices) != 4:
+        return False
+    texts = [str(c).strip() for c in choices]
+    if any(not t for t in texts):
+        return False
+    norms = [lily_evaluation.lily_normalize_answer(t) for t in texts]
+    if len(set(norms)) != 4:
+        return False
+    canon = lily_evaluation.lily_normalize_answer(
+        str(question.get("canonical_answer", ""))
+    )
+    return bool(canon) and canon in norms
 
 
 def lily_parse_question_json(raw: str) -> Optional[dict]:
@@ -300,6 +370,7 @@ class LilyReasoning:
         difficulty_tier: int,
         mode: str,
         avoid_questions: list[str],
+        multiple_choice: bool = False,
     ) -> Optional[dict]:
         avoid_block = "\n".join(f"- {q}" for q in avoid_questions[-20:]) or "- (none yet)"
         prompt = _GENERATION_PROMPT.format(
@@ -308,6 +379,8 @@ class LilyReasoning:
             mode=mode,
             avoid_block=avoid_block,
         )
+        if multiple_choice:
+            prompt += _MC_CHOICES_ADDENDUM
         raw = await self._generate(
             self._model,
             prompt,
@@ -381,6 +454,66 @@ class LilyReasoning:
             return True, f"corrected: {data.get('reason', '')}"
         return False, data.get("reason") or "failed verification"
 
+    # -- multiple-choice supply (sub-agent G) --------------------------------
+
+    async def ensure_choices(self, question: Optional[dict]) -> None:
+        """Attach a valid 4-option `choices` array to a question that lacks
+        one: 3 synthesized distractors (reasoning node) + the canonical
+        answer, order randomized. No-op when choices are already valid.
+        On synthesis failure the question DEGRADES to freeform (choices
+        removed) — an MC round with an open question beats a dead prefetch."""
+        if not isinstance(question, dict):
+            return
+        if lily_valid_choices(question):
+            return
+        canonical = str(question.get("canonical_answer", "")).strip()
+        if not canonical or not question.get("prompt"):
+            question.pop("choices", None)
+            return
+        distractors: list[str] = []
+        try:
+            raw = await self._generate(
+                self._model,
+                _DISTRACTOR_PROMPT.format(
+                    prompt=question.get("prompt", ""),
+                    canonical_answer=canonical,
+                ),
+                REASONING_THINKING_LEVEL,
+                response_mime_type="application/json",
+                response_schema=_DISTRACTOR_RESPONSE_SCHEMA,
+                max_output_tokens=lily_config.reasoning_max_output_tokens(),
+            )
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                data = json.loads(_strip_fences(raw))
+            canon_norm = lily_evaluation.lily_normalize_answer(canonical)
+            seen = {canon_norm}
+            for d in (data or {}).get("distractors", []):
+                text = str(d).strip()
+                norm = lily_evaluation.lily_normalize_answer(text)
+                if text and norm and norm not in seen:
+                    seen.add(norm)
+                    distractors.append(text)
+        except Exception as e:
+            logger.warning(
+                "LILY_REASONING | MC_SYNTHESIS_FAILED | id=%s error_class=%s error=%s",
+                question.get("id"), type(e).__name__, e,
+            )
+        if len(distractors) < 3:
+            logger.warning(
+                "LILY_REASONING | MC_CHOICES_MISSING | id=%s — question "
+                "degrades to freeform", question.get("id"),
+            )
+            question.pop("choices", None)
+            return
+        choices = distractors[:3] + [canonical]
+        random.shuffle(choices)
+        question["choices"] = choices
+        logger.info(
+            "LILY_REASONING | MC_CHOICES_SYNTHESIZED | id=%s", question.get("id")
+        )
+
     async def prefetch_question(
         self,
         scorekeeper,
@@ -388,28 +521,58 @@ class LilyReasoning:
         difficulty_tier: int,
         avoid_questions: list[str],
         from_bank: Optional[dict] = None,
+        multiple_choice: bool = False,
     ) -> Optional[dict]:
         """Prefetch the N+1 question. KB-bank questions bypass verification
-        (spec §4.5). On failure, writes an honest status note into the
-        state block (§11.2) and returns None."""
+        (spec §4.5); when the round runs multiple choice, bank questions
+        without choices get 3 synthesized distractors here (reasoning node
+        only). On failure, writes an honest status note into the state
+        block (§11.2) and returns None."""
         if from_bank is not None:
+            if multiple_choice:
+                await self.ensure_choices(from_bank)
             scorekeeper.clear_status_notes()
             return from_bank
         try:
             question = await asyncio.wait_for(
                 self.generate_question(
-                    category, difficulty_tier, scorekeeper.mode, avoid_questions
+                    category, difficulty_tier, scorekeeper.mode,
+                    avoid_questions, multiple_choice=multiple_choice,
                 ),
                 timeout=PREFETCH_TIMEOUT_SECONDS,
             )
             if question is None:
                 raise RuntimeError("question generation returned unparseable JSON")
+            pre_verify_answer = str(question.get("canonical_answer", ""))
             ok, reason = await asyncio.wait_for(
                 self.verify_question(question),
                 timeout=PREFETCH_TIMEOUT_SECONDS,
             )
             if not ok:
                 raise RuntimeError(f"verification failed: {reason}")
+            if multiple_choice and not lily_valid_choices(question):
+                # A verification correction may have moved the canonical
+                # answer out from under an otherwise-good set: swap the
+                # stale entry in place (order stays randomized).
+                choices = question.get("choices")
+                corrected = str(question.get("canonical_answer", ""))
+                if (
+                    isinstance(choices, list) and len(choices) == 4
+                    and corrected != pre_verify_answer
+                ):
+                    old_norm = lily_evaluation.lily_normalize_answer(
+                        pre_verify_answer
+                    )
+                    for i, c in enumerate(choices):
+                        if lily_evaluation.lily_normalize_answer(str(c)) == old_norm:
+                            choices[i] = corrected
+                            break
+                # Still invalid (missing / malformed / unswappable):
+                # synthesize distractors; failure degrades to freeform.
+                await asyncio.wait_for(
+                    self.ensure_choices(question),
+                    timeout=PREFETCH_TIMEOUT_SECONDS,
+                )
             scorekeeper.clear_status_notes()
             logger.info(
                 "LILY_REASONING | PREFETCH_OK | id=%s category=%s tier=%s",

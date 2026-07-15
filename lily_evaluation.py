@@ -20,6 +20,7 @@ Order is pre-decided by scorekeeper timestamps in both tiers.
 
 import json
 import logging
+import random
 import re
 from difflib import SequenceMatcher
 from typing import Optional
@@ -65,9 +66,10 @@ _FILLER_PREFIXES = (
 _PUNCT_RE = re.compile(r"[^a-z0-9\s]")
 
 
-def lily_normalize_answer(text: str) -> str:
-    """Tier-1 normalization: lowercase, strip punctuation, strip hedge
-    prefixes, drop articles, collapse whitespace."""
+def _strip_fillers(text: str) -> str:
+    """Lowercase, strip punctuation, and repeatedly strip hedge/filler
+    prefixes — WITHOUT dropping articles (the multiple-choice letter parser
+    needs a bare 'a' to survive). Returns "" for pure-filler utterances."""
     if not text:
         return ""
     lowered = text.lower().strip()
@@ -86,7 +88,15 @@ def lily_normalize_answer(text: str) -> str:
             if lowered.startswith(norm_prefix + " "):
                 lowered = lowered[len(norm_prefix) + 1:]
                 changed = True
+    return lowered
 
+
+def lily_normalize_answer(text: str) -> str:
+    """Tier-1 normalization: lowercase, strip punctuation, strip hedge
+    prefixes, drop articles, collapse whitespace."""
+    lowered = _strip_fillers(text)
+    if not lowered:
+        return ""
     words = [w for w in lowered.split() if w not in _ARTICLES]
     return " ".join(words)
 
@@ -249,6 +259,183 @@ def lily_tier1_evaluate(
         "method": None,
         "similarity": round(best_sim, 3),
     }
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 — multiple-choice matching (multiple-choice WO)
+#
+# When the live question carries four choices, an attempt selects ONE of
+# them: by letter ("B", "letter b", "option c"), by position ("the second
+# one", "number three"), or by (fuzzy) option text. A resolved selection is
+# DEFINITIVE — unlike the freeform matcher, MC Tier 1 may return
+# "incorrect" (a clean letter pick of a wrong option is not uncertainty).
+# Only unresolvable attempts (mumbles) escalate to the Tier-2 judge.
+# ---------------------------------------------------------------------------
+
+MC_CHOICE_LETTERS = "ABCD"
+
+_LETTER_INDEX = {"a": 0, "b": 1, "c": 2, "d": 3}
+_LETTER_RE = re.compile(r"^(?:letter |option |choice )?([abcd])$")
+_ORDINAL_INDEX = {"first": 0, "second": 1, "third": 2, "fourth": 3, "last": 3}
+_POSITIONAL_RE = re.compile(
+    r"^(?:the )?(first|second|third|fourth|last)"
+    r"(?: (?:one|option|choice|answer))?$"
+)
+_NUMBER_INDEX = {
+    "one": 0, "1": 0, "two": 1, "2": 1,
+    "three": 2, "3": 2, "four": 3, "4": 3,
+}
+_NUMBER_POSITIONAL_RE = re.compile(r"^(?:the )?number (one|two|three|four|[1-4])$")
+
+
+def lily_canonical_choice_index(
+    choices: list[str], canonical_answer: str
+) -> Optional[int]:
+    """Index of the canonical answer inside the four choices (normalized
+    equality first, then a fuzzy fallback for near-verbatim drift). None
+    when the answer genuinely isn't among the choices."""
+    if not choices:
+        return None
+    canon = lily_normalize_answer(canonical_answer)
+    if not canon:
+        return None
+    norms = [lily_normalize_answer(str(c)) for c in choices]
+    for i, n in enumerate(norms):
+        if n == canon:
+            return i
+    best_i, best_sim = None, 0.0
+    for i, n in enumerate(norms):
+        sim = SequenceMatcher(None, n, canon).ratio()
+        if sim > best_sim:
+            best_i, best_sim = i, sim
+    return best_i if best_sim >= FUZZY_CORRECT_THRESHOLD else None
+
+
+def lily_tier1_evaluate_mc(
+    transcript_text: str,
+    choices: list[str],
+    canonical_answer: str,
+) -> dict:
+    """
+    Tier-1 evaluation of one attempt against a four-choice question.
+
+    Returns:
+      {
+        "verdict": "correct" | "incorrect" | "uncertain",
+        "selected_index": int | None,
+        "matched_answer": str | None,   # the selected choice's text
+        "method": "choice_text" | "letter" | "positional" | None,
+        "similarity": float,
+      }
+
+    "uncertain" (no resolvable selection, or the canonical answer can't be
+    located among the choices) escalates to the Tier-2 judge — mumbles
+    stay Tier-2 territory.
+    """
+    selected: Optional[int] = None
+    method: Optional[str] = None
+    similarity = 0.0
+
+    # Per-choice text evaluation (reuses the freeform matcher one choice at
+    # a time). exact/containment selects immediately; fuzzy/phonetic hits
+    # are held as the LAST resort — a letter or position is more explicit.
+    fuzzy_best: Optional[int] = None
+    fuzzy_sim = 0.0
+    if choices:
+        for i, choice in enumerate(choices):
+            r = lily_tier1_evaluate(transcript_text, [str(choice)])
+            if r["method"] in ("exact", "containment"):
+                selected, method, similarity = i, "choice_text", r["similarity"]
+                break
+            if r["verdict"] == "correct" and r["similarity"] > fuzzy_sim:
+                fuzzy_best, fuzzy_sim = i, r["similarity"]
+
+    kept = _strip_fillers(transcript_text)  # articles preserved: bare "a" = A
+
+    # Letter: "b", "letter b", "option c", "is it d".
+    if selected is None and kept:
+        m = _LETTER_RE.match(kept)
+        if m:
+            selected, method, similarity = _LETTER_INDEX[m.group(1)], "letter", 1.0
+
+    # Positional: "the second one", "second", "number three".
+    if selected is None and kept:
+        m = _POSITIONAL_RE.match(kept)
+        if m:
+            selected, method, similarity = (
+                _ORDINAL_INDEX[m.group(1)], "positional", 1.0,
+            )
+        else:
+            m = _NUMBER_POSITIONAL_RE.match(kept)
+            if m:
+                selected, method, similarity = (
+                    _NUMBER_INDEX[m.group(1)], "positional", 1.0,
+                )
+
+    # Fuzzy/phonetic option-text hit — the least explicit resolver.
+    if selected is None and fuzzy_best is not None:
+        selected, method, similarity = fuzzy_best, "choice_text", fuzzy_sim
+
+    if selected is None or not choices or selected >= len(choices):
+        return {
+            "verdict": "uncertain",
+            "selected_index": None,
+            "matched_answer": None,
+            "method": None,
+            "similarity": 0.0,
+        }
+
+    canonical_idx = lily_canonical_choice_index(
+        [str(c) for c in choices], canonical_answer
+    )
+    if canonical_idx is None:
+        # Malformed question (answer not among choices) — never rule
+        # definitively off a broken sheet; escalate.
+        verdict = "uncertain"
+    else:
+        verdict = "correct" if selected == canonical_idx else "incorrect"
+    return {
+        "verdict": verdict,
+        "selected_index": selected,
+        "matched_answer": str(choices[selected]),
+        "method": method,
+        "similarity": round(similarity, 3),
+    }
+
+
+def lily_tier1_evaluate_question(transcript_text: str, question: dict) -> dict:
+    """Format dispatch: a question carrying four choices runs the MC
+    matcher; anything else runs the freeform matcher against
+    acceptable_answers. Pure — the single Tier-1 entry point for the
+    agent's adjudication paths."""
+    q = question or {}
+    choices = q.get("choices")
+    if isinstance(choices, list) and len(choices) == 4:
+        return lily_tier1_evaluate_mc(
+            transcript_text, choices, str(q.get("canonical_answer", ""))
+        )
+    return lily_tier1_evaluate(transcript_text, q.get("acceptable_answers") or [])
+
+
+def lily_fifty_fifty_eliminations(
+    choices: list[str],
+    canonical_answer: str,
+    rng: Optional[random.Random] = None,
+) -> list[int]:
+    """50/50 lifeline: pick TWO wrong options to eliminate, keeping the
+    canonical answer and one random distractor on the board. Returns the
+    sorted eliminated indices, or [] when the canonical answer can't be
+    located among the choices (never eliminate blind)."""
+    if not choices or len(choices) != 4:
+        return []
+    canonical_idx = lily_canonical_choice_index(
+        [str(c) for c in choices], canonical_answer
+    )
+    if canonical_idx is None:
+        return []
+    wrong = [i for i in range(len(choices)) if i != canonical_idx]
+    picker = rng if rng is not None else random
+    return sorted(picker.sample(wrong, 2))
 
 
 # ---------------------------------------------------------------------------
