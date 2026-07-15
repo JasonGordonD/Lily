@@ -62,6 +62,7 @@ import lily_config
 import lily_evaluation
 import lily_memory
 import lily_persistence
+import lily_reasoning
 import lily_say_gate
 from lily_binding import (
     LilyFragmentAccumulator,
@@ -269,6 +270,9 @@ class LilyGame:
                 "round": str(self.sk.round),
                 "question_number": str(self.sk.question_number),
                 "mode": self.sk.mode,  # deterministic sticky flag (§11.4)
+                # Lobby media choice (sub-agent K): voice_only | pictures —
+                # sticky, deterministic, default voice_only.
+                "media_mode": self.sk.media_mode,
                 "players": json.dumps(self._players_payload()),
                 "answer_window": json.dumps(window),
                 "last_active_at": str(int(time.time())),
@@ -479,6 +483,27 @@ class LilyGame:
             return 4  # final wager question runs mean
         return min(3, rnd)
 
+    def _picture_kind_for_slot(self, rnd: int) -> str | None:
+        """Which picture builder serves the NEXT question, if any
+        (WO-LILY-OMNIBUS-002 K gating). Pictures are a lobby choice:
+        media_mode='voice_only' (the default) excludes picture questions
+        entirely. Adult mode and the final wager round stay text. In
+        pictures mode, round REAL_OR_IMAGINED_ROUND is the reference
+        picture round (every question); otherwise the first question of
+        each round is a real-entity 'name this landmark' slot."""
+        if self.sk.media_mode != "pictures" or self.sk.mode == "adult":
+            return None
+        if rnd > self.rounds_total:
+            return None  # the wager question is always text
+        if rnd == lily_reasoning.REAL_OR_IMAGINED_ROUND:
+            return "real_or_imagined"
+        if self.sk.question_number % self.sk.questions_per_round == 0:
+            # question_number counts STARTED questions, so the next one is
+            # first-of-round exactly when the count is a whole number of
+            # rounds.
+            return "real_entity"
+        return None
+
     def start_prefetch(self) -> None:
         """Prefetch N+1 in the background while the current question plays
         out. Failure writes an honest status note (§11.2)."""
@@ -492,21 +517,38 @@ class LilyGame:
             category = self._category_for_round(rnd)
             tier = self._difficulty_for_round(rnd)
 
-            # Runbook fallback: LILY_KB_ONLY flips supply to the curated
-            # bank; bank questions bypass verification (§4.5).
-            from_bank = None
-            if lily_config.kb_only() and self.supabase is not None:
-                from_bank = await lily_persistence.lily_fetch_bank_question(
-                    self.supabase, category, tier, self.used_prompts,
+            # Picture supply (WO-LILY-OMNIBUS-002 H/I/J/K): pictures-mode
+            # slots are served by the REASONING node's picture builders —
+            # the web/image stacks never touch the vocal path. ANY failure
+            # falls through to the standard text supply below (text-only
+            # fallback; a broken image pipeline never stalls the game).
+            question = None
+            picture_kind = self._picture_kind_for_slot(rnd)
+            if picture_kind is not None:
+                question = await self.reasoning.prefetch_picture_question(
+                    self.supabase,
+                    kind=picture_kind,
+                    question_index=self.sk.question_number,
+                    session_id=self.sk.session_id,
                     mode=self.sk.mode,
                 )
-            question = await self.reasoning.prefetch_question(
-                self.sk,
-                category=category,
-                difficulty_tier=tier,
-                avoid_questions=self.used_prompts,
-                from_bank=from_bank,
-            )
+
+            # Runbook fallback: LILY_KB_ONLY flips supply to the curated
+            # bank; bank questions bypass verification (§4.5).
+            if question is None:
+                from_bank = None
+                if lily_config.kb_only() and self.supabase is not None:
+                    from_bank = await lily_persistence.lily_fetch_bank_question(
+                        self.supabase, category, tier, self.used_prompts,
+                        mode=self.sk.mode,
+                    )
+                question = await self.reasoning.prefetch_question(
+                    self.sk,
+                    category=category,
+                    difficulty_tier=tier,
+                    avoid_questions=self.used_prompts,
+                    from_bank=from_bank,
+                )
             if question is None and self.supabase is not None:
                 # Generation failed — curated bank is the insurance policy.
                 question = await lily_persistence.lily_fetch_bank_question(
@@ -515,6 +557,13 @@ class LilyGame:
                 )
                 if question is not None:
                     self.sk.clear_status_notes()
+            if question is not None and self.sk.media_mode != "pictures":
+                # Picture exclusion in voice_only (sub-agent K): a bank
+                # row's cached image never rides into a voice-only session.
+                question.pop("image_url", None)
+                question.pop("image_license_note", None)
+                if question.get("image_source"):
+                    question["image_source"] = "none"
             if question is not None:
                 self.next_question = question
                 # Auto-advance (frozen-reveal deadlock fix): when the reveal
@@ -955,6 +1004,26 @@ class LilyGame:
             if not self.game_started:
                 asyncio.ensure_future(self.start_game(source="voice"))
             return
+
+        # Media-mode spoken choice (sub-agent K): sticky flag flips
+        # instantly, in code — same discipline as "back to normal".
+        media_choice = result.get("media_choice")
+        if media_choice and media_choice != self.sk.media_mode:
+            self.sk.set_media_mode(media_choice)
+            self.publish_attributes_nowait()
+            if media_choice == "pictures":
+                line = (
+                    "The table asked for pictures. Picture rounds are ON — "
+                    "committed, in code. One short confirmation (the screen "
+                    "is in the game now), then keep moving."
+                )
+            else:
+                line = (
+                    "The table asked for voice only. Pictures are OFF — "
+                    "committed, in code. One short confirmation, no "
+                    "ceremony, keep moving."
+                )
+            self.gated_say(None, "media_mode", line, source="voice_command")
 
         # Safety-net auto-start: cheap gate check on every user segment so
         # the game can start off the ambient chatter of a settled lobby —
@@ -1587,6 +1656,14 @@ class LilyGame:
                 # Multiple-choice format: the choices are spoken content,
                 # not answer material — they ride along.
                 need_to_know["choices"] = q["choices"]
+            if q.get("image_url"):
+                # Picture question: the vocal node needs the FLAG only —
+                # the URL is screen transport (published at delivery),
+                # never speech material.
+                need_to_know["image"] = (
+                    "picture question — the image lands on the screen as "
+                    "you ask; point the table at the screen"
+                )
             extra.append(
                 "NEXT QUESTION (perform it when the table is ready, "
                 "faithfully): " + json.dumps(need_to_know, ensure_ascii=False)

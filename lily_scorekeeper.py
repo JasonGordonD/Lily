@@ -162,6 +162,55 @@ def lily_detect_control_command(text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Media-mode spoken choice (WO-LILY-OMNIBUS-002 sub-agent K) — the lobby
+# offer: voice_only (default) or pictures. Same deterministic,
+# punctuation/fragment-proof command-layer pattern as the sticky commands
+# above; the flag is sticky and flips instantly in code, never by the LLM.
+# ---------------------------------------------------------------------------
+
+_MEDIA_PICTURES_RE = _re.compile(
+    r"\b(?:"
+    r"pictures? on"
+    r"|(?:turn|put) (?:the )?pictures? (?:on|up)"
+    r"|with (?:the )?pictures?"
+    r"|picture rounds?"
+    r"|use the screen"
+    r"|screen on"
+    r")\b"
+)
+
+_MEDIA_VOICE_ONLY_RE = _re.compile(
+    r"\b(?:"
+    r"voice only"
+    r"|no pictures?"
+    r"|without (?:the )?pictures?"
+    r"|pictures? off"
+    r"|turn (?:the )?pictures? off"
+    r"|screen off"
+    r")\b"
+)
+
+
+def lily_detect_media_choice(text: str) -> Optional[str]:
+    """
+    Detect a spoken media-mode choice in an utterance.
+    Returns "pictures", "voice_only", or None.
+
+    Punctuation-proof like lily_detect_control_command. The OFF direction
+    wins a collision ("no pictures on the screen please" -> voice_only) —
+    turning the screen off must never lose to a substring that turns it on.
+    """
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return None
+    if _MEDIA_VOICE_ONLY_RE.search(normalized):
+        return "voice_only"
+    if _MEDIA_PICTURES_RE.search(normalized):
+        return "pictures"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Scorekeeper
 # ---------------------------------------------------------------------------
 
@@ -187,6 +236,10 @@ class LilyScorekeeper:
         self.phase: str = "lobby"          # lobby | round | final | wrapup
         self.round: int = 0
         self.mode: str = "general"         # general | adult (sticky flag)
+        # Lobby media choice (sub-agent K): voice_only | pictures — sticky
+        # flag, default voice_only. Picture questions exist ONLY when this
+        # says pictures.
+        self.media_mode: str = "voice_only"
         self.category: Optional[str] = None
         self.question_number: int = 0
         self.questions_per_round: int = 6
@@ -418,6 +471,7 @@ class LilyScorekeeper:
             "attribution": None,
             "system_directed": False,
             "control_command": None,
+            "media_choice": None,
             "candidate_recorded": False,
             "unrostered": False,
         }
@@ -464,6 +518,18 @@ class LilyScorekeeper:
                 "LILY_INTENT | CONTROL_COMMAND | session=%s speaker=%s command=%s",
                 self.session_id, player or speaker_label, command,
             )
+        else:
+            # Media-mode spoken choice (sub-agent K) — same fragment-joined
+            # detection; the agent layer flips the sticky flag. Setting the
+            # SAME mode again is a no-op there, so re-fires are harmless.
+            choice = lily_detect_media_choice(joined)
+            if choice:
+                result["media_choice"] = choice
+                self._recent_fragments[frag_key] = []
+                logger.info(
+                    "LILY_INTENT | MEDIA_CHOICE | session=%s speaker=%s choice=%s",
+                    self.session_id, player or speaker_label, choice,
+                )
 
         # Per-player bookkeeping
         duration = 0.0
@@ -609,6 +675,18 @@ class LilyScorekeeper:
             })
         self.mode = mode
 
+    def set_media_mode(self, mode: str) -> None:
+        """Sticky media flag (sub-agent K): flips instantly, in code, on
+        the deterministic spoken choice — never by the LLM."""
+        if mode not in ("voice_only", "pictures"):
+            return
+        if mode != self.media_mode:
+            logger.info(
+                "LILY_STATE | MEDIA_MODE_CHANGE | session=%s from=%s to=%s",
+                self.session_id, self.media_mode, mode,
+            )
+        self.media_mode = mode
+
     def set_phase(self, phase: str) -> None:
         if phase in ("lobby", "round", "final", "wrapup"):
             self.phase = phase
@@ -638,7 +716,7 @@ class LilyScorekeeper:
         total_questions = self.rounds_total * self.questions_per_round
         lines.append(
             f"phase={self.phase} round={self.round}/{self.rounds_total} "
-            f"mode={self.mode} "
+            f"mode={self.mode} media={self.media_mode} "
             f"question={q_in_round}/{self.questions_per_round} in this round "
             f"(#{self.question_number} of {total_questions} total, "
             f"then one final wager question) "
@@ -688,6 +766,7 @@ class LilyScorekeeper:
             "phase": self.phase,
             "round": self.round,
             "mode": self.mode,
+            "media_mode": self.media_mode,
             "category": self.category,
             "question_number": self.question_number,
             "questions_per_round": self.questions_per_round,
@@ -706,6 +785,7 @@ class LilyScorekeeper:
         self.phase = snap.get("phase", self.phase)
         self.round = snap.get("round", self.round)
         self.mode = snap.get("mode", self.mode)
+        self.media_mode = snap.get("media_mode", self.media_mode)
         self.category = snap.get("category", self.category)
         self.question_number = snap.get("question_number", self.question_number)
         self.questions_per_round = snap.get(
