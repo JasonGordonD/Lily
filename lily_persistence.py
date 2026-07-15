@@ -18,6 +18,7 @@ lbs_agent.py session-init hardening):
 import asyncio
 import json
 import logging
+import random
 import time
 import uuid
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ logger = logging.getLogger("lily_persistence")
 TRANSCRIPT_BATCH_SIZE = 10
 TRANSCRIPT_BATCH_FLUSH_SECONDS = 30.0
 TRANSCRIPT_FLUSH_ATTEMPTS = 3
+BANK_FETCH_CANDIDATE_LIMIT = 100
 
 
 def lily_create_supabase_client() -> Optional[SupabaseClient]:
@@ -469,38 +471,50 @@ async def lily_fetch_bank_question(
     exclude_ids = exclude_ids or set()
     exclude_hashes = exclude_hashes or set()
     try:
-        rows = await asyncio.to_thread(
-            lambda: supabase.table("lily_questions")
-            .select("*")
-            .execute()
-        )
-        pool = lily_memory.lily_bank_mode_filter(rows.data or [], mode)
-        candidates = [
-            r for r in pool
-            if r.get("question") and r["question"] not in exclude_prompts
-            # Burn protocol (say-gate WO, migration 009): only status='active'
-            # rows are servable — 'burned' (answer leaked on air) and any
-            # future lifecycle value (e.g. the tier-retirement sub-agent's
-            # 'retired') are excluded. A missing column (pre-009 schema)
-            # reads as active.
-            and (r.get("status") or "active") == "active"
-            # Per-group asked history (migration 010): never re-serve a
-            # question this group has already heard.
-            and f"kb_{r.get('id', 0)}" not in exclude_ids
-            and (
-                not exclude_hashes
-                or lily_bank.lily_question_text_hash(r["question"])
-                not in exclude_hashes
+        def _query_stage(
+            stage_category: Optional[str],
+            stage_tier: Optional[int],
+        ):
+            query = (
+                supabase.table("lily_questions")
+                .select("*")
+                .eq("status", "active")
             )
-        ]
-        if not candidates:
+            if mode != "adult":
+                query = query.eq("adult", False)
+            if stage_category is not None:
+                query = query.eq("category", stage_category)
+            if stage_tier is not None:
+                query = query.eq("difficulty_tier", stage_tier)
+            return query.limit(BANK_FETCH_CANDIDATE_LIMIT).execute()
+
+        stages = (
+            (category, difficulty_tier),
+            (category, None),
+            (None, None),
+        )
+        row = None
+        for stage_category, stage_tier in stages:
+            rows = await asyncio.to_thread(
+                _query_stage, stage_category, stage_tier
+            )
+            pool = lily_memory.lily_bank_mode_filter(rows.data or [], mode)
+            candidates = [
+                r for r in pool
+                if r.get("question") and r["question"] not in exclude_prompts
+                and (r.get("status") or "active") == "active"
+                and f"kb_{r.get('id', 0)}" not in exclude_ids
+                and (
+                    not exclude_hashes
+                    or lily_bank.lily_question_text_hash(r["question"])
+                    not in exclude_hashes
+                )
+            ]
+            if candidates:
+                row = random.choice(candidates)
+                break
+        if row is None:
             return None
-        preferred = [
-            r for r in candidates
-            if r.get("category") == category
-            and r.get("difficulty_tier") == difficulty_tier
-        ] or [r for r in candidates if r.get("category") == category] or candidates
-        row = preferred[0]
         # Live-schema tolerance: the production table stores the answer as
         # `canonical_answer` (text) with `acceptable_answers` text[]; the
         # repo's 001 migration used `answer`. Read both, prefer live.

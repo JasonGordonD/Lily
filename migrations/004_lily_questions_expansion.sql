@@ -3,6 +3,64 @@
 -- acceptable_answers text[]), which drifted from migration 001 (answer/jsonb) —
 -- the table was created out-of-band before 001 ran. Applied to production 2026-07-14.
 
+-- Reconcile a greenfield 001 -> 003 schema with the live shape before any
+-- expansion rows are inserted. Every statement is safe on the already-live
+-- shape as well.
+alter table lily_questions
+  add column if not exists canonical_answer text,
+  add column if not exists mode text default 'general';
+
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = current_schema()
+      and table_name = 'lily_questions'
+      and column_name = 'answer'
+  ) then
+    execute $sql$
+      update lily_questions
+      set canonical_answer = answer
+      where canonical_answer is null
+    $sql$;
+    execute 'alter table lily_questions alter column answer drop not null';
+  end if;
+end
+$$;
+
+create or replace function pg_temp.lily_jsonb_text_array(value jsonb)
+returns text[]
+language sql
+immutable
+as $$
+  select coalesce(array_agg(item), array[]::text[])
+  from jsonb_array_elements_text(value) as items(item)
+$$;
+
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = current_schema()
+      and table_name = 'lily_questions'
+      and column_name = 'acceptable_answers'
+      and data_type = 'jsonb'
+  ) then
+    execute $sql$
+      alter table lily_questions
+      alter column acceptable_answers type text[]
+      using pg_temp.lily_jsonb_text_array(acceptable_answers)
+    $sql$;
+  end if;
+end
+$$;
+
+alter table lily_questions
+  alter column canonical_answer set not null,
+  alter column mode set default 'general';
+
 -- Lily curated question bank expansion — curated_v2 — 200 rows (160 general + 40 adult)
 -- Columns: (category, question, canonical_answer, acceptable_answers, difficulty_tier, reveal_color, adult, source)
 -- lily_questions expansion — curated_v2 — GENERAL / academic (40)
