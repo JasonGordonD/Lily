@@ -5198,14 +5198,38 @@ async def entrypoint(ctx: JobContext) -> None:
         device_candidate_group_id or "-",
     )
 
-    # --- Session-init hardening: fail-fast on unpersistable rooms ---
+    # --- Session-init: persist when the database answers, HOST regardless ---
+    # (Policy change, live 2026-07-15 22:57: Supabase timed out through all
+    # three boot retries and the fail-fast rule meant NO LILY AT ALL — a
+    # silent no-show for the room. A database outage now costs her the
+    # memory layer for the night, never her presence: supabase degrades to
+    # None, every persistence path no-ops as designed, and the greeting
+    # carries an honest one-liner. Fail-fast remains only for rooms where
+    # persistence matters more than presence — none exist today.)
     supabase = lily_persistence.lily_create_supabase_client()
-    lily_persistence.lily_init_session(supabase, room_name, group_id)
+    degraded_no_persistence = False
+    try:
+        lily_persistence.lily_init_session(supabase, room_name, group_id)
+    except RuntimeError as e:
+        degraded_no_persistence = True
+        supabase = None
+        logger.error(
+            "LILY_INIT | DEGRADED_NO_PERSISTENCE | room_id=%s — hosting "
+            "without memory/persistence for this session (%s)",
+            room_name, e,
+        )
 
     scorekeeper = LilyScorekeeper(
         session_id=room_name,  # session_id = room name, never random UUIDs
         answer_window_seconds=lily_config.answer_window_seconds(),
     )
+    if degraded_no_persistence:
+        scorekeeper.set_status_note(
+            "memory systems are offline tonight — you can't remember past "
+            "games or save this one. Host brilliantly anyway; if it comes "
+            "up, one honest light line ('my memory's taking the night "
+            "off') and move on. Never invent an explanation."
+        )
 
     # Reconnection: rehydrate scores and round position from checkpoint.
     existing = lily_persistence.lily_check_existing_session(supabase, room_name)
