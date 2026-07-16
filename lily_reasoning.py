@@ -474,6 +474,7 @@ class LilyReasoning:
         mode: str,
         avoid_questions: list[str],
         multiple_choice: bool = False,
+        avoid_answers: Optional[list] = None,
     ) -> Optional[dict]:
         avoid_block = "\n".join(f"- {q}" for q in avoid_questions[-20:]) or "- (none yet)"
         prompt = _GENERATION_PROMPT.format(
@@ -482,6 +483,18 @@ class LilyReasoning:
             mode=mode,
             avoid_block=avoid_block,
         )
+        # Answer-level no-repeat (migration 017): this group has already
+        # played these facts — a reworded question with the same answer is
+        # still a repeat. The curation gate enforces it; this steers the
+        # generator away from wasting a draw.
+        if avoid_answers:
+            recent = [str(a) for a in avoid_answers if a][-30:]
+            if recent:
+                prompt += (
+                    "\n\nNEVER write a question whose answer is any of "
+                    "these (this table has already played them): "
+                    + "; ".join(recent)
+                )
         if multiple_choice:
             prompt += _MC_CHOICES_ADDENDUM
         # Current-events sourcing at prefetch (WO-LILY-OMNIBUS-002 K):
@@ -661,6 +674,7 @@ class LilyReasoning:
         avoid_questions: list[str],
         from_bank: Optional[dict] = None,
         multiple_choice: bool = False,
+        avoid_answers: Optional[list] = None,
     ) -> Optional[dict]:
         """Prefetch the N+1 question. KB-bank questions bypass verification
         (spec §4.5); when the round runs multiple choice, bank questions
@@ -677,6 +691,7 @@ class LilyReasoning:
                 self.generate_question(
                     category, difficulty_tier, scorekeeper.mode,
                     avoid_questions, multiple_choice=multiple_choice,
+                    avoid_answers=avoid_answers,
                 ),
                 timeout=PREFETCH_TIMEOUT_SECONDS,
             )

@@ -565,7 +565,7 @@ migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group pref
 migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt columns
 migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
-tests/               770 tests, run with `python -m pytest tests/` — no network; needs
+tests/               774 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /

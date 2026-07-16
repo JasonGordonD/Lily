@@ -1343,6 +1343,11 @@ class LilyGame:
                 lily_bank.lily_history_hashes(self.asked_history)
                 | self._drawn_hashes
             )
+            # Answer-level no-repeat (migration 017): steer generation away
+            # from facts this group has already played, in any wording.
+            history_answers = sorted(
+                lily_bank.lily_history_answers(self.asked_history)
+            )
 
             # Picture supply (WO-LILY-OMNIBUS-002 H/I/J/K): pictures-mode
             # slots are served by the REASONING node's picture builders —
@@ -1385,6 +1390,7 @@ class LilyGame:
                     avoid_questions=self.used_prompts,
                     from_bank=from_bank,
                     multiple_choice=mc,
+                    avoid_answers=history_answers,
                 )
                 if question is not None and not str(
                     question.get("id", "")
@@ -1716,6 +1722,24 @@ class LilyGame:
                 str(question.get("prompt", ""))[:80],
             )
             return None
+        # Answer-level no-repeat (live 2026-07-15 20:42, "the gold
+        # question every time": regeneration rewrites the prompt — fresh
+        # hash — but the ANSWER is the identity of the fact. A generated
+        # question whose answer this group has already played is a repeat,
+        # however it's worded.)
+        answer_norm = lily_evaluation.lily_normalize_answer(
+            str(question.get("canonical_answer", ""))
+        )
+        if answer_norm and answer_norm in lily_bank.lily_history_answers(
+            self.asked_history
+        ):
+            logger.info(
+                "LILY_BANK | ANSWER_REPEAT_DISCARDED | group=%s answer=%r "
+                "prompt=%r",
+                self.group_id, answer_norm[:40],
+                str(question.get("prompt", ""))[:80],
+            )
+            return None
         proposed = lily_bank.lily_normalize_category_name(
             question.get("proposed_category")
         )
@@ -1773,6 +1797,7 @@ class LilyGame:
             "question_text_hash": lily_bank.lily_question_text_hash(
                 self.armed_question.get("prompt")
             ),
+            "canonical_answer": self.armed_question.get("canonical_answer"),
         })
         if self.supabase is not None:
             asyncio.ensure_future(lily_bank.lily_record_asked(
@@ -3039,13 +3064,38 @@ class LilyGame:
                 extra, act = ("finale",), "reveal_finale"
             elif round_over:
                 extra, act = (f"round_{revealed_round}_scores",), "reveal_scores"
-            self.gated_say(
-                f"q_{revealed_qnum}_reveal",
-                act,
-                reveal_instr,
-                source="adjudicate",
-                extra_keys=extra,
-            )
+            # Organic-preempt echo guard (live 2026-07-15 20:41): her
+            # conversational reply often performs the verdict the moment
+            # the instant path commits ("Spot on! Jupiter is correct —
+            # 2 for 2"); the scripted reveal then queues behind it and
+            # replays the settled ruling seconds later ("Rami came in
+            # first and said... Jupiter"), sometimes mid-next-question.
+            # If her LAST finished turn already carries this question's
+            # answer plus a verdict cue, the reveal act is DONE — claim
+            # and confirm the key silently so nothing re-delivers it.
+            # Round-closing and finale reveals always dispatch (the
+            # standings/finale beats are theirs alone).
+            if (
+                act == "reveal"
+                and self._verdict_already_spoken(question, winner_candidate)
+            ):
+                key = f"q_{revealed_qnum}_reveal"
+                if self.say_registry.claim(key):
+                    self.say_registry.confirm(key)
+                logger.info(
+                    "LILY_REVEAL | ORGANIC_PREEMPTED | session=%s q=%d — "
+                    "verdict already spoken in her last turn; scripted "
+                    "reveal suppressed",
+                    self.sk.session_id, revealed_qnum,
+                )
+            else:
+                self.gated_say(
+                    f"q_{revealed_qnum}_reveal",
+                    act,
+                    reveal_instr,
+                    source="adjudicate",
+                    extra_keys=extra,
+                )
         except Exception:
             # Adjudication runs inside fire-and-forget timer tasks — an
             # unlogged exception here is a silently wedged game (the
@@ -3058,6 +3108,32 @@ class LilyGame:
         finally:
             self._adjudicating = False
             self.sk.adjudicating = False
+
+    def _verdict_already_spoken(
+        self, question: dict, winner_candidate: dict | None
+    ) -> bool:
+        """True when Lily's most recent finished turn already performed
+        this question's verdict — the canonical answer appears in it
+        alongside a verdict cue. Compares the answer we hold against words
+        SHE already said (need-to-know safe: nothing new can leak)."""
+        last = getattr(self, "_last_assistant_text", "") or ""
+        if not last.strip():
+            return False
+        normalized_last = lily_evaluation.lily_normalize_answer(last)
+        answer_norm = lily_evaluation.lily_normalize_answer(
+            str(question.get("canonical_answer", ""))
+        )
+        if not answer_norm or answer_norm not in normalized_last:
+            return False
+        cues = (
+            "correct", "right", "spot on", "got it", "nailed", "indeed",
+            "that is it", "thats it", "exactly", "well done",
+            # miss-side cues — she sometimes reveals the answer while
+            # ruling a miss ("ah, it was actually Verona")
+            "actually", "not quite", "wrong", "missed", "the answer is",
+            "it was",
+        )
+        return any(c in normalized_last for c in cues)
 
     def _reveal_instructions(
         self,
@@ -3081,12 +3157,24 @@ class LilyGame:
                 "clocks, or anyone being 'too late'. A miss is just a miss.)"
             )
         if winner:
-            parts.append(
-                f"{winner} answered first and correctly — {points} point(s) "
-                "already committed to the score. Narrate the call (who was "
-                "first, what they said), suspense hold, then the reveal: "
-                f"the answer is {answer!r}."
-            )
+            if len(self.sk.players) <= 1:
+                # Solo table (live 2026-07-15 20:41: "Rami came in first"
+                # to a table of one — first against whom?). No ordering
+                # language, no competitors implied.
+                parts.append(
+                    f"{winner} got it — {points} point(s) already committed "
+                    "to the score. Confirm it warmly, one beat on the "
+                    f"answer: {answer!r}. It's just {winner} tonight — "
+                    "never say 'first', 'fastest', or anything implying "
+                    "other answerers."
+                )
+            else:
+                parts.append(
+                    f"{winner} answered first and correctly — {points} point(s) "
+                    "already committed to the score. Narrate the call (who was "
+                    "first, what they said), suspense hold, then the reveal: "
+                    f"the answer is {answer!r}."
+                )
         elif winner_candidate is not None and not winner_candidate.get("player"):
             parts.append(
                 f"An UNBOUND voice ({winner_candidate['speaker_label']}) got it "

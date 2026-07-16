@@ -426,3 +426,59 @@ def test_watchdog_quiet_while_question_armed():
     # Armed game: the watchdog must not double-arm or nudge.
     assert game.sk.question_number == before
     assert game.session.instructions == []
+
+
+# ─── 5. echo guard + answer-level no-repeat (live 2026-07-15 20:41/20:42) ────
+
+def test_scripted_reveal_suppressed_when_verdict_already_spoken():
+    game = _make_game()
+    game.sk.bind_speaker("S1", "Rami")
+    _arm(game, QUESTION)
+    now = time.time()
+    game.sk.open_answer_window(duration=30.0, now=now)
+    _final(game, "the femur", "S1", now + 2)
+    # Her organic reply already performed the verdict.
+    game._last_assistant_text = (
+        "Spot on! The femur is correct — that's another point for you, Rami."
+    )
+
+    asyncio.run(game.adjudicate(steal_allowed=False))
+
+    # Ruling committed and revealed on the glass...
+    assert game.sk.players["Rami"]["score"] > 0
+    assert _reveal_doc(game)["reveal"]["correct"] is True
+    # ...but no scripted reveal speech dispatched (no echo), and the key
+    # is consumed so nothing else can re-deliver it.
+    assert game.session.instructions == []
+    assert game.say_registry.state("q_1_reveal") == lily_say_gate.CLAIM_CONFIRMED
+
+
+def test_scripted_reveal_dispatches_when_verdict_not_spoken():
+    game = _make_game()
+    game.sk.bind_speaker("S1", "Rami")
+    _arm(game, QUESTION)
+    now = time.time()
+    game.sk.open_answer_window(duration=30.0, now=now)
+    _final(game, "the femur", "S1", now + 2)
+    game._last_assistant_text = "Take your time, no rush at all."
+
+    asyncio.run(game.adjudicate(steal_allowed=False))
+
+    assert any("COMMITTED" in i for i in game.session.instructions)
+
+
+def test_curation_discards_replayed_answer_any_wording():
+    game = _make_game()
+    game.asked_history.append({
+        "question_id": "q_0001",
+        "question_text_hash": "aaaa",
+        "canonical_answer": "Gold",
+    })
+    regenerated = {
+        "id": "q_0777",
+        "prompt": "Prized by alchemists and represented by Au, name this metal.",
+        "canonical_answer": "gold",
+        "acceptable_answers": ["gold"],
+        "reveal_color": "",
+    }
+    assert game._curate_generated_question(regenerated, "academic", set()) is None

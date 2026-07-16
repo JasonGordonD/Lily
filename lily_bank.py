@@ -111,6 +111,23 @@ def lily_find_duplicate(
 # Asked-history sets (pure)
 # ---------------------------------------------------------------------------
 
+def lily_history_answers(rows) -> set:
+    """Normalized canonical answers from lily_asked_history rows
+    (migration 017; pre-017 rows lack the column and contribute
+    nothing). The answer-level no-repeat key: a regenerated 'what metal
+    is Au?' has a fresh text hash every time, but its answer is always
+    gold."""
+    import lily_evaluation
+    out = set()
+    for r in rows or []:
+        ans = (r or {}).get("canonical_answer")
+        if ans:
+            norm = lily_evaluation.lily_normalize_answer(str(ans))
+            if norm:
+                out.add(norm)
+    return out
+
+
 def lily_history_hashes(rows) -> set:
     """question_text_hash set from lily_asked_history rows."""
     return {
@@ -259,6 +276,11 @@ async def lily_record_asked(
                 "question_text_hash": lily_question_text_hash(
                     question.get("prompt")
                 ),
+                # Answer-level no-repeat (migration 017): reworded
+                # regenerations of the same fact share this key.
+                "canonical_answer": str(
+                    question.get("canonical_answer") or ""
+                )[:200] or None,
                 "session_id": session_id,
                 "asked_at": datetime.now(timezone.utc).isoformat(),
             }).execute()
@@ -278,14 +300,17 @@ async def lily_load_asked_history(
     limit: int = ASKED_HISTORY_LIMIT,
 ) -> list:
     """The group's served-question history (most recent first):
-    [{question_id, question_text_hash}]. Bank draws and generated output
-    are checked against these so a returning table never hears a repeat."""
+    [{question_id, question_text_hash, canonical_answer}]. Bank draws and
+    generated output are checked against these so a returning table never
+    hears a repeat — by id, by normalized text hash, and (migration 017)
+    by canonical ANSWER, which catches reworded regenerations of the same
+    fact."""
     if supabase is None or not group_id:
         return []
     try:
         result = await asyncio.to_thread(
             lambda: supabase.table("lily_asked_history")
-            .select("question_id, question_text_hash")
+            .select("question_id, question_text_hash, canonical_answer")
             .eq("group_id", group_id)
             .order("asked_at", desc=True)
             .limit(limit)

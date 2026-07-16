@@ -406,3 +406,23 @@ def test_proposal_count_reaching_gate_promotes():
             row["use_count"], len(row["groups"])
         )
         assert promoted is (i == 9)
+
+
+# ---------------------------------------------------------------------------
+# Answer-level no-repeat (migration 017 — "the gold question every time")
+# ---------------------------------------------------------------------------
+
+import lily_bank as _lb
+
+
+def test_history_answers_normalizes_and_skips_blanks():
+    rows = [
+        {"canonical_answer": "Gold"},
+        {"canonical_answer": "  the femur "},
+        {"canonical_answer": None},
+        {},
+        None,
+    ]
+    answers = _lb.lily_history_answers(rows)
+    assert "gold" in answers
+    assert len(answers) == 2
