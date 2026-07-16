@@ -565,7 +565,7 @@ migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group pref
 migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt columns
 migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
-tests/               774 tests, run with `python -m pytest tests/` — no network; needs
+tests/               779 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -893,6 +893,33 @@ classification, write the implicit label as wired in B1).
 H1 honesty note: these priors **narrow the clarifying question's workload**
 — they do not retire it. Text+context plateaus around 24–27% EER, so the
 house rule (answers are said TO Lily) stays live and stated in the lobby.
+
+### Judgment rubric + formalized clarify trigger (WO-ADDRESSEE-H1 Tasks 3–4)
+
+Task 3 is texture: a `COMMITTED, OR THINKING OUT LOUD?` prompt block
+(positive framing, zero scalars) grounded in pragmatic completeness — a
+bare name right after the ask is a complete turn; the same words hedged
+or fractured are deliberation; overlap or fractured syntax means check,
+never score. Task 4 is the mechanism under it: when Tier-1 similarity
+lands in the ambiguous middle band under the ACTIVE state-prior
+threshold (`lily_tier1_band` == clarify;
+`[threshold − LILY_TIER1_CLARIFY_MARGIN, threshold)`), the binary
+clarify question fires deterministically — named player, "answer, or
+thinking out loud?" — and the reply writes an EXPLICIT label to
+`lily_addressee_log` through the existing pending-clarify machinery.
+Rate-limited so the repair stays charming: once per question, at most
+`LILY_CLARIFY_MAX_PER_SESSION` (default 3) per session
+(`LILY_CLARIFY | BAND_TRIGGER` logs each firing). Outside the band the
+classification stands and the implicit label writes as before.
+
+Task 5b (privacy posture): `lily_set_training_optin` sets the
+`lily_sessions.training_optin` flag (default FALSE) with a logged
+timestamp — explicit host action only. It gates nothing yet (no audio
+retention exists to gate); the flag and audit trail exist BEFORE any H3
+audio-retention work can begin. Consent stack for that future work:
+(1) the lobby memory disclosure, (2) `training_optin` per session,
+(3) vendor-side truth as documented in the forget-arc section — all
+three before a byte of audio is ever retained.
 
 ### n-best adjudication (WO-ADDRESSEE-H1 Task 1)
 

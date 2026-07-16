@@ -2266,6 +2266,63 @@ class LilyGame:
 
         asyncio.ensure_future(_apply())
 
+    def _maybe_fire_clarify(
+        self,
+        cand: dict,
+        t1: dict,
+        tier1_threshold: float,
+        prior_state: str,
+    ) -> None:
+        """WO-ADDRESSEE-H1 Task 4 — the explicit-label engine. Fires the
+        clarify question when Tier-1 similarity lands in the middle band
+        (lily_tier1_band == clarify) under the ACTIVE threshold. Bound:
+        at most once per question, at most
+        lily_config.clarify_max_per_session() per session; rostered
+        players only (the clarify addresses someone by name)."""
+        player = cand.get("player")
+        if not player:
+            return
+        similarity = t1.get("similarity")
+        if not isinstance(similarity, (int, float)):
+            return
+        band = lily_evaluation.lily_tier1_band(
+            float(similarity), tier1_threshold,
+            lily_config.tier1_clarify_margin(),
+        )
+        if band != lily_evaluation.BAND_CLARIFY:
+            return
+        if not hasattr(self, "_clarify_fired_questions"):
+            self._clarify_fired_questions = set()
+            self._session_clarify_count = 0
+        qnum = self.sk.question_number
+        if qnum in self._clarify_fired_questions:
+            return
+        if self._session_clarify_count >= lily_config.clarify_max_per_session():
+            return
+        if player in self.pending_clarify:
+            return
+        self._clarify_fired_questions.add(qnum)
+        self._session_clarify_count += 1
+        logger.info(
+            "LILY_CLARIFY | BAND_TRIGGER | session=%s q=%d player=%s "
+            "similarity=%.3f threshold=%.3f prior=%s count=%d",
+            self.sk.session_id, qnum, player, similarity,
+            tier1_threshold, prior_state, self._session_clarify_count,
+        )
+        self.mark_pending_clarify(player)
+        self.gated_say(
+            f"q_{qnum}_clarify",
+            "clarify_question",
+            (
+                f"{player} just said something that lands close to an "
+                "answer but not committed. Ask them the binary, by name, "
+                f"quick and light: '{player} — answer, or thinking out "
+                "loud?' One short question, nothing else; their reply "
+                "settles it."
+            ),
+            source="clarify_band",
+        )
+
     def mark_pending_clarify(self, player_name: str) -> None:
         """The clarify moment (lily_log_clarify tool): mark the player
         pending-clarify, emit the `clarify` packet, and log the clarified
@@ -2587,6 +2644,19 @@ class LilyGame:
                     if t1["verdict"] == "correct":
                         asyncio.ensure_future(self.adjudicate(steal_allowed=False))
                         return
+                    # Formalized clarify trigger (WO-ADDRESSEE-H1 Task 4):
+                    # a similarity in the ambiguous MIDDLE BAND under the
+                    # active state-prior threshold fires the binary clarify
+                    # question DETERMINISTICALLY — named player, "answer,
+                    # or thinking out loud?" — and the reply writes an
+                    # explicit label through the existing pending-clarify
+                    # machinery. Rate-limited: once per question, capped
+                    # per session, so the repair stays charming. Outside
+                    # the band the classification stands (implicit labels
+                    # as wired in B1).
+                    self._maybe_fire_clarify(
+                        first, t1, tier1_threshold, prior_now
+                    )
             # Speculative Tier-2: judge ambiguous candidates DURING the
             # window so the verdict is cached by reveal time — the judge
             # round trip comes off the reveal path (prefetch trick, applied

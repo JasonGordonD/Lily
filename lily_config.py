@@ -360,6 +360,12 @@ def overlap_epsilon_seconds() -> float:
     return _get_float("LILY_OVERLAP_EPSILON_SECONDS", 0.3)
 
 
+def clarify_max_per_session() -> int:
+    """WO-ADDRESSEE-H1 Task 4: session-wide cap on band-triggered clarify
+    questions — the repair stays charming, never bureaucratic."""
+    return max(0, _get_int("LILY_CLARIFY_MAX_PER_SESSION", 3))
+
+
 def tier1_clarify_margin() -> float:
     """Width of the ambiguous MIDDLE BAND below the active Tier-1
     threshold (Task 4 consumes this): similarity in

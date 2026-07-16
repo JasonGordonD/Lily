@@ -177,6 +177,39 @@ async def lily_checkpoint(
         logger.error("lily_checkpoint error: %s", e)
 
 
+async def lily_set_training_optin(
+    supabase: SupabaseClient,
+    session_id: str,
+    value: bool,
+) -> bool:
+    """WO-ADDRESSEE-H1 Task 5b — the consent flag, implemented not
+    aspirational. Sets lily_sessions.training_optin (default FALSE;
+    column applied with schema amendment 5a) with its timestamp, logged.
+    Set ONLY by explicit host action. It gates NOTHING yet — no audio
+    retention exists to gate — but the flag and its audit trail exist
+    BEFORE any H3 audio-retention work can begin."""
+    if supabase is None or not session_id:
+        return False
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: supabase.table("lily_sessions").update({
+                    "training_optin": bool(value),
+                    "training_optin_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("session_id", session_id).execute()
+            ),
+            timeout=10.0,
+        )
+        logger.info(
+            "LILY_PRIVACY | TRAINING_OPTIN | session=%s value=%s",
+            session_id, bool(value),
+        )
+        return True
+    except Exception as e:
+        logger.error("lily_set_training_optin error: %s", e)
+        return False
+
+
 async def lily_heartbeat(
     supabase: SupabaseClient,
     scorekeeper,
