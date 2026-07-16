@@ -315,3 +315,50 @@ def test_enroll_voiceprints_maps_case_variant_label_to_player_name():
     rows = db.tables["lily_speaker_voiceprints"]
     assert len(rows) == 1
     assert rows[0]["player_name"] == "Sarah"
+
+
+# ---------------------------------------------------------------------------
+# Boot-time init retries (live 2026-07-15 22:38: one transient ReadTimeout
+# at the early-row insert killed the job — Lily never joined the room)
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest
+import lily_persistence as _lp
+
+
+class _FlakyInitTable:
+    def __init__(self, fail_times: int):
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def upsert(self, payload, on_conflict=None):
+        return self
+
+    def execute(self):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise TimeoutError("The read operation timed out")
+        return type("R", (), {"data": []})()
+
+
+class _FlakyInitClient:
+    def __init__(self, fail_times: int):
+        self._table = _FlakyInitTable(fail_times)
+
+    def table(self, name):
+        return self._table
+
+
+def test_init_session_survives_transient_timeouts(monkeypatch):
+    monkeypatch.setattr(_lp.time, "sleep", lambda s: None)
+    client = _FlakyInitClient(fail_times=2)
+    _lp.lily_init_session(client, "room-x", "grp-x")  # no raise
+    assert client._table.calls == 3
+
+
+def test_init_session_still_fails_fast_when_db_is_down(monkeypatch):
+    monkeypatch.setattr(_lp.time, "sleep", lambda s: None)
+    client = _FlakyInitClient(fail_times=99)
+    with _pytest.raises(RuntimeError):
+        _lp.lily_init_session(client, "room-x", "grp-x")
+    assert client._table.calls == 3

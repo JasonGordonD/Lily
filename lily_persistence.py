@@ -83,37 +83,48 @@ def lily_init_session(
         raise RuntimeError(
             f"LILY_INIT unpersistable room (supabase_client_none) room_id={session_id}"
         )
-    try:
-        supabase.table("lily_sessions").upsert(
-            {
-                "session_id": session_id,
-                "group_id": group_id or session_id,
-                "phase": "lobby",
-                "mode": "general",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-            on_conflict="session_id",
-        ).execute()
-        logger.info("LILY_INIT | EARLY_SESSION_ROW | inserted session_id=%s", session_id)
-    except (PostgrestAPIError, httpx.HTTPError, asyncio.TimeoutError) as e:
-        logger.error(
-            "LILY_INIT | EARLY_SESSION_ROW_INSERT_FAILED | room_id=%s error_class=%s error=%s",
-            session_id, type(e).__name__, e,
-        )
-        raise RuntimeError(
-            f"LILY_INIT early_session_row insert failed room_id={session_id} "
-            f"error_class={type(e).__name__}"
-        ) from e
-    except Exception as e:
-        # Catch supabase-client raised exceptions that don't subclass the above
-        logger.error(
-            "LILY_INIT | EARLY_SESSION_ROW_INSERT_FAILED | room_id=%s error_class=%s error=%s",
-            session_id, type(e).__name__, e,
-        )
-        raise RuntimeError(
-            f"LILY_INIT early_session_row insert failed room_id={session_id} "
-            f"error_class={type(e).__name__}"
-        ) from e
+    # Bounded retries (live 2026-07-15 22:38: the client-level 10s HTTP
+    # timeout — added to stop MID-SESSION hangs — made one transiently slow
+    # boot-time round trip fatal: ReadTimeout -> fail-fast RuntimeError ->
+    # the job died and Lily never joined the room). Fail-fast stays the
+    # policy for a genuinely unpersistable room; a transient timeout gets
+    # three attempts with short backoff first. Boot-time only — nothing
+    # else is running yet, so the blocking sleeps are harmless.
+    last_error: Optional[Exception] = None
+    for attempt in range(1, 4):
+        try:
+            supabase.table("lily_sessions").upsert(
+                {
+                    "session_id": session_id,
+                    "group_id": group_id or session_id,
+                    "phase": "lobby",
+                    "mode": "general",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="session_id",
+            ).execute()
+            logger.info(
+                "LILY_INIT | EARLY_SESSION_ROW | inserted session_id=%s "
+                "attempt=%d", session_id, attempt,
+            )
+            return
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "LILY_INIT | EARLY_SESSION_ROW_RETRY | room_id=%s attempt=%d/3 "
+                "error_class=%s error=%s",
+                session_id, attempt, type(e).__name__, e,
+            )
+            if attempt < 3:
+                time.sleep(2.0 * attempt)
+    logger.error(
+        "LILY_INIT | EARLY_SESSION_ROW_INSERT_FAILED | room_id=%s error_class=%s error=%s",
+        session_id, type(last_error).__name__, last_error,
+    )
+    raise RuntimeError(
+        f"LILY_INIT early_session_row insert failed room_id={session_id} "
+        f"error_class={type(last_error).__name__}"
+    ) from last_error
 
 
 def lily_check_existing_session(
