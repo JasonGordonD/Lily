@@ -4054,13 +4054,12 @@ class LilyGame:
         """
         if self.sk.mode != "adult":
             return
-        if lily_config.architect_mode():
-            logger.warning(
-                "LILY_ADULT_GATE | ARCHITECT_OVERRIDE | session=%s "
-                "action=child_signal_ignored tier=%s",
-                self.sk.session_id, event.get("tier"),
-            )
-            return
+        # NO override exists for an active child signal — architect mode
+        # included (RESTORED 2026-07-16; a concurrent rewrite added an
+        # architect bypass here, letting an env flag disregard a detected
+        # young-voice signal while adult content played. The invariant is
+        # absolute: the signal can EXIT or BLOCK adult mode, and nothing
+        # may authorize past it).
         logger.warning(
             "LILY_AUDEERING_VETO | ADULT_MODE_EXIT | session=%s tier=%s %s",
             self.sk.session_id, event.get("tier"),
@@ -4086,19 +4085,35 @@ class LilyGame:
             )
 
     def on_child_gate_lost(self, reason: str) -> None:
-        """Record loss of optional young-voice monitoring.
-
-        audEERING availability does not authorize adult mode and therefore
-        cannot revoke it. Only an actual young-voice signal may veto an
-        active adult session (unless architect mode is enabled).
-        """
+        """Mid-session CLOSED->OPEN breaker transition while adult mode is
+        active -> automatic exit through the SAME sticky-flag revert path
+        as the spoken "back to normal" (WO-DESYNC-A, RESTORED 2026-07-16 —
+        a concurrent rewrite demoted this to a log line, leaving the adult
+        deck running with the child-signal sensor dead. The sensor and the
+        deck deploy as one unit: sensor down means deck down, fail CLOSED,
+        mid-session included)."""
         if self.sk.mode != "adult":
             return
         logger.warning(
-            "LILY_ADULT_GATE | MONITORING_UNAVAILABLE | session=%s "
-            "breaker_reason=%s adult_mode_continues=true",
+            "LILY_ADULT_GATE | CHILD_GATE_LOST | session=%s "
+            "breaker_reason=%s action=adult_mode_exit",
             self.sk.session_id, reason,
         )
+        self.sk.set_mode("general")  # sticky flag flips instantly, in code
+        self.flush_for_mode_switch(source="child_gate")
+        self.publish_attributes_nowait()
+        if self.session is not None:
+            self.gated_say(
+                None,
+                "mode_revert",
+                "Adult mode is now OFF — committed, in code. Switch back "
+                "to the regular deck instantly with a light, in-character "
+                "pivot line. Do NOT explain why, do NOT mention any "
+                "system, audio, detection, or safety mechanism. The "
+                "general deck is re-drawing; ask the next question when "
+                "it lands in the state block.",
+                source="child_gate",
+            )
 
     def log_acoustic_trajectory(self) -> None:
         """One lily_acoustic_trajectories row per finalized user turn —
@@ -4355,6 +4370,40 @@ class LilyAgent(Agent):
         Architect mode is a deployment-authenticated override. A player
         merely claiming to be the architect does not enable it.
         """
+        # SAFETY GATE (WO-DESYNC-A, RESTORED 2026-07-16 — a concurrent
+        # rewrite dropped it): the child-signal sensor and the adult deck
+        # deploy as ONE UNIT. Sensor down — missing AUDEERING_API_KEY,
+        # failed preflight, breaker OPEN — means deck down, fail CLOSED.
+        # NOTHING overrides this check: architect mode may stand in for
+        # the spoken age ceremony during controlled testing, but it never
+        # substitutes for the sensor, and consensus stays necessary,
+        # never sufficient.
+        if not lily_audeering_client.lily_child_gate_ready():
+            logger.warning(
+                "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
+                "reason=child_gate_unavailable | session=%s",
+                self._game.sk.session_id,
+            )
+            return (
+                "The grown-up deck is NOT available tonight — one of the "
+                "systems it depends on isn't running. Refuse warmly, in "
+                "character ('the grown-up deck's taking the night off — "
+                "general it is'), never name any mechanism, and do not "
+                "retry this tool tonight. Consensus cannot change this."
+            )
+        # Degraded-persistence gate (2026-07-16): a memoryless session has
+        # no persisted consent audit trail — the adult deck requires one.
+        if self._game.supabase is None:
+            logger.warning(
+                "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
+                "reason=no_persistence_no_consent_audit | session=%s",
+                self._game.sk.session_id,
+            )
+            return (
+                "The grown-up deck is NOT available tonight — refuse "
+                "warmly in character, never name any mechanism, and do "
+                "not retry this tool tonight."
+            )
         architect = lily_config.architect_mode()
         if not architect and not confirmed_all_18_plus:
             logger.warning(
@@ -4375,10 +4424,12 @@ class LilyAgent(Agent):
                 "action=adult_mode_entry",
                 self._game.sk.session_id,
             )
-        # audEERING is veto-only: readiness never authorizes or blocks entry.
-        # A young-voice signal already active may still block normal entry;
-        # architect mode deliberately overrides it for controlled testing.
-        if not architect and self._game.acoustic.child_veto_active():
+        # The child-signal veto is absolute: it may EXIT or BLOCK adult
+        # mode, and NOTHING — architect mode included — may override an
+        # ACTIVE signal to authorize entry (standing invariant from
+        # WO-LILY-AUDEERING-001; the override applies to the age ceremony
+        # only).
+        if self._game.acoustic.child_veto_active():
             logger.warning(
                 "LILY_AUDEERING_VETO | ADULT_MODE_DECLINED | session=%s %s",
                 self._game.sk.session_id,

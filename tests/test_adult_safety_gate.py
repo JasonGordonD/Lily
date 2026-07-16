@@ -69,6 +69,9 @@ class _FakeGame:
 def _make_agent() -> tuple[LilyAgent, _FakeGame]:
     agent = LilyAgent.__new__(LilyAgent)  # sidestep livekit Agent base
     game = _FakeGame()
+    # Adult entry requires a persisted consent audit trail (degraded
+    # no-persistence sessions refuse) — give the fake a live client.
+    game.supabase = object()
     agent._game = game
     return agent, game
 
@@ -175,6 +178,8 @@ def test_start_helper_registers_even_a_breaker_open_pipeline():
 
 def test_entry_requires_explicit_18_plus_confirmation(caplog):
     agent, game = _make_agent()
+    _ready_pipeline(consumers.LilyAcousticState())  # gate READY — the age
+    # ceremony is what refuses here, not the sensor
     with caplog.at_level(logging.WARNING, logger="lily_agent"):
         msg = _call_enter_adult(agent, confirmed_all_18_plus=False)
     assert "NOT enabled yet" in msg
@@ -188,9 +193,35 @@ def test_entry_requires_explicit_18_plus_confirmation(caplog):
     )
 
 
-def test_confirmed_entry_proceeds_without_acoustic_pipeline():
+def test_entry_refused_without_acoustic_pipeline_even_when_confirmed(caplog):
+    # FAIL CLOSED (WO-DESYNC-A): the sensor and the deck deploy as one
+    # unit. No pipeline -> no adult mode, 18+ consensus notwithstanding —
+    # consensus is necessary, never sufficient.
     agent, game = _make_agent()
     assert client.lily_child_gate_ready() is False
+    with caplog.at_level(logging.WARNING, logger="lily_agent"):
+        msg = _call_enter_adult(agent, confirmed_all_18_plus=True)
+    assert "NOT available" in msg
+    assert game.sk.mode == "general"
+    assert game.publish_calls == 0
+    assert any(
+        "reason=child_gate_unavailable" in r.message for r in caplog.records
+    )
+
+
+def test_missing_audeering_key_blocks_confirmed_entry():
+    # The exact live condition: breaker OPEN from a missing key.
+    agent, game = _make_agent()
+    state = consumers.LilyAcousticState()
+    client._ACTIVE_PIPELINE = client.LilyAudeeringPipeline(state)
+    assert client.lily_child_gate_ready() is False
+    assert "NOT available" in _call_enter_adult(agent, True)
+    assert game.sk.mode == "general"
+
+
+def test_confirmed_entry_proceeds_when_gate_ready():
+    agent, game = _make_agent()
+    _ready_pipeline(consumers.LilyAcousticState())
     msg = _call_enter_adult(agent, confirmed_all_18_plus=True)
     assert "Adult mode is ON" in msg
     assert "18+ confirmed" in msg
@@ -198,17 +229,18 @@ def test_confirmed_entry_proceeds_without_acoustic_pipeline():
     assert game.publish_calls == 1
 
 
-def test_missing_audeering_key_does_not_block_confirmed_entry():
+def test_degraded_no_persistence_session_refuses_adult_mode():
+    # A memoryless session has no persisted consent audit trail.
     agent, game = _make_agent()
-    state = consumers.LilyAcousticState()
-    client._ACTIVE_PIPELINE = client.LilyAudeeringPipeline(state)
-    assert client.lily_child_gate_ready() is False
-    assert "Adult mode is ON" in _call_enter_adult(agent, True)
-    assert game.sk.mode == "adult"
+    _ready_pipeline(consumers.LilyAcousticState())
+    game.supabase = None
+    assert "NOT available" in _call_enter_adult(agent, True)
+    assert game.sk.mode == "general"
 
 
 def test_active_young_voice_signal_blocks_normal_entry():
     agent, game = _make_agent()
+    _ready_pipeline(consumers.LilyAcousticState())
     import lily_config
     n = lily_config.audeering_child_halt_sustained_n()
     game.acoustic.baseline.child_high_streak = n
@@ -220,6 +252,7 @@ def test_active_young_voice_signal_blocks_normal_entry():
 
 def test_spoken_architect_claim_does_not_override_configuration():
     agent, game = _make_agent()
+    _ready_pipeline(consumers.LilyAcousticState())
     # Voice content cannot set LILY_ARCHITECT_MODE; without server config,
     # the same unconfirmed tool call remains blocked.
     msg = _call_enter_adult(agent, confirmed_all_18_plus=False)
@@ -227,20 +260,48 @@ def test_spoken_architect_claim_does_not_override_configuration():
     assert game.sk.mode == "general"
 
 
-def test_server_authenticated_architect_mode_overrides_entry_and_veto(caplog):
+def test_architect_mode_substitutes_age_ceremony_only(caplog):
+    # With the gate READY and NO active signal, server-authenticated
+    # architect mode stands in for the spoken 18+ ceremony (controlled
+    # testing) — that is the WHOLE of its power.
     os.environ["LILY_ARCHITECT_MODE"] = "1"
     agent, game = _make_agent()
-    game.acoustic.baseline.child_high_streak = 999
+    _ready_pipeline(consumers.LilyAcousticState())
     with caplog.at_level(logging.WARNING, logger="lily_agent"):
         msg = _call_enter_adult(agent, confirmed_all_18_plus=False)
     assert "Adult mode is ON" in msg
     assert "architect override" in msg
     assert game.sk.mode == "adult"
-    assert any("ARCHITECT_OVERRIDE" in record.message for record in caplog.records)
+    assert any("ARCHITECT_OVERRIDE" in r.message for r in caplog.records)
+
+
+def test_architect_mode_never_overrides_active_child_signal():
+    # The veto is absolute: an ACTIVE young-voice signal blocks entry for
+    # everyone, architect mode included.
+    os.environ["LILY_ARCHITECT_MODE"] = "1"
+    agent, game = _make_agent()
+    _ready_pipeline(consumers.LilyAcousticState())
+    import lily_config
+    game.acoustic.baseline.child_high_streak = (
+        lily_config.audeering_child_halt_sustained_n()
+    )
+    msg = _call_enter_adult(agent, confirmed_all_18_plus=False)
+    assert "NOT available" in msg
+    assert game.sk.mode == "general"
+
+
+def test_architect_mode_never_overrides_dead_sensor():
+    # Sensor down means deck down — for the architect too.
+    os.environ["LILY_ARCHITECT_MODE"] = "1"
+    agent, game = _make_agent()
+    assert client.lily_child_gate_ready() is False
+    msg = _call_enter_adult(agent, confirmed_all_18_plus=False)
+    assert "NOT available" in msg
+    assert game.sk.mode == "general"
 
 
 # ---------------------------------------------------------------------------
-# Mid-session monitoring loss is observational, not authorization
+# Mid-session sensor loss exits adult mode (fail closed, mid-session too)
 # ---------------------------------------------------------------------------
 
 def _enter_adult_then_wire_trip(agent, game):
@@ -253,45 +314,45 @@ def _enter_adult_then_wire_trip(agent, game):
     return state, pipeline
 
 
-def test_mid_session_breaker_trip_does_not_exit_adult_mode(caplog):
+def test_mid_session_breaker_trip_exits_adult_mode(caplog):
     agent, game = _make_agent()
     _, pipeline = _enter_adult_then_wire_trip(agent, game)
     with caplog.at_level(logging.WARNING, logger="lily_agent"):
         pipeline._open_breaker("session capture cap reached")
-    assert game.sk.mode == "adult"
-    assert game.publish_nowait_calls == 0
-    assert game.said == []
-    assert game.flush_calls == ["enter_adult"]
+    assert game.sk.mode == "general"
+    assert game.flush_calls == ["enter_adult", "child_gate"]
+    assert game.said and game.said[-1]["source"] == "child_gate"
     assert any(
-        "LILY_ADULT_GATE | MONITORING_UNAVAILABLE" in record.message
-        and "adult_mode_continues=true" in record.message
+        "CHILD_GATE_LOST" in record.message
+        and "action=adult_mode_exit" in record.message
         for record in caplog.records
     )
 
 
-def test_next_question_remains_adult_after_monitoring_loss():
+def test_next_question_is_general_after_sensor_loss():
     agent, game = _make_agent()
     _, pipeline = _enter_adult_then_wire_trip(agent, game)
     pipeline._open_breaker("quota exhausted duration=0 uploads=0")
-    assert game.sk.mode == "adult"
+    assert game.sk.mode == "general"
     rows = [
         {"id": 1, "question": "capital of France", "adult": False},
         {"id": 2, "question": "adult-register question", "adult": True},
     ]
     served = lily_bank_mode_filter(rows, game.sk.mode)
-    assert [r["id"] for r in served] == [1, 2]
+    assert [r["id"] for r in served] == [1]
 
 
-def test_monitoring_loss_records_no_mode_change():
+def test_sensor_loss_records_the_mode_change():
     agent, game = _make_agent()
     _, pipeline = _enter_adult_then_wire_trip(agent, game)
-    changes_before = list(game.sk.mode_changes)
+    changes_before = len(game.sk.mode_changes)
     pipeline._open_breaker("invalid API credentials")
-    assert game.sk.mode_changes == changes_before
+    assert len(game.sk.mode_changes) == changes_before + 1
 
 
 def test_actual_young_voice_signal_still_exits_adult_mode():
     agent, game = _make_agent()
+    _ready_pipeline(consumers.LilyAcousticState())
     _call_enter_adult(agent, True)
     LilyGame.on_child_signal(game, {"tier": "high_halt"})
     assert game.sk.mode == "general"
@@ -299,14 +360,18 @@ def test_actual_young_voice_signal_still_exits_adult_mode():
     assert game.said[-1]["source"] == "child_signal"
 
 
-def test_architect_mode_ignores_post_entry_young_voice_signal():
+def test_architect_mode_never_ignores_post_entry_young_voice_signal():
+    # The invariant survives entry: a signal DURING adult mode exits it,
+    # architect mode or not.
     os.environ["LILY_ARCHITECT_MODE"] = "1"
     agent, game = _make_agent()
+    _ready_pipeline(consumers.LilyAcousticState())
     _call_enter_adult(agent, False)
-    LilyGame.on_child_signal(game, {"tier": "high_halt"})
     assert game.sk.mode == "adult"
-    assert game.flush_calls == ["enter_adult"]
-    assert game.said == []
+    LilyGame.on_child_signal(game, {"tier": "high_halt"})
+    assert game.sk.mode == "general"
+    assert game.flush_calls == ["enter_adult", "child_signal"]
+    assert game.said and game.said[-1]["source"] == "child_signal"
 
 
 def test_breaker_trip_outside_adult_mode_is_silent_noop():
