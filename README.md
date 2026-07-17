@@ -565,7 +565,7 @@ migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group pref
 migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt columns
 migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
-tests/               785 tests, run with `python -m pytest tests/` — no network; needs
+tests/               790 tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.4 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -595,6 +595,16 @@ source=... group_id=...` is logged every session, upgrades as
    that prior `group_id`
    (`source=voiceprint_match`). Best-effort: it only hits when Speechmatics
    returns stable identifier strings for a returning voice.
+   **Identifier-refresh reality (2026-07-16, verified in production):**
+   Speechmatics REFRESHES the identifier blobs every session for the same
+   voice (seven same-voice rows, seven distinct strings, one shared prefix
+   family) — exact identifier-string overlap can never match across
+   sessions. The durable confirmation is the LABEL ROUND-TRIP: stored
+   identifiers are injected as `known_speakers` under player-name labels,
+   and the engine assigns one of those labels to a live stream only when
+   its own biometric match recognizes the voice
+   (`lily_candidate_labels_confirmed`, logged as
+   `DEVICE_VERIFY_LABEL_MATCH`). Transient S-number labels never count.
 3. **(c) name-set hash fallback**: `grp_` + sha1 of the normalized sorted
    player-name set joined with `|` (e.g. `sha1("carly|kali|rami")`) —
    deterministic, so the same table of names re-keys to the same group every

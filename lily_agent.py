@@ -1032,6 +1032,24 @@ class LilyGame:
         if matched == candidate:
             await self._promote_device_candidate(trigger)
             return True
+        # Label round-trip (2026-07-16 fix): exact identifier-string
+        # overlap can NEVER match across sessions — Speechmatics refreshes
+        # the identifier blobs each session for the same voice (verified
+        # in production: 7 same-voice rows, 7 distinct strings). The
+        # durable confirmation is the label: known_speakers were injected
+        # under this candidate's player-name labels, and the engine
+        # assigns one of those labels only when ITS biometric match
+        # recognizes the live voice.
+        if lily_memory.lily_candidate_labels_confirmed(
+            current, self._device_candidate_voiceprints
+        ):
+            logger.info(
+                "LILY_MEMORY | DEVICE_VERIFY_LABEL_MATCH | trigger=%s "
+                "group=%s — vendor recognition via injected label",
+                trigger, candidate,
+            )
+            await self._promote_device_candidate(trigger)
+            return True
         roster_size = 1
         try:
             roster_size = max(1, int(self.sk.roster_size()))

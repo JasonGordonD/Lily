@@ -111,6 +111,61 @@ def _identifier_strings(value) -> set:
     return out
 
 
+def lily_candidate_labels_confirmed(current_identifiers, candidate_rows) -> bool:
+    """Voice confirmation via the LABEL ROUND-TRIP (2026-07-16 fix): we
+    inject a candidate group's stored identifiers as known_speakers under
+    PLAYER-NAME labels; Speechmatics assigns one of those labels to a live
+    stream ONLY when its own biometric match recognizes the voice. So a
+    current speaker id carrying an injected label IS the vendor's
+    recognition decision.
+
+    This exists because exact identifier-string overlap can never match
+    across sessions: production data shows Speechmatics REFRESHES the
+    identifier blobs every session for the same voice (7 same-voice rows,
+    7 distinct strings, one shared prefix family). Transient diarization
+    labels (S0, S1...) never count."""
+    import re as _re
+    if not candidate_rows:
+        return False
+    wanted = {
+        str(lbl).strip().lower()
+        for lbl in (
+            (row or {}).get("speaker_label") or (row or {}).get("player_name")
+            for row in candidate_rows
+        )
+        if lbl and str(lbl).strip()
+    }
+    if not wanted:
+        return False
+    transient = _re.compile(r"^s\d+$", _re.IGNORECASE)
+    for entry in _flatten_identifier_entries(current_identifiers):
+        label = getattr(entry, "label", None) or (
+            entry.get("label") if isinstance(entry, dict) else None
+        )
+        if not label:
+            continue
+        label = str(label).strip()
+        if transient.match(label):
+            continue
+        if label.lower() in wanted:
+            return True
+    return False
+
+
+def _flatten_identifier_entries(value) -> list:
+    """Flatten get_speaker_ids() shapes (entry, list, nested list) into a
+    flat list of entries (SpeakerIdentifier-like objects or dicts)."""
+    out: list = []
+    if value is None:
+        return out
+    if isinstance(value, (list, tuple, set)):
+        for v in value:
+            out.extend(_flatten_identifier_entries(v))
+        return out
+    out.append(value)
+    return out
+
+
 def lily_match_group_by_voiceprints(current_identifiers, stored_rows) -> Optional[str]:
     """Resolution step (b): match this session's Speechmatics speaker
     identifiers against stored lily_speaker_voiceprints rows

@@ -196,3 +196,52 @@ def test_write_session_memory_retries_without_player_names_column():
     payload, _ = stub.rows[0]
     assert "player_names" not in payload
     assert payload["question_count"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Label round-trip confirmation (2026-07-16: identifier strings refresh
+# every session — exact overlap can never match; the injected label coming
+# back IS the vendor's biometric recognition)
+# ---------------------------------------------------------------------------
+
+from lily_memory import lily_candidate_labels_confirmed
+
+
+class _SpeakerId:
+    def __init__(self, label, ids):
+        self.label = label
+        self.speaker_identifiers = ids
+
+
+def _cand_rows():
+    return [{"group_id": "fe600d1f", "player_name": "Rami",
+             "speaker_label": "Rami",
+             "speaker_identifiers": ["OLD_SESSION_BLOB"]}]
+
+
+def test_injected_label_round_trip_confirms():
+    # Fresh-session blob differs from the stored one — only the label,
+    # which the engine assigns on ITS recognition, matches.
+    current = [_SpeakerId("Rami", ["FRESH_SESSION_BLOB"])]
+    assert lily_candidate_labels_confirmed(current, _cand_rows()) is True
+
+
+def test_transient_diarization_labels_never_confirm():
+    current = [_SpeakerId("S1", ["FRESH_BLOB"]), _SpeakerId("S0", ["X"])]
+    assert lily_candidate_labels_confirmed(current, _cand_rows()) is False
+
+
+def test_unrelated_label_never_confirms():
+    current = [_SpeakerId("Dave", ["FRESH_BLOB"])]
+    assert lily_candidate_labels_confirmed(current, _cand_rows()) is False
+
+
+def test_label_match_is_case_insensitive_and_handles_nesting():
+    current = [[_SpeakerId("rami", ["A"])]]  # multi-stream nested shape
+    assert lily_candidate_labels_confirmed(current, _cand_rows()) is True
+
+
+def test_empty_inputs_never_confirm():
+    assert lily_candidate_labels_confirmed(None, _cand_rows()) is False
+    assert lily_candidate_labels_confirmed([_SpeakerId("Rami", [])], []) is False
+    assert lily_candidate_labels_confirmed([], _cand_rows()) is False
