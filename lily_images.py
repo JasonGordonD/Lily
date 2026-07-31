@@ -34,7 +34,7 @@ logger = logging.getLogger("lily_images")
 LILY_IMAGES_BUCKET = "lily-images"
 
 # Provenance values for stored images (question-schema enum minus 'none').
-IMAGE_SOURCES = ("generated", "web")
+IMAGE_SOURCES = ("generated", "web", "player")
 
 # Attempt-row statuses (JRVS media_gen_attempts spellings).
 ATTEMPT_SUCCESS = "success"

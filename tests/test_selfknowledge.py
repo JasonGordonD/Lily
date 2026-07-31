@@ -63,10 +63,16 @@ def test_feature_version_covers_every_entry():
 
 
 def test_whats_new_delta():
-    # A table stamped at 1 hears about voice presets and nothing else.
+    # A table stamped at 1 hears about everything since — and ONLY that.
     delta = lily_capabilities.lily_whats_new(1)
-    assert any("voice" in line for line in delta)
-    assert len(delta) == 1
+    assert any("voice" in line for line in delta)  # v2
+    assert any("photo" in line for line in delta)  # v3
+    v1_descriptions = [
+        e["description"]
+        for e in lily_capabilities.LILY_CAPABILITIES
+        if int(e.get("since", 1)) <= 1
+    ]
+    assert not any(line in v1_descriptions for line in delta)
     # Current stamp → silence; unknown stamp → silence (never fabricate
     # "new since last time" for a table whose history we don't know).
     assert lily_capabilities.lily_whats_new(
@@ -78,13 +84,16 @@ def test_whats_new_delta():
 
 def test_availability_lines_fail_closed_and_stay_honest():
     # Everything on → nothing to caveat.
-    assert lily_capabilities.lily_availability_lines(
-        {"adult_deck": True, "pictures_real_sourcing": True}
-    ) == []
+    all_on = {
+        entry["availability_key"]: True
+        for entry in lily_capabilities.LILY_CAPABILITIES
+        if entry.get("availability_key")
+    }
+    assert lily_capabilities.lily_availability_lines(all_on) == []
     # Unknown flags are OFF — never overclaim (the 12:08 "I absolutely
     # do!" while the key was unset).
     lines = lily_capabilities.lily_availability_lines({})
-    assert len(lines) == 2
+    assert len(lines) == len(all_on)
     joined = " ".join(lines)
     assert "not switched on tonight" in joined
     # Pictures caveat is PARTIAL: generated imagery is never gated

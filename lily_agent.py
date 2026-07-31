@@ -78,7 +78,10 @@ from lily_binding import (
 )
 from lily_reasoning import LilyReasoning
 from lily_scorekeeper import LilyScorekeeper, lily_detect_state_contradiction
+import lily_images
+import lily_vision
 from lily_tts import LilyTTS, lily_prewarm_tts_connection
+from lily_vision import lily_analyze_image
 from lily_voice_switch import lily_list_voices, lily_switch_voice
 
 logger = logging.getLogger("lily_agent")
@@ -5996,6 +5999,108 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.room.local_participant.register_rpc_method("lily_control.start", _rpc_start)
     ctx.room.local_participant.register_rpc_method("lily_control.skip", _rpc_skip)
 
+    # --- Player photo ingest (vision, Zuna port — the 12:48 "you don't
+    # have image ingestion" fix). Topic `lily.image.upload` carries the
+    # UI image-picker's bytes; they land in the lily-images bucket
+    # (content-addressed, "player" source), the public URL flows through
+    # Grok vision, and Lily reacts to what is ACTUALLY in the photo — or
+    # says honestly that she couldn't look (unconfigured provider,
+    # storage failure, analysis error). She never describes an image the
+    # tool did not confirm seeing.
+    def _on_player_image(reader, participant_identity: str):
+        async def _ingest() -> None:
+            try:
+                info = getattr(reader, "info", None)
+                mime = (
+                    (getattr(info, "mime_type", "") or "").lower()
+                    if info else ""
+                ) or "image/jpeg"
+                buf = bytearray()
+                async for chunk in reader:
+                    buf.extend(chunk)
+                    if len(buf) > lily_images.MAX_IMAGE_BYTES:
+                        logger.warning(
+                            "LILY_VISION | INGEST_OVERSIZE | bytes>%d sender=%s",
+                            lily_images.MAX_IMAGE_BYTES, participant_identity,
+                        )
+                        game.sk.set_status_note(
+                            "a player tried to share a photo but it was too "
+                            "large (8MB cap) — tell them plainly, invite a "
+                            "smaller one"
+                        )
+                        game.instructed_reply(
+                            "A player's shared photo was too large to take "
+                            "in — say so plainly and invite a smaller one."
+                        )
+                        return
+                data = bytes(buf)
+                if not data:
+                    return
+                logger.info(
+                    "LILY_VISION | INGEST | bytes=%d mime=%s sender=%s",
+                    len(data), mime, participant_identity,
+                )
+                url = await lily_images.lily_upload_image_bytes(
+                    game.supabase, data, source="player", content_type=mime
+                )
+                if not url:
+                    game.sk.set_status_note(
+                        "a player shared a photo but storing it failed — "
+                        "say the photo didn't make it through, honestly"
+                    )
+                    game.instructed_reply(
+                        "A player tried to share a photo and it didn't come "
+                        "through on your side — say so plainly, invite them "
+                        "to try again. Never describe what you didn't see."
+                    )
+                    return
+                result = await lily_vision.lily_describe_image(
+                    url,
+                    "A player at a live trivia night just shared this photo "
+                    "with the host. Describe what's in it — objects, "
+                    "settings, visible text, anything a playful host could "
+                    "react to. Never guess who any person is.",
+                )
+                if result.get("status") == "ok":
+                    description = str(result.get("description", ""))[:500]
+                    game.sk.set_status_note(
+                        "PLAYER PHOTO (verified through your vision tool — "
+                        f"you really saw it): {description}"
+                    )
+                    game.instructed_reply(
+                        "A player just shared a photo and the PLAYER PHOTO "
+                        "state note carries what is actually in it. React "
+                        "in character — specific and warm, grounded ONLY "
+                        "in what the note says is there. One beat, then "
+                        "back to the night."
+                    )
+                    return
+                if result.get("status") == "unavailable":
+                    game.sk.set_status_note(
+                        "a player shared a photo but your vision provider "
+                        "is not switched on tonight — capability yes, "
+                        "availability no; say you can't look at pictures "
+                        "tonight, honestly"
+                    )
+                else:
+                    game.sk.set_status_note(
+                        "a player shared a photo but the look failed "
+                        f"({str(result.get('reason'))[:120]}) — say you "
+                        "couldn't get a look, honestly"
+                    )
+                game.instructed_reply(
+                    "A player shared a photo but you could NOT actually "
+                    "see it (the state note says why) — say so plainly. "
+                    "No fabricated description, no invented fixes."
+                )
+            except Exception as e:
+                logger.warning("LILY_VISION | ingest failed: %s", e)
+
+        asyncio.ensure_future(_ingest())
+
+    ctx.room.register_byte_stream_handler("lily.image.upload", _on_player_image)
+    logger.info("LILY_VISION | registered byte stream topic=lily.image.upload")
+
     # --- Start ---
     # Say gate: on_enter (fired inside session.start) must know whether
     # this is a fresh room (session_greet) or a reconnect (session_rejoin)
@@ -6017,6 +6122,9 @@ async def entrypoint(ctx: JobContext) -> None:
         tools=[
             lily_list_voices,
             lily_switch_voice,
+            # Vision (Zuna port): player-shared photos + image URLs.
+            # Ingest path: the lily.image.upload byte stream below.
+            lily_analyze_image,
         ],
     )
     game.agent = agent  # P2: per-turn preemptive-generation control
@@ -6049,6 +6157,8 @@ async def entrypoint(ctx: JobContext) -> None:
             audeering_pipeline is not None or lily_config.architect_mode()
         ),
         "pictures_real_sourcing": bool(lily_config.exa_api_key()),
+        # Vision (Zuna port): player-shared photo analysis rides XAI_API_KEY.
+        "vision": lily_vision.lily_vision_available(),
     }
     if audeering_pipeline is not None:
         def _on_track_subscribed(track, publication=None, participant=None) -> None:

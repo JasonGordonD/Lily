@@ -459,6 +459,9 @@ lily_voice_switch.py voice-preset switching tools (Zuna port): lily_list_voices 
 lily_capabilities.py the capabilities manifest: versioned feature list, rematch
                      delta, availability layer, options-block CI markers
                      (stdlib-only, pure)
+lily_vision.py       xAI Grok vision (Zuna port): lily_analyze_image tool +
+                     the player-photo ingest's describe call (structured
+                     failure contract, never raises)
 lily_config.py       ALL env access lives here
 lily_audeering_client.py     devAIce Web API client + room-audio capture pipeline
                              (native lift of mjrvs_audeering_client + pipeline)
@@ -1454,7 +1457,9 @@ thresholds section),
 `LILY_JUDGE_MAX_OUTPUT_TOKENS` (default 1024) — dedicated reasoning/judge budgets
 (thinking tokens count toward `max_output_tokens` on Gemini 3.x) · web tools
 (reasoning node only): `EXA_API_KEY` / `TAVILY_API_KEY` (missing key = tool
-disabled, text-only behavior) · `LILY_IMAGEGEN_MODEL` (default
+disabled, text-only behavior) · `XAI_API_KEY` (Grok vision — player-photo
+analysis via `lily_vision`; missing key = she receives photos but honestly
+says she can't look tonight) · `LILY_IMAGEGEN_MODEL` (default
 `gemini-2.5-flash-image`, invented-content picture questions) · acoustic
 pipeline: `AUDEERING_API_KEY` plus the `AUDEERING_*` tunables listed in the
 acoustic-pipeline section (missing key = breaker open, session unaffected).

@@ -5,6 +5,35 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-07-31 — Image ingestion: the Zuna vision port (12:48 live fixture, manifest v3)
+
+"I can't show you because you don't have like image ingestion" — the
+probe's parting shot, and it was true. Now she does:
+
+- `lily_vision.py` — native lift of Zuna's vision tool: xAI Grok
+  (`grok-4.3`, the fleet-consolidated vision surface) via the
+  chat-completions endpoint with `image_url` content parts; xAI fetches
+  the image itself. Zuna's structured failure contract kept verbatim —
+  every path returns `{status, ...}`, never raises; missing
+  `XAI_API_KEY` is an honest `unavailable`.
+- `lily_analyze_image` function tool (registered via tools=[], mapped
+  to the new manifest entry per the lint rule): a player names an image
+  URL, she looks.
+- Player-photo ingest: byte-stream topic `lily.image.upload` (the UI's
+  image picker) → `lily-images` bucket under the new "player" source
+  (content-addressed, 8MB cap) → Grok describe → a PLAYER PHOTO state
+  note carrying what is ACTUALLY in it, and one in-character reaction
+  grounded only in that note. Oversize, storage failure, unconfigured
+  provider, and analysis errors each produce an honest spoken line —
+  never a fabricated description (the say-gate self-knowledge rules
+  apply to the description text like everything else).
+- Manifest v3: `image_ingestion` entry (availability_key `vision` —
+  the state block carries the OFF caveat when the key is unset), so a
+  voice-presets-era table hears about photo sharing in its rematch
+  delta. Options block gains the "Show her things" line (CI-checked).
+- Companion prmpt_ui change: the Lily session view enables the fleet
+  image picker on topic `lily.image.upload`.
+
 ## 2026-07-31 — "Show me" gets shown for real: the demo picture tool (12:47 live fixture)
 
 Live probe, same afternoon the self-knowledge WO landed: a skeptic asked

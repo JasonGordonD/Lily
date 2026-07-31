@@ -147,6 +147,13 @@ def supabase_service_role_key() -> Optional[str]:
 # required at boot.
 # ---------------------------------------------------------------------------
 
+def xai_api_key() -> Optional[str]:
+    """xAI Grok vision (lily_vision — the fleet's consolidated vision
+    surface, ported from Zuna). Missing key = vision unavailable, honest
+    availability caveat, never a boot failure."""
+    return _get("XAI_API_KEY")
+
+
 def exa_api_key() -> Optional[str]:
     return _get("EXA_API_KEY")
 

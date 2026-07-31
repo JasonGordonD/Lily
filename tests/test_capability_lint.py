@@ -21,10 +21,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_capabilities
+import lily_vision
 import lily_voice_switch
 from lily_agent import LilyAgent
 
 from livekit.agents.llm import tool_context
+
+# Modules whose module-level function tools are passed to LilyAgent via
+# tools=[...] — extend when a new tool module is registered.
+TOOL_MODULES = (lily_voice_switch, lily_vision)
 
 
 def _registered_tool_names() -> set:
@@ -40,12 +45,13 @@ def _registered_tool_names() -> set:
                 names.add(name)
         except Exception:
             continue
-    for name, member in inspect.getmembers(lily_voice_switch):
-        try:
-            if tool_context.is_function_tool(member):
-                names.add(name)
-        except Exception:
-            continue
+    for module in TOOL_MODULES:
+        for name, member in inspect.getmembers(module):
+            try:
+                if tool_context.is_function_tool(member):
+                    names.add(name)
+            except Exception:
+                continue
     return names
 
 

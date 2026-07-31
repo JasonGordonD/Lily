@@ -46,7 +46,7 @@ from typing import Optional
 
 # Bumped whenever a player-facing feature lands. The delta a returning
 # table hears is every feature with `since` greater than their stamp.
-LILY_FEATURE_VERSION: int = 2
+LILY_FEATURE_VERSION: int = 3
 
 # The backfill (version 1) is the audited launch set; voice presets are
 # version 2 (Rami's direct change, 2026-07-31 — added at commit time per
@@ -172,6 +172,21 @@ LILY_CAPABILITIES: list = [
         "description": "two voices — ask her to switch and she switches",
         "prompt_marker": "switch my voice",
         "askable": True,
+    },
+    {
+        "key": "image_ingestion",
+        "code_ref": "lily_vision",
+        "tools": ["lily_analyze_image"],
+        "since": 3,
+        "description": (
+            "share a photo through the chat's image button — she looks at "
+            "it and reacts"
+        ),
+        "prompt_marker": "Show her things",
+        "askable": True,
+        # Grok vision rides XAI_API_KEY — fleet-standard; unset = she can
+        # receive the photo but must honestly say she can't look tonight.
+        "availability_key": "vision",
     },
 ]
 
