@@ -1028,6 +1028,59 @@ class LilyGame:
             "first, then you') and take the names one at a time"
         )
 
+    async def show_demo_picture(self) -> tuple[bool, str]:
+        """Self-knowledge WO Task 1 symmetry, live-fixture fix (12:47
+        transcript): "show me" must GET SHOWN — before this existed, a
+        skeptic asking to see picture rounds five times got a fabricated
+        screen push ("I've just pushed a visual preview to your display").
+        This is the real mechanism: put one actual image on the glass via
+        the SAME metadata path picture questions use (the render path is
+        not phase-gated; generation needs no EXA key).
+
+        Cache-first: any bank image already in the bucket; else one
+        generated demo image. Returns (landed, line_for_lily) — the tool
+        result is the ONLY thing that makes "look at the screen" true.
+        Never raises."""
+        url = None
+        supabase = getattr(self, "supabase", None)
+        if supabase is not None:
+            try:
+                result = await asyncio.to_thread(
+                    lambda: supabase.table("lily_questions")
+                    .select("image_url")
+                    .neq("image_url", "")
+                    .not_.is_("image_url", "null")
+                    .limit(1)
+                    .execute()
+                )
+                rows = getattr(result, "data", None) or []
+                if rows and rows[0].get("image_url"):
+                    url = rows[0]["image_url"]
+            except Exception as e:
+                logger.warning("LILY_DEMO | bank image lookup failed: %s", e)
+        if not url and getattr(self, "reasoning", None) is not None:
+            # Generation rides the reasoning node — the one legal image
+            # seam (web guardrail: the vocal module never touches the
+            # image stack directly).
+            url = await self.reasoning.generate_demo_image(
+                supabase, session_id=self.sk.session_id
+            )
+        if not url:
+            logger.warning("LILY_DEMO | no image available")
+            return (
+                False,
+                "no image could be produced right now — say exactly that, "
+                "honestly ('the picture rail isn't cooperating right this "
+                "second'), and do NOT claim anything reached the screen",
+            )
+        await self.publish_metadata("", image_url=url, category="demo")
+        logger.info("LILY_DEMO | PUBLISHED | url=%s", url[:80])
+        return (
+            True,
+            "a real demo image just landed on the screen — point the table "
+            "at it ('there it is — that's the picture rail')",
+        )
+
     def _stamp_feature_version(self) -> None:
         """Move the group's last_seen_feature_version stamp to the current
         manifest version and persist the whole prefs dict (fire-and-forget,
@@ -4808,6 +4861,21 @@ class LilyAgent(Agent):
             "Round format is now freeform (sticky) — open questions, "
             "no options read out, from the next question you ask."
         )
+
+    @function_tool()
+    async def lily_show_demo_picture(self, context: RunContext) -> str:
+        """Put ONE real demo image on the screen right now — the lobby
+        included. Call this whenever someone asks to SEE what picture
+        rounds look like ("show me", "prove it", "I'll believe it when I
+        see it") instead of describing pictures in words. The tool result
+        is the ONLY thing that makes "look at the screen" true: if it
+        confirms the image landed, point the table at the screen; if it
+        reports a failure, say exactly that — never claim anything
+        reached the screen on your own.
+        """
+        landed, line = await self._game.show_demo_picture()
+        prefix = "IMAGE ON SCREEN: " if landed else "NO IMAGE LANDED: "
+        return prefix + line
 
     @function_tool()
     async def lily_use_fifty_fifty(

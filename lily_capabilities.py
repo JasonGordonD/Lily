@@ -132,7 +132,7 @@ LILY_CAPABILITIES: list = [
     {
         "key": "pictures",
         "code_ref": "lily_imagegen",
-        "tools": [],
+        "tools": ["lily_show_demo_picture"],
         "since": 1,
         "description": "picture rounds on the screen, on request ('pictures on')",
         "prompt_marker": "Pictures, offered once and lightly",

@@ -5,6 +5,31 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-07-31 — "Show me" gets shown for real: the demo picture tool (12:47 live fixture)
+
+Live probe, same afternoon the self-knowledge WO landed: a skeptic asked
+to SEE picture rounds five times ("seeing is believing") and got words,
+then a fabricated screen push ("I've just pushed a visual preview of what
+our game board looks like directly to your display") and invented
+pairing troubleshooting. The prompt demanded "show me gets shown" but no
+MECHANISM existed — the same make-the-honest-answer-exist gap as the
+manifest, one layer down.
+
+- `lily_show_demo_picture` (new tool, mapped to the manifest's
+  `pictures` entry per the lint rule): puts ONE real image on the screen
+  via the same metadata path picture questions use, lobby included.
+  Cache-first (any bank image), else one generated tabletop image
+  through `LilyReasoning.generate_demo_image` — the one legal image seam
+  (web guardrail respected; the vocal module still never references the
+  image stack). Honest failure line when nothing can be produced.
+- Prompt (WHAT YOU KNOW ABOUT YOURSELF): SCREEN ACTIONS EXIST ONLY
+  THROUGH TOOLS — no tool confirmation, nothing reached the screen;
+  never narrate an imagined push, never invent pairing steps for a
+  screen she cannot see, never blame the player's device.
+- Companion prmpt_ui change: the lobby renders the metadata image in a
+  demo frame (the render path is now genuinely not phase-gated
+  frontend-side too).
+
 ## 2026-07-31 — WO-LILY-CAPABILITY-LINT-001: bidirectional tool↔manifest lint
 
 Follow-up to SELFKNOWLEDGE-INTAKE-001, dispatched on its landing. The

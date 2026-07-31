@@ -747,6 +747,27 @@ class LilyReasoning:
 
     # -- picture-question supply (WO-LILY-OMNIBUS-002 H/I/J) ------------------
 
+    async def generate_demo_image(
+        self, supabase, *, session_id: str
+    ) -> Optional[str]:
+        """Self-knowledge WO "show me" demo (12:47 live fixture): ONE
+        generated tabletop image so a skeptic asking to SEE picture
+        rounds gets shown — through this, the one legal image seam.
+        Cache-first via the shared no-silent-crash wrapper (a session's
+        demo generates at most once); returns a public bucket URL or
+        None. Never raises."""
+        return await lily_imagegen.lily_generate_question_image(
+            supabase,
+            session_id=session_id,
+            question_id=f"demo_{session_id}",
+            prompt=(
+                "A warm, playful pub-trivia tabletop scene: a wooden "
+                "table with scattered answer cards, a chalkboard "
+                "scoreboard, soft rose-colored lighting, no text"
+            ),
+            aspect_ratio="16:9",
+        )
+
     async def prefetch_picture_question(
         self,
         supabase,
