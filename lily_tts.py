@@ -100,6 +100,23 @@ class LilyTTS(tts.TTS):
         if voice_id is not None:
             self._opts.voice_id = voice_id
 
+    def set_voice(self, voice_id: str) -> None:
+        """Runtime voice-id swap (port of Zuna's WO-ZUNA-VOICE-SWITCH-TOOL-001).
+
+        Public API used by `lily_voice_switch.lily_switch_voice`. Mutates
+        `self._opts.voice_id` so every subsequent
+        `/v1/text-to-speech/{voice_id}/stream` request targets the new
+        voice. No session teardown — `synthesize()` snapshots `self._opts`
+        via `replace()` on each call, so the next turn picks up the swap
+        without any reconnect.
+
+        Locked invariants (model_id / output_format / voice_settings /
+        api_key) are untouched — only the voice target changes.
+        """
+        if not voice_id or not voice_id.strip():
+            raise ValueError("set_voice requires a non-empty voice_id")
+        self._opts.voice_id = voice_id.strip()
+
     def _ensure_session(self) -> aiohttp.ClientSession:
         return utils.http_context.http_session()
 

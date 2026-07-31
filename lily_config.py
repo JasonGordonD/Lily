@@ -70,14 +70,25 @@ def eleven_api_key() -> str:
     return _require("ELEVEN_API_KEY")
 
 
+# Voice preset 1 — Lily's primary and default voice. Hardcoded ID (same
+# pattern as Zuna's VOICE_NADIA), overridable via LILY_VOICE_1.
+LILY_VOICE_1_DEFAULT = "W3C2vBPukr5b5jvoXhPK"
+
+
+def lily_voice_1() -> str:
+    """Voice preset 1 — primary/default. Always populated."""
+    return _get("LILY_VOICE_1") or LILY_VOICE_1_DEFAULT
+
+
+def lily_voice_2() -> Optional[str]:
+    """Voice preset 2 — Raven's voice (the former default):
+    LILY_VOICE_ID with RAVEN_VOICE_ID fallback. None when unconfigured."""
+    return _get("LILY_VOICE_ID") or _get("RAVEN_VOICE_ID")
+
+
 def lily_voice_id() -> str:
-    """Lily uses Raven's voice: LILY_VOICE_ID with RAVEN_VOICE_ID fallback."""
-    voice = _get("LILY_VOICE_ID") or _get("RAVEN_VOICE_ID")
-    if not voice:
-        raise RuntimeError(
-            "LILY_INIT | no voice configured: set LILY_VOICE_ID (or RAVEN_VOICE_ID)"
-        )
-    return voice
+    """Voice active at session start: preset 1 (primary)."""
+    return lily_voice_1()
 
 
 # ---------------------------------------------------------------------------

@@ -78,6 +78,7 @@ from lily_binding import (
 from lily_reasoning import LilyReasoning
 from lily_scorekeeper import LilyScorekeeper, lily_detect_state_contradiction
 from lily_tts import LilyTTS, lily_prewarm_tts_connection
+from lily_voice_switch import lily_list_voices, lily_switch_voice
 
 logger = logging.getLogger("lily_agent")
 
@@ -5484,7 +5485,7 @@ async def entrypoint(ctx: JobContext) -> None:
             ],
             api_key=lily_config.google_api_key(),
         ),
-        tts=LilyTTS(),  # Raven's voice via LILY_VOICE_ID/RAVEN_VOICE_ID
+        tts=LilyTTS(),  # voice1 (primary) via lily_config.lily_voice_id()
         vad=silero.VAD.load(),  # barge-in enabled; no STT gating during TTS
         turn_handling=TurnHandlingOptions(
             interruption=InterruptionOptions(
@@ -5764,6 +5765,18 @@ async def entrypoint(ctx: JobContext) -> None:
     agent = LilyAgent(
         game=game,
         instructions=LILY_SYSTEM_PROMPT,
+        # Zuna voice-switch port: runtime preset switching between
+        # voice1 (primary, LILY_VOICE_1 / hardcoded default) and voice2
+        # (Raven's voice, LILY_VOICE_ID / RAVEN_VOICE_ID). Discovered by
+        # the LLM via tool descriptions — no prompt-file edits.
+        # `lily_list_voices` reports availability + active preset;
+        # `lily_switch_voice("voice1|voice2")` mutates the session
+        # LilyTTS `_opts.voice_id` so the next `synthesize()` targets
+        # the new voice with no session teardown.
+        tools=[
+            lily_list_voices,
+            lily_switch_voice,
+        ],
     )
     game.agent = agent  # P2: per-turn preemptive-generation control
     # NOTE: `noise_cancellation.NC()` aborts the worker at Krisp init on
