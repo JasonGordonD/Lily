@@ -5,6 +5,23 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-07-31 — WO-LILY-CAPABILITY-LINT-001: bidirectional tool↔manifest lint
+
+Follow-up to SELFKNOWLEDGE-INTAKE-001, dispatched on its landing. The
+manifest stays true only if it can't drift: `tests/test_capability_lint.py`
+now asserts on every merge that (1) every registered function tool —
+the LilyAgent `@function_tool` methods plus the module-level voice-switch
+tools — maps to a `lily_capabilities` entry via its `tools` list or is
+declared in `LILY_INTERNAL_TOOLS` (invisible by declaration, not
+omission: `lily_begin_round`, `lily_bind_speaker`, `lily_log_clarify`),
+and (2) every manifest entry's new `code_ref` resolves to living code
+(module / `module:attr` / `module:Class.attr`) — no orphaned claims.
+Failure messages name the offender and the two legal fixes. The WO's
+verify criteria run synthetically in the same file: a dummy unflagged
+tool fails by name, flagging it internal clears it, an orphan ref fails.
+README WO checklist gains the rule. Out of scope per the WO: runtime
+reflection, architecture self-description, prompt changes.
+
 ## 2026-07-31 — WO-LILY-SELFKNOWLEDGE-INTAKE-001: self-knowledge, the manifest, the mirror ban, intake choreography
 
 Source: Tijoux analysis of the two architect-probe sessions (11:56 and
