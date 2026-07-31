@@ -1,0 +1,211 @@
+# LILY — Changelog
+
+Reverse-chronological work-order, RFI, and fix entries for the Lily agent,
+split out of README.md on 2026-07-31 (dated sections moved verbatim —
+nothing removed or truncated). New dated/WO entries are appended at the
+TOP of this file. Living documentation lives in [README.md](README.md).
+
+## 2026-07-31 — Voice presets + runtime switching (Zuna WO-ZUNA-VOICE-SWITCH-TOOL-001 port)
+
+Lily gains runtime voice switching, ported from Zuna's voice_switch_tool
+and trimmed to two presets:
+
+- **voice1 (primary/default):** `W3C2vBPukr5b5jvoXhPK`, hardcoded as
+  `LILY_VOICE_1_DEFAULT` in `lily_config.py` (same hardcoded-ID pattern
+  as Zuna's `VOICE_NADIA`), overridable via the `LILY_VOICE_1` env var.
+  `lily_voice_id()` — what `LilyTTS()` boots with — now resolves to
+  voice1, so every session starts in the new primary voice. Side effect:
+  boot no longer hard-fails when `LILY_VOICE_ID`/`RAVEN_VOICE_ID` are
+  unset.
+- **voice2:** Raven's voice, the former default — `LILY_VOICE_ID` with
+  `RAVEN_VOICE_ID` fallback, `None` when unconfigured (the tool reports
+  "not configured" rather than erroring).
+
+New module `lily_voice_switch.py` exposes two docstring-discovered
+`function_tool`s (no prompt-file edits), registered on `LilyAgent` via
+`tools=[]`: `lily_list_voices` (reports configured presets + which is
+active on the live TTS) and `lily_switch_voice("voice1"|"voice2")`
+(mutates the session `LilyTTS._opts.voice_id` so the NEXT `synthesize()`
+targets the new voice — no session teardown, no reconnect). `LilyTTS`
+gains `set_voice()` mirroring Zuna's contract (non-empty validation,
+locked invariants untouched). Every tool failure path returns a plain
+string; the tools never raise. Tests: `tests/test_voice_switch.py`
+(config contract pure; tool/TTS tests livekit-gated).
+
+## Live-session fixes (2026-07-15, the femur game)
+
+One live solo session exposed four deterministic failures; all are fixed
+with regression coverage in `tests/test_stall_recovery.py`:
+
+- **Self-correction scores.** Every in-window final a player commits is an
+  attempt; adjudication scores the earliest CORRECT attempt across the
+  table. A revision ("the spine… no, the femur") competes from its own
+  later timestamp — it can never jump the queue, but it can score, which
+  the old "first final locks the player's slot" wrongly prevented.
+- **Steal only with a possible stealer.** Candidates persist through the
+  steal window and judged players are filtered, so a solo table (or a
+  table where everyone answered) could never record a steal — the window
+  burned five silent seconds and re-adjudicated an empty set. The steal
+  now opens only while an unjudged rostered player exists.
+- **Idle watchdog.** The supply line is fire-and-forget tasks gated on
+  one-shot triggers; one silent task death used to wedge the whole game
+  (nothing armed, nothing prefetching, Lily freestyling over a frozen
+  scoreboard). A 10s watchdog makes "game live but idle" self-healing:
+  loaded question → arm + nudge; dead supply task → relaunch; supply task
+  alive past ~90s → cancel, honest status note, relaunch. All watchdog
+  actions log as `LILY_WATCHDOG | ...`.
+- **Armed-limbo recovery (04:05 session).** Adjudication can die between
+  the answer commit and the reveal publish; the game then sits with a
+  confirmed-delivered question armed, window closed, nothing adjudicating
+  — a state the watchdog used to trust as "in progress". It now detects
+  the limbo (delivery claim CONFIRMED + closed window + idle ≥2 ticks)
+  and recovers deterministically: candidates waiting → force
+  adjudication; none → reopen the window. The Tier-2 judge call is also
+  hard-bounded (12s) so a hung judge can never wedge `_adjudicating`.
+- **Arm-failure honesty.** When the reveal can't arm a next question, the
+  consumed question is cleared from the state block and a status note
+  tells Lily to vamp — never to re-ask the revealed question "for the
+  official record" and never to invent one. Bank fetches on the supply
+  path are also time-bounded (20s) so the insurance line can't hang, and
+  prefetch/adjudication crashes now log loudly instead of vanishing into
+  their tasks.
+
+### Persistence + enrollment hardening (same live session, log sweep)
+
+- **Supabase client now has HTTP timeouts** (`postgrest_client_timeout=10`);
+  one hanging postgrest call froze the heartbeat loop at 01:40 — checkpoints
+  and the `last_active_at` beat stopped for the rest of the session while
+  the game ran on. Checkpoints also carry a 15s `wait_for` belt, and the
+  heartbeat loop survives any single bad beat
+  (`LILY_HEARTBEAT | BEAT_FAILED — continuing`).
+- **Voiceprint enrollment names the dead-stream case.** The plugin's
+  `get_speaker_ids()` returns empty for a disconnected STT stream — at the
+  `session_close` trigger that is always true, so 21 minutes of speech read
+  as "not enough words". The failure now logs
+  `reason=stt_stream_disconnected`; the mid-game triggers (first_bind /
+  game_start / group_id_upgrade) are the ones that must land.
+- **Known-noise log lines** (framework-internal, benign):
+  - "preemptive generation enabled but chat context or tools have changed
+    after `on_user_turn_completed`" — was 10/session during live games
+    because in-round state honestly changes on nearly every user turn (the
+    answer being spoken lands as a candidate line; the window flips on the
+    clock), so 1.6.4's equivalence check rightly discarded the speculative
+    run. Preemptive generation is now OFF while the game is live
+    (`set_game_live_preemptive`, logged as `LILY_STATE | PREEMPTIVE_OFF/ON`)
+    and ON in the lobby/wrapup where the check passes — a live session
+    should log ~zero of these; a rare one outside the game window is still
+    benign.
+  - "on_playback_started called after start_fut is set" (double
+    playback-start notification in the transcript synchronizer).
+  - "inference is slower than realtime" (silero VAD under momentary CPU
+    contention) — a one-off per session is noise; investigate only if it
+    repeats or latency metrics degrade alongside it.
+  - "silence has been prepended" (`recorder_io` aligning a track that
+    started mid-frame) — cosmetic recorder bookkeeping, not an audio-path
+    problem. Neither one-off is worth chasing.
+
+## Reliability and privacy audit hardening (2026-07-15)
+
+The repository-wide audit closed the remaining state, privacy, schema, and
+deployment gaps:
+
+- picture prefetch now accepts the shared history-exclusion contract, so a
+  picture slot can fall back to text instead of crashing on unexpected kwargs;
+- reconnect restores the checkpointed question without incrementing it and
+  starts the supply watchdog;
+- speech-act claims are owned by their concrete `SpeechHandle`; a silent,
+  interrupted, or duplicate handle cannot confirm another turn or open an
+  answer window;
+- skip and adjudication use a single transition guard, and media-mode commands
+  are never answer candidates;
+- forget requires a recorded spoken yes, deletes every session-linked content
+  table, disables queued transcript writes, clears in-memory names/transcripts,
+  and suppresses identity reports, memories, facts, preferences, and
+  voiceprints for the remainder of the session;
+- transcript batches retry idempotently through `event_id`, devAIce `202`
+  results are polled to a bounded completion, and bank draws use bounded,
+  server-filtered randomized candidate sets;
+- migrations `001` through `016` now apply to an empty PostgreSQL database in
+  order; pull requests and main deployments run all unit tests plus that
+  greenfield migration check before deployment.
+
+## Loop engagement (2026-07-14 persistence-audit root-cause fix)
+
+The live audit found every session with `round=0` / `question_number=0`,
+`lily_answers` empty, and scores committed only through `lily_award_bonus`:
+**the deterministic pipeline (start_game → arm → ask → window → adjudicate)
+never engaged** — `start_game` was RPC-only and Lily freestyled the quiz.
+The pipeline now has four entry points, in order of preference:
+
+1. **`lily_begin_round` function tool** — Lily calls this the moment the
+   lobby has real energy (first genuine group laugh). This is the primary
+   in-character way to flip out of the lobby; the prompt contract tells
+   her the engine only runs through it.
+2. **Deterministic spoken path** — "start the game" / "start the quiz" /
+   "start the trivia" / "let's start" / "let's play" / "start round one"
+   fire a fragment-proof `start_game` control command at the
+   transcript-event layer (ignored once running).
+3. **`lily_control.start` RPC** — the frontend "start" button. Kept for
+   any UI that wants an explicit host-side gate.
+4. **Auto-start safety net** — if ≥2 speakers are bound
+   (`LILY_AUTO_START_MIN_PLAYERS`), the first question is prefetched, and
+   the lobby grace window has elapsed
+   (`LILY_AUTO_START_LOBBY_GRACE_SECONDS`, default 60s), the game starts
+   automatically. This exists so a voice-only table that never calls the
+   tool AND never touches the UI still reaches question one — the exact
+   failure class that produced 15+ 2026-07-14 sessions with
+   `lily_sessions.round=0` and `question_number=0` despite hours of
+   audio and populated `final_standings`.
+
+**Delivery registration is STRUCTURAL** (WO-LILY-DESYNC-HONESTY-001
+Sub-agent B; supersedes the tiered ratio gate). "Did Lily just perform
+the armed question?" is answered by the `q_{N}_delivery` CLAIM, never by
+text similarity: the answer window opens (at the delivery TURN's playout
+completion, as always — `LILY_WINDOW | OPEN | reason=delivery_claim`)
+and the question marks delivered off that claim event. The claim fires
+in `tts_node` at speech dispatch on either trigger
+(`LilyGame.register_delivery_claim`):
+
+- **structural** — code dispatched this turn to deliver the armed
+  question (`expect_delivery()` arms a one-shot flag: the
+  `lily_begin_round` post-tool turn, both question nudges, the skip and
+  voice game-start follow-ups) — the turn claims regardless of phrasing;
+- **core sentence** — an organic turn performs the question's core
+  answer-bearing sentence as written
+  (`lily_evaluation.lily_turn_presents_question`: word-boundary
+  containment of the prompt's final sentence, TTS tags stripped —
+  flourish before and after, never inside; the prompt states that
+  contract as texture).
+
+Post-adjudication delivery is stricter still. The reveal/score turn now
+STOPS before N+1; only after its playout does a separate question-only turn
+dispatch. That turn must contain the armed prompt and every multiple-choice
+option. If the vocal model resurrects a stale question, invents another one,
+or emits an incomplete option sheet, `tts_node` replaces it with the
+deterministic armed sheet before claiming delivery or opening the window
+(`LILY_DELIVERY | STRICT_REWRITE`). This pins the live 00:07 failure where
+“Jupiter” was answered to a moons question but evaluated against Verona.
+
+The old text-ratio matcher (`lily_question_spoken_ratio`, verbatim ≥0.6 /
+paraphrase ≥0.3 tiers) is **telemetry only** — logged per playout as
+`LILY_WINDOW | RATIO | … telemetry` and acted on by nothing. Two live
+sessions (2026-07-15 01:33 and 22:54) proved it can never decide game
+state: conversationally woven questions the table demonstrably heard
+scored 0.00–0.15, so deliveries never registered, and the
+`fallback_any_agent_speech` opener then opened windows against turns
+carrying no question at all — the ghost game (engine at q=5 while Lily
+ran a different quiz by voice; "official re-runs" of already-answered
+questions). The fallback is gone: after `WINDOW_FALLBACK_AGENT_TURNS`
+finished agent turns with a question armed in phase `question` and no
+claim, ONE structural delivery nudge dispatches instead
+(`LILY_WINDOW | DELIVERY_NUDGE`) — the nudged turn claims at dispatch
+and the window opens on ITS playout. The pipeline never stalls, and a
+window can never again open on a question nobody was delivered. Fixture:
+`tests/test_desync_fixture.py`.
+
+With the pipeline engaged, `lily_answers` rows (one per adjudicated
+attempt, schema `(session_id, player_name, question_id, question_index,
+transcript, verdict, eval_tier, awarded_points, ts)`) and real
+`question_count` values in `lily_memories` (read straight off
+`scorekeeper.question_number`) flow from the existing write paths.
+Tests: `tests/test_round_loop.py`.
