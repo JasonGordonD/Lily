@@ -106,6 +106,7 @@ jobs:
             -e GOOGLE_API_KEY="${GOOGLE_API_KEY}" \
             -e EXA_API_KEY="${EXA_API_KEY}" \
             -e TAVILY_API_KEY="${TAVILY_API_KEY}" \
+            -e XAI_API_KEY="${XAI_API_KEY}" \
             -e SPEECHMATICS_API_KEY="${SPEECHMATICS_API_KEY}" \
             -e SUPABASE_URL="${SUPABASE_URL}" \
             -e SUPABASE_SERVICE_ROLE_KEY="${SUPABASE_SERVICE_ROLE_KEY}" \
@@ -155,6 +156,9 @@ jobs:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          # Grok vision (lily_vision, Zuna port) — same fleet secret Zuna's
+          # deploy forwards; missing = vision honestly unavailable.
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           SPEECHMATICS_API_KEY: ${{ secrets.SPEECHMATICS_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
