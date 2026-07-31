@@ -78,7 +78,9 @@ Lily carries two ElevenLabs voice presets (`lily_config.py`):
 - **voice1 — primary/default:** `W3C2vBPukr5b5jvoXhPK`, hardcoded as
   `LILY_VOICE_1_DEFAULT` (overridable via `LILY_VOICE_1`). Always
   populated; `lily_voice_id()` resolves here, so `LilyTTS()` boots every
-  session on voice1.
+  session on voice1. Own TTS tuning: stability 0.5, speed 0.87
+  (voice2 keeps the 0.4 / 0.90 baseline; settings resolve per active
+  voice at request time in `lily_tts.py`).
 - **voice2 — Raven's voice (the former default):** `LILY_VOICE_ID` with
   `RAVEN_VOICE_ID` fallback; unconfigured means the switch tool reports
   it unavailable rather than erroring.

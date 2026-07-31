@@ -10,9 +10,12 @@ Retained from the Lovebirds baseline:
   - byte-alignment carry on the PCM stream
   - empty-text guard
   - 5K sentence-boundary split
-  - voice_settings: stability 0.4, similarity 0.9, style 0.0,
-    speaker_boost, speed 0.90 (principal adjustment 2026-07-15; Raven's
-    baseline was 0.93)
+  - voice_settings resolved per ACTIVE voice at request time:
+      voice1 (primary): stability 0.5, speed 0.87 (principal adjustment
+        2026-07-31)
+      baseline (voice2/Raven's + any other id): stability 0.4, speed 0.90
+        (principal adjustment 2026-07-15; Raven's baseline was 0.93)
+    shared: similarity 0.9, style 0.0, speaker_boost
 """
 
 import asyncio
@@ -50,6 +53,23 @@ VOICE_SETTINGS = {
     "use_speaker_boost": True,
     "speed": 0.90,
 }
+
+# Voice1 (primary) runs its own tuning — principal adjustment 2026-07-31:
+# stability 0.5 / speed 0.87. Voice2 (Raven's) keeps the baseline above.
+VOICE1_SETTINGS = {
+    **VOICE_SETTINGS,
+    "stability": 0.5,
+    "speed": 0.87,
+}
+
+
+def _voice_settings_for(voice_id: str) -> dict:
+    """Per-voice settings, resolved against the ACTIVE voice id at request
+    time (voice1's id can be env-overridden, so this cannot be a static
+    id-keyed map baked at import)."""
+    if voice_id == lily_config.lily_voice_1():
+        return VOICE1_SETTINGS
+    return VOICE_SETTINGS
 
 
 @dataclass
@@ -203,7 +223,7 @@ class LilyChunkedStream(tts.ChunkedStream):
                 body = {
                     "text": text_chunk,
                     "model_id": self._opts.model_id,
-                    "voice_settings": VOICE_SETTINGS,
+                    "voice_settings": _voice_settings_for(self._opts.voice_id),
                     "apply_text_normalization": "auto",
                 }
 

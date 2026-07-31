@@ -101,6 +101,30 @@ def test_active_preset_reverse_lookup(monkeypatch):
 
 
 @requires_livekit
+def test_per_voice_settings_resolution(monkeypatch):
+    """voice1 carries its own tuning (stability 0.5 / speed 0.87); every
+    other id — voice2 included — gets the baseline (0.4 / 0.90)."""
+    import lily_tts
+
+    monkeypatch.delenv("LILY_VOICE_1", raising=False)
+    v1 = lily_tts._voice_settings_for(VOICE_1_ID)
+    assert v1["stability"] == 0.5
+    assert v1["speed"] == 0.87
+    baseline = lily_tts._voice_settings_for("raven_voice_id")
+    assert baseline["stability"] == 0.4
+    assert baseline["speed"] == 0.90
+    # shared invariants
+    for settings in (v1, baseline):
+        assert settings["similarity_boost"] == 0.9
+        assert settings["style"] == 0.0
+        assert settings["use_speaker_boost"] is True
+    # env override moves the voice1 tuning with the id
+    monkeypatch.setenv("LILY_VOICE_1", "override_voice_id")
+    assert lily_tts._voice_settings_for("override_voice_id")["speed"] == 0.87
+    assert lily_tts._voice_settings_for(VOICE_1_ID)["speed"] == 0.90
+
+
+@requires_livekit
 def test_set_voice_validation():
     from lily_tts import LilyTTS
 

@@ -5,6 +5,19 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-07-31 — Per-voice TTS tuning: voice1 stability 0.5 / speed 0.87
+
+`voice_settings` are now resolved per ACTIVE voice at request time
+(`_voice_settings_for()` in `lily_tts.py`) instead of one global dict.
+Voice1 (primary, `W3C2vBPukr5b5jvoXhPK`) gets its own tuning on the
+principal's adjustment: **stability 0.5, speed 0.87**. Voice2 (Raven's)
+and any other id keep the 2026-07-15 baseline (stability 0.4, speed
+0.90). Shared invariants unchanged: similarity_boost 0.9, style 0.0,
+speaker_boost on, eleven_v3, pcm_24000. The lookup keys on
+`lily_config.lily_voice_1()` at request time, so an `LILY_VOICE_1` env
+override carries the voice1 tuning with it. Tests:
+`tests/test_voice_switch.py::test_per_voice_settings_resolution`.
+
 ## 2026-07-31 — Voice presets + runtime switching (Zuna WO-ZUNA-VOICE-SWITCH-TOOL-001 port)
 
 Lily gains runtime voice switching, ported from Zuna's voice_switch_tool
