@@ -5,6 +5,34 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-07-31 — Voice/glass sync: the screen never leads the voice (live report)
+
+Live report: during greetings/orientation the first question was "just
+slapped on the screen" — no coordination between what Lily was saying and
+what the table saw. Two publish-timing leaks, both fixed in
+`lily_agent.py`:
+
+1. **Phase flipped at ARM.** `arm_next_question` runs while Lily is still
+   greeting (the supply pipeline pre-arms so she never stalls), and its
+   `_set_ui_phase("question")` published immediately — the frontend
+   swapped the lobby for the game board mid-salutation. Now: a new
+   `_phase_hold` keeps the PUBLISHED phase on `lobby` from first-question
+   arm until the delivery turn's playout (internal `ui_phase` still flips
+   for turn logic; `publish_attributes` reports the hold).
+2. **Question text published at TTS DISPATCH.** The screen-sync publish in
+   `register_delivery_claim` fired when the delivery turn was handed to
+   the synthesizer — leading the audible voice by the length of anything
+   queued ahead (greeting, celebration). The claim stays at dispatch (say
+   gate unchanged); the SCREEN publish moved to `open_window`, i.e. the
+   delivery turn's playout completion, exactly when answers go live.
+   MC choices / picture image ride the same publish; seam keys unchanged.
+
+Screen truth now equals SPOKEN truth for question delivery, matching the
+reveal's playback-beat contract. Frontend-compatible: same attributes,
+same metadata document, later timing. Tests:
+`tests/test_desync_fixture.py` (three new: no-publish-at-dispatch,
+lobby hold through first delivery, no hold mid-game); suite 801.
+
 ## 2026-07-31 — Per-voice TTS tuning: voice1 stability 0.5 / speed 0.87
 
 `voice_settings` are now resolved per ACTIVE voice at request time

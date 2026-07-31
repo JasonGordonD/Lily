@@ -282,8 +282,9 @@ current/next round and sticky until changed again.
   options exactly ONCE (never re-read unless asked). The room-metadata
   document gains two optional keys when the armed question carries
   choices: `choices` (the 4 option strings) and `eliminated` (50/50
-  indices into `choices`) — published at the `q_{N}_delivery` claim, the
-  window-open fallback, and the reveal; absent for freeform questions.
+  indices into `choices`) — published at window open (the delivery turn's
+  playout completion; the earlier dispatch-time claim publish led the
+  voice) and the reveal; absent for freeform questions.
 - **50/50 lifeline**: `lily_use_fifty_fifty(player_name)` spends the
   player's one lifeline on the live MC question —
   `lily_fifty_fifty_eliminations` keeps the canonical answer plus one
@@ -1254,7 +1255,10 @@ speaker verification, Hume, any gender-conditional behavior.
   image_url}` via `ctx.api.room.update_room_metadata` (rtc has no
   room-metadata setter); `wager` drives the frontend's final-round palette
   shift; `image_url` (additive, optional — empty when not a picture question)
-  is published at delivery time alongside the question text. Seam addition
+  is published alongside the question text at WINDOW OPEN — the delivery
+  turn's playout completion, so the glass never leads the voice (the
+  published `phase` likewise holds on `lobby` from first-question arm
+  until that playout). Seam addition
   (multiple-choice WO): when the armed question is multiple choice the
   document also carries `choices` (array of exactly 4 strings) and
   `eliminated` (array of 0-based indices into `choices` crossed out by a

@@ -865,3 +865,75 @@ def test_adjudication_publishes_reveal_and_attributes_concurrently():
 async def _adjudicate_and_drain(game: LilyGame):
     await game.adjudicate(steal_allowed=True)
     await _drain()
+
+
+# -- voice/glass sync (2026-07-31): screen never leads the voice ---------------
+
+
+def test_delivery_claim_does_not_publish_question_at_dispatch():
+    # Dispatch-time publish led the voice by the length of any audio queued
+    # ahead of the delivery turn (a greeting mid-playout while the question
+    # hit the glass). The claim itself stays at dispatch; the SCREEN publish
+    # moves to window open (delivery playout completion).
+    game = _make_game()
+    _arm(game, Q3_PROMPT)
+
+    async def scenario():
+        game.expect_delivery()
+        assert game.register_delivery_claim(Q3_PROMPT) == "claimed_structural"
+        await _drain()
+        # Claimed, but nothing on the glass yet:
+        assert game.metadata_publishes == []
+        game.on_agent_speech_finished(Q3_PROMPT)
+        await _drain()
+
+    _run(scenario(), game)
+    # Playout completed -> window open -> the question reaches the glass.
+    assert game.sk.answer_window_open is True
+    assert Q3_PROMPT in game.metadata_publishes
+
+
+def test_first_question_phase_hold_keeps_lobby_until_playout():
+    # The first question arms while Lily is still greeting. The published
+    # phase holds on "lobby" (internal ui_phase flips for turn logic);
+    # window open at delivery playout drops the hold and publishes
+    # "answering" — the board never replaces the lobby mid-salutation.
+    game = _make_game()
+    game.ui_phase = "lobby"
+    game._phase_hold = None
+    game.next_question = {"prompt": Q3_PROMPT, "canonical_answer": "Bosphorus"}
+    game.start_prefetch = lambda: None
+
+    async def scenario():
+        assert game.arm_next_question() is True
+        assert game.ui_phase == "question"          # internal truth
+        assert game._phase_hold == "lobby"          # published hold
+        game.expect_delivery()
+        assert game.register_delivery_claim(Q3_PROMPT) == "claimed_structural"
+        await _drain()
+        assert game._phase_hold == "lobby"          # still held at dispatch
+        game.on_agent_speech_finished(Q3_PROMPT)
+        await _drain()
+
+    _run(scenario(), game)
+    assert game.sk.answer_window_open is True
+    assert game._phase_hold is None                 # hold dropped at playout
+    assert game.ui_phase == "answering"
+
+
+def test_mid_game_arm_does_not_hold_phase():
+    # The hold is strictly a lobby -> first-delivery bridge: arming from any
+    # in-game phase publishes immediately exactly as before.
+    game = _make_game()
+    game.ui_phase = "reveal"
+    game._phase_hold = None
+    game.next_question = {"prompt": Q2_PROMPT, "canonical_answer": "-"}
+    game.start_prefetch = lambda: None
+
+    async def scenario():
+        assert game.arm_next_question() is True
+        await _drain()
+
+    _run(scenario(), game)
+    assert game._phase_hold is None
+    assert game.ui_phase == "question"

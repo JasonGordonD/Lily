@@ -269,6 +269,11 @@ _STRONG_GROUP_SOURCES = (
 # ---------------------------------------------------------------------------
 
 class LilyGame:
+    # Class-level default so __new__-built test fixtures (and any partially
+    # constructed instance) read a sane hold state; __init__ re-declares it
+    # with the full contract comment.
+    _phase_hold: str | None = None
+
     def __init__(
         self,
         ctx: JobContext,
@@ -376,6 +381,13 @@ class LilyGame:
         # contain the armed prompt (and every MC option), tts_node replaces
         # it with the deterministic question sheet before any claim opens.
         self._strict_delivery_qnum: int | None = None
+        # Screen-sync phase hold (voice/glass sync fix, 2026-07-31): while
+        # set, publish_attributes reports THIS phase instead of ui_phase.
+        # Set to "lobby" when the FIRST question arms mid-greeting so the
+        # board does not replace the lobby until the delivery turn actually
+        # plays out (the window-open publish clears it). Internal turn
+        # logic keeps reading self.ui_phase — only the published seam holds.
+        self._phase_hold: str | None = None
         # Honesty assist (desync WO Sub-agent C): one grounded
         # `[state note: …]` line, set when a player's utterance makes a
         # checkable claim about published state, rendered into the state
@@ -498,7 +510,10 @@ class LilyGame:
             if window["open"] and self._steal_window:
                 window["steal"] = True
             attrs = {
-                "phase": self.ui_phase,
+                # Published phase honors the pre-delivery screen hold: the
+                # glass must never lead the voice (first-question arm fires
+                # mid-greeting; the hold keeps the lobby up until playout).
+                "phase": self._phase_hold or self.ui_phase,
                 "round": str(self.sk.round),
                 "question_number": str(self.sk.question_number),
                 "mode": self.sk.mode,  # deterministic sticky flag (§11.4)
@@ -608,6 +623,11 @@ class LilyGame:
         asyncio.ensure_future(self.send_event(event_type, payload))
 
     def _set_ui_phase(self, phase: str) -> None:
+        if phase != "question":
+            # Any non-question transition (answering/scores/final/lobby)
+            # ends a pre-delivery screen hold — the hold only ever bridges
+            # arm → first delivery playout.
+            self._phase_hold = None
         if phase != self.ui_phase:
             self.ui_phase = phase
             self.publish_attributes_nowait()
@@ -858,19 +878,12 @@ class LilyGame:
                 "LILY_SAY | act=question_delivery | key=%s | "
                 "source=tts_node | trigger=%s", key, trigger,
             )
-            # Screen syncs to the spoken question at delivery, not at arm
-            # (arm-time publish spoiled the reveal and led the voice by a
-            # whole celebration beat). MC choices and picture-question
-            # images ride the same publish (seam additions).
-            asyncio.ensure_future(
-                self.publish_metadata(
-                    armed.get("prompt", ""),
-                    choices=armed.get("choices"),
-                    eliminated=self.eliminated,
-                    image_url=armed.get("image_url"),
-                    category=armed.get("category"),
-                )
-            )
+            # Screen sync moved to WINDOW OPEN (playout completion) — the
+            # dispatch-time publish here still led the voice by the length
+            # of any audio queued ahead of this turn (a greeting or
+            # celebration mid-playout while the question hit the glass).
+            # open_window's publish is now the one screen-sync source; MC
+            # choices and picture images ride it (seam unchanged).
             return f"claimed_{trigger}"
         if textual:
             logger.warning(
@@ -1833,12 +1846,21 @@ class LilyGame:
                 _task.cancel()
         self._spec_judge = {}
         self._nbest_by_key = {}  # n-best dicts are per-question
+        if self.ui_phase == "lobby":
+            # Voice/glass sync (2026-07-31 live report): the FIRST question
+            # arms while Lily is still greeting — flipping the published
+            # phase here replaced the lobby with the game board mid-
+            # salutation. Hold the published phase on the lobby until the
+            # delivery turn's playout opens the window (open_window
+            # publishes phase=answering and clears the hold).
+            self._phase_hold = "lobby"
         self._set_ui_phase("question")
-        # Metadata publish moved to DELIVERY time (the q_{N}_delivery claim
-        # in tts_node, with a window-open fallback): publishing here clobbered
-        # the reveal metadata milliseconds after adjudication (no visible
-        # verdict) and put the next question on screen while Lily was still
-        # mid-celebration — screen truth must equal spoken truth.
+        # Metadata publish moved to WINDOW-OPEN time (delivery playout
+        # completion): the old arm-time publish clobbered the reveal
+        # milliseconds after adjudication, and the interim dispatch-time
+        # publish still led the voice by the length of any audio queued
+        # ahead of the delivery turn (greetings, celebration) — screen
+        # truth must equal SPOKEN truth, so the glass syncs at playout.
         self.start_prefetch()  # N+2 begins while N+1 plays out
         return True
 
@@ -2022,10 +2044,11 @@ class LilyGame:
         self._steal_window = steal
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
-        # Fallback screen sync (LWW-idempotent with the delivery-claim
-        # publish): the claim path already published at dispatch; this
-        # re-publish is a harmless last-writer guarantee that the question
-        # is on the glass once answers are live.
+        # THE screen-sync publish (voice/glass sync fix): the question
+        # reaches the glass here — at the delivery turn's playout
+        # completion, exactly when answers go live — never at arm or
+        # dispatch, both of which led the spoken question. Also drops any
+        # pre-delivery phase hold via _set_ui_phase above.
         if not steal and self.armed_question is not None:
             asyncio.ensure_future(
                 self.publish_metadata(
