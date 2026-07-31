@@ -94,6 +94,69 @@ change lands on the NEXT spoken turn. Every failure path (unconfigured
 preset, no LilyTTS on the session, rejected voice id) returns a plain
 string — the tools never raise. Tests: `tests/test_voice_switch.py`.
 
+## Self-knowledge + the capabilities manifest (WO-LILY-SELFKNOWLEDGE-INTAKE-001)
+
+`lily_capabilities.py` is THE source of truth for what Lily can do,
+player-facing — versioned (`lily_feature_version()`), audited against the
+codebase, availability-aware. It exists because the architect probes
+(2026-07-15 fixtures) showed "how does a returning user learn about new
+features?" had no true answer in the build, and under pressure she
+fabricated one. The mechanisms:
+
+- **The rematch delta ("table card").** `last_seen_feature_version` is a
+  key in the opaque `lily_group_prefs.prefs` jsonb (migration 013's
+  documented extension path — no schema change; it joins the forget
+  cascade and the group-id re-key like everything group-keyed). A
+  returning table with a lagged stamp gets ONE casual greeting line
+  naming only the delta; the stamp moves forward AFTER the greet's
+  playout confirms. An unstamped returning table stamps forward
+  SILENTLY — claiming "new since last time" about features they may
+  know would be its own small fabrication.
+- **Availability layer.** Capability (what she can do) and session
+  availability (what's switched on tonight) are separate claims: the
+  entrypoint computes `availability_flags` (adult deck = child-signal
+  sensor up or architect mode; real-photo sourcing = EXA key) and the
+  state block injects only the OFF caveats — "one of mine, but not
+  switched on tonight," never the fixtures' present-tense overclaim.
+  Generated imagery is gated by NOTHING (the render path is not
+  phase-gated and `lily_imagegen` needs no key).
+- **Enumeration from the manifest.** Every askable manifest entry pins a
+  `prompt_marker` that MUST appear in the prompt's WHAT THE TABLE CAN
+  ASK FOR block — `tests/test_selfknowledge.py` CI-checks it, so the
+  options block and the manifest can never disagree and feature
+  rundowns are complete-by-construction.
+- **Prompt contract** (`prompts/lily_system.txt`): WHAT YOU KNOW ABOUT
+  YOURSELF (honest-gap outranks any fabricated answer; the symmetric
+  capability rule — never claim what she lacks, never deny what she
+  has; "show me" gets shown; the manifest waterline), NO MIRROR (the
+  flattery-opener/agreement-echo reflex is banned in EVERY register —
+  warmth lives in reaction and substance), WHEN THE TABLE GOES META
+  (workshop register: one notch down, BLUF — the answer lands in the
+  first sentence), and INTAKE — NAMES, ONE AT A TIME (multi-player
+  intake is conducted round-robin with per-bind acknowledgment; lobby
+  voice-overlap triggers the ordering repair via a state note reusing
+  the H1 overlap epsilon; solo tables get zero protocol theater).
+- **Mirror lint** (`lily_say_gate.lily_mirror_flag`, log-only v1):
+  tts_node logs `LILY_SAY | MIRROR_FLAG | pattern=...` when a turn
+  OPENS with a known flattery/echo pattern — drift is measurable in
+  telemetry, never suppressed (the fixtures show the mirror is
+  situational, not constant).
+- **Recognition ordering** (Task 5, verify): the greeting composes
+  AFTER the bounded memory await (Memory-at-the-door F), the memory
+  branch never asks the first-time question, and
+  `tests/test_selfknowledge.py` carries an ordering tripwire on
+  `on_enter` source.
+
+### WO checklist (standing rules)
+
+- **Manifest rule:** any WO shipping a player-facing feature appends its
+  one-line description to `lily_capabilities.py` and bumps
+  `LILY_FEATURE_VERSION` — and direct changes outside the WO trail
+  (Rami's voice presets are the precedent) get added at commit time.
+  The manifest is built from the CODEBASE, the only complete record.
+- **Options-block rule:** askable features carry a `prompt_marker`; the
+  WHAT THE TABLE CAN ASK FOR block must contain it (CI-enforced).
+
 ## The say gate (speech-boundary bug class, 2026-07-14 WO)
 
 **Standing suppression-health rule (OR amendment R6):** the post-session
@@ -388,6 +451,9 @@ lily_tts.py          ElevenLabs v3 wrapper (lbs_tts lift; byte-alignment carry, 
                      set_voice runtime swap)
 lily_voice_switch.py voice-preset switching tools (Zuna port): lily_list_voices +
                      lily_switch_voice over voice1 (primary) / voice2 (Raven's)
+lily_capabilities.py the capabilities manifest: versioned feature list, rematch
+                     delta, availability layer, options-block CI markers
+                     (stdlib-only, pure)
 lily_config.py       ALL env access lives here
 lily_audeering_client.py     devAIce Web API client + room-audio capture pipeline
                              (native lift of mjrvs_audeering_client + pipeline)

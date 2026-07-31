@@ -5,6 +5,73 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-07-31 — WO-LILY-SELFKNOWLEDGE-INTAKE-001: self-knowledge, the manifest, the mirror ban, intake choreography
+
+Source: Tijoux analysis of the two architect-probe sessions (11:56 and
+12:08, 2026-07-15). The one-line finding: pressed on how returning users
+learn about new features, Lily mirrored four turns, then — called out —
+fabricated architecture to the person who wrote the code. The honest
+answer didn't exist in the build; this WO makes it exist and makes her
+prefer it. DESYNC Sub-agents C and F had already landed, so Tasks 1–2
+extend C's prompt contract in place and Task 5 is a verify against F.
+
+- **Task 1 — self-knowledge honesty** (`prompts/lily_system.txt`, WHAT
+  YOU KNOW ABOUT YOURSELF): "I honestly don't know how that part works —
+  that's one for the builders" is a COMPLETE, high-status answer; no
+  invented mechanisms, flags, changelogs, or architecture, ever; under
+  challenge the honest gap explicitly outranks any fabricated answer.
+  Symmetric rule (the 12:11 false-incapability fixture): never claim a
+  capability she lacks AND never deny one she has — "show me" gets
+  shown. Waterline: the options block, her game rules, tonight's
+  context. Capability vs availability are separate honest claims.
+- **Task 2 — the mirror dies everywhere** (NO MIRROR section, global —
+  per Rami, not workshop-only): flattery openers and agreement-echoes
+  banned in every register; warmth lives in reaction and substance.
+  Workshop register (WHEN THE TABLE GOES META): one notch down, BLUF —
+  the four barged-mid-list fixture turns cost decoration next time, not
+  content. Enforcement: prompt primary + log-only say-gate lint
+  (`lily_mirror_flag`, `LILY_SAY | MIRROR_FLAG` telemetry, opener-scoped
+  and conservative; celebrating an ANSWER never flags).
+- **Task 3 — the capabilities manifest** (`lily_capabilities.py`, new):
+  versioned, codebase-audited backfill (freeform, MC + 50/50, skip,
+  steal, bonus/wager structure, adult deck, pacing, pictures,
+  forget-me, group memory = v1; voice presets = v2, Rami's direct
+  change — her fixture claim was TRUE). `last_seen_feature_version`
+  rides the opaque `lily_group_prefs.prefs` jsonb (no migration; forget
+  cascade + re-key inherited — interlock pinned in tests). Lagged
+  rematch → ONE casual delta line at the door, stamp forward after the
+  greet confirms; unstamped table → silent stamp (never fabricate "new
+  since last time"). Availability layer: entrypoint-computed flags
+  (adult deck = sensor up or architect mode; real-photo sourcing = EXA
+  key; generated imagery gated by NOTHING per the corrected analyst
+  finding) inject only OFF caveats into the state block. Options-block
+  CI: every askable manifest entry's `prompt_marker` must appear in
+  WHAT THE TABLE CAN ASK FOR — the check caught its first real gap on
+  arrival (voice switching, shipped this morning, was absent from the
+  options block; the line is added). Standing rule in the README's WO
+  checklist.
+- **Task 4 — intake choreography** (INTAKE — NAMES, ONE AT A TIME +
+  `note_intake_overlap`): multi-player intake is conducted — protocol
+  set once, round-robin run with per-bind acknowledgment and a "that
+  everyone?" close; a pre-game timestamp overlap between two voices
+  (H1 epsilon, reused outside the window) injects the ordering-repair
+  state note ("two of you at once — you first, then you"), rate-limited
+  to one per 20s; late joiners arriving together get the same frame;
+  solo tables get zero protocol theater.
+- **Task 5 — recognition before the first-time question** (verify
+  against landed DESYNC-F): the greeting composes after the bounded
+  memory await; the memory branch never asks the first-time question;
+  ordering tripwire + branch assertions added.
+
+Tests: `tests/test_selfknowledge.py` (19 — manifest↔options CI, delta/
+stamp flow, mirror lint against the fixtures' quoted turns, greeting
+branches + ordering tripwire, intake overlap mechanics, forget-cascade
+interlock); suite 819. The WO's live-replay criteria (10× exchange
+replays, scripted probes) are LLM evals against the deployed agent and
+sit outside the offline suite; the quoted fixture moments are encoded in
+the test file. Full transcripts were not attached to the WO — when they
+arrive they drop into tests/fixtures/ as the regression corpus.
+
 ## 2026-07-31 — Voice/glass sync: the screen never leads the voice (live report)
 
 Live report: during greetings/orientation the first question was "just

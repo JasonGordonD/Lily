@@ -33,6 +33,7 @@ runtime.
 """
 
 import re
+from typing import Optional
 
 # Emoji / pictograph blocks — structural reference: the Rafiq
 # empty-text-guard ranges (prmpt_common elevenlabs TTS), extended with
@@ -189,6 +190,59 @@ def lily_wrap_state_block(block: str) -> str:
     envelope is what makes an echoed block deterministically strippable
     by lily_filter_leaks before synthesis."""
     return f"{LILY_STATE_SENTINEL_OPEN}\n{block}\n{LILY_STATE_SENTINEL_CLOSE}"
+
+
+# ---------------------------------------------------------------------------
+# Mirror lint (WO-LILY-SELFKNOWLEDGE-INTAKE-001 Task 2a) — LOG-ONLY in v1.
+#
+# The sycophantic-mirror ban is enforced by the prompt contract; this lint
+# exists so drift is measurable in telemetry rather than vibes. The
+# fixtures showed the mirror is situational, not constant ("not letting
+# you off the hook" got playful deflection) — hence a flag, never a
+# suppression. Patterns target the OPENING of a turn only: flattery
+# openers and agreement-echo starts, conservative by design (a false flag
+# pollutes the telemetry the lint exists to provide). tts_node logs
+# `LILY_SAY | MIRROR_FLAG | pattern=...` when this returns a match.
+# ---------------------------------------------------------------------------
+
+LILY_MIRROR_OPENERS: list = [
+    # Flattery-opener class: appraising the utterance, first breath.
+    r"(?:that|this)(?:'s| is| was)(?: such| really| honestly)? "
+    r"a(?:n)? (?:fantastic|great|excellent|amazing|wonderful|brilliant|"
+    r"perfect|incredible|good|fabulous) (?:point|question|idea|thought|"
+    r"observation|call|catch)",
+    r"(?:what a|such a) (?:fantastic|great|excellent|amazing|wonderful|"
+    r"brilliant|perfect|good) (?:point|question|idea|thought|observation)",
+    r"great question",
+    r"fantastic point",
+    r"perfect sweet spot",
+    r"(?:i )?love (?:that|this) (?:point|question|idea|thought)",
+    # Agreement-echo class: "exactly"/"absolutely right" as the opener.
+    r"exactly[.!,—-]",
+    r"(?:you're|you are) (?:absolutely|exactly|so) right",
+    r"absolutely[.!,—-]",
+]
+
+_MIRROR_RES = [
+    re.compile(pattern, re.IGNORECASE) for pattern in LILY_MIRROR_OPENERS
+]
+# Leading ElevenLabs audio tags ([excited] ...) don't shield an opener.
+_MIRROR_LEAD_STRIP = re.compile(r"^(?:\s*\[[^\]]*\])*\s*")
+
+
+def lily_mirror_flag(text: str) -> Optional[str]:
+    """Return the matched mirror pattern when the turn OPENS with a
+    flattery/agreement-echo reflex, else None. Only the first ~120 chars
+    are considered — the ban is on openers; mid-turn enthusiasm about
+    CONTENT is her warmth working as designed. Pure; log-only caller."""
+    if not text:
+        return None
+    head = _MIRROR_LEAD_STRIP.sub("", text)[:120]
+    for pattern_re in _MIRROR_RES:
+        match = pattern_re.search(head)
+        if match and match.start() <= 40:
+            return match.re.pattern
+    return None
 
 
 # ---------------------------------------------------------------------------

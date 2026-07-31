@@ -62,6 +62,7 @@ import lily_audeering_client
 import lily_audeering_consumers
 import lily_bank
 import lily_bank_tuning
+import lily_capabilities
 import lily_config
 import lily_evaluation
 import lily_forget
@@ -269,10 +270,16 @@ _STRONG_GROUP_SOURCES = (
 # ---------------------------------------------------------------------------
 
 class LilyGame:
-    # Class-level default so __new__-built test fixtures (and any partially
-    # constructed instance) read a sane hold state; __init__ re-declares it
-    # with the full contract comment.
+    # Class-level defaults so __new__-built test fixtures (and any partially
+    # constructed instance) read sane state; __init__ re-declares them with
+    # the full contract comments.
     _phase_hold: str | None = None
+    # Self-knowledge Task 3: a lagged returning table's delta rode the
+    # greeting; the stamp persists after the greet confirms.
+    _whats_new_pending: bool = False
+    # Session availability flags (manifest availability layer): set by the
+    # entrypoint once gates are known; None = unknown, inject nothing.
+    availability_flags: dict | None = None
 
     def __init__(
         self,
@@ -939,6 +946,106 @@ class LilyGame:
             "ask about preferences again tonight."
         )
 
+    def whats_new_instruction(self) -> str:
+        """WO-LILY-SELFKNOWLEDGE-INTAKE-001 Task 3 — the rematch delta.
+
+        Called from greeting_instructions' RETURNING-TABLE branch only.
+        Compares the group's stamped last_seen_feature_version (a key in
+        the opaque prefs dict — joins the forget cascade and re-key like
+        everything group-keyed) against the codebase manifest:
+
+          - stamp missing (returning table from before stamping existed,
+            or a cold row): stamp forward SILENTLY — we cannot know what
+            they saw, and a false "new since last time" claim would be
+            its own small fabrication. Real deltas start next rematch.
+          - stamp current: silence.
+          - stamp lagged: ONE casual, frequency-capped line about only
+            the delta; the stamp moves forward AFTER the mention (the
+            session_greet confirm in on_agent_speech_finished).
+        """
+        current = lily_capabilities.lily_feature_version()
+        prefs = self.prefs or {}
+        stamp = prefs.get("last_seen_feature_version")
+        if stamp is None:
+            self._stamp_feature_version()
+            return ""
+        try:
+            seen = int(stamp)
+        except (TypeError, ValueError):
+            self._stamp_feature_version()
+            return ""
+        if seen >= current:
+            return ""
+        delta = lily_capabilities.lily_whats_new(seen)
+        if not delta:
+            self._stamp_feature_version()
+            return ""
+        self._whats_new_pending = True
+        listed = "; ".join(delta)
+        return (
+            " ONE more beat, casual and quick, folded into the welcome — "
+            "since this table last played you picked up something new: "
+            f"{listed}. One light line ('since you were last here I "
+            "picked up a couple of tricks'), never a feature list read "
+            "aloud, and never mention it again tonight."
+        )
+
+    def note_intake_overlap(
+        self, label: str, start_ts: float, end_ts: float
+    ) -> None:
+        """Intake choreography (self-knowledge WO Task 4) — lobby overlap.
+
+        Reuses the H1 Task 2 timestamp-overlap signal shape (same epsilon)
+        OUTSIDE the answer window: pre-game, two final segments from
+        different speaker labels overlapping in time means two people
+        talked over each other during name intake. She must order, never
+        guess — a one-shot state note hands her the repair. Rate-limited
+        (one note per 20s) so a chatty lobby doesn't spam the context;
+        the note is consumed by the next turn like every state note.
+        """
+        prev = getattr(self, "_intake_last_segment", None)
+        self._intake_last_segment = (label, start_ts, end_ts)
+        if prev is None or not label:
+            return
+        prev_label, _prev_start, prev_end = prev
+        if not prev_label or prev_label == label:
+            return
+        epsilon = lily_config.overlap_epsilon_seconds()
+        if start_ts >= (prev_end - epsilon):
+            return
+        now = time.monotonic()
+        last_noted = getattr(self, "_intake_overlap_noted_at", 0.0)
+        if now - last_noted < 20.0:
+            return
+        self._intake_overlap_noted_at = now
+        logger.info(
+            "LILY_INTAKE | OVERLAP | session=%s labels=%s/%s",
+            self.sk.session_id, prev_label, label,
+        )
+        self.sk.set_status_note(
+            "two voices just overlapped during intake — do not guess who "
+            "was who: run the ordering repair ('two of you at once — you "
+            "first, then you') and take the names one at a time"
+        )
+
+    def _stamp_feature_version(self) -> None:
+        """Move the group's last_seen_feature_version stamp to the current
+        manifest version and persist the whole prefs dict (fire-and-forget,
+        same path as every preference write). Idempotent."""
+        current = lily_capabilities.lily_feature_version()
+        prefs = dict(self.prefs or {})
+        if prefs.get("last_seen_feature_version") == current:
+            return
+        prefs["last_seen_feature_version"] = current
+        self.prefs = prefs
+        # getattr: test harnesses build LilyGame via __new__.
+        logger.info(
+            "LILY_PREFS | FEATURE_STAMP | session=%s group=%s version=%d",
+            self.sk.session_id, getattr(self, "group_id", None), current,
+        )
+        if getattr(self, "supabase", None) is not None:
+            self.persist_prefs()
+
     async def stage_device_candidate(
         self,
         candidate_group_id: str,
@@ -1201,6 +1308,7 @@ class LilyGame:
                 "FOR and happens at most once tonight."
                 + self.memory_disclosure_instruction()
                 + self.prefs_offer_instruction()
+                + self.whats_new_instruction()
             )
         else:
             # Neutral-history rule: without memory data, never claim OR deny
@@ -1949,6 +2057,16 @@ class LilyGame:
         # Honesty assist (desync WO Sub-agent C): the state note serviced
         # the turn that just finished playing — one-shot, consumed here.
         self._state_note = None
+        # Self-knowledge Task 3: the what's-new delta rode the greeting —
+        # once the greet has genuinely played out, the stamp moves forward
+        # (never before: an interrupted greet keeps the delta for a retry).
+        if (
+            getattr(self, "_whats_new_pending", False)
+            and self.say_registry.state("session_greet")
+            == lily_say_gate.CLAIM_CONFIRMED
+        ):
+            self._whats_new_pending = False
+            self._stamp_feature_version()
         if self._pending_reveal_event is not None:
             # Reveal speech finished without a speaking-start hook having
             # fired the packet (safety net) — emit now so the UI never hangs.
@@ -3955,6 +4073,22 @@ class LilyGame:
                 "architect mode: server-authenticated override ACTIVE — "
                 "operator testing may bypass adult age/signal vetoes"
             )
+        # Self-knowledge Task 3, availability layer: capability vs what's
+        # switched on TONIGHT. Only gated features that are OFF inject —
+        # so "picture rounds are one of mine, but they're not switched on
+        # tonight" is grounded, never the fixtures' present-tense
+        # overclaim. None = gates unknown (entrypoint hasn't set them);
+        # inject nothing rather than guess.
+        if self.availability_flags is not None:
+            gated_off = lily_capabilities.lily_availability_lines(
+                self.availability_flags
+            )
+            if gated_off:
+                extra.append(
+                    "tonight's availability (capability vs switched-on — "
+                    "name the difference honestly if asked): "
+                    + "; ".join(gated_off)
+                )
         if getattr(self, "device_candidate_group_id", None):
             extra.append(
                 "device memory candidate: UNVERIFIED — the device looks "
@@ -5020,6 +5154,16 @@ class LilyAgent(Agent):
                 len(raw) - len(full),
             )
 
+        # Mirror lint (self-knowledge WO Task 2a) — LOG-ONLY: the ban is
+        # prompt-enforced; this makes drift measurable in telemetry.
+        # Never mutates or suppresses the turn.
+        mirror_pattern = lily_say_gate.lily_mirror_flag(full)
+        if mirror_pattern:
+            logger.info(
+                "LILY_SAY | MIRROR_FLAG | session=%s pattern=%r",
+                self._game.sk.session_id, mirror_pattern,
+            )
+
         if len(full) < 3:
             # §11.1: an empty candidate (safety-filter mute, truncation) is a
             # loggable event with a retry — never silence.
@@ -5634,6 +5778,12 @@ async def entrypoint(ctx: JobContext) -> None:
             now=arrival_ts,
             addressee_confidence=fused_conf,
         )
+        # Intake choreography (self-knowledge WO Task 4): pre-game only,
+        # a timestamp overlap between two different voices feeds the
+        # ordering-repair note — diarization binding degrades exactly
+        # here (first contact, no voiceprints), so she orders, not guesses.
+        if not game.game_started:
+            game.note_intake_overlap(speaker_label, seg_start_ts, seg_end_ts)
         player = result.get("player")
         transcripts.add(
             text,
@@ -5820,6 +5970,18 @@ async def entrypoint(ctx: JobContext) -> None:
         acoustic_state
     )
     game.audeering_pipeline = audeering_pipeline
+    # Self-knowledge Task 3 availability layer: the session's gates, known
+    # only now that the pipeline start has resolved. Capability lives in
+    # the manifest; THESE flags say what is switched on tonight. Adult
+    # deck deploys as one unit with the child-signal sensor (architect
+    # mode is the server-authenticated testing override); real-entity
+    # picture sourcing rides the EXA key — generated imagery needs neither.
+    game.availability_flags = {
+        "adult_deck": (
+            audeering_pipeline is not None or lily_config.architect_mode()
+        ),
+        "pictures_real_sourcing": bool(lily_config.exa_api_key()),
+    }
     if audeering_pipeline is not None:
         def _on_track_subscribed(track, publication=None, participant=None) -> None:
             try:
