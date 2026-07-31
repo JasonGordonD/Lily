@@ -156,6 +156,11 @@ fabricated one. The mechanisms:
   The manifest is built from the CODEBASE, the only complete record.
 - **Options-block rule:** askable features carry a `prompt_marker`; the
   WHAT THE TABLE CAN ASK FOR block must contain it (CI-enforced).
+- **Tool-lint rule (WO-LILY-CAPABILITY-LINT-001):** new player-facing
+  tool → manifest entry (listed in that entry's `tools`) or an explicit
+  `LILY_INTERNAL_TOOLS` flag, enforced by CI both directions
+  (`tests/test_capability_lint.py` — every registered tool accounted
+  for; every manifest `code_ref` resolves to living code).
 
 ## The say gate (speech-boundary bug class, 2026-07-14 WO)
 

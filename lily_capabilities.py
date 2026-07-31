@@ -54,6 +54,8 @@ LILY_FEATURE_VERSION: int = 2
 LILY_CAPABILITIES: list = [
     {
         "key": "freeform",
+        "code_ref": "lily_evaluation",
+        "tools": [],
         "since": 1,
         "description": "freeform play — shout the answer, first clear answer wins",
         "prompt_marker": "Freeform play is the default",
@@ -61,6 +63,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "multiple_choice",
+        "code_ref": "lily_evaluation:lily_tier1_evaluate_mc",
+        "tools": ["lily_set_round_format"],
         "since": 1,
         "description": "multiple choice on request (round two runs it by default)",
         "prompt_marker": "Multiple choice on request",
@@ -68,6 +72,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "fifty_fifty",
+        "code_ref": "lily_agent:LilyAgent.lily_use_fifty_fifty",
+        "tools": ["lily_use_fifty_fifty"],
         "since": 1,
         "description": "one 50/50 lifeline per player per game",
         "prompt_marker": "50/50 lifeline",
@@ -75,6 +81,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "skip",
+        "code_ref": "lily_agent:LilyGame.skip_question",
+        "tools": [],
         "since": 1,
         "description": "any player can skip a question, no spotlight",
         "prompt_marker": '"Skip"',
@@ -82,6 +90,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "steal",
+        "code_ref": "lily_agent:LilyGame.open_window",
+        "tools": [],
         "since": 1,
         "description": "a missed question opens a five-second steal window",
         "prompt_marker": "steal window",
@@ -89,6 +99,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "bonus_points",
+        "code_ref": "lily_agent:LilyAgent.lily_award_bonus",
+        "tools": ["lily_award_bonus"],
         "since": 1,
         "description": "point values climb each round; the wager round risks it all",
         # Gameplay structure, not an askable option — described in the
@@ -98,6 +110,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "adult_deck",
+        "code_ref": "lily_agent:LilyAgent.lily_enter_adult_mode",
+        "tools": ["lily_enter_adult_mode"],
         "since": 1,
         "description": "the grown-up deck, every player 18+ and opted in aloud",
         "prompt_marker": "grown-up deck",
@@ -108,6 +122,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "pacing",
+        "code_ref": "lily_agent:LilyGame.set_pacing",
+        "tools": ["lily_set_pacing"],
         "since": 1,
         "description": "timed or relaxed pacing, remembered as the table's usual",
         "prompt_marker": "Pacing, the table's call",
@@ -115,6 +131,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "pictures",
+        "code_ref": "lily_imagegen",
+        "tools": [],
         "since": 1,
         "description": "picture rounds on the screen, on request ('pictures on')",
         "prompt_marker": "Pictures, offered once and lightly",
@@ -129,6 +147,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "forget_me",
+        "code_ref": "lily_forget",
+        "tools": ["lily_forget_group", "lily_explain_memory"],
         "since": 1,
         "description": "'Lily, forget me' — deletes everything kept for the table",
         "prompt_marker": '"Lily, forget me"',
@@ -136,6 +156,8 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "group_memory",
+        "code_ref": "lily_memory",
+        "tools": ["lily_note_fact"],
         "since": 1,
         "description": "remembers returning tables — names, wins, facts, the usual",
         # Lives in MEMORY, HONESTY, AND FORGETTING, not the options block.
@@ -144,12 +166,30 @@ LILY_CAPABILITIES: list = [
     },
     {
         "key": "voice_presets",
+        "code_ref": "lily_voice_switch",
+        "tools": ["lily_list_voices", "lily_switch_voice"],
         "since": 2,
         "description": "two voices — ask her to switch and she switches",
         "prompt_marker": "switch my voice",
         "askable": True,
     },
 ]
+
+
+# WO-LILY-CAPABILITY-LINT-001 — tools that are deliberately INVISIBLE to
+# Lily's self-knowledge: plumbing, not player-facing features. Invisible
+# by DECLARATION, not by omission — the bidirectional CI lint
+# (tests/test_capability_lint.py) fails any registered tool that is
+# neither mapped by a manifest entry's `tools` list nor named here.
+LILY_INTERNAL_TOOLS: frozenset = frozenset({
+    # Game orchestration — the LLM's control surface, not a table option.
+    "lily_begin_round",
+    # Intake/diarization plumbing (name binding is mechanics; the
+    # player-facing surface is the intake protocol in the prompt).
+    "lily_bind_speaker",
+    # Adjudication bookkeeping (clarify-moment logging).
+    "lily_log_clarify",
+})
 
 
 def lily_feature_version() -> int:
