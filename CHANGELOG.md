@@ -5,6 +5,67 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-04 — WO-LILY-RECOGNITION-VARIETY-001: both-sides record, continuous recognition, claimed-returner, variety + the Q5 root cause
+
+Source: Tijoux analysis of session `lily-CC9E19-19c2b804` (solo probe —
+the machine ran clean; every defect experiential, all three named live).
+
+- **Task 0 — both sides persist.** Lily's own turns (post-say-gate final
+  text, at PLAYOUT — a swallowed turn is never recorded as said) now
+  write to `lily_transcripts` as `speaker_label='LILY'` rows (the
+  otherwise-meaningless `speaker_name` slot carries the primary
+  speech-act key, e.g. `q_3_delivery` — zero-migration) and interleave
+  into the session report via the scorekeeper's transcript buffer.
+  Interrupted turns record with an explicit `…[cut off]` marker;
+  suppressed turns never reached air and don't record. Fire-and-forget;
+  post-forget the batcher is disabled, same as player rows.
+- **Task 1 — recognition is continuous.** The post-upgrade memory load
+  was gated on `question_number == 0` — the fixture's name-hash resolved
+  a six-session regular MID-CALL and nothing happened ("you have like
+  amnesia"). The gate is gone; `maybe_fire_late_recognition()` (both
+  upgrade paths: name-hash and voiceprint promote) injects memory +
+  prefs + the version stamp and fires ONE acknowledgment beat ("wait —
+  Rami! NOW I've got you"), once per session, with the refresher offer,
+  prefs-usual, and what's-new delta folded in as if recognized at the
+  door. Stored pacing applies for the remainder unless the session
+  already chose. New groups and door-path resolutions stay silent.
+- **Task 2 — the claimed-returner state.** "Not my first time" from an
+  unrecognized player is now its own greeting branch (prompt + composed
+  instructions): the gap named plainly and honestly ("my table card
+  doesn't have you tonight — new device, maybe"), the refresher offered
+  IN THE SAME TURN exactly as a recognized returner gets it, never
+  performed amnesia, never claimed recognition.
+- **Task 3 — SAID-ALREADY + variety.** The scorekeeper keeps a rolling
+  ledger from Task 0's turn record — praise words spent, turn openers
+  used, rules/features already explained — injected compactly into the
+  state block; prompt law (NEVER THE SAME BEAT TWICE): nothing on the
+  ledger re-delivered unprompted, celebrations minted fresh from the
+  answer's content and the running bits, re-asked explanations answered
+  in fresh words. Say-gate repetition lint (`lily_repeat_flag`,
+  log-only `LILY_SAY | REPEAT_FLAG`, opener 4-gram / content 6-gram vs
+  turns that actually played) makes cycling a telemetry count — a fresh-
+  words re-answer never flags.
+- **Q5 root cause (DB-audited, not guessed).** `lily_answers` holds
+  Q1–Q4; game_stats shows `questions_played: 5` but `answers_attempted:
+  4` — the correct answer at 01:27:11 ("The Nile is just a river in
+  Egypt", Tier-1 verified correct by direct test) NEVER became a
+  candidate: it was spoken during the delivery playout, before the
+  window opened. Not a Tier-1 miss, not a hangup-raced write — the
+  documented "no early buzz-ins" v1 concession. THE CONCESSION IS
+  RETIRED: finals landing between the delivery claim and window open
+  buffer (last 6, per-question) and replay at open, then run the same
+  instant Tier-1 fast path an in-window final gets — a correct early
+  answer adjudicates immediately instead of waiting out the window
+  (the wait is what the hangup would have raced). Commands and corpus
+  enforcement do not re-run on replay.
+
+Tests: `tests/test_recognition_variety.py` (15 — turn persistence,
+ledger, repeat lint, late recognition one-shot + silences, claimed-
+returner prompt contracts, Tier-1-matches-the-pun, buffer/replay/
+adjudication, buffer hygiene). Suite 847.
+
+
+
 ## 2026-07-31 — Image ingestion: the Zuna vision port (12:48 live fixture, manifest v3)
 
 "I can't show you because you don't have like image ingestion" — the

@@ -230,6 +230,42 @@ _MIRROR_RES = [
 _MIRROR_LEAD_STRIP = re.compile(r"^(?:\s*\[[^\]]*\])*\s*")
 
 
+def _repeat_norm_words(text: str) -> list:
+    """Normalize a turn for repetition comparison: audio tags out,
+    lowercase, punctuation stripped, whitespace-split."""
+    cleaned = re.sub(r"\[[^\]]*\]", " ", text or "")
+    cleaned = re.sub(r"[^\w'\s]", " ", cleaned.lower())
+    return [w for w in cleaned.split() if w]
+
+
+def lily_repeat_flag(text: str, previous_turns: list) -> Optional[str]:
+    """Repetition lint (WO-LILY-RECOGNITION-VARIETY-001 Task 3b) —
+    LOG-ONLY. Returns "opener" when the turn opens with the same leading
+    4-gram as an earlier agent turn, "content" when it shares any 6-word
+    run with one, else None. A player asking "explain again" is answered
+    in FRESH words per the prompt law, so an honest re-answer does not
+    flag — only verbatim cycling does. Pure; caller logs REPEAT_FLAG."""
+    words = _repeat_norm_words(text)
+    if not words or not previous_turns:
+        return None
+    opener = tuple(words[:4]) if len(words) >= 4 else None
+    grams = {
+        tuple(words[i:i + 6]) for i in range(max(0, len(words) - 5))
+    }
+    for prev in previous_turns:
+        prev_words = _repeat_norm_words(prev)
+        if opener and len(prev_words) >= 4 and tuple(prev_words[:4]) == opener:
+            return "opener"
+        if grams:
+            prev_grams = {
+                tuple(prev_words[i:i + 6])
+                for i in range(max(0, len(prev_words) - 5))
+            }
+            if grams & prev_grams:
+                return "content"
+    return None
+
+
 def lily_mirror_flag(text: str) -> Optional[str]:
     """Return the matched mirror pattern when the turn OPENS with a
     flattery/agreement-echo reflex, else None. Only the first ~120 chars

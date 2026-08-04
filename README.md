@@ -147,6 +147,37 @@ fabricated one. The mechanisms:
   `tests/test_selfknowledge.py` carries an ordering tripwire on
   `on_enter` source.
 
+## Both-sides record, continuous recognition, variety (WO-LILY-RECOGNITION-VARIETY-001)
+
+From the 2026-08-04 solo-probe fixture (`lily-CC9E19-19c2b804`) — the
+machine ran clean; the defects were experiential:
+
+- **Both sides of the call persist.** Lily's own turns (post-say-gate
+  final text, recorded at PLAYOUT so a swallowed turn never counts as
+  said) write to `lily_transcripts` as `speaker_label='LILY'` rows (the
+  `speaker_name` slot carries the primary speech-act key) and interleave
+  into the session report. Interrupted turns carry `…[cut off]`.
+- **Recognition is continuous, not a door-check.** A group resolution
+  landing on an existing group MID-CALL (name-hash or voiceprint) loads
+  memory/prefs/version-stamp and fires one acknowledgment beat
+  (`maybe_fire_late_recognition`, once per session) with the refresher
+  offer, prefs-usual, and what's-new delta folded in — a late catch is
+  a recovery moment, never silent amnesia.
+- **Claimed returner** ("not my first time", no data) is its own
+  greeting state: the gap named honestly ("my table card doesn't have
+  you tonight — new device, maybe") + the refresher offered in the same
+  turn. Never performed amnesia, never claimed recognition.
+- **SAID-ALREADY ledger + variety law.** The scorekeeper tracks praise
+  words spent, openers used, and topics already explained (from the
+  agent-turn record); the state block carries the ledger and the prompt
+  (NEVER THE SAME BEAT TWICE) forbids re-delivery — fresh-minted
+  celebrations every beat. Say-gate `REPEAT_FLAG` lint (log-only) makes
+  cycling a telemetry count.
+- **Early buzz-ins are captured** (the fixture's Q5 root cause,
+  DB-audited): finals spoken between the delivery claim and window open
+  buffer per-question and replay at open, then run the instant Tier-1
+  fast path — the "no early buzz-ins" v1 concession is retired.
+
 ### WO checklist (standing rules)
 
 - **Manifest rule:** any WO shipping a player-facing feature appends its

@@ -619,6 +619,17 @@ class LilyScorekeeper:
         # Rolling tagged transcript buffer (last 30 lines)
         self.transcript_buffer: list[dict] = []
 
+        # WO-LILY-RECOGNITION-VARIETY-001 Task 0/3 — the agent's OWN turns.
+        # agent_turns: rolling final-spoken-text record (feeds the say-gate
+        # repeat lint and the report); the SAID-ALREADY ledger tracks what
+        # she has already delivered this session so nothing gets re-served:
+        # praise words used, turn openers used, feature/rule topics already
+        # explained. All bounded; all reset with the session object.
+        self.agent_turns: list[str] = []
+        self.said_praise: list[str] = []
+        self.said_openers: list[str] = []
+        self.said_topics: list[str] = []
+
         # Honest-failure status notes (spec §11.2) — reasoning-node failures
         # land here and surface in the state block.
         self.status_notes: list[str] = []
@@ -1410,6 +1421,105 @@ class LilyScorekeeper:
         self.round_format = fmt
 
     # -- honest failure notes (§11.2) ----------------------------------------
+
+    # -- agent-turn record + SAID-ALREADY ledger (RECOGNITION-VARIETY 0/3) ----
+
+    AGENT_TURNS_CAP = 40
+    LEDGER_CAP = 24
+    # Praise formulas the fixture player mock-echoed ("Fantastic.") — the
+    # ledger tracks which have been SPENT this session.
+    PRAISE_WORDS = (
+        "fantastic", "amazing", "incredible", "brilliant", "wonderful",
+        "excellent", "perfect", "spectacular", "gorgeous", "beautiful",
+        "outstanding", "magnificent", "superb", "stellar", "impressive",
+        "phenomenal", "glorious", "marvelous", "legendary", "unstoppable",
+    )
+    # Feature/rule topics — once explained, they live on the ledger and are
+    # never re-explained unprompted (keys mirror the capabilities manifest).
+    TOPIC_MARKERS = {
+        "multiple_choice": ("multiple choice", "four options", "a, b, c"),
+        "fifty_fifty": ("50/50", "fifty fifty", "fifty-fifty"),
+        "steal": ("steal",),
+        "skip": ("skip",),
+        "pacing": ("relaxed", "timed rounds"),
+        "pictures": ("picture round", "pictures on", "picture rounds"),
+        "adult_deck": ("grown-up deck", "adult deck", "18 or older"),
+        "forget_me": ("forget me", "forget you"),
+        "voice_presets": ("switch my voice", "other voice", "two voices"),
+        "wager": ("wager",),
+        "bonus_points": ("points climb", "double points", "worth more"),
+    }
+
+    def record_agent_turn(
+        self,
+        text: str,
+        *,
+        timestamp: Optional[float] = None,
+        act_keys: Optional[list] = None,
+        interrupted: bool = False,
+    ) -> None:
+        """Record one of LILY'S OWN spoken turns (post-say-gate final text,
+        at playout). Feeds three consumers: the session-report transcript
+        (interleaved with player turns), the say-gate repeat lint
+        (agent_turns), and the SAID-ALREADY ledger the state block carries
+        so nothing gets delivered twice. Pure local state — persistence is
+        the caller's fire-and-forget."""
+        clean = (text or "").strip()
+        if not clean:
+            return
+        recorded = clean + (" …[cut off]" if interrupted else "")
+        self.transcript_buffer.append({
+            "speaker": "LILY",
+            "speaker_label": "LILY",
+            "text": recorded,
+            "timestamp": timestamp,
+            "acts": list(act_keys or []),
+        })
+        if len(self.transcript_buffer) > TRANSCRIPT_BUFFER_SIZE:
+            self.transcript_buffer = self.transcript_buffer[-TRANSCRIPT_BUFFER_SIZE:]
+
+        self.agent_turns.append(clean)
+        if len(self.agent_turns) > self.AGENT_TURNS_CAP:
+            self.agent_turns = self.agent_turns[-self.AGENT_TURNS_CAP:]
+
+        lowered = clean.lower()
+        for word in self.PRAISE_WORDS:
+            if word in lowered and word not in self.said_praise:
+                self.said_praise.append(word)
+        opener = " ".join(
+            w for w in lowered.replace("—", " ").split()[:4] if w
+        ).strip(".!,?")
+        if opener and opener not in self.said_openers:
+            self.said_openers.append(opener)
+            self.said_openers = self.said_openers[-self.LEDGER_CAP:]
+        for topic, markers in self.TOPIC_MARKERS.items():
+            if topic not in self.said_topics and any(
+                m in lowered for m in markers
+            ):
+                self.said_topics.append(topic)
+        self.said_praise = self.said_praise[-self.LEDGER_CAP:]
+        self.said_topics = self.said_topics[-self.LEDGER_CAP:]
+
+    def said_already_lines(self) -> list:
+        """Compact SAID-ALREADY ledger for the state block. Empty session →
+        no lines (inject nothing)."""
+        lines = []
+        if self.said_praise:
+            lines.append(
+                "praise words already spent (mint fresh ones): "
+                + ", ".join(self.said_praise[-10:])
+            )
+        if self.said_openers:
+            lines.append(
+                "turn openers already used (open differently): "
+                + " | ".join(self.said_openers[-6:])
+            )
+        if self.said_topics:
+            lines.append(
+                "already explained (never re-explain unprompted): "
+                + ", ".join(self.said_topics)
+            )
+        return lines
 
     def set_status_note(self, note: str) -> None:
         if note not in self.status_notes:

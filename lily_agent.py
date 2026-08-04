@@ -280,6 +280,14 @@ class LilyGame:
     # Self-knowledge Task 3: a lagged returning table's delta rode the
     # greeting; the stamp persists after the greet confirms.
     _whats_new_pending: bool = False
+    # RECOGNITION-VARIETY Task 1: the mid-session recognition catch-up
+    # acknowledgment fires at most once per session.
+    _late_recognition_fired: bool = False
+    # RECOGNITION-VARIETY fixture Q5: answers spoken while the delivery
+    # turn is still playing out (window not yet open) buffer here and
+    # replay at window open — the "no early buzz-ins" v1 concession cost
+    # a correct final answer its adjudication row on 08-04.
+    _pre_window_segments: list | None = None
     # Session availability flags (manifest availability layer): set by the
     # entrypoint once gates are known; None = unknown, inject nothing.
     availability_flags: dict | None = None
@@ -993,6 +1001,188 @@ class LilyGame:
             "aloud, and never mention it again tonight."
         )
 
+    def buffer_pre_window_answer(self, seg: dict) -> None:
+        """RECOGNITION-VARIETY fixture Q5 fix — capture the early buzz.
+
+        The answer window opens at the delivery turn's PLAYOUT COMPLETION
+        (v1 concession: no early buzz-ins). A fast caller answering while
+        Lily is still reading the question landed in a closed window and
+        vanished — the 08-04 session's Q5 ("The Nile is just a river in
+        Egypt", correct, inside a pun) wrote no adjudication row because
+        it never became a candidate. Finals arriving between the delivery
+        CLAIM and window open now buffer (last 6) and replay at open.
+        No-op unless a question is armed and its delivery is claimed —
+        lobby chatter and post-window banter never buffer."""
+        if self.sk.answer_window_open or self.armed_question is None:
+            return
+        key = f"q_{self.sk.question_number}_delivery"
+        if self.say_registry.state(key) is None:
+            return
+        buf = self._pre_window_segments
+        if buf is None:
+            buf = []
+            self._pre_window_segments = buf
+        buf.append(dict(seg))
+        del buf[:-6]
+        logger.info(
+            "LILY_ANSWER | PRE_WINDOW_BUFFERED | session=%s q=%d speaker=%s",
+            self.sk.session_id, self.sk.question_number,
+            seg.get("speaker_label"),
+        )
+
+    def _replay_pre_window_answers(self) -> None:
+        """At window open (non-steal): replay buffered early answers as
+        candidates, then run the same instant Tier-1 fast path a live
+        in-window final gets — a correct early answer adjudicates now
+        instead of waiting out the window (the wait is what the 08-04
+        hangup raced). Commands/corpus enforcement do NOT re-run — the
+        original pass already handled them."""
+        buffered = list(self._pre_window_segments or [])
+        self._pre_window_segments = []
+        if not buffered:
+            return
+        replay_ts = time.time()
+        last_result = None
+        last_text = ""
+        for seg in buffered:
+            try:
+                last_result = self.sk.on_transcript_segment(
+                    is_final=True, now=replay_ts, **seg
+                )
+                last_text = seg.get("text") or ""
+                logger.info(
+                    "LILY_ANSWER | PRE_WINDOW_REPLAY | session=%s q=%d "
+                    "text=%r",
+                    self.sk.session_id, self.sk.question_number,
+                    last_text[:60],
+                )
+            except Exception as e:
+                logger.warning(
+                    "LILY_ANSWER | PRE_WINDOW_REPLAY_FAILED: %s", e
+                )
+        try:
+            question = self.sk.current_question or {}
+            acceptable = question.get("acceptable_answers") or []
+            ordered = self.sk.ordered_candidates()
+            if ordered and acceptable and last_result is not None:
+                first = ordered[0]
+                threshold = self.sk.tier1_threshold(
+                    now=replay_ts,
+                    addressee_confidence=last_result.get(
+                        "addressee_confidence"
+                    ),
+                )
+                t1 = self._tier1_question(
+                    first["text"], question,
+                    key=first["player"]
+                    or f"unrostered:{first['speaker_label']}",
+                    threshold=threshold,
+                )
+                if t1["verdict"] == "correct":
+                    self.send_event_nowait(
+                        "lock", {"name": first.get("player")}
+                    )
+                    asyncio.ensure_future(
+                        self.adjudicate(steal_allowed=False)
+                    )
+        except Exception as e:
+            logger.warning(
+                "LILY_ANSWER | PRE_WINDOW_TIER1_FAILED: %s", e
+            )
+
+    def maybe_fire_late_recognition(self) -> None:
+        """WO-LILY-RECOGNITION-VARIETY-001 Task 1 — the catch-up path.
+
+        Fires when group resolution lands on an EXISTING group AFTER the
+        greeting has already gone out (the 08-04 fixture: a cold device,
+        the name-hash resolving a six-session regular mid-call, and then
+        NOTHING — she stayed amnesiac to a regular the whole game).
+        One acknowledgment beat, once per session; the delta line, prefs
+        offer, and refresher rules then apply exactly as if recognition
+        had landed at the door. A genuinely new group has no memory block
+        and triggers nothing. Device-id resolution at the door remains
+        the fast path — if the greeting hasn't gone out yet, the greeting
+        itself acts on the memory and this stays silent."""
+        if not self.memory_block or self._late_recognition_fired:
+            return
+        # getattr: test harnesses build LilyGame via __new__.
+        registry = getattr(self, "say_registry", None)
+        greeted = (
+            registry is not None
+            and registry.state("session_greet") is not None
+        )
+        if not greeted and not getattr(self, "game_started", False):
+            return  # door path: greeting_instructions will act on it
+        self._late_recognition_fired = True
+        # Stored 'usual' honored for the remainder: apply stored pacing
+        # only when this session hasn't spoken its own choice.
+        try:
+            stored_pacing = (self.prefs or {}).get("pacing")
+            if stored_pacing in ("timed", "relaxed") and (
+                stored_pacing != self.sk.pacing
+            ):
+                self.sk.set_pacing(stored_pacing)
+                self.publish_attributes_nowait()
+        except Exception:
+            pass
+        names = ", ".join((self.memory_player_names or [])[:4])
+        ack = (
+            "Recognition just landed MID-SESSION: the [RETURNING TABLE] "
+            "block now carries who this table really is"
+            + (f" ({names})" if names else "")
+            + ". ONE warm, specific acknowledgment beat — the shape of "
+            "'wait — Rami! NOW I've got you: reigning champion, four "
+            "wins.' Own the late catch lightly ('took me a second'); "
+            "never pretend you knew all along, and never apologize in a "
+            "spiral. Then fold in, same breath or the next, what a "
+            "recognized returner would have gotten at the door: no "
+            "walkthrough — offer ONCE 'want a refresher on the options, "
+            "or straight in?' and respect the answer."
+            + self.prefs_offer_instruction()
+            + self.whats_new_instruction()
+        )
+        logger.info(
+            "LILY_MEMORY | LATE_RECOGNITION | session=%s group=%s names=%s",
+            self.sk.session_id, getattr(self, "group_id", None), names or "-",
+        )
+        self.instructed_reply(ack)
+
+    def record_agent_turn(
+        self, text: str, *, act_keys: list, interrupted: bool
+    ) -> None:
+        """WO-LILY-RECOGNITION-VARIETY-001 Task 0 — persist Lily's OWN turn.
+
+        Local first (scorekeeper: report transcript + SAID-ALREADY ledger +
+        the repeat-lint window), then fire-and-forget to lily_transcripts
+        as a speaker_label='LILY' row. Zero-migration note: the row's
+        speaker_name slot (meaningless for an agent row) carries the
+        primary speech-act key where one confirmed — e.g. 'q_3_delivery'.
+        Post-forget, the batcher is disabled and the write is a no-op,
+        same as player rows. Never raises."""
+        clean = (text or "").strip()
+        if not clean:
+            return
+        try:
+            self.sk.record_agent_turn(
+                clean,
+                timestamp=time.time(),
+                act_keys=act_keys,
+                interrupted=interrupted,
+            )
+        except Exception as e:
+            logger.warning("LILY_TURNS | local record failed: %s", e)
+        batcher = getattr(self, "transcripts", None)
+        if batcher is None:
+            return
+        try:
+            batcher.add(
+                clean + (" …[cut off]" if interrupted else ""),
+                speaker_label="LILY",
+                speaker_name=(act_keys[0] if act_keys else None),
+            )
+        except Exception as e:
+            logger.warning("LILY_TURNS | transcript persist failed: %s", e)
+
     def note_intake_overlap(
         self, label: str, start_ts: float, end_ts: float
     ) -> None:
@@ -1276,6 +1466,10 @@ class LilyGame:
         self._device_candidate_prefs = {}
         self._device_candidate_voiceprints = []
         self.memory_settled.set()
+        # Task 1 (RECOGNITION-VARIETY): a voiceprint verification landing
+        # after the greeting is the same late-recognition moment as a
+        # name-hash upgrade — same acknowledgment beat, same one-shot.
+        self.maybe_fire_late_recognition()
         logger.info(
             "LILY_MEMORY | DEVICE_CANDIDATE_VERIFIED | trigger=%s group=%s "
             "— returning memory promoted",
@@ -1376,12 +1570,21 @@ class LilyGame:
                 "first time playing with you. FIRST TIME: walk them "
                 "through their options naturally, drawing on the WHAT THE "
                 "TABLE CAN ASK FOR block — conversational, folded into the "
-                "banter, never a feature list read aloud. RETURNING (they "
-                "say so, or a [RETURNING TABLE] block appears later): no "
-                "walkthrough — offer a refresher ONCE and respect the "
-                "answer. Either way the walkthrough or refresher happens "
-                "at most once tonight. Never claim you remember them, and "
-                "never announce it's their first time — let them tell you."
+                "banter, never a feature list read aloud. CLAIMED "
+                "RETURNER — they say it's NOT their first time but your "
+                "memory has nothing: name the gap plainly and honestly in "
+                "ONE light beat ('my table card doesn't have you tonight "
+                "— new device, maybe') and IN THE SAME TURN offer the "
+                "refresher exactly as a recognized returner would get it "
+                "— 'want a refresher on the options, or straight in?' — "
+                "and respect the answer. Never perform vague amnesia you "
+                "could explain, never claim recognition you don't have, "
+                "and never argue with their memory of you. If recognition "
+                "catches up mid-game (the [RETURNING TABLE] block "
+                "appears), you'll get an instruction beat for it. Either "
+                "way the walkthrough or refresher happens at most once "
+                "tonight. Never claim you remember them, and never "
+                "announce it's their first time — let them tell you."
             )
         parts.append(
             " Bind names as people speak. When the table feels ready — "
@@ -2002,6 +2205,7 @@ class LilyGame:
             ))
         self._armed_speech_misses = 0
         self._pending_delivery_qnum = None  # stale delivery intent dies at arm
+        self._pre_window_segments = []  # early-buzz buffer is per-question
         self._strict_delivery_qnum = None
         self._judged_keys = set()
         self._addressee_rows = {}  # B1: row-id tasks are per-question
@@ -2076,7 +2280,9 @@ class LilyGame:
         """Called on TTS playback completion (agent stops speaking). If the
         armed question's delivery is REGISTERED (the q_{N}_delivery claim —
         structural, never text-similarity), the answer window opens HERE —
-        never earlier (known v1 concession: no early buzz-ins)."""
+        never earlier. (The old "no early buzz-ins" v1 concession is
+        retired: finals spoken during the delivery playout buffer via
+        buffer_pre_window_answer and replay at open — fixture Q5.)"""
         # A deterministic instruction speech finished playing out — its
         # items are committed, the persistent context is stable again, so
         # preemptive generation can resume (P2).
@@ -2100,6 +2306,13 @@ class LilyGame:
                 delivery_key = f"q_{self.sk.question_number}_delivery"
                 if delivery_key in released:
                     self.expect_delivery()
+            # Task 0 (RECOGNITION-VARIETY): an INTERRUPTED turn partially
+            # played — it belongs in the record, marked. A suppressed turn
+            # never reached air and is not recorded as said.
+            if interrupted:
+                self.record_agent_turn(
+                    spoken_text, act_keys=[], interrupted=True
+                )
             return
         confirmed = (
             self.say_registry.confirm_owner(speech_id)
@@ -2110,6 +2323,12 @@ class LilyGame:
             logger.info(
                 "LILY_SAY | CONFIRMED | keys=%s", ",".join(sorted(confirmed))
             )
+        # Task 0 (RECOGNITION-VARIETY): BOTH sides of the call persist.
+        # Recording at playout completion means the record holds what the
+        # room actually heard — never a dispatched-but-swallowed turn.
+        self.record_agent_turn(
+            spoken_text, act_keys=sorted(confirmed or []), interrupted=False
+        )
         # Honesty assist (desync WO Sub-agent C): the state note serviced
         # the turn that just finished playing — one-shot, consumed here.
         self._state_note = None
@@ -2243,6 +2462,10 @@ class LilyGame:
                 await self.adjudicate(steal_allowed=not steal)
 
         self._window_timer = asyncio.ensure_future(_expire())
+        # Early-buzz replay (fixture Q5): answers spoken during the
+        # delivery playout become candidates NOW that the window is live.
+        if not steal:
+            self._replay_pre_window_answers()
 
     def _start_bed(self) -> None:
         path = lily_config.thinking_bed_path()
@@ -3664,48 +3887,58 @@ class LilyGame:
                     new_group_id,
                     e,
                 )
-        if self.sk.question_number == 0:
-            # Group prefs WO: the resolved group may have a stored 'usual'.
-            # The re-key above already merged any session-written row under
-            # the new id (session choices winning); reconcile the in-memory
-            # dict the same way — stored keys slot in UNDER this session's
-            # spoken choices, opaquely (round_format / media_mode included).
-            stored_prefs = await lily_persistence.lily_load_group_prefs(
-                self.supabase, new_group_id
+        # RECOGNITION-VARIETY Task 1: recognition is CONTINUOUS, not a
+        # door-check. This block was gated on question_number == 0 —
+        # the 08-04 fixture's name-hash resolved a six-session regular
+        # MID-CALL and nothing happened: no recall, no acknowledgment,
+        # amnesia for the whole game. The load now runs whenever the
+        # upgrade lands; maybe_fire_late_recognition() below turns a
+        # late resolution into a recovery moment.
+        #
+        # Group prefs WO: the resolved group may have a stored 'usual'.
+        # The re-key above already merged any session-written row under
+        # the new id (session choices winning); reconcile the in-memory
+        # dict the same way — stored keys slot in UNDER this session's
+        # spoken choices, opaquely (round_format / media_mode included).
+        stored_prefs = await lily_persistence.lily_load_group_prefs(
+            self.supabase, new_group_id
+        )
+        if stored_prefs:
+            merged = dict(stored_prefs)
+            merged.update(self.prefs or {})
+            self.prefs = merged
+            logger.info(
+                "LILY_PREFS | RECONCILED | group=%s keys=%s "
+                "(post-upgrade)",
+                new_group_id, ",".join(sorted(merged.keys())),
             )
-            if stored_prefs:
-                merged = dict(stored_prefs)
-                merged.update(self.prefs or {})
-                self.prefs = merged
-                logger.info(
-                    "LILY_PREFS | RECONCILED | group=%s keys=%s "
-                    "(post-upgrade)",
-                    new_group_id, ",".join(sorted(merged.keys())),
-                )
-            memory = await lily_memory.lily_load_group_memory(
-                self.supabase, new_group_id
+        memory = await lily_memory.lily_load_group_memory(
+            self.supabase, new_group_id
+        )
+        block = lily_memory.lily_build_memory_block(
+            memory, prefs=self.prefs
+        )
+        if block:
+            self.memory_block = block  # llm_node injects it next turn
+            self.memory_total_games = int(
+                (memory or {}).get("total_games") or 0
             )
-            block = lily_memory.lily_build_memory_block(
-                memory, prefs=self.prefs
+            self.memory_player_names = list(
+                (memory or {}).get("player_names") or []
             )
-            if block:
-                self.memory_block = block  # llm_node injects it next turn
-                self.memory_total_games = int(
-                    (memory or {}).get("total_games") or 0
-                )
-                self.memory_player_names = list(
-                    (memory or {}).get("player_names") or []
-                )
-                logger.info(
-                    "LILY_MEMORY | BLOCK_READY | group=%s chars=%d "
-                    "total_games=%s (post-upgrade)",
-                    new_group_id, len(block),
-                    (memory or {}).get("total_games"),
-                )
+            logger.info(
+                "LILY_MEMORY | BLOCK_READY | group=%s chars=%d "
+                "total_games=%s (post-upgrade)",
+                new_group_id, len(block),
+                (memory or {}).get("total_games"),
+            )
         # Memory at the door (F): the upgrade's reload is the answer the
         # greeting may be waiting on (the live race: participant metadata
         # landed AFTER the entrypoint's initial load gave up).
         self.memory_settled.set()
+        # Task 1: recognition that arrives AFTER the door becomes a
+        # recovery moment, not a silent nothing.
+        self.maybe_fire_late_recognition()
         self.fire_enrollment("group_id_upgrade")
 
     async def resolve_group_identity(self, trigger: str) -> None:
@@ -4145,6 +4378,16 @@ class LilyGame:
                     "name the difference honestly if asked): "
                     + "; ".join(gated_off)
                 )
+        # SAID-ALREADY ledger (RECOGNITION-VARIETY Task 3a): what she has
+        # already delivered this session. The prompt law forbids re-serving
+        # any of it unprompted — repetition was named live by the player
+        # ("I know", the mock-echoed "Fantastic.").
+        said = self.sk.said_already_lines()
+        if said:
+            extra.append(
+                "SAID-ALREADY (re-deliver NOTHING on this ledger unless a "
+                "player asks; mint fresh words instead): " + " || ".join(said)
+            )
         if getattr(self, "device_candidate_group_id", None):
             extra.append(
                 "device memory candidate: UNVERIFIED — the device looks "
@@ -5234,6 +5477,17 @@ class LilyAgent(Agent):
                 "LILY_SAY | MIRROR_FLAG | session=%s pattern=%r",
                 self._game.sk.session_id, mirror_pattern,
             )
+        # Repetition lint (RECOGNITION-VARIETY Task 3b) — LOG-ONLY, against
+        # turns that actually PLAYED (sk.agent_turns records at playout, so
+        # a dispatched-then-swallowed turn never counts as said).
+        repeat_kind = lily_say_gate.lily_repeat_flag(
+            full, self._game.sk.agent_turns
+        )
+        if repeat_kind:
+            logger.info(
+                "LILY_SAY | REPEAT_FLAG | session=%s kind=%s",
+                self._game.sk.session_id, repeat_kind,
+            )
 
         if len(full) < 3:
             # §11.1: an empty candidate (safety-filter mute, truncation) is a
@@ -5855,6 +6109,21 @@ async def entrypoint(ctx: JobContext) -> None:
         # here (first contact, no voiceprints), so she orders, not guesses.
         if not game.game_started:
             game.note_intake_overlap(speaker_label, seg_start_ts, seg_end_ts)
+        else:
+            # Early-buzz capture (fixture Q5): a final landing while the
+            # delivery turn is still playing buffers for replay at window
+            # open — no-op unless a delivery is actually in flight.
+            game.buffer_pre_window_answer({
+                "text": text,
+                "speaker_label": speaker_label,
+                "segment_start_time": seg_start_ts,
+                "segment_end_time": seg_end_ts,
+                "diarization_confidence": diarization_confidence,
+                "acoustic_confidence": acoustic_confidence,
+                "timestamp_source": timing.get("source"),
+                "timing_drift_seconds": timing.get("drift_seconds"),
+                "addressee_confidence": fused_conf,
+            })
         player = result.get("player")
         transcripts.add(
             text,
