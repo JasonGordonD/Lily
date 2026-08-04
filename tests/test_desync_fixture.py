@@ -937,3 +937,31 @@ def test_mid_game_arm_does_not_hold_phase():
     _run(scenario(), game)
     assert game._phase_hold is None
     assert game.ui_phase == "question"
+
+
+def test_reveal_beat_carries_committed_winner_score():
+    # 08-04 wrong-score fix: score truth rides the WIRE. The reveal beat
+    # carries the winner's COMMITTED score so the frontend targets a real
+    # number — its old guessed increment double-counted once commits began
+    # publishing ahead of the beat (desync-E ordering).
+    game = _make_game()
+    game.arm_next_question = lambda: False
+    game.start_prefetch = lambda: None
+    game.sk.bind_speaker("S1", "Rami")
+    _arm_question(game, FEMUR_QUESTION)
+    now = 3000.0
+    game.sk.open_answer_window(duration=30.0, now=now)
+    game.sk.on_transcript_segment(
+        text="femur", speaker_label="S1", is_final=True,
+        now=now + 2, segment_start_time=now + 2,
+    )
+
+    _run(_adjudicate_and_drain(game), game)
+
+    ev = game._pending_reveal_event
+    assert ev is not None
+    assert ev["winner"] == "Rami"
+    assert ev["correct"] is True
+    committed = game.sk.players["Rami"]["score"]
+    assert committed > 0
+    assert ev["winner_score"] == committed

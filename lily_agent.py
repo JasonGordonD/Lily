@@ -3491,6 +3491,18 @@ class LilyGame:
             reveal_payload = {
                 "correct": winner_candidate is not None,
                 "winner": winner,
+                # Score truth ON THE WIRE (08-04 screen bug): the beat now
+                # carries the winner's COMMITTED score. The frontend's old
+                # overlay GUESSED the increment and — because commits have
+                # published BEFORE the reveal beat since desync-E — its
+                # "attribute is lagging" check passed trivially and the
+                # chip rolled one point HIGH after every reveal, holding
+                # the wrong score until the next commit. With the real
+                # number on the beat there is nothing to guess.
+                "winner_score": (
+                    (self.sk.players.get(winner) or {}).get("score")
+                    if winner else None
+                ),
             }
             self._pending_reveal_event = reveal_payload
             self._set_ui_phase("reveal")
