@@ -353,7 +353,13 @@ def test_adult_reveal_keyed_once_zero_suppressions(caplog):
     # Exactly ONE reveal packet is pending (single-shot: consumed at TTS
     # start or playout completion, whichever fires first) — the second
     # adjudicate queued nothing on top of it.
-    assert game._pending_reveal_event == {"correct": True, "winner": "Rami"}
+    assert game._pending_reveal_event == {
+        "correct": True,
+        "winner": "Rami",
+        # Score truth on the wire (08-04 screen fix): the beat carries
+        # the committed score.
+        "winner_score": 1,
+    }
     # And the reveal metadata carries the bank row's own category.
     doc = json.loads(game.ctx.api.room.requests[-1].metadata)
     assert doc["category"] == "adult_couples"

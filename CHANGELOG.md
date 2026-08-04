@@ -5,6 +5,28 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-04 — Wrong score on the screen: score truth rides the reveal beat (live report)
+
+Principal's report from the 08-04 call; committed truth was RIGHT
+(DB-audited: 4 correct rows, 4 points, standings 4) — the defect was the
+frontend's score-truth optimism inverted by our own ordering fix. The
+overlay (desync-E) was designed for a LAGGING backend: snapshot the
+winner's score at the reveal beat, and if the attribute hasn't moved 2s
+later, roll optimistically by a guessed increment. Since desync-E,
+commits publish BEFORE the reveal speech — so the beat-time snapshot
+already held the new score, the "attribute is lagging" check passed
+trivially (nothing more was coming), and the chip rolled ONE POINT HIGH
+after every reveal, holding the wrong score until the next commit.
+
+Fix: the reveal beat now carries `winner_score` — the winner's COMMITTED
+score at adjudication. The frontend targets that real number (overlay
+only when the board genuinely trails the wire value; the guessed
+increment is deleted; a beat without the key applies no overlay at all).
+Seam addition documented; pinned by
+`test_reveal_beat_carries_committed_winner_score` + updated adult-identity
+and frontend seam-parser expectations. Companion prmpt_ui change in the
+same push.
+
 ## 2026-08-04 — WO-LILY-RECOGNITION-VARIETY-001: both-sides record, continuous recognition, claimed-returner, variety + the Q5 root cause
 
 Source: Tijoux analysis of session `lily-CC9E19-19c2b804` (solo probe —
