@@ -251,6 +251,10 @@ def _segment_addressee_confidence(
 # WINDOW_FALLBACK_AGENT_TURNS finished agent turns with a question armed
 # in phase=question the window opens regardless.
 WINDOW_FALLBACK_AGENT_TURNS = 2
+# WS-2 registered-undelivered reconciliation: a delivery stuck registered
+# but unplayed (claim never confirmed, never released) is re-fired this
+# many times before the watchdog releases the question back to supply.
+UNDELIVERED_MAX_REFIRES = 2
 
 # Device metadata identifies a browser/table candidate, never the humans
 # currently present. Its memories stay quarantined until a live voiceprint
@@ -376,6 +380,13 @@ class LilyGame:
         self._watchdog_task: asyncio.Task | None = None
         self._prefetch_stall_ticks = 0
         self._armed_limbo_ticks = 0
+        # WS-2 registered-undelivered reconciliation: consecutive watchdog
+        # ticks a delivery has been armed-but-unconfirmed, and how many
+        # times it has already been re-fired this question. Both reset when
+        # a question arms, when a window opens, and when the delivery
+        # confirms.
+        self._undelivered_ticks = 0
+        self._undelivered_refires = 0
         # True while the currently-open answer window is a steal window
         # (seam: rides answer_window JSON as the optional `steal` key).
         self._steal_window = False
@@ -1950,6 +1961,8 @@ class LilyGame:
             return
         self._prefetch_stall_ticks = 0
         self._armed_limbo_ticks = 0
+        self._undelivered_ticks = 0
+        self._undelivered_refires = 0
         self._watchdog_task = asyncio.ensure_future(self._idle_watchdog())
 
     async def _idle_watchdog(self) -> None:
@@ -2002,8 +2015,20 @@ class LilyGame:
                                     self.sk.session_id, self.sk.question_number,
                                 )
                                 self.open_window()
+                        self._undelivered_ticks = 0
+                        self._undelivered_refires = 0
                     else:
+                        # WS-2: armed with a CLOSED window and the delivery
+                        # claim NOT confirmed — either never registered, or
+                        # registered and stuck (dispatched, playing, but
+                        # playout silently never completed and no exception
+                        # fired, so WS-0's suppressed-path release never
+                        # ran). The old contract trusted the delivery-nudge
+                        # machinery here, but that machinery only advances
+                        # on a FINISHED agent turn; a fully-silent stall
+                        # never trips it. Reconcile explicitly.
                         self._armed_limbo_ticks = 0
+                        self.reconcile_undelivered_claim()
                     continue
                 self._armed_limbo_ticks = 0
                 # Game live but idle: nothing armed, no window, no ruling
@@ -2058,6 +2083,160 @@ class LilyGame:
                     )
             except Exception:
                 logger.exception("LILY_WATCHDOG | TICK_FAILED")
+
+    # -- registered-undelivered reconciliation (WS-2, WO-LILY-OMNIBUS-003) -----
+    #
+    # WS-0 covers the FAILED generation (GENERATION_FAILED logs and the
+    # suppressed path releases the claim). WS-2 covers the remaining stuck
+    # class: a question armed and registered in asked_history whose delivery
+    # never reaches playout — the claim stays PENDING (dispatched, no
+    # completion, no exception) or was never registered at all — with no
+    # ruling in flight. The 583a0f16 session held the round-2 loop for five
+    # minutes on q_0001 (Jupiter) and q_2943 (Lisa), both in asked_history,
+    # neither ever aired. This hangs off WS-1's single claim choke point
+    # (`register_delivery_claim` / the q_{N}_delivery key), not a parallel
+    # mechanism: re-fire the delivery, and after repeated re-fires release
+    # the question back to supply so a fresh one can arm.
+
+    def _undelivered_reconcile_ticks(self) -> int:
+        """Watchdog ticks a delivery may stay armed-but-unconfirmed before
+        it is treated as stuck (config seconds / the tick interval, floor
+        one tick). Matches the ARMED_LIMBO two-tick idiom at the 20s
+        default."""
+        seconds = lily_config.undelivered_reconcile_seconds()
+        return max(1, round(seconds / self.WATCHDOG_INTERVAL_SECONDS))
+
+    def _delivery_confirmed(self) -> bool:
+        key = f"q_{self.sk.question_number}_delivery"
+        return self.say_registry.state(key) == lily_say_gate.CLAIM_CONFIRMED
+
+    def _stuck_delivery_present(self) -> bool:
+        """True iff a registered-undelivered claim has already accrued the
+        full reconcile window without confirming (WS-2's stuck class),
+        measured against CURRENT state. A freshly-armed or in-flight
+        delivery is NOT stuck (its ticks have not accrued) — only one that
+        has outlived the reconcile window is."""
+        if not getattr(self, "game_started", False) or getattr(
+            self, "game_over", False
+        ):
+            return False
+        if self.armed_question is None or self.sk.answer_window_open:
+            return False
+        if self._adjudicating or getattr(self, "_question_transitioning", False):
+            return False
+        if self._delivery_confirmed():
+            return False
+        return (
+            getattr(self, "_undelivered_ticks", 0)
+            >= self._undelivered_reconcile_ticks()
+        )
+
+    def no_stuck_claims(self) -> bool:
+        """WS-6 gate: True when reconciliation reports no registered-
+        undelivered claim stuck past the reconcile window. WS-6's supply
+        fallback arms only while this holds — a genuinely stuck delivery
+        (armed, unconfirmed, past the reconcile window) blocks it until the
+        watchdog re-fires or releases it; a normal in-flight delivery does
+        not."""
+        return not self._stuck_delivery_present()
+
+    def reconcile_undelivered_claim(self) -> str:
+        """One watchdog tick's reconciliation of the armed question's
+        delivery (called from _idle_watchdog when armed with a closed
+        window and an UNCONFIRMED delivery claim; safe to call standalone —
+        it re-guards every precondition). Returns:
+          "idle"     — not stuck yet (pre-game, no armed question, window
+                       open, ruling in flight, delivery already confirmed,
+                       or the reconcile window has not elapsed);
+          "refired"  — the stuck delivery was re-dispatched (a stale
+                       PENDING claim released first so the re-ask is not
+                       suppressed as a duplicate);
+          "released" — re-fires exhausted; the question was deregistered
+                       from asked_history and dropped so a fresh one arms.
+        """
+        if not getattr(self, "game_started", False) or getattr(
+            self, "game_over", False
+        ):
+            return "idle"
+        if self.armed_question is None or self.sk.answer_window_open:
+            self._undelivered_ticks = 0
+            return "idle"
+        if self._adjudicating or getattr(self, "_question_transitioning", False):
+            self._undelivered_ticks = 0
+            return "idle"
+        if self._delivery_confirmed():
+            self._undelivered_ticks = 0
+            self._undelivered_refires = 0
+            return "idle"
+        # Armed, window closed, delivery unconfirmed (never registered or
+        # stuck PENDING): count consecutive stuck ticks.
+        self._undelivered_ticks = getattr(self, "_undelivered_ticks", 0) + 1
+        if self._undelivered_ticks < self._undelivered_reconcile_ticks():
+            return "idle"
+        self._undelivered_ticks = 0
+        qnum = self.sk.question_number
+        key = f"q_{qnum}_delivery"
+        if getattr(self, "_undelivered_refires", 0) < UNDELIVERED_MAX_REFIRES:
+            self._undelivered_refires += 1
+            # Drop a stale never-played claim so the re-dispatched delivery
+            # re-claims cleanly (a confirmed claim can never reach here, so
+            # this only ever releases a stuck PENDING one).
+            self.say_registry.release(key)
+            logger.error(
+                "LILY_WATCHDOG | UNDELIVERED_REFIRE | session=%s q=%d "
+                "attempt=%d — delivery registered but never aired; "
+                "re-dispatching",
+                self.sk.session_id, qnum, self._undelivered_refires,
+            )
+            self.expect_delivery()
+            self.gated_say(
+                None,
+                "question_nudge",
+                (
+                    "The armed question has not reached the table yet. "
+                    "Deliver it now: one short bridge if you need it, then "
+                    "its question sentence exactly as written, whole, in "
+                    "one breath — then stop and let the table answer."
+                ),
+                source="undelivered_reconcile",
+            )
+            return "refired"
+        # Re-fires exhausted — release the question back to supply.
+        self.say_registry.release(key)
+        self._release_armed_question_to_supply()
+        logger.error(
+            "LILY_WATCHDOG | UNDELIVERED_RELEASE | session=%s q=%d — "
+            "delivery never aired after %d re-fires; deregistering from "
+            "asked_history and returning to supply",
+            self.sk.session_id, qnum, UNDELIVERED_MAX_REFIRES,
+        )
+        return "released"
+
+    def _release_armed_question_to_supply(self) -> None:
+        """Deregister the armed question from the in-memory asked_history
+        mirror (the session's own no-repeat gate — comment at
+        arm_next_question), clear its stale delivery intent, and drop it so
+        the idle path arms the NEXT question on the following tick. The DB
+        asked_history row is left intact (it truthfully records the draw;
+        removing it is a DB delete gated on Doc); only the in-memory mirror
+        governs re-supply this session."""
+        armed = self.armed_question or {}
+        qid = armed.get("id")
+        hist = getattr(self, "asked_history", None)
+        if isinstance(hist, list) and hist:
+            for index in range(len(hist) - 1, -1, -1):
+                if hist[index].get("question_id") == qid:
+                    hist.pop(index)
+                    break
+            else:
+                # Reconstructed draw with no id match: the armed question is
+                # the most recent served row.
+                hist.pop()
+        self.armed_question = None
+        self._pending_delivery_qnum = None
+        self._armed_speech_misses = 0
+        self._undelivered_ticks = 0
+        self._undelivered_refires = 0
 
     # -- mode-switch flush + re-arm (WO-LILY-DESYNC-HONESTY-001 D) -------------
     #
@@ -2240,6 +2419,8 @@ class LilyGame:
             ))
         self._armed_speech_misses = 0
         self._pending_delivery_qnum = None  # stale delivery intent dies at arm
+        self._undelivered_ticks = 0  # WS-2: reconcile counters are per-question
+        self._undelivered_refires = 0
         self._pre_window_segments = []  # early-buzz buffer is per-question
         self._strict_delivery_qnum = None
         self._judged_keys = set()
@@ -2486,6 +2667,10 @@ class LilyGame:
         dur = duration if duration is not None else self._answer_window_duration()
         self.sk.open_answer_window(duration=dur, reset_candidates=not steal)
         self._steal_window = steal
+        # WS-2: the delivery aired — its window is open, so no undelivered
+        # claim is stuck for this question anymore.
+        self._undelivered_ticks = 0
+        self._undelivered_refires = 0
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
         # THE screen-sync publish (voice/glass sync fix): the question

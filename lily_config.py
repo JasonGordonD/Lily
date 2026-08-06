@@ -235,6 +235,18 @@ def intake_settle_seconds() -> float:
     return _get_float("LILY_INTAKE_SETTLE_SECONDS", 20.0)
 
 
+def undelivered_reconcile_seconds() -> float:
+    """How long a delivery may stay registered-but-unplayed before the
+    idle watchdog reconciles it (WS-2 registered-undelivered class): a
+    question armed with a delivery claim that never confirmed and never
+    failed — no playout, no exception. Past this many seconds of stuck
+    ticks the watchdog re-fires the delivery, and after repeated re-fires
+    releases the question back to supply. The 583a0f16 session held the
+    loop for five minutes on q_0001/q_2943, both registered in
+    asked_history and never aired."""
+    return _get_float("LILY_UNDELIVERED_RECONCILE_SECONDS", 20.0)
+
+
 def group_id_override() -> Optional[str]:
     """Stable group id for voiceprint rematch (v2); defaults to room name."""
     return _get("LILY_GROUP_ID")
