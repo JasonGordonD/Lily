@@ -988,6 +988,19 @@ class LilyGame:
                 act, source,
             )
             return False
+        # PATCH-003 P8: a game-lane payload (delivery, verdict, reveal,
+        # steal/lockout, scores) requires a LIVE game state — the "Nobody
+        # landed it" lockout aired into lobby conversation with no
+        # question live. Validate at dispatch, the same chokepoint as the
+        # hold gate.
+        if self.game_payload_blocked(act, source):
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=no_live_game | act=%s | "
+                "source=%s | game_started=%s q=%d window=%s",
+                act, source, getattr(self, "game_started", False),
+                self.sk.question_number, self.sk.answer_window_open,
+            )
+            return False
         reservation = f"dispatch_{uuid.uuid4().hex}"
         if key is not None and not self.say_registry.claim(key, owner=reservation):
             # WO-LILY-HOTFIX-001: dup suppression is only legitimate against
@@ -3169,6 +3182,27 @@ class LilyGame:
     _HOLD_EXEMPT_SOURCES = frozenset({
         "stop_primitive", "hold_ack", "hold_release",
     })
+
+    # PATCH-003 P8: game-lane acts — deliveries, verdicts, reveals, the
+    # steal/lockout opener, timers, scoreboards. None may air without a
+    # live game (game_started and not game_over). The steal window
+    # additionally requires an open answer window (a lockout with no
+    # question is the exact "Nobody landed it" lobby fixture).
+    _GAME_LANE_ACTS = frozenset({
+        "question_delivery", "question_nudge", "verdict", "reveal",
+        "reveal_flourish", "reveal_scores", "reveal_finale", "steal_window",
+    })
+
+    def game_payload_blocked(self, act: str, source: str) -> bool:
+        """True when this is a game-lane payload dispatched with no live
+        game — the "Nobody landed it" lockout that aired into lobby
+        conversation. game_started (and not game_over) is the live-game
+        gate; a lobby/ended state blocks every game-lane act."""
+        if act not in self._GAME_LANE_ACTS:
+            return False
+        return not getattr(self, "game_started", False) or getattr(
+            self, "game_over", False
+        )
 
     def hold_blocks_dispatch(self, act: str, source: str) -> bool:
         """True when the hold state must suppress this dispatch. Exempt
