@@ -862,7 +862,12 @@ class LilyReasoning:
     # -- picture-question supply (WO-LILY-OMNIBUS-002 H/I/J) ------------------
 
     async def generate_demo_image(
-        self, supabase, *, session_id: str, adult: bool = False
+        self,
+        supabase,
+        *,
+        session_id: str,
+        adult: bool = False,
+        intensity: str = "suggestive",
     ) -> Optional[str]:
         """Self-knowledge WO "show me" demo (12:47 live fixture): ONE
         generated tabletop image so a skeptic asking to SEE picture
@@ -871,26 +876,32 @@ class LilyReasoning:
         demo generates at most once per deck); returns a public bucket
         URL or None. Never raises.
 
-        adult=True (owner directive 2026-08-06): the sample renders in
-        the adult deck's art direction — realistic comic-book
-        illustration via lily_imagegen.lily_adult_style — so a table
-        asking what the grown-up deck's pictures look like gets shown
-        the real style, in a suggestive-not-explicit sample."""
+        adult=True: sample rides the adult deck (Grok + lily_adult_style
+        chokepoint). intensity is the player-chosen heat
+        (suggestive|explicit); style is applied inside generation."""
         if adult:
-            prompt = lily_imagegen.lily_adult_style(
+            prompt = (
                 "A grown-up cocktail-lounge trivia scene: a dimly lit "
                 "speakeasy table, martini glasses, playing cards and a "
                 "smoldering-glance couple leaning close mid-question, "
-                "flirtatious grown-up energy, suggestive but tasteful"
+                "flirtatious grown-up energy, permissive wear"
             )
             question_id = f"demo_adult_{session_id}"
-        else:
-            prompt = (
-                "A warm, playful pub-trivia tabletop scene: a wooden "
-                "table with scattered answer cards, a chalkboard "
-                "scoreboard, soft rose-colored lighting, no text"
+            return await lily_imagegen.lily_generate_question_image(
+                supabase,
+                session_id=session_id,
+                question_id=question_id,
+                prompt=prompt,
+                aspect_ratio="16:9",
+                mode="adult",
+                intensity=intensity,
             )
-            question_id = f"demo_{session_id}"
+        prompt = (
+            "A warm, playful pub-trivia tabletop scene: a wooden "
+            "table with scattered answer cards, a chalkboard "
+            "scoreboard, soft rose-colored lighting, no text"
+        )
+        question_id = f"demo_{session_id}"
         return await lily_imagegen.lily_generate_question_image(
             supabase,
             session_id=session_id,
@@ -907,6 +918,7 @@ class LilyReasoning:
         question_index: int,
         session_id: str,
         mode: str = "general",
+        intensity: str = "suggestive",
         exclude_ids: Optional[set] = None,
         exclude_hashes: Optional[set] = None,
     ) -> Optional[dict]:
@@ -923,7 +935,7 @@ class LilyReasoning:
         ANY failure — the caller falls back to the standard text supply
         (text-only fallback). Adult mode supplies picture rounds exactly
         like the other decks; generated images route to the Grok adult
-        image model (mode is threaded to the builders below)."""
+        image model (mode + intensity threaded to the builders below)."""
         if supabase is None:
             return None
         # Picture builders use deterministic ids for a slot. Honour the
@@ -951,6 +963,7 @@ class LilyReasoning:
                 return await lily_imagegen.lily_build_real_or_imagined_question(
                     supabase, index=question_index, session_id=session_id,
                     approve=self.approve_entity_image, mode=mode,
+                    intensity=intensity,
                 )
             if kind == "real_entity":
                 return await lily_search.lily_build_real_entity_picture_question(

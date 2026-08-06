@@ -620,6 +620,10 @@ class LilyScorekeeper:
         # flag, default voice_only. Picture questions exist ONLY when this
         # says pictures.
         self.media_mode: str = "voice_only"
+        # Adult image intensity (player-chosen): suggestive | explicit.
+        # Default suggestive until the table confirms explicit. Cleared to
+        # suggestive on every adult exit so there is no residue.
+        self.adult_image_intensity: str = "suggestive"
         self.category: Optional[str] = None
         self.question_number: int = 0
         self.questions_per_round: int = 6
@@ -1849,6 +1853,24 @@ class LilyScorekeeper:
                 "at_question": self.question_number,
             })
         self.mode = mode
+        # No residue: leaving adult always resets image intensity.
+        if mode == "general":
+            self.adult_image_intensity = "suggestive"
+
+    def set_adult_image_intensity(self, intensity: str) -> bool:
+        """Sticky adult image heat: suggestive | explicit. Returns True if
+        the value was accepted (even if unchanged)."""
+        value = (intensity or "").strip().lower()
+        if value not in ("suggestive", "explicit"):
+            return False
+        if value != self.adult_image_intensity:
+            logger.info(
+                "LILY_STATE | ADULT_IMAGE_INTENSITY | session=%s "
+                "from=%s to=%s",
+                self.session_id, self.adult_image_intensity, value,
+            )
+        self.adult_image_intensity = value
+        return True
 
     def set_media_mode(self, mode: str) -> None:
         """Sticky media flag (sub-agent K): flips instantly, in code, on
@@ -2040,6 +2062,7 @@ class LilyScorekeeper:
             f"phase={self.phase} round={self.round}/{self.rounds_total} "
             f"mode={self.mode} pacing={self.pacing} "
             f"format={self.round_format} media={self.media_mode} "
+            f"adult_image={self.adult_image_intensity} "
             f"question={q_in_round}/{self.questions_per_round} in this round "
             f"(#{self.question_number} of {total_questions} total, "
             f"then one final wager question) "
@@ -2102,6 +2125,7 @@ class LilyScorekeeper:
             "round_format": self.round_format,
             "round_format_override": self.round_format_override,
             "media_mode": self.media_mode,
+            "adult_image_intensity": self.adult_image_intensity,
             "category": self.category,
             "question_number": self.question_number,
             "questions_per_round": self.questions_per_round,
@@ -2127,6 +2151,11 @@ class LilyScorekeeper:
             "round_format_override", self.round_format_override
         )
         self.media_mode = snap.get("media_mode", self.media_mode)
+        self.adult_image_intensity = snap.get(
+            "adult_image_intensity", self.adult_image_intensity
+        )
+        if self.adult_image_intensity not in ("suggestive", "explicit"):
+            self.adult_image_intensity = "suggestive"
         self.category = snap.get("category", self.category)
         self.question_number = snap.get("question_number", self.question_number)
         self.questions_per_round = snap.get(

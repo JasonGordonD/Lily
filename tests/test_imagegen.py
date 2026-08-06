@@ -242,7 +242,8 @@ def test_real_or_imagined_odd_index_is_generated(monkeypatch):
 
 def test_generation_routes_to_grok_in_adult_mode(monkeypatch):
     # WO-LILY-ADULT-PICTURES-001: adult-deck generation goes to xAI Grok
-    # Imagine; the Gemini path must never run for adult.
+    # Imagine; the Gemini path must never run for adult. Style chokepoint
+    # always wraps the prompt before the wire.
     calls = {}
 
     async def fake_xai(prompt, *, model=None):
@@ -253,9 +254,25 @@ def test_generation_routes_to_grok_in_adult_mode(monkeypatch):
     data, mime, model = run(
         lily_imagegen.lily_generate_image_bytes("invented place", mode="adult")
     )
-    assert calls["xai"]["prompt"] == "invented place"
+    assert "invented place" in calls["xai"]["prompt"]
+    assert "comic-book" in calls["xai"]["prompt"]
+    assert "SUGGESTIVE" in calls["xai"]["prompt"]
     assert model == lily_imagegen.lily_config.adult_imagegen_model()
     assert model == "grok-imagine-image"
+
+
+def test_adult_style_intensity_and_content_brief():
+    sug = lily_imagegen.lily_adult_style("scene", intensity="suggestive")
+    exp = lily_imagegen.lily_adult_style("scene", intensity="explicit")
+    assert "comic-book" in sug and "comic-book" in exp
+    assert "Permissive wear" in sug
+    assert "kinky positions" in sug.lower() or "Kinky" in sug or "kinky" in sug
+    assert "toys" in sug.lower()
+    assert "Captions" in sug or "captions" in sug
+    assert "SUGGESTIVE" in sug and "EXPLICIT" in exp
+    assert "hardcore" in sug.lower() or "stop short" in sug.lower()
+    assert lily_imagegen.lily_normalize_adult_image_intensity("EXPLICIT") == "explicit"
+    assert lily_imagegen.lily_normalize_adult_image_intensity("nope") == "suggestive"
 
 
 def test_real_or_imagined_generated_adult_threads_mode_and_names_grok(monkeypatch):

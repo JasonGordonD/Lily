@@ -172,21 +172,64 @@ def clamp_and_log(requested: str) -> str:
 
 GENERATION_TIMEOUT_SECONDS = 45.0
 
-# Owner directive 2026-08-06: adult-deck imagery renders in realistic
-# comic-book illustration style — stylized art, never photorealism. THE
-# style chokepoint: every adult-context generation prompt passes through
-# lily_adult_style before the wire.
+# Owner directive 2026-08-06 + adult image intensity WO: adult-deck
+# imagery renders in realistic comic-book illustration style — stylized
+# art, never photorealism. THE style chokepoint: every adult-context
+# generation prompt passes through lily_adult_style before the wire
+# (auto-applied in lily_generate_image_bytes when mode='adult').
+#
+# Content brief (both intensities): permissive wear, kinky positions,
+# power dynamics, cosplay, toys, captions/partial captions allowed.
+# Intensity (suggestive | explicit) is player-chosen at the table;
+# default is suggestive until the table confirms explicit.
+
+ADULT_IMAGE_INTENSITIES: Final[tuple[str, ...]] = ("suggestive", "explicit")
+
 LILY_ADULT_IMAGE_STYLE = (
     "Rendered as a realistic comic-book illustration: bold inked "
     "linework, painterly shading, dramatic lighting, a confident "
-    "grown-up tone — stylized art, never photorealistic, no text."
+    "grown-up tone — stylized art, never photorealistic. "
+    "Permissive wear is the default dress code: open, flirty, "
+    "intentionally less conservative clothing. Subject matter may "
+    "include kinky positions, power dynamics and D/s energy, cosplay, "
+    "and adult toys. Captions or partial captions on the image are "
+    "allowed."
+)
+
+LILY_ADULT_INTENSITY_SUGGESTIVE = (
+    "Intensity SUGGESTIVE: spicy erotic-comic energy — sensual, "
+    "kink-coded, and grown-up; stop short of hardcore explicit sexual "
+    "detail. Tasteful heat, not pornography."
+)
+
+LILY_ADULT_INTENSITY_EXPLICIT = (
+    "Intensity EXPLICIT: full explicit adult content allowed — graphic "
+    "sexual positions, clear dynamics, toys, and cosplay as the scene "
+    "calls for. No soft ceiling."
 )
 
 
-def lily_adult_style(prompt: str) -> str:
-    """Apply the adult-deck art direction to one generation prompt."""
+def lily_normalize_adult_image_intensity(intensity: Optional[str]) -> str:
+    """Coerce intensity to a legal sticky value; unknown -> suggestive."""
+    value = (intensity or "").strip().lower()
+    if value in ADULT_IMAGE_INTENSITIES:
+        return value
+    return "suggestive"
+
+
+def lily_adult_style(
+    prompt: str, *, intensity: str = "suggestive"
+) -> str:
+    """Apply the adult-deck art direction + intensity to one generation
+    prompt. intensity: 'suggestive' (default) | 'explicit'."""
     base = (prompt or "").strip()
-    return f"{base} {LILY_ADULT_IMAGE_STYLE}".strip()
+    level = lily_normalize_adult_image_intensity(intensity)
+    addendum = (
+        LILY_ADULT_INTENSITY_EXPLICIT
+        if level == "explicit"
+        else LILY_ADULT_INTENSITY_SUGGESTIVE
+    )
+    return f"{base} {LILY_ADULT_IMAGE_STYLE} {addendum}".strip()
 
 
 _XAI_IMAGES_URL: Final = "https://api.x.ai/v1/images/generations"
@@ -253,23 +296,27 @@ async def lily_generate_image_bytes(
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     mode: str = "general",
+    intensity: str = "suggestive",
 ) -> tuple[bytes, str, str]:
     """One image generation call. Returns (image_bytes, mime_type, model).
 
     Provider routing by DECK (read-only on mode — never touches the adult
     gate): general/standard -> Gemini image model; adult -> xAI Grok Imagine
-    (Gemini refuses adult content). RAISES RuntimeError with the provider's
-    message on any failure — callers (the no-silent-crash wrappers below)
-    turn that into a visible lily_image_attempts error row. Aspect ratio is
-    clamped before the wire (the donor crash class: an off-list value 400s
-    AFTER a good render)."""
+    (Gemini refuses adult content). On adult mode the prompt is always
+    run through lily_adult_style(intensity=...) before the wire so the
+    comic / permissive-wear / kink / caption brief cannot be skipped.
+    RAISES RuntimeError with the provider's message on any failure —
+    callers (the no-silent-crash wrappers below) turn that into a visible
+    lily_image_attempts error row. Aspect ratio is clamped before the wire
+    (the donor crash class: an off-list value 400s AFTER a good render)."""
     if not (prompt or "").strip():
         raise RuntimeError("empty image prompt")
     if mode == "adult":
-        # Adult deck -> Grok. Adult picture-trivia is LIVE upstream
-        # (prefetch_picture_question threads mode='adult' to the builders);
-        # this branch carries its generated images.
-        return await _generate_image_bytes_xai(prompt, model=model)
+        # Adult deck -> Grok. Style chokepoint applies here so every adult
+        # generation (demo, picture rounds, bank image_prompt) gets the
+        # same art brief + player-chosen intensity.
+        styled = lily_adult_style(prompt, intensity=intensity)
+        return await _generate_image_bytes_xai(styled, model=model)
     mdl = model or lily_config.imagegen_model()
     clamped = clamp_and_log(aspect_ratio)
     config = None
@@ -320,14 +367,17 @@ async def lily_generate_question_image(
     prompt: str,
     aspect_ratio: str = "16:9",
     mode: str = "general",
+    intensity: str = "suggestive",
 ) -> Optional[str]:
     """NO-SILENT-CRASH wrapper: generate + store one INVENTED-content image
     and return its public bucket URL, or None (text-only fallback).
 
     Provider routing by deck: general -> Gemini, adult -> Grok (read-only on
-    mode). CACHE-FIRST: a bank row (kb_ id) that already carries an image
-    short-circuits — nothing is generated. Every attempt writes a visible
-    lily_image_attempts row; this function NEVER raises."""
+    mode). intensity is player-chosen adult image heat (suggestive|explicit)
+    and is ignored for general deck. CACHE-FIRST: a bank row (kb_ id) that
+    already carries an image short-circuits — nothing is generated. Every
+    attempt writes a visible lily_image_attempts row; this function NEVER
+    raises."""
     # Cache-first (sub-agent H rule): check the bank row before generating.
     cached = await lily_images.lily_cached_bank_image(supabase, question_id)
     if cached is not None:
@@ -338,7 +388,10 @@ async def lily_generate_question_image(
     )
     try:
         data, mime, mdl = await lily_generate_image_bytes(
-            prompt, aspect_ratio=aspect_ratio, mode=mode
+            prompt,
+            aspect_ratio=aspect_ratio,
+            mode=mode,
+            intensity=intensity,
         )
     except Exception as e:
         await lily_images.lily_record_image_attempt(
@@ -440,6 +493,7 @@ async def lily_build_real_or_imagined_question(
     difficulty_tier: int = 2,
     approve=None,
     mode: str = "general",
+    intensity: str = "suggestive",
 ) -> Optional[dict]:
     """Build one 'real or imagined' question: even indexes serve a REAL
     photo (Exa-sourced, sub-agent I), odd indexes a GENERATED plausible
@@ -448,8 +502,9 @@ async def lily_build_real_or_imagined_question(
     standard text supply (text-only fallback). Never raises.
 
     mode routes the GENERATED branch's provider (read-only on the deck):
-    general -> Gemini image model, adult -> xAI Grok Imagine. The REAL
-    branch is web-sourced and unaffected by mode."""
+    general -> Gemini image model, adult -> xAI Grok Imagine. intensity
+    threads adult image heat into the style chokepoint. The REAL branch
+    is web-sourced and unaffected by mode/intensity."""
     try:
         if index % 2 == 0:
             # REAL branch — web-sourced, never generated.
@@ -523,6 +578,7 @@ async def lily_build_real_or_imagined_question(
         url = await lily_generate_question_image(
             supabase, session_id=session_id, question_id=qid,
             prompt=gen_prompt, aspect_ratio="16:9", mode=mode,
+            intensity=intensity,
         )
         if url is None:
             return None  # error row already written; text-only fallback

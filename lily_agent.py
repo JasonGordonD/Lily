@@ -2036,7 +2036,10 @@ class LilyGame:
             # seam (web guardrail: the vocal module never touches the
             # image stack directly).
             url = await self.reasoning.generate_demo_image(
-                supabase, session_id=self.sk.session_id, adult=adult
+                supabase,
+                session_id=self.sk.session_id,
+                adult=adult,
+                intensity=self.sk.adult_image_intensity,
             )
         if not url:
             logger.warning("LILY_DEMO | no image available")
@@ -2563,6 +2566,7 @@ class LilyGame:
                     question_index=self.sk.question_number,
                     session_id=self.sk.session_id,
                     mode=supply_mode,
+                    intensity=self.sk.adult_image_intensity,
                     exclude_ids=history_ids, exclude_hashes=history_hashes,
                 )
 
@@ -7162,7 +7166,54 @@ class LilyAgent(Agent):
             "it lands in the state block in a beat. NEVER serve a "
             "leftover general question as adult material and NEVER "
             "freestyle one; vamp for a beat until the state block shows "
-            "the adult question, then ask it word for word."
+            "the adult question, then ask it word for word. "
+            "ADULT PICTURES: adult image heat defaults to SUGGESTIVE. "
+            "Ask the whole table clearly: for grown-up pictures do they "
+            "want spicy-but-suggestive, or full explicit? Wait for the "
+            "table (not one enthusiast) to agree, then call "
+            "lily_set_adult_image_intensity with intensity="
+            "'suggestive'|'explicit' and confirmed_table=true. Do not "
+            "assume explicit. Re-ask only if they change it."
+        )
+
+    @function_tool()
+    async def lily_set_adult_image_intensity(
+        self,
+        context: RunContext,
+        intensity: str = "suggestive",
+        confirmed_table: bool = False,
+    ) -> str:
+        """Set adult picture heat after the table agrees: 'suggestive' or
+        'explicit'. Call only when adult mode is on and the table has
+        clearly chosen. Default stays suggestive until they pick explicit.
+        """
+        if self._game.sk.mode != "adult":
+            return (
+                "Adult image intensity is only available in adult mode. "
+                "Enter the grown-up deck first, then ask the table."
+            )
+        level = (intensity or "").strip().lower()
+        if level not in ("suggestive", "explicit"):
+            return (
+                "Invalid intensity. Use intensity='suggestive' or "
+                "intensity='explicit' only."
+            )
+        if not confirmed_table and not lily_config.architect_mode():
+            return (
+                "Intensity is NOT changed yet. Ask every player at the "
+                "table: 'For grown-up pictures — spicy-but-suggestive, or "
+                "full explicit? Everyone has to be good with it.' Call "
+                "again with confirmed_table=true only after the table "
+                "agrees. If anyone wants softer, stay on suggestive."
+            )
+        if not self._game.sk.set_adult_image_intensity(level):
+            return "Intensity not accepted — use suggestive or explicit."
+        self._game.publish_attributes_nowait()
+        return (
+            f"Adult image intensity is now {level.upper()} — sticky for "
+            "this session until they change it or say back to normal. "
+            "One short confirmation, then keep the night moving. Demo "
+            "and generated adult pictures follow this heat."
         )
 
     @function_tool()
@@ -7449,12 +7500,12 @@ class LilyAgent(Agent):
         rounds look like ("show me", "prove it", "I'll believe it when I
         see it") instead of describing pictures in words. Pass adult=true
         when they ask what the GROWN-UP deck's pictures look like — the
-        sample renders in the adult deck's realistic comic-book art
-        style (suggestive, tasteful, never explicit). The tool result
-        is the ONLY thing that makes "look at the screen" true: if it
-        confirms the image landed, point the table at the screen; if it
-        reports a failure, say exactly that — never claim anything
-        reached the screen on your own.
+        sample uses the adult comic-book art direction at the session's
+        sticky adult_image intensity (suggestive default, or explicit if
+        the table set it). The tool result is the ONLY thing that makes
+        "look at the screen" true: if it confirms the image landed, point
+        the table at the screen; if it reports a failure, say exactly
+        that — never claim anything reached the screen on your own.
         """
         if adult and not (
             (getattr(self._game, "availability_flags", None) or {}).get(
