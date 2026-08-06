@@ -114,6 +114,51 @@ supply stalls pushing her to fill gaps that belonged to the table.
   (the live session had it null on all 14 rows). `LILY_FEATURE_VERSION`
   unchanged — the single whole-WO bump is assigned to a later
   workstream, and the capability-manifest entry rides with it.
+## 2026-08-05 — WO-LILY-OMNIBUS-003 WS-13: STT echo-room study + tuning matrix (as amended by AMENDMENT-001/-002)
+
+Evidence: session `lily-81BCB0-583a0f16` (4-player echo room) ran on
+effective Speechmatics defaults — 3 phantom labels (S5–S7), a Chris
+S1→S4 continuity split, and 104s/206s corrupted spans under S2. Full
+study + per-lever audit in the README "STT tuning — echo-room study
+close-out" section. Shipped:
+
+- **`lily_stt_tuning.py` + `stt_tuned.json`** — the tuned-config artifact
+  (WS-15 bake-off incumbent arm; drift-tested), 27-cell matrix grid,
+  machine-metric scorers (WER/DER/phantom/attribution/span —
+  AMENDMENT-002 standard), and the StartRecognition wire-injection patch:
+  `speaker_diarization_config.get_speakers=true` (server pushes
+  SpeakersResult at end of transcript into a teardown-surviving store) +
+  `audio_filtering_config.volume_threshold` (SDK already sends 0.0 on
+  every wire — value override is schema-safe). Both fields live-validated
+  against the voice endpoint (RecognitionStarted, no 1003 — the
+  `max_alternatives` incident class does not apply).
+- **Tuned constructor** (`lily_agent.py`): `speaker_sensitivity`
+  0.5→0.35; player-name `additional_vocab` at construction when
+  voiceprints exist (constructor-only pin — names at bind require WS-8's
+  `Agent.update_options(stt=...)` swap); dunder-label filter on
+  known-speaker enrollment both directions.
+- **Enrollment fallback** (`lily_persistence.py`): session-close
+  enrollment no longer dies with the websocket — captured SpeakersResult
+  is the fallback source, closing the 2026-07-15 dead-stream hole.
+- **`lily_room_profile.py`** (AMENDMENT-002 item 6): blind RT60/DRR from
+  the first audeering capture window (coverage untouched; devAIce stays
+  a coarse quality gate); reverberant→longer EOU trigger + SMART_TURN
+  recommendation, low-DRR→Tier-1 threshold delta + positively-framed
+  state-block line.
+- **Playback-path verdict (item 1, verification only):** record-clean;
+  protection is structural (agent never subscribes to its own track) +
+  client AEC; `__ASSISTANT__` ignore is a dormant backstop with no real
+  identifiers. Regression: `lily_assistant_leak_scan` pinned in tests.
+- **Findings of record:** FIXED-mode `end_of_utterance_max_delay` is
+  INERT at this pin (clamp lives on the non-FIXED path; RT
+  conversation_config has no such field) — nothing config-side caps span
+  length, so spans >30s are WS-10 quarantine
+  (`ws10_span_quarantine_seconds` in the artifact). No session audio was
+  recorded anywhere → the fixture
+  (`tests/fixtures/echo_room_81BCB0.json`) is RECORD-DERIVED and
+  acoustic matrix replay is deferred to WS-15's recorded fixture.
+
+Tests: +27 (`tests/test_stt_tuning.py`), suite 885 green.
 
 ## 2026-08-04 — Wrong score on the screen: score truth rides the reveal beat (live report)
 

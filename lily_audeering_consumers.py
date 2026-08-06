@@ -539,6 +539,12 @@ class LilyAcousticState:
         self.baseline = LilyRoomBaseline()
         self._room_line: str | None = None
         self._env_line: str | None = None
+        # WS-13 item 6: session-start room profile (blind RT60/DRR,
+        # lily_room_profile — reverberation physics, NOT devAIce
+        # audio_quality, which stays the coarse quality gate). Set at most
+        # once per session from the first capture window.
+        self._profile_line: str | None = None
+        self._room_profile: dict[str, Any] | None = None
         self._latest_snapshot: dict[str, Any] | None = None
         self._breaker_open: bool = False
         # Optional veto callback, wired by the entrypoint to the game's
@@ -611,7 +617,26 @@ class LilyAcousticState:
         """Lines for the [GAME STATE] block. Empty when neutral/suppressed.
         [env: ...] appears at most once per refresh."""
         with self._lock:
-            return tuple(l for l in (self._room_line, self._env_line) if l)
+            return tuple(
+                l
+                for l in (self._room_line, self._env_line, self._profile_line)
+                if l
+            )
+
+    def set_room_profile(
+        self, profile: dict[str, Any] | None, note: str | None
+    ) -> None:
+        """Record the session-start room profile (WS-13 item 6). The note is
+        the profile mapping's state-block line (positively framed); None
+        clears nothing — the first non-None profile wins for the session."""
+        with self._lock:
+            if profile is not None and self._room_profile is None:
+                self._room_profile = dict(profile)
+                self._profile_line = note
+
+    def room_profile(self) -> dict[str, Any] | None:
+        with self._lock:
+            return dict(self._room_profile) if self._room_profile else None
 
     def child_veto_active(self) -> bool:
         with self._lock:

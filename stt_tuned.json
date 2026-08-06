@@ -1,0 +1,32 @@
+{
+ "artifact": "lily-stt-tuned",
+ "source_ws": "WO-LILY-OMNIBUS-003/WS-13",
+ "evidence_session": "lily-81BCB0-583a0f16",
+ "stack_pins": {
+  "livekit-plugins-speechmatics": "1.6.6",
+  "speechmatics-voice": "0.2.8",
+  "speechmatics-rt": "1.1.0"
+ },
+ "constructor": {
+  "language": "en",
+  "operating_point": "enhanced",
+  "enable_diarization": true,
+  "speaker_active_format": "[{speaker_id}] {text}",
+  "speaker_sensitivity": 0.35,
+  "prefer_current_speaker": true,
+  "max_speakers": 7,
+  "max_delay": 1.5,
+  "end_of_utterance_silence_trigger": 0.8,
+  "turn_detection_mode": "fixed",
+  "include_partials": true,
+  "ignore_speakers": [
+   "__ASSISTANT__"
+  ]
+ },
+ "wire_injection": {
+  "get_speakers": true,
+  "volume_threshold": 0.0
+ },
+ "ws10_span_quarantine_seconds": 30.0,
+ "ws8_per_word_volume_available": true
+}

@@ -73,6 +73,7 @@ import lily_nbest
 import lily_persistence
 import lily_reasoning
 import lily_say_gate
+import lily_stt_tuning
 from lily_binding import (
     LilyFragmentAccumulator,
     lily_extract_name_from_fragments,
@@ -6963,6 +6964,11 @@ async def entrypoint(ctx: JobContext) -> None:
         known_rows = await lily_persistence.lily_load_voiceprints(
             supabase, group_id
         )
+    # WS-13: dunder-wrapped labels (`__ASSISTANT__`-style) are the engine's
+    # ignore namespace — a corrupt voiceprint row must never enroll real
+    # identifiers under one (it would turn the inert echo-guard label into
+    # an active matcher for a real voice and silently drop that player).
+    known_rows = lily_stt_tuning.lily_filter_enrollable_speakers(known_rows)
     known_speakers = [
         SpeakerIdentifier(
             label=row["label"], speaker_identifiers=row["speaker_identifiers"]
@@ -6981,32 +6987,58 @@ async def entrypoint(ctx: JobContext) -> None:
     if lily_nbest.lily_install_nbest_stt_patch(_nbest_collector, _nbest_max):
         game.nbest_collector = _nbest_collector
 
+    # --- STT tuning injection (WO-LILY-OMNIBUS-003 WS-13) ---
+    # Armed BEFORE STT construction, same contract as the n-best patch.
+    # Injects `speaker_diarization_config.get_speakers` (end-of-transcript
+    # SpeakersResult push — the enrollment fallback that survives stream
+    # teardown, replacing the ~5-word-starved GET_SPEAKERS polling as the
+    # only source) and `audio_filtering_config.volume_threshold` (already on
+    # every wire at 0.0 — schema-safe, unlike max_alternatives). Both fields
+    # live-validated against the voice endpoint 2026-08-05: RecognitionStarted,
+    # no 1003.
+    lily_stt_tuning.lily_install_stt_tuning_patch(
+        get_speakers=True,
+        volume_threshold=float(
+            lily_stt_tuning.LILY_STT_TUNED["wire_injection"]["volume_threshold"]
+        ),
+    )
+
     # --- STT: Speechmatics multi-speaker fleet profile (Part II §1.1) ---
     # NOTE: livekit-plugins-speechmatics 1.6.6 does not expose a `model=`
     # kwarg — `operating_point` is the only path to select ENHANCED, and the
     # SDK-level deprecation warning about `TranscriptionConfig.operating_point`
     # is emitted from inside the plugin wrapper. Fix requires an upstream
     # plugin bump; no fleet member has migrated yet. Keep as-is.
+    # WS-13: constructor values come from the tuned artifact
+    # (lily_stt_tuning.LILY_STT_TUNED — rationale per lever in the README
+    # STT stack table). speaker_sensitivity 0.5 -> 0.35: the echo-room
+    # session minted 3 phantom labels + 1 continuity split for 4 players at
+    # the default; lower sensitivity biases matching toward enrolled voices
+    # over minting generic ones. max_speakers stays 7 at construction —
+    # the table size is unknowable pre-bind; the roster-aware cap
+    # (lily_max_speakers_for) is WS-8's to apply via the 1.6.6
+    # Agent.update_options(stt=...) swap. Known player names ride
+    # additional_vocab — the bounded stable set the constructor-only pin
+    # allows (never answer nouns).
+    _tuned = lily_stt_tuning.lily_tuned_stt_kwargs()
+    # Voiceprint labels are player names when a binding existed; generic
+    # engine labels (S1..Sn / UU) are not names and stay out of the vocab.
+    _vocab_names = sorted({
+        name
+        for row in known_rows
+        for name in [str(row.get("label") or "").strip()]
+        if name and not re.fullmatch(r"S\d+|UU", name)
+    })
     stt = SpeechmaticsSTT(
-        language="en",
         operating_point=OperatingPoint.ENHANCED,
-        enable_diarization=True,
-        speaker_active_format="[{speaker_id}] {text}",
-        speaker_sensitivity=0.5,
         prefer_current_speaker=True,  # [VERIFY live] rapid answer collisions
-        # No in-flight max_speakers update exists at 1.6.6 — fixed at
-        # construction to product cap (2-6 players) + 1. Applies only to
-        # generic speakers on top of enrolled ones.
-        max_speakers=7,
-        max_delay=1.5,
-        end_of_utterance_silence_trigger=0.8,
         turn_detection_mode=TurnDetectionMode.FIXED,
-        include_partials=True,
-        ignore_speakers=["__ASSISTANT__"],  # echo guard, fleet standard
         additional_vocab=[
             AdditionalVocabEntry(content="Lily"),
+            *(AdditionalVocabEntry(content=name) for name in _vocab_names),
         ],
         known_speakers=known_speakers,
+        **{k: v for k, v in _tuned.items() if k != "prefer_current_speaker"},
     )
     game.stt = stt
     if known_speakers:

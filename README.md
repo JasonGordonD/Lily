@@ -19,7 +19,7 @@ Living documentation lives here. Dated work-order and fix entries live in
 | Layer | Choice |
 |---|---|
 | Framework | `livekit-agents==1.6.6` (plugin family pinned to match; upgraded from 1.6.4 under WO-LILY-OMNIBUS-003 WS-0 with the full migration audit below; JRVS stays the fleet 1.6.4 reference install) |
-| STT | Speechmatics — `en`, diarization, ENHANCED, `speaker_sensitivity=0.5`, `prefer_current_speaker=True`, `max_speakers=7` (fixed at construction — no in-flight update path exists at 1.6.6 either; 1.6.6's new `Agent.update_options(stt=...)` full-STT swap is the only live route, unwired), `ignore_speakers=["__ASSISTANT__"]` |
+| STT | Speechmatics — `en`, diarization, ENHANCED; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`, full lever audit in the WS-13 close-out table below): `speaker_sensitivity=0.35` (0.5 minted 3 phantoms + 1 continuity split for 4 players in the echo-room evidence session), `prefer_current_speaker=True`, `max_speakers=7` (fixed at construction — table size is unknowable pre-bind; roster-aware cap `lily_max_speakers_for` is WS-8's to apply via the 1.6.6 `Agent.update_options(stt=...)` swap), `ignore_speakers=["__ASSISTANT__"]`, player-name `additional_vocab` at construction when voiceprints exist, StartRecognition wire injection `get_speakers=true` + `audio_filtering_config.volume_threshold` (lily_stt_tuning patch, live-schema-validated) |
 | Vocal LLM | `gemini-3.5-flash` — every spoken turn; explicit `safety_settings` (adult-product context), `thinking_config={"thinking_level": "low"}`, `max_output_tokens ≥ 600`, default sampling |
 | Reasoning LLM | `gemini-3.1-pro-preview` — background node, own google-genai client (HTTP isolation): question prefetch (N+1) + verification at prefetch time; never speaks |
 | TTS | ElevenLabs v3 via `lily_tts.py` (`/v1/text-to-speech/{voice_id}/stream`; the dialogue endpoint stays off per fleet revert). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`) |
@@ -969,6 +969,143 @@ judge instead of scoring. Edge contract: single hypothesis → 0.0, no
 hypotheses → null. Both the hypothesis set (`asr_n_best`) and the
 dispersion land on the `lily_addressee_log` row when available (absent →
 SQL NULL; columns from schema amendment 5a).
+
+## STT tuning — echo-room study close-out (WO-LILY-OMNIBUS-003 WS-13)
+
+Evidence session `lily-81BCB0-583a0f16` (2026-08-05, 4 players, reverberant
+room) ran on effective Speechmatics defaults and produced 3 phantom labels
+(S5–S7), a label-continuity split (Chris S1→S4), and two corrupted spans
+(104.1s / 206.0s under S2). The record is frozen as
+`tests/fixtures/echo_room_81BCB0.json` (RECORD-DERIVED — no session audio
+was recorded anywhere: no egress in lily, `call-audio` bucket empty; the
+fixture is the persisted transcript record, and acoustic replay of matrix
+cells is impossible until a recorded-audio fixture exists — WS-15's
+bake-off owns that leg). Baseline machine metrics (AMENDMENT-002 standard —
+WER/DER + phantom/attribution/span scoring, `lily_stt_tuning` scorers):
+phantom_label_count=3, label_continuity_splits=1, attribution_accuracy=0.91,
+span_violations=2 at the 30s threshold.
+
+**Chosen config** ships as a loadable artifact — `stt_tuned.json` (mirrors
+`lily_stt_tuning.LILY_STT_TUNED`, drift-tested) — and is the incumbent arm
+of the WS-15 diarization bake-off. Matrix axes for the acoustic sweep:
+`speaker_sensitivity` [0.3, 0.4, 0.5] × `max_speakers` [5, 6, 7] ×
+`volume_threshold` [0.0, 1.6, 3.2] (27 cells, `lily_matrix_cells()`).
+
+### Config audit: every plugin kwarg at livekit-plugins-speechmatics 1.6.6
+
+| Kwarg | Session value | Chosen | Rationale / installed-surface fact |
+|---|---|---|---|
+| `language` | `en` | keep | product language |
+| `output_locale` | unset | keep unset | no locale need; available |
+| `domain` | unset | keep unset | no domain pack applies to trivia |
+| `operating_point` | ENHANCED | keep | accuracy over latency; only model-selection path at this pin (no `model=` kwarg) |
+| `turn_detection_mode` | FIXED | keep | `end_of_utterance_mode` kwarg is REMOVED at 1.6.6 (deprecated shim warns); modes are now presets — FIXED/ADAPTIVE/SMART_TURN/EXTERNAL. ADAPTIVE + SMART_TURN require the `speechmatics-voice[smart]` extra (not installed) and flip to client-side forced-EOU; EXTERNAL would double-drive finalize with the session Silero VAD. Room-profile sensor recommends SMART_TURN for high-RT60 rooms — adoption is a WS-8 stream-swap decision |
+| `include_partials` | True | keep | partials feed binding/continuous recognition (`enable_partials` is the deprecated alias, migrated by the plugin shim) |
+| `enable_diarization` | True | keep | multiplayer core |
+| `max_delay` | 1.5 | keep | validator bounds [0.7, 4.0]; word-emission latency is not the corruption mechanism |
+| `end_of_utterance_silence_trigger` | 0.8 | keep 0.8; room profile maps high-RT60 → 1.0 | validator bounds (0, 2). FIXED preset default is 0.5; 0.8 tolerates table deliberation. Server-side trigger — see ceiling finding below |
+| `end_of_utterance_max_delay` | unset | keep unset — **inert in FIXED mode** | the clamp lives in `_calculate_finalize_delay`, which returns early through `_calculate_fixed_finalize_delay` for FIXED; the RT API's `conversation_config` has no such field either. The 206s span happened WITH a nominal 10s default ceiling because that ceiling never applies in FIXED mode: finalization waits on the SERVER's silence-triggered EndOfUtterance, and 4-player cross-talk + reverb tails starve 0.8s of global silence indefinitely. No config value caps span length at this pin → span sanity is WS-10 quarantine (threshold below) |
+| `additional_vocab` | `["Lily"]` | + player names at construction | constructor-only (StartRecognition; `update_speakers()` carries focus/ignore/focus_mode ONLY) so "names at bind" is impossible without a full STT swap; known-voiceprint names ARE available pre-construction and ride along. NEVER answer nouns — expectation-primed matching (n-best × `acceptable_answers`) is the generalizing mechanism |
+| `punctuation_overrides` | unset | keep unset | no failure mode implicates punctuation |
+| `speaker_sensitivity` | 0.5 (default) | **0.35** | validator bounds (0, 1). Higher mints more unique speakers; reverb reflections minted phantoms at 0.5. With enrolled speakers present, lower sensitivity biases toward matching enrolled voices over minting generic ones. 0.35 = matrix-center of the 0.3–0.5 band, pending WS-15 acoustic sweep |
+| `max_speakers` | 7 | keep 7 at construction | validator bounds 2–100; construction-fixed at this pin. S7-dumping-ground = the generic 7-cap exhausting (enrolled speakers do NOT consume the generic budget). Table size is unknowable pre-bind, so the roster-aware cap (`lily_max_speakers_for`: bound+1, clamp [2,7]) belongs to WS-8's post-bind `Agent.update_options(stt=...)` swap |
+| `prefer_current_speaker` | True | keep | echo copies arriving close behind the true speaker get folded into the current speaker instead of minting a phantom |
+| `speaker_active_format` | `[{speaker_id}] {text}` | keep | attribution rides the transcript |
+| `speaker_passive_format` | unset | keep unset | passive frames unused |
+| `focus_speakers` / `focus_mode` | unset / RETAIN | keep | focusing would drop unbound guests |
+| `ignore_speakers` | `["__ASSISTANT__"]` | keep (dormant backstop — see playback-path verdict) | plugin excludes dunder-wrapped labels by default; entry kept explicit |
+| `known_speakers` | voiceprint rows | keep + dunder filter | `lily_filter_enrollable_speakers` drops dunder labels on the way in; enrollment write refuses them on the way out |
+| `vad` | unset | keep unset | FIXED mode: server endpoints; session Silero VAD handles barge-in only |
+| `sample_rate` / `audio_encoding` | 16000 / PCM_S16LE | keep | plugin defaults |
+| — `transcription_config=` | — | — | dead at 1.6.6 (deprecated, ignored); `advanced_engine_control` survives serialization ONLY for declared TranscriptionConfig fields |
+| — wire injection | none | `get_speakers=true`, `audio_filtering_config.volume_threshold=0.0` | see below |
+
+**Wire injection (`lily_stt_tuning.lily_install_stt_tuning_patch`)** — the
+StartRecognition wire dict is the only injection point that survives
+`TranscriptionConfig.to_dict()` (same finding as lily_nbest). Both fields
+live-validated against the voice endpoint 2026-08-05 (RecognitionStarted, no
+1003-close; unsolicited `SpeakersResult` observed before `EndOfTranscript`)
+— the `max_alternatives` incident class does not apply:
+
+- `speaker_diarization_config.get_speakers=true` — server pushes speaker
+  identifiers at end of transcript; captured into a teardown-surviving store
+  (`lily_captured_speakers`) that `lily_enroll_voiceprints` uses as fallback.
+  This closes the 2026-07-15 session-close enrollment hole (dead websocket →
+  GET_SPEAKERS unusable) and retires the ~5-word polling as the ONLY source.
+- `audio_filtering_config.volume_threshold` — the SDK already hardcodes
+  `0.0` onto every wire, so overriding the VALUE is schema-safe. Live value
+  stays **0.0**: with no recoverable session audio there is no calibration
+  ground truth, and an uncalibrated pre-ASR floor risks dropping quiet REAL
+  speech (the session already lost answers to client-side mic-ducking).
+  The lever is wired for WS-15's sweep; per-word `volume` labels ride
+  AddTranscript results for WS-8's ghost-fold heuristic (echo copies run
+  quieter).
+
+### Playback-path verdict (item 1 — verification, not repair)
+
+Record-corroborated clean: zero assistant-speech runs (≥8-word verbatim,
+`lily_assistant_leak_scan`) in any user-attributed row of the evidence
+session. The protecting mechanism, in order: (1) STRUCTURAL — the agent
+subscribes to remote participant tracks only; its own TTS is published, not
+fed back to its STT input; (2) DEVICE — client-side AEC removes Lily's
+playback from the players' shared mic (policy below keeps it on); (3) the
+`ignore_speakers=["__ASSISTANT__"]` entry is a DORMANT backstop: no
+voiceprint row carries that label (verified in `lily_speaker_voiceprints`),
+so the engine can never assign it — it carries no real identifiers and
+filters nothing today. Regression guards: the leak scan runs in tests
+against the fixture; the enrollment path now refuses dunder labels in both
+directions, so the backstop can never become an active matcher for a real
+voice.
+
+### Enrollment (item 2, joint with WS-8)
+
+`get_speakers=true` auto-retrieval + `known_speakers` at StartRecognition is
+the enrollment loop. Identifiers are minted by the server from LIVE session
+audio — i.e., in-room reverberant audio — so the AMENDMENT-002 clean/reverb
+mismatch is avoided BY CONSTRUCTION for players enrolled in-room (there is
+no clean-audio enrollment path in this stack). Cross-room reuse (enrolled in
+a quiet room, returning in an echo room) is the residual mismatch case;
+lowered `speaker_sensitivity` (0.35) is the compensating choice, and the
+WS-15 fixture should include one cross-room arm. WS-8 interfaces:
+`lily_stt_tuning.lily_captured_speakers()` (teardown-surviving identifiers),
+`lily_max_speakers_for(roster)` (post-bind swap cap), per-word `volume`
+labels (ghost-fold), `Agent.update_options(stt=...)` (the swap lever — 
+recommended, deliberately unwired here).
+
+### WS-10 handoff — span quarantine
+
+`ws10_span_quarantine_seconds = 30.0` (artifact key): longest legitimate
+player span in evidence is 20.1s; corrupted spans were 104.1s/206.0s. Since
+no config lever caps FIXED-mode span length at this pin, spans past the
+threshold are a quarantine concern, not a tuning concern.
+
+### Room-profile sensor (item 6 — AMENDMENT-002)
+
+`lily_room_profile.py`: blind RT60 (decay-run slope fitting) + DRR proxy
+(peak/shadow energy ratio) on the FIRST audeering capture window — same
+bytes the upload path already holds; capture coverage untouched; devAIce
+`audio_quality` stays a coarse quality gate only (it measures SNR/clipping,
+not reverberation physics). Estimates on speech carry real variance, so the
+mapping uses coarse bands (`RT60 ≥ 0.6s` reverberant, `DRR < 2dB` low):
+reverberant → `end_of_utterance_silence_trigger` 1.0 + SMART_TURN
+recommendation; low-DRR → Tier-1 threshold delta −0.05 + a positively-framed
+state-block line (`[room profile: …listen generously…]`) via the acoustic
+state's `set_room_profile`. Advisory: estimator failure never touches the
+session.
+
+### Client capture policy (AMENDMENT-002, program-wide)
+
+- Never force `echoCancellation=false` on Android; platform APM defaults
+  stay ON, per-platform behavior documented as encountered.
+- iOS wrapper pre-warms the audio context on a user interaction before
+  session start.
+- Client-side Krisp: always BVC-OFF in shared-mic mode.
+- Browser AEC needs 2–5s convergence — the session-start greeting/intro
+  choreography deliberately provides it; keep that choreography.
+- Double-talk mic-ducking means some of the evidence session's answer loss
+  was likely client-side, before any wire — server-side tuning cannot
+  recover it, which is one more reason `volume_threshold` stays 0.0 until
+  calibrated.
 
 ## Bank curation loop (WO-LILY-OMNIBUS-002 D/E/F)
 

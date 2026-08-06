@@ -580,6 +580,10 @@ class LilyAudeeringPipeline:
         self._http_session = None
         self._uploads_this_session = 0
         self._breaker_reason: str | None = None
+        # WS-13 item 6: one blind RT60/DRR room profile per session, from
+        # the FIRST capture window's bytes (zero new capture machinery —
+        # coverage window/interval untouched).
+        self._room_profiled = False
         if not self._api_key:
             self._open_breaker("missing AUDEERING_API_KEY at startup")
 
@@ -751,6 +755,43 @@ class LilyAudeeringPipeline:
             except Exception:
                 pass
 
+    def _maybe_profile_room(self, wav_bytes: bytes) -> None:
+        """Session-start room profile from the first window (WS-13 item 6).
+        Runs once; estimator failure is silent-to-the-session (the profile
+        is advisory) but logged. Never raises."""
+        if self._room_profiled:
+            return
+        self._room_profiled = True
+        try:
+            import lily_room_profile
+
+            profile = lily_room_profile.lily_estimate_room_profile(
+                wav_bytes[44:], AUDEERING_SAMPLE_RATE
+            )
+            if profile is None:
+                logger.info("LILY_ROOM_PROFILE | first window inconclusive")
+                return
+            adjustments = lily_room_profile.lily_profile_stt_adjustments(profile)
+            self._state.set_room_profile(
+                {
+                    "rt60_estimate_s": profile.rt60_estimate_s,
+                    "drr_estimate_db": profile.drr_estimate_db,
+                    "reverberant": profile.reverberant,
+                    "low_drr": profile.low_drr,
+                    "adjustments": {
+                        k: v for k, v in adjustments.items() if k != "state_note"
+                    },
+                },
+                adjustments.get("state_note"),
+            )
+            logger.info(
+                "LILY_ROOM_PROFILE | rt60=%s drr=%s reverberant=%s low_drr=%s",
+                profile.rt60_estimate_s, profile.drr_estimate_db,
+                profile.reverberant, profile.low_drr,
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory sensor only
+            logger.warning("LILY_ROOM_PROFILE | failed: %r", exc)
+
     def _capture_audio_window(self, wav_bytes: bytes) -> None:
         """Schedule one upload without awaiting it inline (never blocks a
         turn)."""
@@ -769,6 +810,7 @@ class LilyAudeeringPipeline:
 
     async def _process_window(self, wav_bytes: bytes) -> None:
         try:
+            self._maybe_profile_room(wav_bytes)
             parsed = await upload_audio(wav_bytes, session=self._http_session)
             if parsed is None:
                 if _UPLOAD_DISABLED_REASON is not None:

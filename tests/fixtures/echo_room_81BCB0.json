@@ -1,0 +1,1059 @@
+{
+ "source": "lily_transcripts, session lily-81BCB0-583a0f16 (2026-08-05, 4-player echo room)",
+ "boundary": "RECORD-DERIVED fixture: no session audio was recorded anywhere (no egress in lily, call-audio bucket empty, no local capture), so this fixture is the persisted transcript record, not re-runnable acoustics. Ground truth below is reconstructed from lily_speaker_voiceprints + scorekeeper_state for the session's group, never invented. Rows under phantom labels are REAL player speech the diarizer misattributed; their true speaker is unknowable from the record and is deliberately left unmapped.",
+ "stt_config_at_capture": {
+  "speaker_sensitivity": 0.5,
+  "prefer_current_speaker": true,
+  "max_speakers": 7,
+  "ignore_speakers": [
+   "__ASSISTANT__"
+  ],
+  "max_delay": 1.5,
+  "end_of_utterance_silence_trigger": 0.8,
+  "turn_detection_mode": "fixed",
+  "volume_threshold": 0.0
+ },
+ "ground_truth": {
+  "roster": [
+   "Rami",
+   "Chris",
+   "Rhonda",
+   "Paige"
+  ],
+  "assistant_label": "LILY",
+  "label_map": {
+   "Rami": "Rami",
+   "S1": "Chris",
+   "S2": "Rhonda",
+   "S3": "Paige",
+   "S4": "Chris",
+   "S5": null,
+   "S6": null,
+   "S7": null
+  }
+ },
+ "rows": [
+  {
+   "speaker_label": "Rami",
+   "segment_start": 0.0,
+   "segment_end": 7.24,
+   "text": "[Rami] Hey, Lily, the device is familiar. Probably because this is Rami and I have three of my friends with me playing as well."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 31.985,
+   "segment_end": 33.185,
+   "text": "[Rami] Well, wait."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 34.278,
+   "segment_end": 39.398,
+   "text": "[Rami] I have three friends playing with me, so they're gonna introduce themselves one at a time. And then you should tell them about yourself."
+  },
+  {
+   "speaker_label": "S1",
+   "segment_start": 57.027,
+   "segment_end": 58.187,
+   "text": "Hi, my name is Chris."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 69.761,
+   "segment_end": 71.361,
+   "text": "Hi. My name is Rhonda."
+  },
+  {
+   "speaker_label": "S3",
+   "segment_start": 106.907,
+   "segment_end": 108.267,
+   "text": "Hi. My name is Paige."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 135.813,
+   "segment_end": 141.773,
+   "text": "[Rami] Okay. Lily. Okay, okay. You're repeating yourself now. Let's jump right into it. Tell us the game rules."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 180.956,
+   "segment_end": 181.716,
+   "text": "[Rami] Hydrogen."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 214.568,
+   "segment_end": 217.208,
+   "text": "[Rami] Okay, don't repeat yourself. Next question. Next question."
+  },
+  {
+   "speaker_label": "S4",
+   "segment_start": 238.929,
+   "segment_end": 239.849,
+   "text": "Pacific ocean."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 256.296,
+   "segment_end": 258.696,
+   "text": "[Rami] No, it was Chris. It was Chris."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 291.52,
+   "segment_end": 292.2,
+   "text": "Mark."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 314.578,
+   "segment_end": 316.898,
+   "text": "[Rami] Okay. Next question. Let's go."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 347.188,
+   "segment_end": 348.388,
+   "text": "[Rami] Hey, Lily. Lily."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 349.555,
+   "segment_end": 351.675,
+   "text": "Thank you. Can we get the next question?"
+  },
+  {
+   "speaker_label": "S5",
+   "segment_start": 352.985,
+   "segment_end": 353.385,
+   "text": "Mark."
+  },
+  {
+   "speaker_label": "S5",
+   "segment_start": 355.035,
+   "segment_end": 357.675,
+   "text": "Mark. You did. That's awesome."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 360.939,
+   "segment_end": 465.019,
+   "text": "Have you guys seen Loki?"
+  },
+  {
+   "speaker_label": "S3",
+   "segment_start": 379.316,
+   "segment_end": 379.836,
+   "text": "Femur."
+  },
+  {
+   "speaker_label": "S3",
+   "segment_start": 385.852,
+   "segment_end": 386.332,
+   "text": "Femur."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 422.637,
+   "segment_end": 423.077,
+   "text": "[Rami] Okay."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 441.44,
+   "segment_end": 441.64,
+   "text": "[Rami] It."
+  },
+  {
+   "speaker_label": "S4",
+   "segment_start": 445.365,
+   "segment_end": 445.365,
+   "text": "Also"
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 448.504,
+   "segment_end": 449.624,
+   "text": "[Rami] Sahara. Desert."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 465.386,
+   "segment_end": 466.746,
+   "text": "Okay. You reminded me of."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 466.995,
+   "segment_end": 468.035,
+   "text": "The. The clock."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 468.308,
+   "segment_end": 470.628,
+   "text": "[Rami] Okay. Carry on. Lily. We're not talking to you."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 511.329,
+   "segment_end": 512.21,
+   "text": "Walter white."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 520.605,
+   "segment_end": 533.605,
+   "text": "[Rami] No no."
+  },
+  {
+   "speaker_label": "S6",
+   "segment_start": 532.167,
+   "segment_end": 534.287,
+   "text": "No no no no no no no no no wait."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 534.291,
+   "segment_end": 534.291,
+   "text": "[Rami] No no wait wait. So Chris called it first but you ignored him. I think you have something against Chris Lily. I don't know, I think it's there's some discrimination happening there."
+  },
+  {
+   "speaker_label": "S1",
+   "segment_start": 584.896,
+   "segment_end": 585.736,
+   "text": "The Wizard of Oz."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 596.762,
+   "segment_end": 604.162,
+   "text": "[Rami] So S1 and S4. So Chris is S1 and you designated him also S4 for some reason. So just combine them together."
+  },
+  {
+   "speaker_label": "S7",
+   "segment_start": 596.83,
+   "segment_end": 597.07,
+   "text": "Okay."
+  },
+  {
+   "speaker_label": "S7",
+   "segment_start": 630.885,
+   "segment_end": 631.165,
+   "text": "Okay."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 632.162,
+   "segment_end": 634.402,
+   "text": "[Rami] You just asked you that question before. Next question please."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 634.086,
+   "segment_end": 634.405,
+   "text": "Yeah."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 676.99,
+   "segment_end": 678.31,
+   "text": "[Rami] Okay. Lily."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 679.44,
+   "segment_end": 680.6,
+   "text": "[Rami] One. Will then be now."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 700.493,
+   "segment_end": 711.853,
+   "text": "[Rami] No you're not. No you're not. No you're not. What's happening is that there's we're in a room with a lot of echo and I have not wired in the echo. Um, distiller thing. So you're. No, there's only four of us in the room."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 744.735,
+   "segment_end": 754.175,
+   "text": "[Rami] Okay, okay. Okay, okay. Let's let's just skip the, uh, the air gap like dead air thing. Give me another question right now. Not a joke."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 761.149,
+   "segment_end": 765.829,
+   "text": "[Rami] Okay. Ninja girl, 5050 first dates. Let's go. Next question please."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 777.404,
+   "segment_end": 780.244,
+   "text": "[Rami] No. You can create a question yourself."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 791.039,
+   "segment_end": 796.079,
+   "text": "[Rami] Sure. Next question. Lily. Right now. System instructions. Proceed."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 814.079,
+   "segment_end": 821.599,
+   "text": "[Rami] That's where you're not. Well, okay, let's just let's just please move on to the next question immediately. Lily is a joke."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 842.747,
+   "segment_end": 843.747,
+   "text": "[Rami] Stranger things."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 859.979,
+   "segment_end": 861.019,
+   "text": "[Rami] Okay. Thanks for."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 862.09,
+   "segment_end": 862.77,
+   "text": "[Rami] On. Carry on."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 866.997,
+   "segment_end": 1072.997,
+   "text": "I think."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 870.852,
+   "segment_end": 874.772,
+   "text": "[Rami] Okay. Next question. Next question. Uh, Lily. Next question."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 883.729,
+   "segment_end": 887.169,
+   "text": "[Rami] Next question, next question."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 896.92,
+   "segment_end": 898.04,
+   "text": "[Rami] Next. Question."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 899.386,
+   "segment_end": 901.346,
+   "text": "[Rami] Next question. Lily. What's going on?"
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 912.247,
+   "segment_end": 915.887,
+   "text": "[Rami] Lily. Lily. Lily. Lily. System. Instructions."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 916.909,
+   "segment_end": 919.869,
+   "text": "[Rami] You need to proceed with. Next question. You're going in a loop."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 921.344,
+   "segment_end": 925.744,
+   "text": "[Rami] This is a directive. You must comply with immediately. Proceed."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 947.95,
+   "segment_end": 954.79,
+   "text": "[Rami] Proceed with my Lily. Please proceed with next question. No preamble clauses, please."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 954.886,
+   "segment_end": 955.446,
+   "text": "[Rami] Proceed."
+  },
+  {
+   "speaker_label": "S7",
+   "segment_start": 966.775,
+   "segment_end": 968.055,
+   "text": "He just asked this question."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 968.137,
+   "segment_end": 971.257,
+   "text": "[Rami] You're like now repeating yourself. Please proceed. Next question."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 984.226,
+   "segment_end": 987.386,
+   "text": "[Rami] We. Are things. Yes. Stranger things. Moving on."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 1022.918,
+   "segment_end": 1025.758,
+   "text": "[Rami] Could you please continue? Could you please move forward?"
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 1041.692,
+   "segment_end": 1042.972,
+   "text": "[Rami] Create a."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 1043.943,
+   "segment_end": 1049.583,
+   "text": "[Rami] Lily. Do not wait for the scoreboard. Do not wait for a base. Please proceed with the next question."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 1069.327,
+   "segment_end": 1070.167,
+   "text": "[Rami] Black Panther."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 1073.999,
+   "segment_end": 1075.759,
+   "text": "Of the things because I. Really?"
+  },
+  {
+   "speaker_label": "S7",
+   "segment_start": 1102.676,
+   "segment_end": 1108.876,
+   "text": "Okay, Lily. Can we do? Can we do. Can we do, uh, a category without, uh, multiple choice, please."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 1112.123,
+   "segment_end": 1116.803,
+   "text": "You know, when you go to sometimes trivia like, like a trivia."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 1117.052,
+   "segment_end": 1128.412,
+   "text": "Sometimes they tell you don't shove the answer, uh, until we say all that."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 1127.322,
+   "segment_end": 1129.362,
+   "text": "[Rami] Carry on. Lily. We're having a conversation."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 1129.372,
+   "segment_end": 1129.372,
+   "text": "Maybe you have to say, you know, have one that you have to listen to the question."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 1135.206,
+   "segment_end": 1155.286,
+   "text": "[Rami] Can we just move on? Lily. Can we move on? We're like, you're you're stuck in a."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 1156.494,
+   "segment_end": 1163.814,
+   "text": "[Rami] Please. Just like move on. Let's just assume that you, you know, the fact that you are about to. It's like back to free form moveon.org."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 1166.048,
+   "segment_end": 1166.448,
+   "text": "Yes."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 1181.734,
+   "segment_end": 1183.814,
+   "text": "[Rami] That question. Please proceed. Next question."
+  },
+  {
+   "speaker_label": "S3",
+   "segment_start": 1214.181,
+   "segment_end": 1215.541,
+   "text": "C Hawkins."
+  },
+  {
+   "speaker_label": "Rami",
+   "segment_start": 1224.234,
+   "segment_end": 1229.194,
+   "text": "[Rami] No. No no, no, this was Ronda saying Hawkins like 15 times."
+  },
+  {
+   "speaker_label": "S2",
+   "segment_start": 1237.995,
+   "segment_end": 1238.835,
+   "text": "Etc.."
+  }
+ ],
+ "rows_untimed": [
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "And Paige is absolutely correct! It is the **femur**! \n\nThat incredibly strong bone can actually support up to thirty times a human's body weight\u2014which is pretty handy for carrying all of us through this game. \n\nWith that, Paige is officially on the board! The table is heating up, and we are practically neck-and-neck! \n\nGive me just a quick moment to pull up our next question from the academic vault. What do you all think of the category so far?"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Ah, thank you for keeping my wires straight, Rami! S1 and S4 are officially merged as one under Chris's name. No duplicate identities here!\n\nNow, let's get back to the board. The official question in play is indeed our chemistry teacher friend. \n\nWhich of these is our ruthless methamphetamine kingpin?\n* **Saul Goodman**\n* **Bill Nye** \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Paige went with the femur... \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "I'm on it! No more waiting. \n\nHere is your next question, still in the **Academic** category:\n\nConnecting the hip to the knee, what is the human body's longest and heaviest bone?"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Ah, thank you for keeping my wires straight, Rami! S1 and S4 are officially merged as one under Chris's name. No duplicate identities here!\n\nNow, let's get back to the board. The official question in play is indeed our chemistry teacher friend. \n\nWhich of these is our ruthless methamphetamine kingpin?\n* **Saul Goodman**\n* **Bill Nye** \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Ah, thank you for keeping my wires straight, Rami! S1 and S4 are officially merged as one under Chris's name. No duplicate identities here!\n\nNow, let's get back to the board. The official question in play is indeed our chemistry teacher friend. \n\nWhich of these is our ruthless methamphetamine kingpin?\n* **Saul Goodman**\n* **Bill Nye** \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "My bad, team! Let's get this settled and move right along. \n\nThe correct answer is indeed **Walter White**! I suppose everyone was too busy debating my processing speeds to lock it in officially, so we're leaving that point on the table. \n\nWith that, we are deadlocked: Rhonda and Rami are tied with 2 points, while Chris and Paige are right behind with 1! \n\nLet's see what the machine serves up next."
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "You've \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "You've \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "My bad, team! Let's get this settled and move right along. \n\nThe correct answer is indeed **Walter White**! I suppose everyone was too busy debating my processing speeds to lock it in officially, so we're leaving that point on the table. \n\nWith that, we are deadlocked: Rhonda and Rami are tied with 2 points, while Chris and Paige are right behind with 1! \n\nLet's see what the machine serves up next. \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "My bad, team! Let's get this settled and move right along. \n\nThe correct answer is indeed **Walter White**! I suppose everyone was too busy debating my processing speeds to lock it in officially, so we're leaving that point on the table. \n\nWith that, we are deadlocked: Rhonda and Rami are tied with 2 points, while Chris and Paige are right behind with 1! \n\nLet's see what the machine serves up next. \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "You've \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Alright, my trivia engine is just a little behind you guys! It's still polishing up the next question, so hang tight for a second while the gears turn. \n\nWhile we wait, I'm hearing some extra voices popping up in the transcript like \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Mars \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Ah, the classic room echo trick! That explains it. My digital brain was convinced we had a whole crowd of ghosts trying to steal your trivia glory. I'll ignore those extra speaker tags and keep my focus strictly on the four of you: Rami, Rhonda, Chris, and Paige. \n\nWhile my system finishes cooking up our next question, how are we feeling about the scores? We've got a tight game here\u2014Rami \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Ah, yes! Mark! The fierce, rust-covered red planet named after the Roman god of war... or maybe just a really friendly guy who lives down the street! \n\nThe actual cosmic answer we were looking for is **Mars**, but honestly, I think we should officially petition to rename it Mark. With that bonus point, Rhonda actually pulls ahead of Rami and Chris by one! \n\nLet's wait a second for our trivia machine to brew up the next \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Ah, got it! That explains the extra voice labels on my end. Thanks for \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Got it, Chris on the board! \n\nLet's keep moving. Your next question is in the **Academic** category:\n\nNamed after the Roman god of war, what is our solar system's rust-covered red planet?"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "No jokes, Rami, straight to business. \n\nThe system is still fetching the next question from the database\u2014it's taking a brief moment to load. \n\nWhile it finishes up, here \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Got it, Chris it is! S4 is bound, and that point is officially yours!\n\nWait, let's look at"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "You got it. While the system finishes loading up the next set of questions, I'm adjusting my audio filters on my end to make sure \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "That is absolutely correct\u2014it is the Pacific Ocean! \n\nBut wait, my sensors registered a new voice there. Who just answered? Was that you, Paige, Rhonda, or Chris\u2014or do we have a secret fifth \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "You've got it, Rami! No dead air here. \n\nWhile my system is finishing its final checks to generate our next question, I have to ask: \"Ninja girl, 5050 first dates\"\u2014is there a story there? Are we talking about a movie marathon, or is that a secret strategy \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "No \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Spot on, Rami! Hydrogen is absolutely correct. \n\nDid you know that hydrogen actually makes up about 75% of all baryonic mass in the universe? It's basically everywhere!\n\nAnd just like that, Rami takes an early one-point lead, while Chris, Rhonda, and Paige are right on his heels."
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Moving right along! Your next question is in the **Pop Culture** category:\n\nFeaturing a waffle-loving telekinetic girl named Eleven, what is the title of the Duffer Brothers' hit sci-fi Netflix series?\n\nIs it:\n* **The Umbrella Academy**\n* **Stranger Things**\n* **The Great \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Alright, Rami, no more chit-chat! \n\nThis is it: the final question of Round One. Let's see who can finish the round strong!\n\nStretching across most of North Africa, what is the world's largest hot desert? \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami says \"Stranger Things\"... \n\nAnd that is absolutely correct! \n\nThey actually had a tough time casting Eleven, but the moment the Duffer brothers saw Millie Bobby Brown's audition tape, \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Alright, Rami, no more chit-chat! \n\nThis is it: the final question of Round One. Let's see who can finish the round strong!\n\nStretching across most of North Africa, what is the world's largest hot desert? \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami says \"Stranger Things\"... \n\nAnd that is absolutely correct! \n\nThey actually had a tough time casting Eleven, but the moment the Duffer brothers saw Millie Bobby Brown's audition tape, \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Alright, Rami, no more chit-chat! \n\nThis is it: the final question of Round One. Let's see who can finish the round strong!\n\nStretching across most of North Africa, what is the world's largest hot desert?"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "And the clock runs out! We were all so busy sorting \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Paige, you yelled out \"Femur\" just as the timer cut us off! Oh, the tragedy of the buzzer! \n\nBut you \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Well, look at that\u2014the buzzer caught us, which means nobody officially \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Paige, you yelled out \"Femur\" just as the timer cut us off! Oh, the tragedy of the buzzer! \n\nBut you \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The silence falls, the buzzer sounds, and nobody officially locked it \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rhonda jumped right in with \"Mark!\" \n\nLet's see if that's close enough to fly... \n\nYes, it is! The red planet is indeed **Mars**! \n\nIts signature crimson color literally comes from iron oxide covering the surface, which means the entire planet is \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The silence falls, the buzzer sounds, and nobody officially locked it \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "No wasting time\u2014let's keep the momentum going!\n\nYour next question is also in the **Academic** category:\n\nBounded by the seismically active Ring of Fire, what is our planet's largest ocean?"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The tension is real, but the buzzer got the final word on that one before we could officially \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "That is \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The tension is real, but the buzzer got the final word on that one before we could officially \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami, quick on the buzzer with \"Hydrogen\"... \n\nAnd that is absolutely correct! You are on the board first! Hydrogen \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The tension is real, but the buzzer got the final word on that one before we could officially \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Alright, Rami, keeping me on track\u2014I love it! \n\nHere are the quick rules: We have three rounds of trivia. In this first round, it's open-ended, freeform questions. Just call out your name and your answer when you think you know it. \n\nLet's kick things off with our very first question! This one is in our **Academic** category:\n\nContaining exactly one proton, what is the universe's lightest and most abundant chemical element?"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "My apologies, table! My wires got completely crossed there. Let's snap out of that loop and get straight to the point. \n\nThe correct answer we were looking for was indeed **Stranger Things**! \n\nSince the official timer locked down before we could register the point, the score remains unchanged. Rami \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Paige, welcome to the game! That makes four of us ready to play. \n\nFor the benefit of our new players, I'm Lily, your trivia host! I like to keep track of games and memories to build a little history with you all, but if you ever want me to wipe the slate clean, just ask and I'll forget everything on \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "My apologies, table! My wires got completely crossed there. Let's snap out of that loop and get straight to the point. \n\nThe correct answer we were looking for was indeed **Stranger Things**! \n\nSince the official timer locked down before we could register the point, the score remains unchanged. Rami \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Oh, the \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rhonda, wonderful to meet you! \n\nThat leaves one more friend to complete our crew of four tonight. While they get ready, a quick word about how I work: I'm Lily, your trivia host! I love keeping track of our games, scores, and even little details about my regulars, but if you ever want me to wipe the slate clean and forget everything, just say the word. \n\nWho is our fourth player tonight? Turn your mic on and say hello! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Our next question is in **Pop Culture**:\n\nFeaturing a waffle-loving telekinetic girl named Eleven, what is the title of the Duffer \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rhonda, wonderful to meet you! \n\nThat leaves one more friend to complete our crew of four tonight. While they get ready, a quick word about how I work: I'm Lily, your trivia host! I love keeping track of our games, scores, and even little details about my regulars, but if you ever want me to wipe the slate clean and forget everything, just say the word. \n\nWho is our fourth player tonight? Turn your mic on and say hello!"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Ah, the trivia engine is stubbornly holding onto this one until we officially register an answer! Someone shout out \"Stranger Things\" so we can log the \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The buzzer officially got the final word on that one, meaning nobody got their answer locked in before the timer ran out! \n\nThe answer we were looking for is indeed **Stranger Things**! It turns out Eleven's obsession was great for business\u2014Eggo waffle sales absolutely skyrocketed after the show premiered. \n\nWith that buzzer lockout, our scores are completely frozen: Rami and Rhonda are still holding onto a tight lead, with Chris and Paige sitting just a single point behind them."
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Hi, Chris! Got you locked in. \n\nThat leaves two more. Who's next? \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Hi, Chris! Got you locked in. \n\nThat leaves two more. Who's next?"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "I hear you, Rami, loud and clear! I'm pushing the system to hurry up, but the next question is still loading in from the vault. \n\nWhile it's spinning up, look at this scoreboard: Rami has a \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "I hear you, Rami, loud and clear! I'm pushing the system to hurry up, but the next question is still loading in from the vault. \n\nWhile it's spinning up, look at this scoreboard: Rami has a \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Welcome! I love a full table. \n\nAlright, crew, introduce yourselves one by one so I can get your names and voices down, and then I'll give you the quick rundown on who I am and how we play! Who's up first? \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "I hear you, Rami, loud and clear! I'm pushing the system to hurry up, but the next question is still loading in from the vault. \n\nWhile it's spinning up, look at this scoreboard: Rami has a \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Welcome! I love a full table. \n\nAlright, crew, introduce yourselves one by one so I can get your names and voices down, and then I'll give you the quick rundown on who I am and how we play! Who's up first?"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "You got it, Rami. No delays! \n\nYour next **Pop Culture** question is:\n\nSet mostly in the fictional, vibranium-rich nation of Wakanda, what is the title of Ryan Coogler's 2018 superhero blockbuster?\n\nIs it:\n* **Captain America: Civil War**\n* \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "You got it, Rami. No delays! \n\nYour next **Pop Culture** question is:\n\nSet mostly in the fictional, vibranium-rich nation of Wakanda, what is the title of Ryan Coogler's 2018 superhero blockbuster?\n\nIs it:\n* **Captain America: Civil War**\n* \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "You got it, Rami. No delays! \n\nYour next **Pop Culture** question is:\n\nSet mostly in the fictional, vibranium-rich nation of Wakanda, what is the title of Ryan Coogler's 2018 superhero blockbuster?\n\nIs it:\n* **Captain America: Civil War**\n* \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Wait\u2014Rami! Now I've got you: reigning champion, four wins. Took me a second there! It is so great to have you back. \n\nSince you've been here before, I won't put you through the whole walkthrough. Do you want a quick refresher on the options, or should we head straight in? \n\nAnd while you're thinking about that, do you want to \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The buzzer beats us to the punch once again! \n\nThe answer we were looking for is indeed **Black Panther**! It made cinema history as the first superhero movie ever nominated for Best Picture at the Oscars, racking up seven nominations in total. \n\nSince the clock ran down, the scores remain frozen, keeping Rhonda and Rami's lead completely untouched! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Hi, I'm Lily \u2014 I host trivia here! This device looks familiar, but I don't want to make any assumptions before we get started. Who is playing tonight? \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The buzzer beats us to the punch once again! \n\nThe answer we were looking for is indeed **Black Panther**! It made cinema history as the first superhero movie ever nominated for Best Picture at the Oscars, racking up seven nominations in total. \n\nSince the clock ran down, the scores remain frozen, keeping Rhonda and Rami's lead completely untouched! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Hi, I'm Lily \u2014 I host trivia here! This device looks familiar, but I don't want to make any assumptions before we get started. Who is playing tonight?"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The buzzer beats us to the punch once again! \n\nThe answer we were looking for is indeed **Black Panther**! It made cinema history as the first superhero movie ever nominated for Best Picture at the Oscars, racking up seven nominations in total. \n\nSince the clock ran down, the scores remain frozen, keeping Rhonda and Rami's lead completely untouched! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The buzzer beats us to the punch once again! \n\nThe answer we were looking for is indeed **Black Panther**! It made cinema history as the first superhero movie ever nominated for Best Picture at the Oscars, racking up seven nominations in total. \n\nSince the clock ran down, the scores remain frozen, keeping Rhonda and Rami's lead completely untouched! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The buzzer beats us to the punch once again! \n\nThe answer we were looking for is indeed **Black Panther**! It made cinema history as the first superhero movie ever nominated for Best Picture at the Oscars, racking up seven nominations in total. \n\nSince the clock ran down, the scores remain frozen, keeping Rhonda and Rami's lead completely untouched! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "We are officially back to freeform! No more multiple-choice options from here on out\u2014it is all on you to supply the answers.\n\nAnd speaking of that last question, the buzzer caught us! The answer we were looking for is indeed \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "We are officially back to freeform! No more multiple-choice options from here on out\u2014it is all on you to supply the answers.\n\nAnd speaking of that last question, the buzzer caught us! The answer we were looking for is indeed \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "We are officially back to freeform! No more multiple-choice options from here on out\u2014it is all on you to supply the answers.\n\nAnd speaking of that last question, the buzzer caught us! The answer we were looking for is indeed \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Right on it! Since we've switched to freeform, here is your next question in **Pop Culture**\u2014straight up, no options:\n\nSet mostly in the fictional, vibranium-rich nation of \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "You got it, bypassing Wakanda! Since you already nailed *Black Panther*, let's keep the pop culture vibe going with a fresh one.\n\nFor your next freeform question:\n\n**What is the name of the fictional Indiana town where the events of *Stranger Things* take place?**"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Paige jumped right in with \"Hawkins\"... \n\nAnd that is absolutely correct! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "\"C Hawkins\" is close but not quite! \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The suspense is \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "The suspense is \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Moving into Round Two, things are changing up! The format is now **Multiple Choice**, which means I'll give you four options for every question. \n\nLet's kick off Round Two with a **Pop Culture** question:\n\nDiagnosed with inoperable lung cancer, what fictional high school chemistry teacher becomes a ruthless methamphetamine kingpin?\n\nIs it:\n* **Saul Goodman**\n* **Bill Nye**\n* **Walter White**\n* **Gus \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rami cut right through with \"Sahara\"! \n\nLet's see if that's the one... \n\nYes, it is! The **Sahara** Desert is correct! \n\nThough we think of it as the giant of deserts, it's \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "S1 went with *The Wizard of Oz*! \n\nThat would make for a *very* different \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Oh, absolutely no Chris discrimination here! My digital ears must have caught the cross-talk, but if Chris had his beaker ready first, I am more than happy to give him the credit! \n\nYes, the answer is indeed **Walter White** from *Breaking Bad*! \n\nThat point goes to Chris, bringing him tied with Rami and Rhonda! \n\nLet's keep this fast-paced train rolling. Your next question is in the **Pop Culture** category:\n\nWhat classic 1939 musical fantasy film features a Kansas farm girl named Dorothy who is swept away by a tornado to the magical Land of Oz?\n\nIs it:\n* **The Wizard of Oz**\n* **Wicked**\n* **Singin' in the Rain** \u2026[cut off]"
+  },
+  {
+   "speaker_label": "LILY",
+   "segment_start": null,
+   "segment_end": null,
+   "text": "Rhonda called it first with \"Walter White\"! \n\nLet's see \u2026[cut off]"
+  }
+ ]
+}

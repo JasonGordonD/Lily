@@ -33,6 +33,7 @@ import lily_bank
 import lily_config
 import lily_forget
 import lily_memory
+import lily_stt_tuning
 
 logger = logging.getLogger("lily_persistence")
 
@@ -923,30 +924,51 @@ async def lily_enroll_voiceprints(
         # words". Detect the dead-stream case and name it, so mid-game
         # triggers (first_bind / game_start / round_complete) are visibly
         # the ones that must succeed.
+        # WS-13: the get_speakers StartRecognition injection
+        # (lily_stt_tuning) makes the server PUSH a SpeakersResult at end of
+        # transcript, captured into a store that survives stream teardown.
+        # That store is the fallback for both dead-stream cases below —
+        # session_close enrollment no longer depends on a live websocket.
+        speaker_ids = None
         streams = getattr(stt, "_streams", None)
-        if streams is not None and not any(
+        stream_dead = streams is not None and not any(
             getattr(getattr(s, "_client", None), "_is_connected", False)
             for s in streams
-        ):
-            logger.error(
-                "LILY_ENROLL | FAILED | trigger=%s reason=stt_stream_disconnected "
-                "(GET_SPEAKERS needs a live STT session — enrollment must fire "
-                "before teardown)", trigger,
-            )
-            return False
-        # get_speaker_ids() is ASYNC at 1.6.6 and needs ~5 spoken words per
-        # speaker before it returns useful identifiers — this task stays in
-        # the background and tolerates (but LOGS) empty results. Awaitable
-        # check kept defensive in case a plugin bump makes it synchronous.
-        speaker_ids = get_ids()
-        if asyncio.iscoroutine(speaker_ids) or isinstance(speaker_ids, asyncio.Future):
-            speaker_ids = await speaker_ids
+        )
+        if not stream_dead:
+            # get_speaker_ids() is ASYNC at 1.6.6 and needs ~5 spoken words
+            # per speaker before it returns useful identifiers — this task
+            # stays in the background and tolerates (but LOGS) empty
+            # results. Awaitable check kept defensive in case a plugin bump
+            # makes it synchronous.
+            speaker_ids = get_ids()
+            if asyncio.iscoroutine(speaker_ids) or isinstance(
+                speaker_ids, asyncio.Future
+            ):
+                speaker_ids = await speaker_ids
         if not speaker_ids:
-            logger.error(
-                "LILY_ENROLL | FAILED | trigger=%s reason=no_speaker_ids_yet "
-                "(Speechmatics needs ~5 spoken words per speaker)", trigger
-            )
-            return False
+            captured = lily_stt_tuning.lily_captured_speakers()
+            if captured:
+                logger.info(
+                    "LILY_ENROLL | FALLBACK | trigger=%s "
+                    "source=captured_speakers_result n=%d stream_dead=%s",
+                    trigger, len(captured), stream_dead,
+                )
+                speaker_ids = captured
+            elif stream_dead:
+                logger.error(
+                    "LILY_ENROLL | FAILED | trigger=%s "
+                    "reason=stt_stream_disconnected_and_no_captured_speakers "
+                    "(GET_SPEAKERS needs a live STT session and no "
+                    "SpeakersResult was pushed before teardown)", trigger,
+                )
+                return False
+            else:
+                logger.error(
+                    "LILY_ENROLL | FAILED | trigger=%s reason=no_speaker_ids_yet "
+                    "(Speechmatics needs ~5 spoken words per speaker)", trigger
+                )
+                return False
         # Return shape is list[SpeakerIdentifier] (or a nested list) —
         # flatten defensively.
         flat = []
@@ -1014,6 +1036,11 @@ async def lily_enroll_voiceprints(
                 entry.get("speaker_identifiers") if isinstance(entry, dict) else None
             )
             if not label:
+                continue
+            # Dunder-wrapped labels are the engine's ignore namespace
+            # (__ASSISTANT__): never persist identifiers under one — on a
+            # rematch it would enroll a real voice into an ignored slot.
+            if isinstance(label, str) and label.startswith("__") and label.endswith("__"):
                 continue
             if not identifiers:
                 continue
