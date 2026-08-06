@@ -60,6 +60,7 @@ from livekit.plugins.speechmatics import (
 
 import lily_addressee
 import lily_addressee_classifier
+import lily_arsenal
 import lily_assessment
 import lily_audeering_client
 import lily_audeering_consumers
@@ -2621,15 +2622,24 @@ class LilyGame:
             question = None
             picture_kind = self._picture_kind_for_slot(rnd)
             if picture_kind is not None:
-                question = await self.reasoning.prefetch_picture_question(
-                    self.supabase,
-                    kind=picture_kind,
-                    question_index=self.sk.question_number,
-                    session_id=self.sk.session_id,
-                    mode=supply_mode,
-                    intensity=self.sk.adult_image_intensity,
-                    exclude_ids=history_ids, exclude_hashes=history_hashes,
-                )
+                # Rung 1 — the standing arsenal (PATCH-003 binding A): a
+                # pre-generated pair served with ZERO generation wait, so
+                # pictures-on at game start is instant. A hit fires
+                # watermark replenishment in the background. Only when the
+                # arsenal is empty for this partition do we fall to live
+                # generation (rung 2), and only at PREFETCH — the delivery
+                # path itself never generates.
+                question = await self._arsenal_picture_draw(supply_mode)
+                if question is None:
+                    question = await self.reasoning.prefetch_picture_question(
+                        self.supabase,
+                        kind=picture_kind,
+                        question_index=self.sk.question_number,
+                        session_id=self.sk.session_id,
+                        mode=supply_mode,
+                        intensity=self.sk.adult_image_intensity,
+                        exclude_ids=history_ids, exclude_hashes=history_hashes,
+                    )
 
             # Runbook fallback: LILY_KB_ONLY flips supply to the curated
             # bank; bank questions bypass verification (§4.5). Text supply
@@ -6701,6 +6711,119 @@ class LilyGame:
             "duration_s": round(time.time() - self.session_started_at, 1),
             "acoustic_lane": acoustic_lane,
         }
+
+    # -- standing picture arsenal (PATCH-003 binding additions A/B/C) --------------
+
+    async def _arsenal_picture_draw(self, supply_mode: str) -> dict | None:
+        """First rung of the picture supply ladder: draw a pre-generated
+        pair from the standing arsenal. ZERO generation on this path — the
+        whole point is cold-start pictures with no Grok wait. Returns the
+        §4.2 question shape, or None so the caller falls to the next rung
+        (live generation at prefetch, then the truthful pictureless line).
+
+        Heat is read HERE (binding C): a mid-session heat flip changes the
+        partition this draws from on the very next question — no stale
+        partition. 'mix' draws from whichever adult partition still has a
+        pair this group has not seen."""
+        if getattr(self, "supabase", None) is None:
+            return None
+        group_id = getattr(self, "group_id", None)
+        if not group_id:
+            return None
+        intensity = getattr(self.sk, "adult_image_intensity", "suggestive")
+        partitions = lily_arsenal.lily_partitions_for(supply_mode, intensity)
+        # Answer-level belt over the DB group no-repeat: steer clear of
+        # answers this group has already played on any supply path.
+        try:
+            excl = set(lily_bank.lily_history_answers(self.asked_history))
+        except Exception:
+            excl = set()
+        for partition in partitions:
+            q = await lily_arsenal.lily_arsenal_draw(
+                self.supabase,
+                partition=partition,
+                group_id=group_id,
+                session_id=self.sk.session_id,
+                exclude_answers=excl,
+            )
+            if q is not None:
+                self._kick_arsenal_replenish(partition, supply_mode, intensity)
+                return q
+        return None
+
+    def _kick_arsenal_replenish(
+        self, partition: str, supply_mode: str, intensity: str
+    ) -> None:
+        """Fire watermark-gated replenishment in the BACKGROUND — never
+        awaited, never on the delivery path. Checks the served/ready
+        watermark first; only when the pool has crossed it does it spawn a
+        generate-toward-ten task. Fire-and-forget: a failure logs and dies,
+        it never touches the spoken lane."""
+        if getattr(self, "supabase", None) is None:
+            return
+
+        async def _run() -> None:
+            try:
+                served = await lily_arsenal.lily_arsenal_served_count(
+                    self.supabase, session_id=self.sk.session_id, partition=partition
+                )
+                ready = await lily_arsenal.lily_arsenal_ready_count(
+                    self.supabase, partition=partition
+                )
+                if not lily_arsenal.lily_should_replenish(served, ready):
+                    return
+                await lily_arsenal.lily_arsenal_replenish(
+                    self.supabase,
+                    partition=partition,
+                    generate_one=self._arsenal_generate_one(supply_mode, intensity),
+                )
+            except Exception as e:
+                logger.warning(
+                    "LILY_ARSENAL | REPLENISH_KICK_FAILED | partition=%s: %s",
+                    partition, e,
+                )
+
+        asyncio.ensure_future(_run())
+
+    _ARSENAL_PARTITION_INTENSITY = {
+        "adult_suggestive": "suggestive",
+        "adult_explicit": "explicit",
+    }
+
+    def _arsenal_generate_one(self, supply_mode: str, intensity: str):
+        """Build the generate_one callable the replenisher pumps: one
+        fresh picture pair per call via the reasoning node's picture
+        builder (the SAME generator the live prefetch rung uses), or None
+        when generation is unavailable so the replenisher stops cleanly.
+        Each partition banks at its OWN fixed heat — adult_explicit rows
+        are explicit, adult_suggestive rows are suggestive — so a 'mix'
+        session draws true-to-partition pairs from either pool."""
+
+        async def _one(partition: str) -> dict | None:
+            # 'real_or_imagined' is the only fully generated picture kind
+            # (real_entity is web-sourced, not bankable as a standing
+            # generated pair). Arsenal rows are generated pairs.
+            try:
+                idx = int(time.time() * 1000) % 100000
+            except Exception:
+                idx = 0
+            part_intensity = self._ARSENAL_PARTITION_INTENSITY.get(
+                partition, intensity
+            )
+            q = await self.reasoning.prefetch_picture_question(
+                self.supabase,
+                kind="real_or_imagined",
+                question_index=idx,
+                session_id=self.sk.session_id,
+                mode=supply_mode,
+                intensity=part_intensity,
+            )
+            if q is None or not q.get("image_url"):
+                return None
+            q["_arsenal_intensity"] = part_intensity
+            return q
+
+        return _one
 
     # -- state block --------------------------------------------------------------
 
