@@ -5,6 +5,53 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-05 — WO-LILY-FLOOR-001 FL-1: the per-utterance addressee classifier
+
+Evidence base: session `lily-81BCB0-583a0f16` — Lily barged into a
+player-to-player tangent ("Carry on, Lily. We're not talking to you")
+and into the players' feedback conversation. Root conditions:
+`agent_classification` null on every utterance (every heard utterance
+defaulted to host-directed), no scope boundary on speak-by-default,
+supply stalls pushing her to fill gaps that belonged to the table.
+
+- **`lily_addressee_classifier.py`** (pure stdlib): per-utterance
+  addressee judgment fusing three signal families. Deterministic game
+  priors (open window + expectation-primed match on the active
+  registered question = host-directed BY DEFINITION, no name needed;
+  idle/vamp flips the default toward side chatter unless named or
+  command-shaped; adjacency to a Lily prompt biases host). Name
+  evidence, not a wake word ("Lily" anywhere spikes host-directed;
+  vocative "Carry on, Lily" is address, referential "Lily is a joke" is
+  mild side evidence — split at the language layer). Acoustic register
+  via the narrow `LilyAcousticRegister` interface (WS-11/WS-13 features:
+  arousal/energy, per-word volume, rate, articulation — those Omnibus-003
+  surfaces are not live yet, so the snapshot adapter reads what exists
+  today and fixture-recorded features drive the replay tests).
+- **Side-cluster machine**: rapid player-to-player alternation with
+  content cohering BETWEEN the players locks a cluster — utterances
+  inside it classify as a cluster, not one by one, until it breaks
+  (vocative/command/window-match/gap/a played Lily turn).
+- **Emission BEFORE the reply**: `classify_addressee` runs in the
+  transcript layer (`on_transcript_event`), lands on
+  `last_addressee_judgment` (the FL-2/FL-4 consumption surface), logs
+  `LILY_ADDRESSEE | CLASSIFIED` structured JSON, and conditions the next
+  reply via a positive-framing floor-read line in the state block
+  (host-directed injects nothing; she never narrates her classification
+  — 10% principle).
+- **Per-utterance log coverage** (migration 018): every finalized
+  segment now writes its `lily_addressee_log` row carrying
+  `agent_classification` (never null), `addressee_score`,
+  `addressee_score_components`, `side_cluster_id`, `side_cluster_event`.
+  The old window-open/acted-on gate is gone; clarify re-log rows keep
+  NULL judgment columns (the utterance's primary row carries it).
+- Fixture replay (`tests/test_addressee_classifier.py`) pins the WO's
+  verification: both 81BCB0 derailment beats classify side-cluster
+  before Lily would have spoken; every scored answer classifies
+  host-directed with no name; the log populates per utterance with no
+  nulls. `LILY_FEATURE_VERSION` unchanged — the single whole-WO bump is
+  assigned to a later workstream, and the capability-manifest entry for
+  the floor feature rides with it.
+
 ## 2026-08-04 — Wrong score on the screen: score truth rides the reveal beat (live report)
 
 Principal's report from the 08-04 call; committed truth was RIGHT

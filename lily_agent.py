@@ -58,6 +58,7 @@ from livekit.plugins.speechmatics import (
 )
 
 import lily_addressee
+import lily_addressee_classifier
 import lily_audeering_client
 import lily_audeering_consumers
 import lily_bank
@@ -291,6 +292,12 @@ class LilyGame:
     # Session availability flags (manifest availability layer): set by the
     # entrypoint once gates are known; None = unknown, inject nothing.
     availability_flags: dict | None = None
+    # FL-1 (WO-LILY-FLOOR-001): per-utterance addressee classifier and the
+    # latest judgment — the FL-2/FL-4 consumption surface. Class-level
+    # defaults keep offline __new__ harnesses working; classify_addressee
+    # lazily builds the classifier when a harness skipped __init__.
+    addressee_classifier: "lily_addressee_classifier.LilyAddresseeClassifier | None" = None
+    last_addressee_judgment: "lily_addressee_classifier.LilyAddresseeJudgment | None" = None
 
     def __init__(
         self,
@@ -484,6 +491,13 @@ class LilyGame:
         # label UPDATE at adjudication commit.
         self.pending_clarify: dict[str, dict] = {}
         self._addressee_rows: dict[str, asyncio.Task] = {}
+
+        # FL-1: the per-session addressee classifier (adjacency anchor +
+        # side-cluster machine live inside it).
+        self.addressee_classifier = (
+            lily_addressee_classifier.LilyAddresseeClassifier()
+        )
+        self.last_addressee_judgment = None
 
         # Acoustic pipeline (WO-LILY-AUDEERING-001): room-read state store +
         # per-user-turn trajectory counter. The entrypoint passes the fresh
@@ -2287,6 +2301,13 @@ class LilyGame:
         # items are committed, the persistent context is stable again, so
         # preemptive generation can resume (P2).
         self._resume_preemptive()
+        # FL-1 adjacency anchor: a Lily turn that actually played (fully
+        # or partially) biases the next utterance host-directed and
+        # supersedes any live side-cluster. A suppressed turn never hit
+        # the air, so it moves no floor state.
+        classifier = getattr(self, "addressee_classifier", None)
+        if classifier is not None and not suppressed:
+            classifier.note_agent_prompt(time.time())
         # Say gate: playout completed — pending speech-act claims are now
         # genuinely spoken. Confirmed acts never release (a confirmed act
         # can never be redelivered); only a claimed-but-never-played act
@@ -2500,6 +2521,112 @@ class LilyGame:
         except Exception as e:
             logger.warning("LILY_SFX | stinger failed: %s", e)
 
+    # -- addressee classifier (WO-LILY-FLOOR-001 FL-1) -----------------------------
+
+    def classify_addressee(
+        self,
+        result: dict,
+        text: str,
+        *,
+        speaker_label: str | None = None,
+        segment_ts: float,
+        nbest: dict | None = None,
+    ) -> "lily_addressee_classifier.LilyAddresseeJudgment":
+        """Per-utterance addressee judgment, computed in the transcript
+        layer BEFORE any reply generation (the reply's context blocks
+        condition on it via build_state_block). Fuses deterministic game
+        priors, name evidence, and the acoustic register; the structured
+        result lands on last_addressee_judgment for FL-2/FL-4 and in the
+        lily_addressee_log row for this utterance."""
+        classifier = self.addressee_classifier
+        if classifier is None:
+            classifier = lily_addressee_classifier.LilyAddresseeClassifier()
+            self.addressee_classifier = classifier
+
+        # Expectation-primed match on the ACTIVE registered question: the
+        # scorekeeper recorded it as an answer candidate, or Tier-1 fuzzy
+        # lands "correct" against the live acceptable answers.
+        question = self.sk.current_question or {}
+        acceptable = question.get("acceptable_answers") or []
+        expectation = bool(result.get("candidate_recorded"))
+        if not expectation and acceptable:
+            try:
+                hyps = (nbest or {}).get("hypotheses") or []
+                if nbest is not None and len(hyps) > 1:
+                    expectation = (
+                        lily_evaluation.lily_tier1_evaluate_nbest(
+                            text, {"acceptable_answers": acceptable},
+                            hypotheses=hyps,
+                        )["verdict"] == "correct"
+                    )
+                else:
+                    expectation = (
+                        lily_evaluation.lily_tier1_evaluate(text, acceptable)[
+                            "verdict"
+                        ] == "correct"
+                    )
+            except Exception:
+                expectation = False
+
+        window_open = self.sk.is_window_open(now=segment_ts)
+        if getattr(self, "ui_phase", None) == "lobby":
+            phase = "lobby"
+        elif window_open:
+            phase = "question"
+        elif self.sk.phase == "wrapup":
+            phase = "wrapup"
+        else:
+            # Between questions / supply stall: the gap belongs to the
+            # table — the classifier default flips toward side chatter.
+            phase = "idle"
+
+        # Acoustic register: WS-11/WS-13 features via the narrow snapshot
+        # adapter, only when the capture clock is aligned with this
+        # segment (same alignment contract as confidence fusion).
+        register = None
+        try:
+            inputs = self.acoustic.addressee_fusion_inputs()
+            if not inputs.get("breaker_open") and (
+                lily_addressee.lily_acoustic_sample_aligned(
+                    segment_ts,
+                    inputs.get("captured_at"),
+                    max_staleness_seconds=(
+                        lily_config.addressee_acoustic_max_staleness_seconds()
+                    ),
+                    max_future_seconds=(
+                        lily_config.addressee_acoustic_max_future_seconds()
+                    ),
+                )
+            ):
+                register = (
+                    lily_addressee_classifier.LilyAcousticRegister
+                    .from_snapshot(self.acoustic.addressee_snapshot())
+                )
+        except Exception:
+            register = None
+
+        judgment = classifier.classify(
+            lily_addressee_classifier.LilyUtteranceSignals(
+                text=text,
+                speaker_label=speaker_label,
+                ts=segment_ts,
+                window_open=window_open,
+                expectation_match=expectation,
+                phase=phase,
+                command_shaped=bool(
+                    result.get("control_command")
+                    or result.get("system_directed")
+                ),
+                register=register,
+            )
+        )
+        self.last_addressee_judgment = judgment
+        logger.info(
+            "LILY_ADDRESSEE | CLASSIFIED | session=%s %s",
+            self.sk.session_id, judgment.log_json(),
+        )
+        return judgment
+
     # -- addressee-label corpus (B1) ----------------------------------------------
 
     def _nbest_lookup(self, key: str | None) -> dict | None:
@@ -2552,6 +2679,7 @@ class LilyGame:
         prior_state: str | None = None,
         overlap_flag: bool | None = None,
         nbest: dict | None = None,
+        judgment: "lily_addressee_classifier.LilyAddresseeJudgment | None" = None,
     ) -> dict:
         """Build one lily_addressee_log row. fuzzy_matched_answer is the
         Tier-1 verdict against the LIVE question's acceptable_answers (null
@@ -2632,6 +2760,11 @@ class LilyGame:
         if nbest is not None and nbest.get("hypotheses"):
             row["asr_n_best"] = nbest["hypotheses"]
             row["n_best_dispersion"] = nbest.get("dispersion")
+        # FL-1: the per-utterance addressee judgment (migration 018).
+        # Clarify rows re-log an EARLIER utterance and pass no judgment —
+        # their columns stay NULL; the utterance's primary row carries it.
+        if judgment is not None:
+            row.update(judgment.row_fields())
         return row
 
     def _log_addressee_segment(
@@ -2641,21 +2774,16 @@ class LilyGame:
         speaker_label: str | None,
         segment_ts: float,
         nbest: dict | None = None,
+        judgment: "lily_addressee_classifier.LilyAddresseeJudgment | None" = None,
     ) -> None:
-        """B1: one insert per finalized segment while an answer window is
-        open, plus any finalized segment the agent acts on (scored,
-        skipped-on, system-directed). All writes fire-and-forget via
+        """B1 corpus + FL-1 runtime record: one insert per finalized
+        segment — every utterance carries its addressee judgment
+        (agent_classification is never null again; the 81BCB0 root
+        condition was every heard utterance defaulting to host-directed
+        with a null classification). All writes fire-and-forget via
         asyncio.to_thread inside the persistence helper — zero hot-path
         cost. Clarified rows are inserted by mark_pending_clarify."""
         if self.supabase is None:
-            return
-        window_open = self.sk.is_window_open(now=segment_ts)
-        acted_on = (
-            result.get("candidate_recorded")
-            or result.get("control_command")
-            or result.get("system_directed")
-        )
-        if not window_open and not acted_on:
             return
         if result.get("candidate_recorded"):
             action = lily_addressee.AGENT_ACTION_SCORED
@@ -2674,6 +2802,7 @@ class LilyGame:
             prior_state=result.get("prior_state"),
             overlap_flag=result.get("overlap_flag"),
             nbest=nbest,
+            judgment=judgment,
         )
         task = asyncio.ensure_future(
             lily_persistence.lily_log_addressee(self.supabase, row)
@@ -2863,9 +2992,20 @@ class LilyGame:
                 timing.get("drift_seconds"),
             )
 
+        # FL-1 (WO-LILY-FLOOR-001): the addressee judgment for this
+        # utterance — structured output emitted here, ahead of any reply
+        # generation, so the reply is conditioned on it (build_state_block
+        # carries the floor read) and the corpus row below records it.
+        judgment = self.classify_addressee(
+            result, text, speaker_label=speaker_label, segment_ts=ts,
+            nbest=nbest,
+        )
+
         # B1 corpus row — logged BEFORE command handling so skipped-on and
         # system-directed segments are captured too (fire-and-forget).
-        self._log_addressee_segment(result, text, speaker_label, ts, nbest=nbest)
+        self._log_addressee_segment(
+            result, text, speaker_label, ts, nbest=nbest, judgment=judgment
+        )
 
         # Task 6: one acoustic-trajectory row per finalized user turn
         # (fire-and-forget; no-op when no capture has landed).
@@ -4369,6 +4509,31 @@ class LilyGame:
             extra.extend(self.acoustic.state_block_lines())
         except Exception:
             pass  # acoustic read is enrichment; never breaks the state block
+        # FL-1 floor read (WO-LILY-FLOOR-001): the latest addressee
+        # judgment conditions the reply BEFORE it is generated. Context
+        # only, positive framing, never spoken (10% principle — she never
+        # narrates her classification state; the leak filter backstops).
+        # Host-directed injects nothing: speak-by-default is unchanged
+        # inside its scope.
+        judgment = getattr(self, "last_addressee_judgment", None)
+        if judgment is not None:
+            if judgment.classification == (
+                lily_addressee_classifier.CLASS_SIDE_CLUSTER
+            ):
+                extra.append(
+                    "floor read: the players are in a conversation with "
+                    "each other right now — the floor is theirs. Stay "
+                    "warm and quiet; rejoin the moment someone addresses "
+                    "you or the game needs its host"
+                )
+            elif judgment.classification == (
+                lily_addressee_classifier.CLASS_SIDE_CHATTER
+            ):
+                extra.append(
+                    "floor read: that last line was table talk between "
+                    "players — let it breathe; respond only to what is "
+                    "asked of the host"
+                )
         if lily_config.architect_mode():
             extra.append(
                 "architect mode: server-authenticated override ACTIVE — "
