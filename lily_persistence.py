@@ -1110,49 +1110,47 @@ async def lily_dedupe_group_voiceprints(
 
     Deletion is row-scoped and id-keyed — never a bare DELETE. The winner
     is chosen by (has-identifiers, updated_at) so a stale duplicate can
-    never overwrite a good enrollment."""
+    never overwrite a good enrollment.
+
+    Idempotent: re-running re-selects the survivors and deletes whatever
+    losers remain, so a dedupe interrupted mid-loop heals on the next run.
+    Raises on a PostgREST failure so the caller can surface a re-runnable
+    partial merge (the previous swallow-to-0 hid failure as a no-op)."""
     if supabase is None or not group_id or not player_name:
         return 0
-    try:
-        res = await asyncio.to_thread(
-            lambda: supabase.table("lily_speaker_voiceprints")
-            .select("id, speaker_label, player_name, speaker_identifiers, updated_at")
-            .eq("group_id", group_id)
-            .eq("player_name", player_name)
-            .execute()
-        )
-        rows = [r for r in (res.data or []) if isinstance(r, dict)]
-        if len(rows) <= 1:
-            return 0
-
-        def _rank(row: dict):
-            has_ids = 1 if row.get("speaker_identifiers") else 0
-            return (has_ids, str(row.get("updated_at") or ""))
-
-        winner = max(rows, key=_rank)
-        loser_ids = [
-            r.get("id") for r in rows
-            if r.get("id") is not None and r.get("id") != winner.get("id")
-        ]
-        deleted = 0
-        for lid in loser_ids:
-            await asyncio.to_thread(
-                lambda lid=lid: supabase.table("lily_speaker_voiceprints")
-                .delete().eq("id", lid).execute()
-            )
-            deleted += 1
-        logger.info(
-            "LILY_MERGE | VOICEPRINT_DEDUPE | group=%s player=%s kept=%s "
-            "deleted=%d",
-            group_id, player_name, winner.get("id"), deleted,
-        )
-        return deleted
-    except Exception as e:
-        logger.error(
-            "LILY_MERGE | VOICEPRINT_DEDUPE_FAILED | group=%s player=%s error=%s",
-            group_id, player_name, e,
-        )
+    res = await asyncio.to_thread(
+        lambda: supabase.table("lily_speaker_voiceprints")
+        .select("id, speaker_label, player_name, speaker_identifiers, updated_at")
+        .eq("group_id", group_id)
+        .eq("player_name", player_name)
+        .execute()
+    )
+    rows = [r for r in (res.data or []) if isinstance(r, dict)]
+    if len(rows) <= 1:
         return 0
+
+    def _rank(row: dict):
+        has_ids = 1 if row.get("speaker_identifiers") else 0
+        return (has_ids, str(row.get("updated_at") or ""))
+
+    winner = max(rows, key=_rank)
+    loser_ids = [
+        r.get("id") for r in rows
+        if r.get("id") is not None and r.get("id") != winner.get("id")
+    ]
+    deleted = 0
+    for lid in loser_ids:
+        await asyncio.to_thread(
+            lambda lid=lid: supabase.table("lily_speaker_voiceprints")
+            .delete().eq("id", lid).execute()
+        )
+        deleted += 1
+    logger.info(
+        "LILY_MERGE | VOICEPRINT_DEDUPE | group=%s player=%s kept=%s "
+        "deleted=%d",
+        group_id, player_name, winner.get("id"), deleted,
+    )
+    return deleted
 
 
 async def lily_merge_speaker(
@@ -1163,9 +1161,17 @@ async def lily_merge_speaker(
     into_player: str,
 ) -> dict:
     """Durable side of an operator speaker merge — retro-attribute the
-    merged label's prior utterances and dedupe voiceprints, as ONE logical
-    reconciliation (each leg tolerates its own failure so a partial merge
-    still lands what it can, and logs what it couldn't).
+    merged label's prior utterances and dedupe voiceprints.
+
+    NOT a true DB transaction: PostgREST has no cross-table transaction, so
+    these are three independent writes. Each leg is INDIVIDUALLY IDEMPOTENT
+    (every write is `SET col=into WHERE speaker_label=label`, or a
+    re-select-and-delete dedupe), so a mid-sequence failure half-applies but
+    re-running the WHOLE merge heals it — running it twice yields the same
+    end state as running it once. On any leg failure we log
+    `LILY_MERGE | PARTIAL | safe_to_rerun=true` so the operator can simply
+    re-fire. (True atomicity needs a Postgres stored-proc — filed as a Doc
+    DDL request in the WS-8 report.)
 
     1. lily_transcripts.speaker_name  ← into_player   (this session, label)
     2. lily_addressee_log.player_name ← into_player   (this session, label)
@@ -1182,6 +1188,8 @@ async def lily_merge_speaker(
         "addressee_updated": None,
         "voiceprint_relabeled": None,
         "voiceprints_deduped": 0,
+        "dedupe_failed": False,
+        "partial": False,
     }
     if supabase is None or not label or not into:
         return summary
@@ -1234,8 +1242,30 @@ async def lily_merge_speaker(
                 "LILY_MERGE | VOICEPRINT_RELABEL_FAILED | group=%s label=%s error=%s",
                 group_id, label, e,
             )
-        summary["voiceprints_deduped"] = await lily_dedupe_group_voiceprints(
-            supabase, group_id, into
+        try:
+            summary["voiceprints_deduped"] = await lily_dedupe_group_voiceprints(
+                supabase, group_id, into
+            )
+        except Exception as e:
+            summary["dedupe_failed"] = True
+            logger.error(
+                "LILY_MERGE | VOICEPRINT_DEDUPE_FAILED | group=%s player=%s error=%s",
+                group_id, into, e,
+            )
+    # A leg that was ATTEMPTED and failed (explicit False) or a failed
+    # dedupe means the merge half-applied. Every leg is idempotent, so the
+    # operator-facing remedy is a plain re-fire — surface it loudly.
+    summary["partial"] = (
+        summary["transcripts_updated"] is False
+        or summary["addressee_updated"] is False
+        or summary["voiceprint_relabeled"] is False
+        or summary["dedupe_failed"]
+    )
+    if summary["partial"]:
+        logger.warning(
+            "LILY_MERGE | PARTIAL | safe_to_rerun=true session=%s group=%s "
+            "from_label=%s into=%s summary=%s — re-fire the merge to heal",
+            session_id, group_id, label, into, summary,
         )
     logger.info(
         "LILY_MERGE | DONE | session=%s group=%s from_label=%s into=%s summary=%s",

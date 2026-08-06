@@ -140,6 +140,14 @@ class _Query:
                     n += 1
             return _Result([{"count": n}])
         if self._op == "delete":
+            # Fault injection: fail the first N voiceprint deletes to
+            # simulate a mid-sequence merge failure (leg 3 half-applied).
+            if (
+                self._name == "lily_speaker_voiceprints"
+                and self._db.fail_deletes > 0
+            ):
+                self._db.fail_deletes -= 1
+                raise RuntimeError("injected delete failure")
             keep, removed = [], []
             for row in table:
                 (removed if self._match(row) else keep).append(row)
@@ -162,8 +170,9 @@ class _Query:
 
 
 class _FakeSupabase:
-    def __init__(self, tables):
+    def __init__(self, tables, fail_deletes=0):
         self.tables = {k: [dict(r) for r in v] for k, v in tables.items()}
+        self.fail_deletes = fail_deletes
 
     def table(self, name):
         return _Query(self, name)
@@ -341,6 +350,59 @@ def test_durable_merge_retro_attributes_and_dedupes():
     # The freshest row (real session identifiers) survived.
     assert chris_rows[0]["speaker_identifiers"] == ["id-s4-fresh"]
     assert summary["voiceprints_deduped"] == 1
+
+
+def test_rerun_heals_a_half_applied_merge():
+    # Leg 3 (voiceprint dedupe) fails mid-sequence on the first run: the
+    # transcript/addressee/relabel legs land but the duplicate Chris rows
+    # survive. Because every leg is idempotent, re-firing the WHOLE merge
+    # converges to the fully-correct end state — this is the mitigation for
+    # "not a true transaction": proven re-runnable recovery, not a claim.
+    db = _db_from_fixture()
+    db.fail_deletes = 1  # break the first dedupe delete
+
+    first = asyncio.run(lily_persistence.lily_merge_speaker(
+        db, FIXTURE["session_id"], FIXTURE["group_id"],
+        from_label="S1", into_player="Chris",
+    ))
+    # Half-applied and flagged re-runnable.
+    assert first["partial"] is True
+    assert first["dedupe_failed"] is True
+    # Retro legs DID land even though dedupe blew up.
+    assert first["transcripts_updated"] is True
+    assert all(
+        r["speaker_name"] == "Chris"
+        for r in db.tables["lily_transcripts"] if r["speaker_label"] == "S1"
+    )
+    # Duplicate Chris rows still present (the un-healed state).
+    chris_rows = [
+        r for r in db.tables["lily_speaker_voiceprints"]
+        if r["player_name"] == "Chris"
+    ]
+    assert len(chris_rows) == 2
+
+    # Re-fire the identical merge on the now-healthy client.
+    second = asyncio.run(lily_persistence.lily_merge_speaker(
+        db, FIXTURE["session_id"], FIXTURE["group_id"],
+        from_label="S1", into_player="Chris",
+    ))
+    assert second["partial"] is False
+    assert second["dedupe_failed"] is False
+    # End state fully correct: one Chris row, fresh identifiers, retro intact.
+    chris_rows = [
+        r for r in db.tables["lily_speaker_voiceprints"]
+        if r["player_name"] == "Chris"
+    ]
+    assert len(chris_rows) == 1
+    assert chris_rows[0]["speaker_identifiers"] == ["id-s4-fresh"]
+    assert all(
+        r["speaker_name"] == "Chris"
+        for r in db.tables["lily_transcripts"] if r["speaker_label"] == "S1"
+    )
+    assert all(
+        r["player_name"] == "Chris"
+        for r in db.tables["lily_addressee_log"] if r["speaker_label"] == "S1"
+    )
 
 
 def test_dedupe_prefers_row_with_identifiers_over_newer_empty():
