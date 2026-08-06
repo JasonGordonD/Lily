@@ -90,6 +90,7 @@ def test_rejoin_key_does_not_trip_greet_key():
 
 def test_keyless_dispatch_always_speaks():
     game = _make_game()
+    game.game_started = True  # P8: steal/lockout requires a live game
     assert game.gated_say(None, "steal_window", "five seconds!", "adjudicate")
     assert game.gated_say(None, "steal_window", "five seconds!", "adjudicate")
     assert len(game.session.instructions) == 2
@@ -98,6 +99,7 @@ def test_keyless_dispatch_always_speaks():
 def test_extra_keys_claimed_alongside_primary():
     # The final reveal claims q_N_reveal AND finale in one dispatch.
     game = _make_game()
+    game.game_started = True  # P8: reveal requires a live game
     assert game.gated_say(
         "q_18_reveal", "reveal_finale", "and the winner is...",
         "adjudicate", extra_keys=("finale",),
@@ -126,6 +128,7 @@ def test_on_enter_routes_by_reconnect_flag():
 def test_swallowed_dispatch_releases_and_redelivers():
     # Claim at dispatch -> playback failure releases -> retry redelivers.
     game = _make_game()
+    game.game_started = True  # P8: reveal requires a live game
     game.gated_say("q_4_reveal", "reveal", "the answer is...", "adjudicate")
     released = game.say_registry.release_pending()  # tts_node empty path
     assert released == ["q_4_reveal"]
