@@ -193,10 +193,13 @@ def test_entry_requires_explicit_18_plus_confirmation(caplog):
     )
 
 
-def test_entry_refused_without_acoustic_pipeline_even_when_confirmed(caplog):
-    # FAIL CLOSED (WO-DESYNC-A): the sensor and the deck deploy as one
-    # unit. No pipeline -> no adult mode, 18+ consensus notwithstanding —
-    # consensus is necessary, never sufficient.
+def test_entry_refused_without_acoustic_pipeline_even_when_confirmed(
+    caplog, monkeypatch
+):
+    # LEGACY "sensor" MODE (opt-in since the 2026-08-06 owner directive
+    # opened the deck by default): sensor and deck deploy as one unit.
+    # No pipeline -> no adult mode, 18+ consensus notwithstanding.
+    monkeypatch.setenv("LILY_ADULT_DECK", "sensor")
     agent, game = _make_agent()
     assert client.lily_child_gate_ready() is False
     with caplog.at_level(logging.WARNING, logger="lily_agent"):
@@ -209,8 +212,10 @@ def test_entry_refused_without_acoustic_pipeline_even_when_confirmed(caplog):
     )
 
 
-def test_missing_audeering_key_blocks_confirmed_entry():
-    # The exact live condition: breaker OPEN from a missing key.
+def test_missing_audeering_key_blocks_confirmed_entry(monkeypatch):
+    # The exact live condition: breaker OPEN from a missing key —
+    # blocking only in legacy sensor mode.
+    monkeypatch.setenv("LILY_ADULT_DECK", "sensor")
     agent, game = _make_agent()
     state = consumers.LilyAcousticState()
     client._ACTIVE_PIPELINE = client.LilyAudeeringPipeline(state)
@@ -290,8 +295,9 @@ def test_architect_mode_never_overrides_active_child_signal():
     assert game.sk.mode == "general"
 
 
-def test_architect_mode_never_overrides_dead_sensor():
-    # Sensor down means deck down — for the architect too.
+def test_architect_mode_never_overrides_dead_sensor(monkeypatch):
+    # Sensor mode: sensor down means deck down — for the architect too.
+    monkeypatch.setenv("LILY_ADULT_DECK", "sensor")
     os.environ["LILY_ARCHITECT_MODE"] = "1"
     agent, game = _make_agent()
     assert client.lily_child_gate_ready() is False

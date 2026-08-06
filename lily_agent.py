@@ -1957,7 +1957,7 @@ class LilyGame:
             "first, then you') and take the names one at a time"
         )
 
-    async def show_demo_picture(self) -> tuple[bool, str]:
+    async def show_demo_picture(self, adult: bool = False) -> tuple[bool, str]:
         """Self-knowledge WO Task 1 symmetry, live-fixture fix (12:47
         transcript): "show me" must GET SHOWN — before this existed, a
         skeptic asking to see picture rounds five times got a fabricated
@@ -1972,7 +1972,11 @@ class LilyGame:
         Never raises."""
         url = None
         supabase = getattr(self, "supabase", None)
-        if supabase is not None:
+        # Adult sample (owner directive 2026-08-06): skip the general bank
+        # shortcut — the point is to show the ADULT deck's art direction
+        # (realistic comic-book style), so it always rides the generated
+        # rail with lily_adult_style applied.
+        if supabase is not None and not adult:
             try:
                 result = await asyncio.to_thread(
                     lambda: supabase.table("lily_questions")
@@ -1992,7 +1996,7 @@ class LilyGame:
             # seam (web guardrail: the vocal module never touches the
             # image stack directly).
             url = await self.reasoning.generate_demo_image(
-                supabase, session_id=self.sk.session_id
+                supabase, session_id=self.sk.session_id, adult=adult
             )
         if not url:
             logger.warning("LILY_DEMO | no image available")
@@ -6579,15 +6583,17 @@ class LilyAgent(Agent):
         Architect mode is a deployment-authenticated override. A player
         merely claiming to be the architect does not enable it.
         """
-        # SAFETY GATE (WO-DESYNC-A, RESTORED 2026-07-16 — a concurrent
-        # rewrite dropped it): the child-signal sensor and the adult deck
-        # deploy as ONE UNIT. Sensor down — missing AUDEERING_API_KEY,
-        # failed preflight, breaker OPEN — means deck down, fail CLOSED.
-        # NOTHING overrides this check: architect mode may stand in for
-        # the spoken age ceremony during controlled testing, but it never
-        # substitutes for the sensor, and consensus stays necessary,
-        # never sufficient.
-        if not lily_audeering_client.lily_child_gate_ready():
+        # SENSOR GATE — "sensor" mode only (owner directive 2026-08-06:
+        # the deck is OPEN by default; the Audeering age read is
+        # unreliable in live rooms and the lane is quota-blocked, which
+        # had made the deck permanently unavailable). In open mode the
+        # spoken 18+ ceremony below is the gate; when the sensor IS
+        # running, an ACTIVE child veto still blocks entry in every mode
+        # (checked further down — that invariant is untouched).
+        if (
+            lily_config.adult_deck_gate_mode() == "sensor"
+            and not lily_audeering_client.lily_child_gate_ready()
+        ):
             logger.warning(
                 "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
                 "reason=child_gate_unavailable | session=%s",
@@ -6948,17 +6954,31 @@ class LilyAgent(Agent):
         )
 
     @function_tool()
-    async def lily_show_demo_picture(self, context: RunContext) -> str:
+    async def lily_show_demo_picture(
+        self, context: RunContext, adult: bool = False
+    ) -> str:
         """Put ONE real demo image on the screen right now — the lobby
         included. Call this whenever someone asks to SEE what picture
         rounds look like ("show me", "prove it", "I'll believe it when I
-        see it") instead of describing pictures in words. The tool result
+        see it") instead of describing pictures in words. Pass adult=true
+        when they ask what the GROWN-UP deck's pictures look like — the
+        sample renders in the adult deck's realistic comic-book art
+        style (suggestive, tasteful, never explicit). The tool result
         is the ONLY thing that makes "look at the screen" true: if it
         confirms the image landed, point the table at the screen; if it
         reports a failure, say exactly that — never claim anything
         reached the screen on your own.
         """
-        landed, line = await self._game.show_demo_picture()
+        if adult and not (
+            (getattr(self._game, "availability_flags", None) or {}).get(
+                "adult_deck", False
+            )
+        ):
+            return (
+                "NO IMAGE LANDED: the adult deck is not available in this "
+                "session's configuration — offer the general demo instead."
+            )
+        landed, line = await self._game.show_demo_picture(adult=adult)
         prefix = "IMAGE ON SCREEN: " if landed else "NO IMAGE LANDED: "
         return prefix + line
 
@@ -8582,8 +8602,13 @@ async def entrypoint(ctx: JobContext) -> None:
     # mode is the server-authenticated testing override); real-entity
     # picture sourcing rides the EXA key — generated imagery needs neither.
     game.availability_flags = {
+        # Owner directive 2026-08-06: open by default (spoken 18+ opt-in
+        # remains the consent step); "sensor" mode restores the legacy
+        # pipeline coupling.
         "adult_deck": (
-            audeering_pipeline is not None or lily_config.architect_mode()
+            lily_config.adult_deck_gate_mode() == "open"
+            or audeering_pipeline is not None
+            or lily_config.architect_mode()
         ),
         "pictures_real_sourcing": bool(lily_config.exa_api_key()),
         # Vision (Zuna port): player-shared photo analysis rides XAI_API_KEY.

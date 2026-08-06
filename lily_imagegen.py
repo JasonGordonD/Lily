@@ -172,6 +172,22 @@ def clamp_and_log(requested: str) -> str:
 
 GENERATION_TIMEOUT_SECONDS = 45.0
 
+# Owner directive 2026-08-06: adult-deck imagery renders in realistic
+# comic-book illustration style — stylized art, never photorealism. THE
+# style chokepoint: every adult-context generation prompt passes through
+# lily_adult_style before the wire.
+LILY_ADULT_IMAGE_STYLE = (
+    "Rendered as a realistic comic-book illustration: bold inked "
+    "linework, painterly shading, dramatic lighting, a confident "
+    "grown-up tone — stylized art, never photorealistic, no text."
+)
+
+
+def lily_adult_style(prompt: str) -> str:
+    """Apply the adult-deck art direction to one generation prompt."""
+    base = (prompt or "").strip()
+    return f"{base} {LILY_ADULT_IMAGE_STYLE}".strip()
+
 
 _XAI_IMAGES_URL: Final = "https://api.x.ai/v1/images/generations"
 
