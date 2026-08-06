@@ -46,7 +46,7 @@ from typing import Optional
 
 # Bumped whenever a player-facing feature lands. The delta a returning
 # table hears is every feature with `since` greater than their stamp.
-LILY_FEATURE_VERSION: int = 4
+LILY_FEATURE_VERSION: int = 5
 
 # The backfill (version 1) is the audited launch set; voice presets are
 # version 2 (Rami's direct change, 2026-07-31 — added at commit time per
@@ -171,6 +171,18 @@ LILY_CAPABILITIES: list = [
         "since": 2,
         "description": "two voices — ask her to switch and she switches",
         "prompt_marker": "switch my voice",
+        "askable": True,
+    },
+    {
+        "key": "custom_category",
+        "code_ref": "lily_agent:LilyAgent.lily_set_category",
+        "tools": ["lily_set_category"],
+        "since": 5,
+        "description": (
+            "name any topic and she builds that round on the fly — 'give "
+            "me a Game of Thrones round', 'let's do Japan'"
+        ),
+        "prompt_marker": "Any topic, on the fly",
         "askable": True,
     },
     {

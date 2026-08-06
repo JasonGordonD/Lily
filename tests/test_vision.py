@@ -58,10 +58,17 @@ def test_manifest_carries_image_ingestion_at_v3():
     assert lily_capabilities.lily_feature_version() >= 3
     assert "lily_analyze_image" in entry["tools"]
     assert entry["availability_key"] == "vision"
-    # A voice-presets-era table hears about image sharing on rematch.
+    # A voice-presets-era (v2) table hears about image sharing on rematch —
+    # and every feature newer than v2 (custom categories landed at v5),
+    # nothing v2-or-older.
     delta = lily_capabilities.lily_whats_new(2)
     assert any("photo" in line for line in delta)
-    assert len(delta) == 1
+    expected = [
+        e["description"]
+        for e in lily_capabilities.LILY_CAPABILITIES
+        if int(e.get("since", 1)) > 2
+    ]
+    assert delta == expected
 
 
 def test_vision_off_yields_honest_availability_line():

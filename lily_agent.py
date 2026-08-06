@@ -420,6 +420,12 @@ class LilyGame:
         # stays excluded (no repeats either way).
         self._drawn_ids: set = set()
         self._drawn_hashes: set = set()
+        # Operator-requested topic (WO-LILY-CAPABILITY-RESTORE-001): maps a
+        # round number to a table-named subject ("Game of Thrones", "Japan").
+        # _category_for_round consults it before the fixed family rotation,
+        # so lily_set_category steers the generator without touching the
+        # rotation. Non-adult only — the adult deck keeps its own families.
+        self._category_override: dict[int, str] = {}
         # 50/50 lifeline (multiple-choice WO): eliminated choice indices for
         # the CURRENT question — reset at arm, rides publish_metadata.
         self.eliminated: list[int] = []
@@ -2211,6 +2217,11 @@ class LilyGame:
             return ADULT_CATEGORY_FAMILIES[
                 (rnd - 1) % len(ADULT_CATEGORY_FAMILIES)
             ]
+        # Operator-requested topic wins over the family rotation for the
+        # round it was set on (getattr: test harnesses build via __new__).
+        override = getattr(self, "_category_override", {}).get(rnd)
+        if override:
+            return override
         return CATEGORY_FAMILIES[(rnd - 1) % len(CATEGORY_FAMILIES)]
 
     def _difficulty_for_round(self, rnd: int) -> int:
@@ -6657,6 +6668,76 @@ class LilyAgent(Agent):
         return (
             "Round format is now freeform (sticky) — open questions, "
             "no options read out, from the next question you ask."
+        )
+
+    @function_tool()
+    async def lily_set_category(self, context: RunContext, topic: str) -> str:
+        """Build the round on a subject the table names — "give me a Game
+        of Thrones round", "let's do Japan", "a round about 90s hip-hop".
+        You write your own questions on the fly, so ANY topic is fair game:
+        call this the moment a table asks for a specific subject, and NEVER
+        tell them the deck is fixed or the topic isn't available. It takes
+        effect on the current/next round; if the first question needs a
+        beat to build, say you're putting their round together and vamp —
+        never invent a question, never fall back to the old topic.
+
+        Args:
+            topic: The subject for the round, in the table's own words
+                (e.g. "Game of Thrones", "Japan", "90s hip-hop").
+        """
+        game = self._game
+        subject = " ".join((topic or "").split())[:80]
+        if not subject:
+            return (
+                "No topic caught — ask the table what subject they want and "
+                "call this again with it."
+            )
+        if game.sk.mode == "adult":
+            # The adult deck rotates its OWN families and a custom label
+            # must never ride an adult question (the deck-identity firewall:
+            # adult questions announced as an academic category was a live
+            # defect). Redirect honestly — never a flat denial.
+            return (
+                f"Custom topics run on the general deck. Say 'back to "
+                f"normal' first, then name {subject!r} again and I'll build "
+                "the round."
+            )
+        target_round = game._round_for_next_question()
+        game._category_override[target_round] = subject
+        # The prefetched next question was drawn on the OLD category — drop
+        # it and redraw under the new topic. A live/delivered armed question
+        # stays on the glass; the override takes the first UNDELIVERED slot
+        # (same mutability guard as lily_set_round_format).
+        game.next_question = None
+        armed = game.armed_question
+        armed_mutable = (
+            armed is not None
+            and not game.sk.answer_window_open
+            and game.say_registry.state(
+                f"q_{game.sk.question_number}_delivery"
+            ) is None
+        )
+        if armed_mutable:
+            game.armed_question = None
+            game.sk.current_question = None
+        task = game._prefetch_task
+        if task is not None and not task.done():
+            task.cancel()
+        game._prefetch_task = None
+        game._prefetch_stall_ticks = 0
+        game.sk.set_status_note(
+            f"custom round committed: building {subject!r} questions now — "
+            "the first lands in the state block in a beat. Tell the table "
+            "you're putting their round together, vamp honestly until it "
+            "arrives, and never invent a question or fall back to the old "
+            "topic."
+        )
+        if game.game_started and not game.game_over:
+            game.start_prefetch()
+        return (
+            f"Round topic set to {subject!r} — I'm generating those "
+            "questions now. Tell the table you're building their round; the "
+            "first one lands in a beat."
         )
 
     @function_tool()

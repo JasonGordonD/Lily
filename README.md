@@ -150,6 +150,58 @@ fabricated one. The mechanisms:
   `tests/test_selfknowledge.py` carries an ordering tripwire on
   `on_enter` source.
 
+## On-the-fly categories + the capability truth test (WO-LILY-CAPABILITY-RESTORE-001)
+
+The 2026-08-06 session had Lily DENY a table-named topic ("my general
+deck is pre-loaded... can't do a specific custom topic") — contradicting
+her own core behavior (she "generates her own questions on the fly") and
+the fact that the reasoning generator already accepts any `category`
+string. The gap was wiring, not capability: the round category came only
+from the fixed family rotation, with no path for a requested subject to
+reach it.
+
+- **`lily_set_category(topic)`** (LilyAgent tool): a table asks for "a
+  Game of Thrones round" / "let's do Japan" and the tool records the
+  subject on `_category_override[target_round]`. `_category_for_round`
+  consults that override before the family rotation, so the exact seam
+  `_prefetch_inner` reads (`category = self._category_for_round(rnd)`,
+  passed straight to `reasoning.prefetch_question(category=...)`) now
+  carries the requested topic. The stale prefetched question (drawn on
+  the old category) is dropped and re-issued; a beat-to-build is covered
+  by an honest "putting your round together" status note — never a
+  denial. Adult mode redirects to the general deck rather than crossing
+  the deck-identity firewall (an adult question must never wear a custom
+  label). Manifest entry `custom_category` (v5), option line "Any topic,
+  on the fly".
+- **The capability truth test** (`tests/test_capability_truth.py`): what
+  she CLAIMS (prompt) == what the manifest SAYS == what ACTUALLY WORKS.
+  Beyond the capability lint's one direction (every registered tool maps
+  to an entry; every code_ref resolves), it pins the ones the lint can't
+  see: every manifest-NAMED tool is a really-registered function tool (a
+  manifest can name a tool that was never wired — a lie the lint never
+  sees); every askable feature is claimed in the prompt and every
+  non-askable one is deliberately unclaimed; every `availability_key` is
+  computed at runtime from a REAL dependency check (never a hardcoded
+  literal — the anti-"honest relaying of a lying config" core), with a
+  runtime flip test proving vision availability tracks the XAI key; and
+  the two capabilities that regressed (vision, custom category) are
+  INVOKED against their real contracts. Live proof that the generator
+  honors an arbitrary topic (real Gemini "Game of Thrones" → *Drogon*,
+  "Japan" → *Edo*) and that Grok vision analyzes a seeded photo is in the
+  WO record; those need funded keys and run against the deployed agent,
+  not CI.
+- **Pictures / vision were never an omnibus code regression.** The
+  availability gating predates the 1.6.4→1.6.6 rebuild (`40c71e1` for the
+  EXA-gated real-photo sourcing, `3a17144` for the XAI-gated vision); WS-0
+  never touched the vision or capabilities modules. The "photo/picture
+  modules aren't switched on tonight" line is the availability layer
+  telling the truth — it fires only when `XAI_API_KEY` / `EXA_API_KEY`
+  are absent at runtime. Both secrets are present at repo scope and
+  forwarded by `deploy.yml` (`XAI_API_KEY` docker `-e` + job env; seeded
+  2026-07-31), and the funded GCP `XAI_API_KEY` passes a live vision call.
+  A session that still heard "off" was a deployed-runtime key gap, not
+  code — a redeploy carries the keys.
+
 ## Both-sides record, continuous recognition, variety (WO-LILY-RECOGNITION-VARIETY-001)
 
 From the 2026-08-04 solo-probe fixture (`lily-CC9E19-19c2b804`) — the

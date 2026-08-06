@@ -5,6 +5,71 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-06 — WO-LILY-CAPABILITY-RESTORE-001: on-the-fly categories + capability truth test
+
+**Restored on-the-fly category creation and pinned a three-way capability
+truth test; audited the picture/vision "regression" to ground.**
+
+**Audit — the flipping commit for each claim.**
+- *Custom category:* never a code regression. `_category_for_round` has
+  been fixed family-rotation since the original wired agent (`0a502a8`),
+  only ever touched by omnibus WS-6 (`1b1af93`, supply-stall visibility) —
+  no operator-request topic path ever existed (pickaxe on
+  `requested_category` / `lily_set_category` / "custom category" across
+  ALL history: nothing). The generator already accepted any `category`;
+  the wiring to steer it did not. This WO adds it.
+- *Pictures / vision:* also NOT an omnibus flip. The availability gating
+  predates the 1.6.4→1.6.6 rebuild — `40c71e1`
+  (WO-LILY-SELFKNOWLEDGE-INTAKE-001) introduced `availability_flags` and
+  the EXA-gated `pictures_real_sourcing`; `3a17144` (Zuna vision port)
+  introduced the XAI-gated `vision` flag. Omnibus WS-0 (`36a7795`) touched
+  neither `lily_vision.py` nor `lily_capabilities.py`. "Not switched on
+  tonight" is the availability layer telling the truth when `XAI_API_KEY`
+  / `EXA_API_KEY` are absent at runtime. Both are present at repo scope
+  and forwarded by `deploy.yml` (XAI seeded 2026-07-31); the funded GCP
+  `XAI_API_KEY` passes a live vision call. A live "off" was a
+  deployed-runtime key gap — a redeploy carries the keys.
+
+**Category creation restored.**
+- `lily_set_category(topic)` (LilyAgent function tool) records a
+  table-named subject on `_category_override[target_round]`;
+  `_category_for_round` consults it before the rotation, so the requested
+  topic reaches the generator seam (`reasoning.prefetch_question(
+  category=...)`). Stale prefetch dropped and re-issued; honest
+  "building your round" status note covers the build beat; NEVER a denial.
+  Adult mode redirects to the general deck (deck-identity firewall).
+- Manifest entry `custom_category` (v5, `LILY_FEATURE_VERSION` 4→5); option
+  line "Any topic, on the fly" in WHAT THE TABLE CAN ASK FOR.
+- **Live proof:** real Gemini generation on arbitrary topics — "Game of
+  Thrones" → *Daenerys rides Drogon* (category="Game of Thrones"), "Japan"
+  → *Tokyo was Edo* (category="Japan").
+
+**Picture capabilities verified live.**
+- Grok vision (`lily_describe_image`) analyzed a seeded public photo →
+  `status:ok`, "black Labrador Retriever puppy" — funded `XAI_API_KEY`
+  (team not blocked, key not disabled). Picture-trivia round is wired
+  end-to-end already: `media_mode="pictures"` voice command →
+  `prefetch_picture_question` → `image_url`/`image_source` on the question
+  → `publish_metadata(image_url=...)` to the companion display.
+
+**Capability truth test — permanent (`tests/test_capability_truth.py`).**
+CLAIMS == manifest SAYS == ACTUALLY WORKS, failing on mismatch in EITHER
+direction: every manifest-named tool is a really-registered function tool
+(a lie the capability lint never sees); askable↔prompt both directions;
+every `availability_key` computed at runtime from a real dependency check,
+never a literal (with a vision-flag flip test); and the two regressed
+capabilities INVOKED against their contracts.
+
+**Tests:** full suite **1166 passed** on an isolated livekit-agents 1.6.6
+venv (new: `tests/test_custom_category.py` 8 cases,
+`tests/test_capability_truth.py` 10 cases; updated `test_vision.py` v2
+delta to include custom categories). Zero regressions.
+
+**Secrets:** none needed — `XAI_API_KEY` and `EXA_API_KEY` are present at
+`JasonGordonD/Lily` scope and forwarded by `deploy.yml`. If a future
+deploy predates the 2026-07-31 XAI seed, redeploy so the agent container
+picks it up.
+
 ## 2026-08-06 — WO-LILY-HOTFIX-002: transcript echo-dups + group-binding loudness
 
 **Evidence re-audit first (session `lily-AAC431-6208ff7c`, 05:19–05:25).**
