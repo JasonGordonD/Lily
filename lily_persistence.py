@@ -439,7 +439,31 @@ async def lily_log_addressee(
     """Fire-and-forget insert into lily_addressee_log. Returns the new row
     id when available (kept by the caller for the later label UPDATE).
     Tolerates failures silently — corpus logging must never surface into
-    the live session (debug log only)."""
+    the live session (debug log only).
+
+    WS-11 fail-soft: the telemetry columns land in later migrations —
+    FL-1's migration 018 (agent_classification + addressee_score +
+    addressee_score_components + side_cluster_id + side_cluster_event) and
+    WS-11's migration 019 (timing_source, timing_drift_seconds). Until those
+    DDLs are applied in a given environment the insert raises PGRST204
+    ("column does not exist") and the WHOLE corpus row was being lost (FL-1
+    ships no fail-soft of its own). On any insert failure, retry once with
+    ALL of those keys stripped so the base row (the training-data flywheel)
+    still lands — no memory is bad memory. The retry is best-effort: on a
+    mixed-migration environment (018 applied, 019 not) it drops FL-1's
+    columns from that one retried row too; corpus completeness over
+    per-row column fidelity."""
+    _TELEMETRY_KEYS = (
+        # FL-1 migration 018
+        "agent_classification",
+        "addressee_score",
+        "addressee_score_components",
+        "side_cluster_id",
+        "side_cluster_event",
+        # WS-11 migration 019
+        "timing_source",
+        "timing_drift_seconds",
+    )
     try:
         result = await asyncio.to_thread(
             lambda: supabase.table("lily_addressee_log").insert(row).execute()
@@ -449,8 +473,27 @@ async def lily_log_addressee(
             return data[0].get("id")
         return None
     except Exception as e:
-        logger.debug("lily_log_addressee error: %s", e)
-        return None
+        if not any(k in row for k in _TELEMETRY_KEYS):
+            logger.debug("lily_log_addressee error: %s", e)
+            return None
+        logger.debug(
+            "lily_log_addressee telemetry insert failed (%s) — retrying "
+            "without WS-11 columns (migration 018 not applied here)", e,
+        )
+        base_row = {k: v for k, v in row.items() if k not in _TELEMETRY_KEYS}
+        try:
+            result = await asyncio.to_thread(
+                lambda: supabase.table("lily_addressee_log")
+                .insert(base_row)
+                .execute()
+            )
+            data = getattr(result, "data", None) or []
+            if data and isinstance(data[0], dict):
+                return data[0].get("id")
+            return None
+        except Exception as e2:
+            logger.debug("lily_log_addressee retry error: %s", e2)
+            return None
 
 
 async def lily_update_addressee_label(

@@ -91,6 +91,8 @@ LILY_LOCAL_ONLY_ENV = {
     # values (edit the defaults, or promote to deploy.yml vars).
     "LILY_SEGMENT_MAX_SPAN_SECONDS",
     "LILY_SEGMENT_MAX_FINALIZATION_LAG_SECONDS",
+    # WS-11 garble clarify gate threshold.
+    "LILY_GARBLE_CLARIFY_MIN_CONFIDENCE",
     # Misc: image model id (prefetch-only) and voice preset 1 (hardcoded
     # default ID, same pattern as Zuna's VOICE_NADIA).
     "LILY_IMAGEGEN_MODEL",

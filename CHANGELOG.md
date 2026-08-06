@@ -5,6 +5,51 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-05 — WS-11 telemetry restoration (WO-LILY-OMNIBUS-003)
+
+Session lily-81BCB0-583a0f16 landed 14 addressee rows but zero
+`lily_acoustic_trajectories` rows (fleet-wide), every `acoustic_snapshot`
+explicit-null, `n_best_dispersion` 0.000 on every row, and `overlap_flag`
+never firing in an echo room. Root causes, three distinct:
+
+- **Audeering lane was OFFLINE, not running-without-persistence.** devAIce
+  `durationQuota=0` on the shared fleet account (verified live) opens the
+  circuit breaker at preflight, so nothing was ever captured — the zero
+  rows are correct behaviour for an offline sensor. The gap was that a
+  zero-row session said nothing about WHY. `LilyAudeeringPipeline.lane_health()`
+  now surfaces breaker state + reason + upload count into
+  `build_game_stats()["acoustic_lane"]`, so offline-vs-no-persistence is
+  self-evident from the session report.
+- **Dispersion structurally 0.000 in tap-only mode.** With
+  `LILY_STT_MAX_ALTERNATIVES=1` (the live-incident default) the collector
+  synthesizes exactly one hypothesis, and the variance of one confidence is
+  zero even on torn speech. `drain()` now also computes per-word-confidence
+  variance (`dispersion_source`, `mean_word_confidence`,
+  `min_word_confidence`); a low mean over a multi-word final fires the light
+  clarify posture (`_maybe_fire_confidence_clarify`) instead of engaging the
+  garble — the "Ninja girl, 5050 first dates" case (mean word conf 0.57–0.63)
+  now asks for a repeat.
+- **Overlap never fired because empty labeled drains collapsed the span.**
+  When per-word speaker tags disagreed with the event's speaker_id (echo
+  room), `drain(speaker_label=...)` returned None, losing the stream times;
+  the overlap span fell back to a degenerate arrival point the strict
+  epsilon gate can never flip. `drain()` now falls back to an unfiltered
+  drain (`speaker_filter_fallback`) so real timings survive.
+
+Reconciled with WO-LILY-FLOOR-001 FL-1 (which landed on origin/main during
+this work and owns `agent_classification` via its classifier): WS-11 defers
+the classification column entirely to FL-1 and adds ONLY the STT stream-clock
+timing trail (`timing_source`, `timing_drift_seconds`, migration 019) — the
+overlap side's provenance. `lily_log_addressee` gains a strip-and-retry
+covering BOTH migrations' telemetry columns so no corpus row is lost before
+either DDL lands (FL-1 shipped no fail-soft; cardinal rule: no memory is bad
+memory).
+
+Live-session confirmation of the repaired trajectory/overlap/clarify paths
+is a close-out item owed once the Audeering quota is restored (the lane is
+quota-blocked, so a live acoustic round-trip cannot be exercised now).
+Pinned by `tests/test_ws11_telemetry.py`; full suite green.
+
 ## 2026-08-05 — WO-LILY-FLOOR-001 FL-1: the per-utterance addressee classifier
 
 Evidence base: session `lily-81BCB0-583a0f16` — Lily barged into a

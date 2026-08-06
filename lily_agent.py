@@ -3201,6 +3201,8 @@ class LilyGame:
         overlap_flag: bool | None = None,
         nbest: dict | None = None,
         judgment: "lily_addressee_classifier.LilyAddresseeJudgment | None" = None,
+        timing_source: str | None = None,
+        timing_drift_seconds: float | None = None,
     ) -> dict:
         """Build one lily_addressee_log row. fuzzy_matched_answer is the
         Tier-1 verdict against the LIVE question's acceptable_answers (null
@@ -3281,11 +3283,21 @@ class LilyGame:
         if nbest is not None and nbest.get("hypotheses"):
             row["asr_n_best"] = nbest["hypotheses"]
             row["n_best_dispersion"] = nbest.get("dispersion")
-        # FL-1: the per-utterance addressee judgment (migration 018).
-        # Clarify rows re-log an EARLIER utterance and pass no judgment —
-        # their columns stay NULL; the utterance's primary row carries it.
+        # FL-1: the per-utterance addressee judgment (migration 018) —
+        # agent_classification and the fused-score/side-cluster trail. FL-1
+        # is the SINGLE writer of agent_classification. Clarify rows re-log
+        # an EARLIER utterance and pass no judgment — their columns stay
+        # NULL; the utterance's primary row carries it.
         if judgment is not None:
             row.update(judgment.row_fields())
+        # WS-11 (migration 019 columns): the STT stream-clock reconciler's
+        # source/drift audit trail — the overlap side's provenance. Set only
+        # when known so a pre-019 environment's fail-soft retry strips a
+        # minimal, contiguous set. Distinct from FL-1's columns.
+        if timing_source is not None:
+            row["timing_source"] = timing_source
+        if timing_drift_seconds is not None:
+            row["timing_drift_seconds"] = timing_drift_seconds
         return row
 
     def _log_addressee_segment(
@@ -3313,6 +3325,12 @@ class LilyGame:
             action = lily_addressee.AGENT_ACTION_ADJUDICATED_OTHER
         else:
             action = lily_addressee.AGENT_ACTION_IGNORED
+        # WS-11: STT-timing telemetry off the reconciler (migration 019
+        # columns). FL-1 owns agent_classification via `judgment`; WS-11
+        # only adds the overlap-side timing provenance. lily_log_addressee
+        # strips these keys and retries if the DDL is not yet applied (no
+        # corpus row is lost).
+        timing = (nbest or {}).get("segment_timing") or {}
         row = self._addressee_row(
             text=text,
             speaker_label=speaker_label,
@@ -3324,6 +3342,8 @@ class LilyGame:
             overlap_flag=result.get("overlap_flag"),
             nbest=nbest,
             judgment=judgment,
+            timing_source=timing.get("source"),
+            timing_drift_seconds=timing.get("drift_seconds"),
         )
         task = asyncio.ensure_future(
             lily_persistence.lily_log_addressee(self.supabase, row)
@@ -3411,6 +3431,70 @@ class LilyGame:
             ),
             source="clarify_band",
         )
+
+    def _maybe_fire_confidence_clarify(
+        self,
+        result: dict,
+        speaker_label: str | None,
+        segment_ts: float,
+        nbest: dict | None,
+    ) -> bool:
+        """WS-11 — garble gate. A final whose per-word confidences were low
+        across a multi-word utterance (tap-only mode synthesizes ONE
+        hypothesis, so the dispersion gate stays 0.000 and the Tier-1 path
+        engages the content anyway — the live "Ninja girl, 5050 first
+        dates" case) fires the SAME light clarify posture as the Task-4
+        band trigger instead of scoring garble as an answer.
+
+        Shares the per-question / per-session caps and the pending-clarify
+        machinery with _maybe_fire_clarify. Rostered players only (the
+        clarify addresses someone by name). Honest within the synthesized
+        set's limits: it widens recall, it is not a true lattice, so this
+        keys on the recognizer's own word confidences, nothing invented."""
+        if not lily_nbest.lily_nbest_garbled(
+            nbest,
+            min_mean_confidence=lily_config.garble_clarify_min_confidence(),
+        ):
+            return False
+        player = result.get("player")
+        if not player:
+            return False
+        if not self.sk.is_window_open(now=segment_ts):
+            return False
+        if not hasattr(self, "_clarify_fired_questions"):
+            self._clarify_fired_questions = set()
+            self._session_clarify_count = 0
+        qnum = self.sk.question_number
+        if qnum in self._clarify_fired_questions:
+            return False
+        if self._session_clarify_count >= lily_config.clarify_max_per_session():
+            return False
+        if player in self.pending_clarify:
+            return
+        self._clarify_fired_questions.add(qnum)
+        self._session_clarify_count += 1
+        logger.info(
+            "LILY_CLARIFY | GARBLE_TRIGGER | session=%s q=%d player=%s "
+            "mean_word_conf=%s words=%d count=%d",
+            self.sk.session_id, qnum, player,
+            nbest.get("mean_word_confidence"), nbest.get("word_count", 0),
+            self._session_clarify_count,
+        )
+        self.mark_pending_clarify(player)
+        self.gated_say(
+            f"q_{qnum}_clarify",
+            "clarify_question",
+            (
+                f"You caught the shape of {player}'s answer but not cleanly. "
+                "Ask them to run it back once, by name, quick and warm: "
+                f"'{player}, say that one more time for me?' One short line, "
+                "nothing else; their repeat settles it. Stay purely a host "
+                "who wants to get their answer right — light, in-character, "
+                "and leave it at the ask."
+            ),
+            source="clarify_garble",
+        )
+        return True
 
     def mark_pending_clarify(self, player_name: str) -> None:
         """The clarify moment (lily_log_clarify tool): mark the player
@@ -3751,6 +3835,19 @@ class LilyGame:
                     )
                     if t1["verdict"] == "correct":
                         asyncio.ensure_future(self.adjudicate(steal_allowed=False))
+                        return
+                    # WS-11 garble gate — checked BEFORE the band trigger and
+                    # AFTER the clean-correct guard (so a garbled final that
+                    # still fuzzy-matches adjudicates and never double-speaks
+                    # a clarify over a reveal). A low mean per-word confidence
+                    # over a multi-word final fires the light repeat-request
+                    # posture; tap-only mode's single hypothesis keeps the
+                    # dispersion gate blind to this, which is why it keys on
+                    # the recognizer's own word confidences. Returns early
+                    # when it fires so the band trigger doesn't stack.
+                    if self._maybe_fire_confidence_clarify(
+                        result, speaker_label, ts, nbest
+                    ):
                         return
                     # Formalized clarify trigger (WO-ADDRESSEE-H1 Task 4):
                     # a similarity in the ambiguous MIDDLE BAND under the
@@ -5124,6 +5221,16 @@ class LilyGame:
         # surfaces (per_player, lily_answers, final_standings) disagreeing
         # pairwise is the live failure this audits.
         mismatches = self.sk.reconcile_scores()
+        # WS-11: durable acoustic-lane health, so a zero-trajectory-row
+        # session is self-explaining (offline vs running-without-persistence)
+        # from the session report alone. Absent pipeline reads as a
+        # deliberate offline state (no key / never constructed).
+        pipeline = getattr(self, "audeering_pipeline", None)
+        acoustic_lane = (
+            pipeline.lane_health()
+            if pipeline is not None
+            else {"breaker_open": True, "reason": "pipeline_absent"}
+        )
         return {
             "final_standings": standings,
             "rounds_played": self.sk.round,
@@ -5137,6 +5244,7 @@ class LilyGame:
                 "ledger_entries": len(self.sk.score_ledger),
             },
             "duration_s": round(time.time() - self.session_started_at, 1),
+            "acoustic_lane": acoustic_lane,
         }
 
     # -- state block --------------------------------------------------------------

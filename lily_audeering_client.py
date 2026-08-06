@@ -579,6 +579,7 @@ class LilyAudeeringPipeline:
         self._open_logged = False
         self._http_session = None
         self._uploads_this_session = 0
+        self._breaker_reason: str | None = None
         if not self._api_key:
             self._open_breaker("missing AUDEERING_API_KEY at startup")
 
@@ -590,10 +591,30 @@ class LilyAudeeringPipeline:
     def breaker_open(self) -> bool:
         return self._breaker == _BreakerState.OPEN
 
+    def lane_health(self) -> dict[str, Any]:
+        """Durable acoustic-lane health for the session report (WS-11).
+
+        Session lily-81BCB0-583a0f16 had zero trajectory rows and every
+        addressee snapshot explicit-null with NOTHING in the persisted
+        record saying WHY. This surfaces the offline-vs-no-persistence
+        distinction into build_game_stats so a zero-row session is
+        self-explaining: breaker state, the reason it opened, and how many
+        uploads actually left the box this session."""
+        return {
+            "breaker_open": self.breaker_open,
+            "reason": (
+                self._breaker_reason
+                if self.breaker_open
+                else ("healthy" if self._started else "not_started")
+            ),
+            "uploads_this_session": self._uploads_this_session,
+        }
+
     def _open_breaker(self, reason: str) -> None:
         if self._breaker == _BreakerState.OPEN:
             return
         self._breaker = _BreakerState.OPEN
+        self._breaker_reason = reason
         try:
             # Reason rides along so the state's on_breaker_open hook (the
             # adult-mode safety gate) can log WHY the sensor went down.

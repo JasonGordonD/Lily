@@ -194,6 +194,33 @@ def lily_nbest_dispersion(confidences: Optional[list]) -> Optional[float]:
     return round(sum((v - mean) ** 2 for v in vals) / len(vals), 6)
 
 
+def lily_nbest_garbled(
+    nbest: Optional[dict],
+    *,
+    min_mean_confidence: float = 0.65,
+    min_word_count: int = 2,
+) -> bool:
+    """True when a drained utterance reads as GARBLED — the recognizer was
+    unsure word-by-word even though the synthesized set has only one
+    hypothesis (tap-only mode, LILY_STT_MAX_ALTERNATIVES=1). This is the
+    honest confidence signal the single-hypothesis path could not surface
+    through dispersion alone: a low mean per-word confidence over a
+    multi-word final is the "Ninja girl, 5050 first dates" case that got
+    content engagement instead of a clarify.
+
+    Conservative: single-word interjections never trip (min_word_count),
+    and a missing/absent mean confidence reads as NOT garbled (never invent
+    doubt)."""
+    if not isinstance(nbest, dict):
+        return False
+    if int(nbest.get("word_count") or 0) < min_word_count:
+        return False
+    mean = nbest.get("mean_word_confidence")
+    if not isinstance(mean, (int, float)) or isinstance(mean, bool):
+        return False
+    return float(mean) < float(min_mean_confidence)
+
+
 # ---------------------------------------------------------------------------
 # Utterance synthesis from per-word alternatives
 # ---------------------------------------------------------------------------
@@ -335,6 +362,7 @@ class LilyNBestCollector:
 
         Returns None when nothing was buffered. Never raises."""
         try:
+            fallback = False
             if speaker_label:
                 taken, kept = [], []
                 for w in self._words:
@@ -343,6 +371,17 @@ class LilyNBestCollector:
                     else:
                         kept.append(w)
                 self._words = kept
+                if not taken:
+                    # Label miss (echo-room speaker-tag disagreement): the
+                    # per-word tags never matched the event's speaker_id, so
+                    # the filtered take is empty. Returning None here loses
+                    # the stream times and the overlap span collapses to a
+                    # degenerate arrival point that the strict-epsilon gate
+                    # can never flip (the live lily-81BCB0 zero-overlap
+                    # cause). Fall back to draining the whole buffer so the
+                    # utterance keeps real timings and a confidence signal.
+                    taken, self._words = self._words, []
+                    fallback = True
             else:
                 taken, self._words = self._words, []
             if not taken:
@@ -364,17 +403,54 @@ class LilyNBestCollector:
             stream_start = min(starts) if starts else None
             stream_end = max(ends) if ends else None
             speaker_consistency = None
-            if speaker_label:
+            if speaker_label and not fallback:
                 exact = sum(1 for w in taken if w.get("speaker") == speaker_label)
                 speaker_consistency = round(exact / len(taken), 4) if taken else None
+
+            # Per-word top-alternative confidences — the deliberation signal
+            # tap-only mode (one synthesized hypothesis) otherwise hides: a
+            # torn recognizer produces low/spread word confidences even when
+            # the utterance collapses to a single hypothesis.
+            word_confs = [
+                float(w["alternatives"][0]["confidence"])
+                for w in taken
+                if w.get("alternatives")
+                and isinstance(
+                    w["alternatives"][0].get("confidence"), (int, float)
+                )
+                and not isinstance(w["alternatives"][0].get("confidence"), bool)
+            ]
+            mean_word_conf = (
+                round(sum(word_confs) / len(word_confs), 6) if word_confs else None
+            )
+            min_word_conf = round(min(word_confs), 6) if word_confs else None
+
+            hyp_dispersion = lily_nbest_dispersion(hypotheses)
+            if len(hypotheses) > 1:
+                dispersion = hyp_dispersion
+                dispersion_source = "hypothesis_variance"
+            elif len(word_confs) > 1:
+                # Population variance of the per-word confidences.
+                m = sum(word_confs) / len(word_confs)
+                dispersion = round(
+                    sum((c - m) ** 2 for c in word_confs) / len(word_confs), 6
+                )
+                dispersion_source = "word_confidence_variance"
+            else:
+                dispersion = hyp_dispersion  # 0.0 (single confident word)
+                dispersion_source = "word_confidence_variance"
             return {
                 "hypotheses": hypotheses,
-                "dispersion": lily_nbest_dispersion(hypotheses),
+                "dispersion": dispersion,
+                "dispersion_source": dispersion_source,
+                "mean_word_confidence": mean_word_conf,
+                "min_word_confidence": min_word_conf,
                 "word_count": len(taken),
                 "stream_start_time": stream_start,
                 "stream_end_time": stream_end,
                 "top_hypothesis_confidence": hypotheses[0].get("confidence"),
                 "speaker_consistency": speaker_consistency,
+                "speaker_filter_fallback": fallback,
                 "source": "per_word_synthesis",
             }
         except Exception as e:

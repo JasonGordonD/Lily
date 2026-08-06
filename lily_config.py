@@ -561,6 +561,17 @@ def stt_max_alternatives() -> int:
     return max(1, min(_get_int("LILY_STT_MAX_ALTERNATIVES", 1), 8))
 
 
+def garble_clarify_min_confidence() -> float:
+    """WS-11 garble gate: a finalized answer whose MEAN per-word recognizer
+    confidence falls below this over a multi-word utterance fires the light
+    clarify posture instead of scoring the garble. Tap-only mode (default
+    LILY_STT_MAX_ALTERNATIVES=1) synthesizes one hypothesis, so the
+    dispersion gate reads 0.000 even on torn speech — this is the honest
+    single-hypothesis backstop. Live garbled finals sat at 0.57–0.63 mean
+    word confidence; clean answers at 0.85+."""
+    return _get_float("LILY_GARBLE_CLARIFY_MIN_CONFIDENCE", 0.65)
+
+
 def nbest_dispersion_threshold() -> float:
     """Confidence-variance threshold above which a definitive Tier-1
     verdict on an n-best set is demoted to "uncertain" (escalate to the
