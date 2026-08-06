@@ -50,6 +50,9 @@ class _FakeBonusGame:
             }
         self.events: list[tuple[str, dict]] = []
         self.publish_calls = 0
+        # WS-7: the tool persists a bonus audit row when a supabase client
+        # exists; None keeps these tests offline.
+        self.supabase = None
 
     def send_event_nowait(self, event_type: str, payload: dict) -> None:
         self.events.append((event_type, dict(payload)))
@@ -124,3 +127,37 @@ def test_award_bonus_unknown_name_after_game_started_still_refuses_by_name():
     assert "Ghost" in msg
     assert game.sk.players["Dave"]["score"] == 0
     assert game.events == []
+
+
+def test_award_bonus_lands_ledger_entry_and_audit_row(monkeypatch):
+    # WS-7 score integrity: the bonus goes through the single write path
+    # (ledger entry, cause="bonus") and persists a lily_answers audit row
+    # — the live bonus point had none.
+    import lily_agent as _la
+
+    agent, game = _make_agent(game_started=True, players=["Dave"])
+    game.supabase = object()  # any non-None client triggers the write
+    written = []
+
+    async def _fake_write(supabase, session_id, entry):
+        written.append((session_id, dict(entry)))
+
+    monkeypatch.setattr(
+        _la.lily_persistence, "lily_write_score_event", _fake_write
+    )
+    loop = asyncio.new_event_loop()
+    try:
+        msg = loop.run_until_complete(
+            LilyAgent.lily_award_bonus.__wrapped__(
+                agent, None, "Dave", "glorious misfire"
+            )
+        )
+        # Drain the fire-and-forget task scheduled by ensure_future.
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+    assert msg == "Bonus point to Dave."
+    assert game.sk.score_ledger[-1]["cause"] == "bonus"
+    assert written == [("test-room", game.sk.score_ledger[-1])]
+    assert written[0][1]["points"] == 1
+    assert written[0][1]["transcript"] == "glorious misfire"

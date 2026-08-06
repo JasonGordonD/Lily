@@ -637,6 +637,14 @@ class LilyScorekeeper:
         # Mode changes recorded for the session report (B3 game_stats).
         self.mode_changes: list[dict] = []
 
+        # Score ledger (WS-7 score integrity): every scoring mutation —
+        # adjudicated answers, bonuses, make-goods, rehydration seeds —
+        # lands one entry here via apply_score_event, the SOLE score
+        # writer. Standings derive from ledger sums (ledger_scores);
+        # wrap-up reconciliation (reconcile_scores) compares the parallel
+        # per-player counters against them and hard-logs any drift.
+        self.score_ledger: list[dict] = []
+
         # Per-speaker recent finals for fragment-joined command detection
         self._recent_fragments: dict[str, list[tuple[float, str]]] = {}
 
@@ -1297,42 +1305,147 @@ class LilyScorekeeper:
         for state in self.players.values():
             state["questions_since_spoke"] += 1
 
+    def apply_score_event(
+        self,
+        player_name: str,
+        *,
+        cause: str,
+        correct: Optional[bool] = None,
+        points: int = 0,
+        category: Optional[str] = None,
+        question_id: Optional[str] = None,
+        question_index: Optional[int] = None,
+        transcript: Optional[str] = None,
+        eval_tier: Optional[int] = None,
+    ) -> Optional[dict]:
+        """The SOLE score writer (WS-7). Every scoring mutation — an
+        adjudicated result, a bonus, a make-good, an operator-directed
+        award — goes through here and lands one score_ledger entry with a
+        cause code. Nothing else may touch players[name]["score"].
+        WS-4's idempotent award keying bolts onto this entry point.
+
+        Cause vocabulary: "answer" (adjudication commit, correct set),
+        "bonus", "make_good", "operator_award", "rehydrate" (checkpoint
+        seed). correct=True applies answer semantics (streak/answers_correct
+        advance); correct=False resets the streak and forces points to 0;
+        correct=None moves points without touching the streak.
+
+        Returns the ledger entry, or None for an unrostered name (warned,
+        no mutation, no audit — a point can never land on a null player).
+        """
+        state = self.players.get(player_name)
+        if state is None:
+            logger.warning(
+                "LILY_STATE | SCORE_FOR_UNKNOWN_PLAYER | session=%s name=%s cause=%s",
+                self.session_id, player_name, cause,
+            )
+            return None
+        if correct is False:
+            points = 0
+            state["streak"] = 0
+        else:
+            state["score"] += points
+            if correct is True:
+                state["streak"] += 1
+                state["answers_correct"] = state.get("answers_correct", 0) + 1
+                if category or self.category:
+                    state["last_correct_category"] = category or self.category
+        entry = {
+            "player": player_name,
+            "cause": cause,
+            "correct": correct,
+            "points": points,
+            "question_id": question_id,
+            "question_index": (
+                question_index if question_index is not None
+                else self.question_number
+            ),
+            "transcript": transcript,
+            "eval_tier": eval_tier,
+            "score_after": state["score"],
+            "ts": _now_iso(),
+        }
+        self.score_ledger.append(entry)
+        logger.info(
+            "LILY_STATE | SCORE_COMMIT | session=%s player=%s cause=%s correct=%s points=%d score=%d streak=%d",
+            self.session_id, player_name, cause, correct, points,
+            state["score"], state["streak"],
+        )
+        return entry
+
     def record_result(
         self,
         player_name: str,
         correct: bool,
         points: int = 1,
         category: Optional[str] = None,
+        question_id: Optional[str] = None,
+        transcript: Optional[str] = None,
+        eval_tier: Optional[int] = None,
     ) -> Optional[dict]:
         """Commit an adjudicated result. Event-bound truth: Lily never
-        announces a score change that hasn't landed here first."""
-        state = self.players.get(player_name)
-        if state is None:
-            logger.warning(
-                "LILY_STATE | SCORE_FOR_UNKNOWN_PLAYER | session=%s name=%s",
-                self.session_id, player_name,
-            )
-            return None
-        if correct:
-            state["score"] += points
-            state["streak"] += 1
-            state["answers_correct"] = state.get("answers_correct", 0) + 1
-            if category or self.category:
-                state["last_correct_category"] = category or self.category
-        else:
-            state["streak"] = 0
-        logger.info(
-            "LILY_STATE | SCORE_COMMIT | session=%s player=%s correct=%s points=%d score=%d streak=%d",
-            self.session_id, player_name, correct, points if correct else 0,
-            state["score"], state["streak"],
+        announces a score change that hasn't landed here first. Delegates
+        to apply_score_event (cause="answer") — the single write path."""
+        entry = self.apply_score_event(
+            player_name,
+            cause="answer",
+            correct=correct,
+            points=points,
+            category=category,
+            question_id=question_id,
+            transcript=transcript,
+            eval_tier=eval_tier,
         )
-        return state
+        if entry is None:
+            return None
+        return self.players.get(player_name)
 
-    def award_bonus(self, player_name: str, points: int = 1) -> None:
-        """Bonus point (e.g. best wrong answer of the round)."""
-        state = self.players.get(player_name)
-        if state is not None:
-            state["score"] += points
+    def award_bonus(self, player_name: str, points: int = 1,
+                    transcript: Optional[str] = None) -> Optional[dict]:
+        """Bonus point (e.g. best wrong answer of the round). Returns the
+        ledger entry so the agent layer can persist the audit row."""
+        return self.apply_score_event(
+            player_name,
+            cause="bonus",
+            points=points,
+            transcript=transcript,
+        )
+
+    def ledger_scores(self) -> dict[str, int]:
+        """Per-player score totals derived from the ledger — the standings
+        truth. Every rostered player appears (0 without entries)."""
+        sums: dict[str, int] = {name: 0 for name in self.players}
+        for entry in self.score_ledger:
+            name = entry.get("player")
+            if name in sums:
+                sums[name] += int(entry.get("points") or 0)
+        return sums
+
+    def reconcile_scores(self) -> list[dict]:
+        """Wrap-up reconciliation (WS-7): compare the per-player counters
+        against ledger sums. Any drift means something wrote a score
+        outside the choke point — hard-logged per player. Returns the
+        mismatch list (empty when clean)."""
+        sums = self.ledger_scores()
+        mismatches = []
+        for name, state in self.players.items():
+            counter = int(state.get("score", 0))
+            ledger = sums.get(name, 0)
+            if counter != ledger:
+                mismatches.append(
+                    {"player": name, "counter": counter, "ledger": ledger}
+                )
+                logger.error(
+                    "LILY_SCORE | RECONCILE_MISMATCH | session=%s player=%s "
+                    "counter=%d ledger=%d",
+                    self.session_id, name, counter, ledger,
+                )
+        if not mismatches:
+            logger.info(
+                "LILY_SCORE | RECONCILE_OK | session=%s players=%d entries=%d",
+                self.session_id, len(self.players), len(self.score_ledger),
+            )
+        return mismatches
 
     def use_lifeline(self, player_name: str) -> bool:
         state = self.players.get(player_name)
@@ -1617,6 +1730,7 @@ class LilyScorekeeper:
             "unrostered_labels": dict(self.unrostered_labels),
             "status_notes": list(self.status_notes),
             "mode_changes": list(self.mode_changes),
+            "score_ledger": [dict(e) for e in self.score_ledger],
         }
 
     def rehydrate(self, snap: dict) -> None:
@@ -1643,6 +1757,30 @@ class LilyScorekeeper:
         self.mode_changes = list(snap.get("mode_changes") or [])
         for name, s in (snap.get("players") or {}).items():
             self.players[name] = dict(s)
+        # Score-ledger restore (WS-7): the ledger travels with the
+        # checkpoint. Legacy snapshots (or any player whose restored
+        # counter outruns the restored ledger) get a "rehydrate" seed
+        # entry for the difference, so ledger sums == counters holds from
+        # the first post-restore reconcile.
+        self.score_ledger.extend(
+            dict(e) for e in (snap.get("score_ledger") or [])
+        )
+        sums = self.ledger_scores()
+        for name, state in self.players.items():
+            diff = int(state.get("score", 0)) - sums.get(name, 0)
+            if diff != 0:
+                self.score_ledger.append({
+                    "player": name,
+                    "cause": "rehydrate",
+                    "correct": None,
+                    "points": diff,
+                    "question_id": None,
+                    "question_index": self.question_number,
+                    "transcript": None,
+                    "eval_tier": None,
+                    "score_after": int(state.get("score", 0)),
+                    "ts": _now_iso(),
+                })
         logger.info(
             "LILY_STATE | REHYDRATED | session=%s players=%d phase=%s round=%d",
             self.session_id, len(self.players), self.phase, self.round,

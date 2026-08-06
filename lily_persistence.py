@@ -356,24 +356,76 @@ async def lily_write_answer(
     verdict: str,
     eval_tier: int,
     awarded_points: int,
+    cause: Optional[str] = None,
 ) -> None:
-    """Fire-and-forget audit row for every adjudicated attempt."""
+    """Fire-and-forget audit row for every scoring event (WS-7: not just
+    adjudicated attempts — bonuses, make-goods, operator awards too).
+
+    ``cause`` targets the lily_answers.cause column (Doc DDL request).
+    Until that column lands, the first insert fails and is retried once
+    without the key — the row is never lost, and non-adjudication events
+    keep their trace because their verdict field carries the cause code.
+    Once the column exists the same code path lights it up unchanged."""
+    row = {
+        "session_id": session_id,
+        "player_name": player_name,
+        "question_id": question_id,
+        "question_index": question_index,
+        "transcript": transcript,
+        "verdict": verdict,
+        "eval_tier": eval_tier,
+        "awarded_points": awarded_points,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    if cause is not None:
+        row["cause"] = cause
     try:
         await asyncio.to_thread(
-            lambda: supabase.table("lily_answers").insert({
-                "session_id": session_id,
-                "player_name": player_name,
-                "question_id": question_id,
-                "question_index": question_index,
-                "transcript": transcript,
-                "verdict": verdict,
-                "eval_tier": eval_tier,
-                "awarded_points": awarded_points,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }).execute()
+            lambda: supabase.table("lily_answers").insert(row).execute()
         )
     except Exception as e:
-        logger.error("lily_write_answer error: %s", e)
+        if "cause" not in row:
+            logger.error("lily_write_answer error: %s", e)
+            return
+        logger.info(
+            "lily_write_answer: cause column not accepted (%s) — "
+            "retrying without it (cause=%s encoded in verdict for "
+            "non-adjudication rows)", e, row.pop("cause"),
+        )
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("lily_answers").insert(row).execute()
+            )
+        except Exception as e2:
+            logger.error("lily_write_answer error: %s", e2)
+
+
+async def lily_write_score_event(
+    supabase: SupabaseClient,
+    session_id: str,
+    entry: dict,
+) -> None:
+    """Persist one score-ledger entry (LilyScorekeeper.apply_score_event)
+    as a lily_answers row. Adjudication rows keep verdict semantics
+    (correct/incorrect); every other cause writes its cause code as the
+    verdict — the clean non-DDL trace until the cause column lands."""
+    cause = entry.get("cause") or "unknown"
+    if cause == "answer":
+        verdict = "correct" if entry.get("correct") else "incorrect"
+    else:
+        verdict = cause
+    await lily_write_answer(
+        supabase,
+        session_id,
+        entry.get("player"),
+        entry.get("question_id"),
+        int(entry.get("question_index") or 0),
+        entry.get("transcript") or "",
+        verdict,
+        int(entry.get("eval_tier") or 0),
+        int(entry.get("points") or 0),
+        cause=cause,
+    )
 
 
 # ---------------------------------------------------------------------------

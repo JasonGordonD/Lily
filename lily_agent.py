@@ -528,13 +528,17 @@ class LilyGame:
     def _players_payload(self) -> list[dict]:
         if not self.sk.players:
             return []
-        top = max(s["score"] for s in self.sk.players.values())
-        leaders = [n for n, s in self.sk.players.items() if s["score"] == top and top > 0]
+        # Scores derive from the ledger (WS-7) — the single write path's
+        # sums, never the parallel per-player counters. The choke point
+        # keeps both in sync; wrap-up reconciliation flags any drift.
+        scores = self.sk.ledger_scores()
+        top = max(scores.values())
+        leaders = [n for n, v in scores.items() if v == top and top > 0]
         sole_leader = leaders[0] if len(leaders) == 1 else None
         return [
             {
                 "name": name,
-                "score": s["score"],
+                "score": scores[name],
                 "streak": s["streak"],
                 "leader": name == sole_leader,
             }
@@ -3769,20 +3773,34 @@ class LilyGame:
             if winner_candidate is not None:
                 if winner_candidate["player"]:
                     winner = winner_candidate["player"]
-                    self.sk.record_result(winner, correct=True, points=points)
+                    self.sk.record_result(
+                        winner, correct=True, points=points,
+                        question_id=question.get("id"),
+                        transcript=winner_candidate["text"],
+                    )
                 else:
                     # Open-floor winner: never silently attributed. Hold the
                     # award until lily_bind_speaker lands for that voice.
+                    # Question context rides along so the eventual make-good
+                    # commit lands a fully-traceable ledger entry + audit row
+                    # (WS-7 — the live make-good had no lily_answers row).
                     self._pending_unbound_award = {
                         "speaker_label": winner_candidate["speaker_label"],
                         "points": points,
+                        "question_id": question.get("id"),
+                        "question_index": self.sk.question_number,
+                        "transcript": winner_candidate["text"],
                     }
             for cand in ordered:
                 key = cand["player"] or f"unrostered:{cand['speaker_label']}"
                 self._judged_keys.add(key)
                 is_winner = cand is winner_candidate
                 if cand["player"] and not is_winner:
-                    self.sk.record_result(cand["player"], correct=False, points=0)
+                    self.sk.record_result(
+                        cand["player"], correct=False, points=0,
+                        question_id=question.get("id"),
+                        transcript=cand["text"],
+                    )
                 if self.supabase is not None:
                     asyncio.ensure_future(lily_persistence.lily_write_answer(
                         self.supabase,
@@ -3797,6 +3815,7 @@ class LilyGame:
                         1 if cand.get("_tier1", {}).get("verdict")
                         in ("correct", "incorrect") else eval_tier,
                         points if is_winner else 0,
+                        cause="answer",
                     ))
 
             # B1 implicit weak labels at adjudication commit: the winning
@@ -4674,6 +4693,10 @@ class LilyGame:
         standings = sorted(
             self._players_payload(), key=lambda p: -p["score"]
         )
+        # Wrap-up reconciliation (WS-7): standings (ledger-derived) vs the
+        # per-player counters — any mismatch is hard-logged inside
+        # reconcile_scores before anything persists.
+        self.sk.reconcile_scores()
         # Comeback callout: the wager round flipped the leaderboard.
         if (
             standings
@@ -4721,6 +4744,11 @@ class LilyGame:
             }
             for name, s in self.sk.players.items()
         }
+        # Score reconciliation (WS-7): the report records whether the
+        # counters and the ledger agreed at report time — the three
+        # surfaces (per_player, lily_answers, final_standings) disagreeing
+        # pairwise is the live failure this audits.
+        mismatches = self.sk.reconcile_scores()
         return {
             "final_standings": standings,
             "rounds_played": self.sk.round,
@@ -4728,6 +4756,11 @@ class LilyGame:
             "per_player": per_player,
             "mode_changes": list(self.sk.mode_changes),
             "callouts": list(self.highlights),
+            "score_reconciliation": {
+                "ok": not mismatches,
+                "mismatches": mismatches,
+                "ledger_entries": len(self.sk.score_ledger),
+            },
             "duration_s": round(time.time() - self.session_started_at, 1),
         }
 
@@ -5025,7 +5058,22 @@ class LilyGame:
         pending = self._pending_unbound_award
         if pending and pending["speaker_label"] == speaker_label:
             self._pending_unbound_award = None
-            self.sk.record_result(player_name, correct=True, points=pending["points"])
+            # Make-good commit through the single write path (WS-7): the
+            # held open-floor point lands with its own cause code and an
+            # audit row — the live make-good had no lily_answers row.
+            entry = self.sk.apply_score_event(
+                player_name,
+                cause="make_good",
+                correct=True,
+                points=pending["points"],
+                question_id=pending.get("question_id"),
+                question_index=pending.get("question_index"),
+                transcript=pending.get("transcript"),
+            )
+            if entry is not None and self.supabase is not None:
+                asyncio.ensure_future(lily_persistence.lily_write_score_event(
+                    self.supabase, self.sk.session_id, entry,
+                ))
             note = f" Their held point ({pending['points']}) is now committed."
         # NOTE (supersedes the spec's dynamic max_speakers idea): the 1.6.6
         # Speechmatics plugin has NO in-flight update path for max_speakers
@@ -5453,8 +5501,15 @@ class LilyAgent(Agent):
         name = (player_name or "").strip()
         if name not in self._game.sk.players:
             return f"No rostered player named {name!r} — no point awarded."
-        self._game.sk.award_bonus(name)
         clean_reason = (reason or "").strip()[:200] or None
+        entry = self._game.sk.award_bonus(name, transcript=clean_reason)
+        # Bonus audit row (WS-7): every scoring mutation writes a
+        # lily_answers row with a cause — the live bonus point had none.
+        supabase = self._game.supabase
+        if entry is not None and supabase is not None:
+            asyncio.ensure_future(lily_persistence.lily_write_score_event(
+                supabase, self._game.sk.session_id, entry,
+            ))
         self._game.send_event_nowait(
             "best_wrong_answer",
             {
