@@ -235,19 +235,51 @@ def test_no_stuck_claims_predicate_tracks_reconciliation():
 
     _arm(game, GHOST_Q1)
     game.say_registry.claim(_delivery_key(game))
-    # Freshly dispatched: in-flight, not yet stuck.
+    # Freshly dispatched, no re-fire yet: in-flight, not stuck.
     assert game.no_stuck_claims() is True
 
-    # Accrue the stuck window WITHOUT firing the action (probe one short,
-    # then the boundary tick flips it stuck before it re-fires-resets).
-    ticks = game._undelivered_reconcile_ticks()
-    for _ in range(ticks - 1):
-        game.reconcile_undelivered_claim()
-    game._undelivered_ticks = ticks  # at/over the window, action not yet run
+    # First re-fire raises the persistent stuck signal.
+    assert _tick_to_threshold(game) == "refired"
     assert game.no_stuck_claims() is False
 
-    # Reconcile re-fires and clears the stuck state.
-    game.reconcile_undelivered_claim()
+    # The delivery finally airs: its claim confirms -> cleared.
+    key = _delivery_key(game)
+    game.say_registry.claim(key)
+    game.say_registry.confirm(key)
+    assert game.no_stuck_claims() is True
+
+
+def test_predicate_stays_false_across_ticks_during_persistent_stall():
+    # The WS-6 requirement: no_stuck_claims() must report False for the
+    # DURATION of an active stall, not just at the single threshold-crossing
+    # tick. _undelivered_refires persists across the reset that clears
+    # _undelivered_ticks each cycle.
+    game = _make_game()
+    _arm(game, GHOST_Q1)
+    game.say_registry.claim(_delivery_key(game))
+
+    # First stuck window -> first re-fire; stuck signal now up.
+    assert _tick_to_threshold(game) == "refired"
+    assert game._undelivered_refires == 1
+    assert game.no_stuck_claims() is False
+
+    # Delivery STILL never airs. Across the idle ticks that accrue toward
+    # the next re-fire, a WS-6 reader BETWEEN watchdog ticks keeps seeing
+    # stuck — this is exactly the between-tick window the old ticks-based
+    # predicate lost.
+    ticks = game._undelivered_reconcile_ticks()
+    for _ in range(ticks - 1):
+        assert game.reconcile_undelivered_claim() == "idle"
+        assert game.no_stuck_claims() is False
+    # The window-closing tick re-fires again; still stuck across it.
+    assert game.reconcile_undelivered_claim() == "refired"
+    assert game._undelivered_refires == 2
+    assert game.no_stuck_claims() is False
+
+    # Only once the question is released does it clear.
+    game.say_registry.claim(_delivery_key(game))
+    assert _tick_to_threshold(game) == "released"
+    assert game.armed_question is None
     assert game.no_stuck_claims() is True
 
 
@@ -257,7 +289,7 @@ def test_no_stuck_claims_true_when_delivery_confirmed():
     key = _delivery_key(game)
     game.say_registry.claim(key)
     game.say_registry.confirm(key)
-    game._undelivered_ticks = 99  # even with stale ticks, a confirmed
+    game._undelivered_refires = 5  # even mid-re-fire-cycle, a confirmed
     assert game.no_stuck_claims() is True  # delivery is never stuck
 
 

@@ -2111,11 +2111,22 @@ class LilyGame:
         return self.say_registry.state(key) == lily_say_gate.CLAIM_CONFIRMED
 
     def _stuck_delivery_present(self) -> bool:
-        """True iff a registered-undelivered claim has already accrued the
-        full reconcile window without confirming (WS-2's stuck class),
-        measured against CURRENT state. A freshly-armed or in-flight
-        delivery is NOT stuck (its ticks have not accrued) — only one that
-        has outlived the reconcile window is."""
+        """True iff the armed question's delivery has been re-fired at least
+        once and STILL has not aired (WS-2's stuck class), measured against
+        CURRENT state.
+
+        The persistent signal is `_undelivered_refires`, NOT
+        `_undelivered_ticks`: the tick counter resets to 0 inside the same
+        synchronous reconcile call that crosses the threshold (before it
+        re-fires), so a caller reading between watchdog ticks never catches
+        it at/above threshold — the stuck window would have zero observable
+        duration. `_undelivered_refires` is raised at the first re-fire and
+        clears only when the delivery confirms (open_window), the question
+        is released (_release_armed_question_to_supply), or a new question
+        arms — so it holds False across the WHOLE active re-fire cycle,
+        which is what WS-6 reads to keep its supply fallback off a ghost.
+        A freshly-armed or normally in-flight delivery (no re-fire yet) is
+        NOT stuck."""
         if not getattr(self, "game_started", False) or getattr(
             self, "game_over", False
         ):
@@ -2126,10 +2137,7 @@ class LilyGame:
             return False
         if self._delivery_confirmed():
             return False
-        return (
-            getattr(self, "_undelivered_ticks", 0)
-            >= self._undelivered_reconcile_ticks()
-        )
+        return getattr(self, "_undelivered_refires", 0) > 0
 
     def no_stuck_claims(self) -> bool:
         """WS-6 gate: True when reconciliation reports no registered-
