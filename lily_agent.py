@@ -66,6 +66,7 @@ import lily_bank
 import lily_bank_tuning
 import lily_capabilities
 import lily_config
+import lily_dereverb
 import lily_evaluation
 import lily_forget
 import lily_memory
@@ -5740,6 +5741,18 @@ class LilyAgent(Agent):
                 self._game.greeting_instructions(),
                 source="on_enter",
             )
+
+    def stt_node(self, audio, model_settings):
+        # WS-16 (AMENDMENT-002): pre-STT dereverberation node, DEFAULT OFF
+        # (LILY_DEREVERB_NODE) — enabling is gated on the decision memo +
+        # operator sign-off. Off returns None here and the stream is passed
+        # through untouched with zero new imports on the boot path. The
+        # node preserves frame cadence 1:1 (constant in-stream algorithmic
+        # delay only), and any processor failure degrades to passthrough.
+        processor = lily_dereverb.lily_create_dereverb_processor()
+        if processor is not None:
+            audio = lily_dereverb.lily_dereverb_frames(audio, processor)
+        return super().stt_node(audio, model_settings)
 
     # -- tools ------------------------------------------------------------------
 

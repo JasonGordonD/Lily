@@ -3,6 +3,8 @@ livekit-plugins-speechmatics==1.6.6
 livekit-plugins-google==1.6.6
 livekit-plugins-silero==1.6.6
 livekit-plugins-noise-cancellation==0.2.6
+livekit-plugins-ai-coustics==0.3.0
+nara_wpe==0.0.11
 google-genai>=2.0.0
 supabase>=2.27.2
 httpx>=0.27.0

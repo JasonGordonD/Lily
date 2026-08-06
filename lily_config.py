@@ -698,3 +698,16 @@ def architect_mode() -> bool:
     saying "I'm the architect" never changes it.
     """
     return _get_bool("LILY_ARCHITECT_MODE", False)
+
+
+# ---------------------------------------------------------------------------
+# Dereverberation node (WO-LILY-OMNIBUS-003 WS-16 / AMENDMENT-002)
+# ---------------------------------------------------------------------------
+
+def dereverb_node_mode() -> str:
+    """Pre-STT dereverberation node: "off" (default) | "wpe" | "aic".
+
+    DEFAULT OFF — enabling is gated on the WS-16 decision memo and operator
+    sign-off. Unknown values resolve to "off"."""
+    raw = (_get("LILY_DEREVERB_NODE") or "off").strip().lower()
+    return raw if raw in ("off", "wpe", "aic") else "off"
