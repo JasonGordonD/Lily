@@ -75,7 +75,8 @@ def _clamp_confidence(value) -> Optional[float]:
 def lily_extract_diarization_confidence(event) -> Optional[float]:
     """Best-effort Speechmatics diarization confidence extraction.
 
-    The 1.6.6 event shape has drifted in the field across wrappers, so this
+    The event shape drifted in the field across wrappers (observed live on
+    1.6.4; extraction stays defensive at 1.6.6), so this
     helper checks common attribute names and an optional dict payload before
     giving up.
     """

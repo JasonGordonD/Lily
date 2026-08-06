@@ -6171,9 +6171,20 @@ async def entrypoint(ctx: JobContext) -> None:
             failed = False
             try:
                 exc_fn = getattr(handle, "exception", None)
-                failed = callable(exc_fn) and exc_fn() is not None
-            except Exception:
-                pass
+                speech_exc = exc_fn() if callable(exc_fn) else None
+                if speech_exc is not None:
+                    failed = True
+                    logger.warning(
+                        "LILY_SPEECH | GENERATION_FAILED | speech_id=%s exc=%r "
+                        "— routing to suppressed path (claims release, turn "
+                        "not recorded)",
+                        getattr(handle, "id", "?"), speech_exc,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "LILY_SPEECH | exception() probe failed on speech_id=%s: %r",
+                    getattr(handle, "id", "?"), e,
+                )
             spoken = ""
             try:
                 for item in handle.chat_items:
