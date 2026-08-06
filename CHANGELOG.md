@@ -5,6 +5,32 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-06 — Live log-audit fixes (post-deploy hygiene)
+
+Evening log review of the freshly deployed build (session lily-05AAC9)
+walked the full say-gate lifecycle live — every branch held. Two real
+findings, both fixed:
+
+- **Idle watchdog outlived the session** (`TICK_FAILED |
+  AgentSession isn't running`, once per hangup): the loop only checked
+  `game_over`, so its first post-close tick dispatched against a dead
+  session. `stop_idle_watchdog()` now cancels the task in the close
+  handler, with a `_session_closed` flag as the in-loop belt.
+- **NUDGE_NEAR_MISS diagnostic** (05AAC9 q=2: `DELIVERY_NUDGE` at
+  `ratio=1.00`): a near-verbatim performance the strict claim matcher
+  rejected means the table likely heard the question twice (organic +
+  nudged sheet-read) — most plausibly an MC read missing options. A
+  nudge at ratio ≥ 0.9 now logs the exact spoken vs armed text so the
+  matcher gap is diagnosable from the log alone before any loosening.
+
+Noted, no action: ARMED_LIMBO q=3 (watchdog forced a late adjudication —
+recovery worked; recurring occurrences would warrant a hunt), the lobby
+preemptive-generation draft discards (latency-only), the Speechmatics
+`operating_point` deprecation (upstream; plugin ≥1.6.8 migration is
+bench-gated per the audio-pipeline enable rule), and the framework's
+segment-synchronizer duplicate playback-start line (benign).
+Pinned in tests/test_hotfix002.py; full suite green (1219).
+
 
 ## 2026-08-06 — WO-LILY-ADULT-PICTURES-001: adult deck picture rounds enabled (generated images -> Grok)
 

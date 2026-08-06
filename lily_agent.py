@@ -2693,10 +2693,24 @@ class LilyGame:
         self._supply_stall_ticks = 0
         self._watchdog_task = asyncio.ensure_future(self._idle_watchdog())
 
+    def stop_idle_watchdog(self) -> None:
+        """Session close: stop the watchdog for good (2026-08-06 log
+        audit — the loop survived the AgentSession and its first
+        post-close tick dispatched against a dead session: TICK_FAILED
+        `AgentSession isn't running`, once per hangup). Cancel plus the
+        _session_closed flag (belt for a tick already past the sleep)."""
+        self._session_closed = True
+        task = getattr(self, "_watchdog_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._watchdog_task = None
+
     async def _idle_watchdog(self) -> None:
-        while not self.game_over:
+        while not self.game_over and not getattr(self, "_session_closed", False):
             await asyncio.sleep(self.WATCHDOG_INTERVAL_SECONDS)
             try:
+                if getattr(self, "_session_closed", False):
+                    return
                 if not self.game_started or self.game_over:
                     continue
                 if (
@@ -3594,6 +3608,21 @@ class LilyGame:
                 self.sk.session_id, self.sk.question_number, ratio,
                 WINDOW_FALLBACK_AGENT_TURNS,
             )
+            if ratio >= 0.9:
+                # 2026-08-06 log audit (session 05AAC9 q=2, ratio=1.00):
+                # a near-verbatim performance that the strict claim
+                # matcher rejected means the table likely hears the
+                # question TWICE (organic + nudged sheet-read). Capture
+                # exactly what was spoken vs armed so the matcher gap is
+                # diagnosable from the log alone.
+                logger.warning(
+                    "LILY_WINDOW | NUDGE_NEAR_MISS | session=%s q=%d "
+                    "ratio=%.2f — high-similarity turn did NOT register "
+                    "a delivery claim | spoken=%r | armed=%r",
+                    self.sk.session_id, self.sk.question_number, ratio,
+                    (spoken_text or "")[:220],
+                    str((self.armed_question or {}).get("prompt", ""))[:180],
+                )
             self.expect_delivery()
             self.gated_say(
                 None,
@@ -8317,6 +8346,10 @@ async def entrypoint(ctx: JobContext) -> None:
         async def _persist() -> None:
             try:
                 heartbeat_stop.set()
+                # 2026-08-06 log audit: the idle watchdog must die WITH the
+                # session — its post-close ticks dispatched against a dead
+                # AgentSession (TICK_FAILED once per hangup).
+                game.stop_idle_watchdog()
                 # Difficulty self-tuning + retirement (sub-agent E):
                 # session-end job, fire-and-forget — it runs concurrently
                 # with the awaited persistence writes below and is never

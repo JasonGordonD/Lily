@@ -217,3 +217,59 @@ def test_unverifiable_candidate_says_so(caplog):
     assert any(
         "DEVICE_VERIFY_UNAVAILABLE" in r.message for r in caplog.records
     )
+
+
+# -- 2026-08-06 log-audit fixes ------------------------------------------------
+
+
+def test_stop_idle_watchdog_cancels_and_flags():
+    """TICK_FAILED class: the watchdog must die WITH the session — after
+    stop_idle_watchdog() no tick can ever run against a dead AgentSession."""
+    game = LilyGame.__new__(LilyGame)
+    game.game_over = False
+    game.game_started = True
+
+    async def scenario():
+        game._watchdog_task = asyncio.ensure_future(asyncio.sleep(60))
+        game.stop_idle_watchdog()
+        await asyncio.sleep(0)
+        assert game._session_closed is True
+        assert game._watchdog_task is None
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(scenario())
+    finally:
+        loop.close()
+
+
+def test_nudge_near_miss_logs_spoken_vs_armed(caplog):
+    """Session 05AAC9 q=2 fixture: a near-verbatim performance (ratio 1.00)
+    that the strict claim matcher rejects (MC options unread) must log the
+    NUDGE_NEAR_MISS diagnostic carrying spoken vs armed text."""
+    from test_desync_fixture import _make_game as _desync_game
+    from lily_agent import WINDOW_FALLBACK_AGENT_TURNS
+
+    game = _desync_game()
+    game.armed_question = {
+        "prompt": "Which planet in our solar system has the most moons?",
+        "canonical_answer": "Saturn",
+        "acceptable_answers": ["saturn"],
+        "choices": ["Jupiter", "Saturn", "Uranus", "Neptune"],
+    }
+    game.sk.start_question(game.armed_question)
+    game._armed_speech_misses = 0
+    game._pending_delivery_qnum = None
+    game.ui_phase = "question"
+    # She performs the question sentence verbatim — but never the options,
+    # so the strict matcher refuses the claim while the ratio reads ~1.0.
+    spoken = "Which planet in our solar system has the most moons?"
+    with caplog.at_level(logging.WARNING):
+        for _ in range(WINDOW_FALLBACK_AGENT_TURNS):
+            assert game.register_delivery_claim(spoken) is None
+            game.on_agent_speech_finished(spoken)
+    near_miss = [r for r in caplog.records if "NUDGE_NEAR_MISS" in r.message]
+    assert near_miss, "high-ratio unclaimed delivery must log the diagnostic"
+    msg = near_miss[0].getMessage()
+    assert "most moons" in msg  # spoken text captured
+    assert game.sk.answer_window_open is False  # still no ghost window
