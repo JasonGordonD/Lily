@@ -4901,6 +4901,37 @@ class LilyGame:
 
         # Media-mode spoken choice (sub-agent K): sticky flag flips
         # instantly, in code — same discipline as "back to normal".
+        # PATCH-003 P7: a delivery-rate request ('speak slower') is applied
+        # in code BEFORE the ack — the fixture was a fragment + no change.
+        # One warm ack (operator anchor 'Slower it is.'); the state block
+        # carries the pace so sentences shorten and pauses lengthen on both
+        # voices whether or not the voice honors the speed param.
+        pace_request = lily_scorekeeper.lily_detect_pace_request(text)
+        if pace_request and pace_request != self.sk.delivery_pace:
+            self.set_delivery_pace(pace_request)
+            self.publish_attributes_nowait()
+            if pace_request == "slow":
+                self.gated_say(
+                    None, "pace_ack",
+                    "The player asked you to slow down — it's applied in "
+                    "code and takes effect on your next turn. REGISTER "
+                    "GUIDANCE (vary freely within this length and "
+                    "temperature, never longer): one short warm sentence — "
+                    "'Slower it is.' Then, from here on, shorter sentences "
+                    "and a beat more pause between them.",
+                    source="voice_command",
+                )
+            else:
+                self.gated_say(
+                    None, "pace_ack",
+                    "The player asked you to speed back up — applied in "
+                    "code. REGISTER GUIDANCE (vary freely within this "
+                    "length and temperature, never longer): one short warm "
+                    "sentence acknowledging it, then keep moving at your "
+                    "normal clip.",
+                    source="voice_command",
+                )
+
         media_choice = result.get("media_choice")
         if media_choice and media_choice != self.sk.media_mode:
             if media_choice == "pictures":
@@ -6584,6 +6615,31 @@ class LilyGame:
             )
         return None
 
+    def set_delivery_pace(self, level: str) -> bool:
+        """PATCH-003 P7: apply a delivery-rate request. Sets the session
+        field, applies the TTS speed where the voice supports it, and
+        returns True if accepted. Text-layer compensation (shorter
+        sentences + more pause) rides the state block regardless — so
+        'slower' always takes effect on both voices, even if the voice
+        can't honor the speed change."""
+        value = (level or "").strip().lower()
+        if value not in ("normal", "slow"):
+            return False
+        self.sk.delivery_pace = value
+        tts = getattr(self, "tts", None)
+        applied_to_voice = False
+        set_pace = getattr(tts, "set_pace", None)
+        if callable(set_pace):
+            try:
+                applied_to_voice = bool(set_pace(value))
+            except Exception as e:
+                logger.warning("LILY_PACE | tts set_pace failed: %s", e)
+        logger.info(
+            "LILY_PACE | session=%s pace=%s tts_rate_applied=%s",
+            self.sk.session_id, value, applied_to_voice,
+        )
+        return True
+
     def picture_activation_outcome(self) -> str:
         """PATCH-003 P1: can pictures-on actually flip right now? Reads the
         picture lane and returns 'on' (flip + confirm), 'unavailable_gen'
@@ -6610,6 +6666,14 @@ class LilyGame:
                 extra.append(lane_line)
         except Exception:
             pass  # grounding is enrichment; never breaks the state block
+        # PATCH-003 P7: a slow delivery pace shapes the TEXT on both voices
+        # (the voice speed change is best-effort; this always applies).
+        if getattr(self.sk, "delivery_pace", "normal") == "slow":
+            extra.append(
+                "delivery pace: SLOW (the table asked) — keep sentences "
+                "short and add a beat more pause between them; unhurried, "
+                "never clipped"
+            )
         # Room-temperature read (WO-LILY-AUDEERING-001 Task 3): NL descriptor
         # lines only — zero scalars; neutral room injects NOTHING. The [env:]
         # line appears at most once per refresh. Synchronous read — never
@@ -8849,11 +8913,13 @@ async def entrypoint(ctx: JobContext) -> None:
         api_key=lily_config.google_api_key(),
     )
     game._general_llm = general_vocal_llm
+    lily_tts_instance = LilyTTS()  # voice1 (primary)
+    game.tts = lily_tts_instance  # P7: reachable for set_delivery_pace
     session = AgentSession(
         userdata={"scorekeeper": scorekeeper, "game": game},
         stt=stt,
         llm=general_vocal_llm,
-        tts=LilyTTS(),  # voice1 (primary) via lily_config.lily_voice_id()
+        tts=lily_tts_instance,  # voice1 (primary) via lily_config.lily_voice_id()
         vad=silero.VAD.load(),  # barge-in enabled; no STT gating during TTS
         turn_handling=TurnHandlingOptions(
             interruption=InterruptionOptions(

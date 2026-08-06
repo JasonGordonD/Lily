@@ -86,6 +86,10 @@ class _TTSOpts:
     api_key: str
     model_id: str
     output_format: str
+    # PATCH-003 P7: session pace multiplier on the resolved speed
+    # (1.0 = normal, <1.0 = slower). Snapshotted per synthesize() like
+    # every other opt, so a mid-session pace change takes the next turn.
+    pace_multiplier: float = 1.0
 
 
 class LilyTTS(tts.TTS):
@@ -113,7 +117,24 @@ class LilyTTS(tts.TTS):
             api_key=api_key or lily_config.eleven_api_key(),
             model_id=model_id,
             output_format=OUTPUT_FORMAT,
+            pace_multiplier=1.0,
         )
+
+    # PATCH-003 P7 pace levels — a modest slow-down the ElevenLabs speed
+    # param supports cleanly (below ~0.8 the voice distorts). Text-layer
+    # compensation (shorter sentences, more pause) rides the state block
+    # regardless of whether the voice honors the speed change.
+    _PACE_MULTIPLIERS = {"normal": 1.0, "slow": 0.88}
+
+    def set_pace(self, level: str) -> bool:
+        """Set the session delivery pace ('normal' | 'slow'). Returns True
+        if the level was applied to the TTS speed. Safe to call between
+        turns — synthesize() snapshots _opts each call."""
+        mult = self._PACE_MULTIPLIERS.get((level or "").strip().lower())
+        if mult is None:
+            return False
+        self._opts.pace_multiplier = mult
+        return True
 
     @property
     def model(self) -> str:
@@ -246,10 +267,17 @@ class LilyChunkedStream(tts.ChunkedStream):
             chunk_count = 0
 
             for chunk_index, text_chunk in enumerate(text_chunks):
+                # P7: apply the session pace to the resolved speed (a slow
+                # pace lowers it modestly; normal leaves it untouched).
+                voice_settings = dict(_voice_settings_for(self._opts.voice_id))
+                if self._opts.pace_multiplier != 1.0 and "speed" in voice_settings:
+                    voice_settings["speed"] = round(
+                        voice_settings["speed"] * self._opts.pace_multiplier, 3
+                    )
                 body = {
                     "text": text_chunk,
                     "model_id": self._opts.model_id,
-                    "voice_settings": _voice_settings_for(self._opts.voice_id),
+                    "voice_settings": voice_settings,
                     "apply_text_normalization": "auto",
                 }
 

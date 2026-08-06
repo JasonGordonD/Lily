@@ -268,6 +268,35 @@ _PACING_TIMED_NEGATION_RE = _re.compile(
 )
 
 
+_PACE_SLOWER_RE = _re.compile(
+    r"\b(?:speak|talk|go|say (?:it|that)|slow) (?:it |them )?"
+    r"(?:down |a bit |a little )?slow(?:er|ly)?\b"
+    r"|\bslow(?:er| down| it down)\b"
+    r"|\btoo fast\b|\byou'?re going too fast\b|\bnot so fast\b"
+)
+_PACE_FASTER_RE = _re.compile(
+    r"\b(?:speak|talk|go|say (?:it|that)) (?:it |them )?"
+    r"(?:a bit |a little )?fast(?:er)?\b"
+    r"|\bspeed (?:it |things )?up\b|\btoo slow\b|\bhurry (?:it )?up\b"
+)
+
+
+def lily_detect_pace_request(text: str) -> Optional[str]:
+    """PATCH-003 P7 — detect a delivery-rate request. Returns "slow",
+    "normal" (faster/back-to-normal), or None. Punctuation/fragment-proof
+    like the other command detectors. The 'slower' fixture ('Can you
+    please speak slower?') answered by a fragment and no change is what
+    this closes."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return None
+    if _PACE_SLOWER_RE.search(normalized):
+        return "slow"
+    if _PACE_FASTER_RE.search(normalized):
+        return "normal"
+    return None
+
+
 def lily_detect_pacing_choice(text_normalized: str) -> Optional[str]:
     """Classify a normalized utterance as a pacing choice. Returns
     "pacing_relaxed", "pacing_timed", or None. A negated timed ("no timed
@@ -610,6 +639,9 @@ class LilyScorekeeper:
         # `pacing` (a seam addition) and persisted per group as the
         # "pacing" key of the opaque lily_group_prefs dict.
         self.pacing: str = "timed"
+        # PATCH-003 P7: delivery rate (normal | slow). Independent of
+        # `pacing` (game-clock speed) — this is how fast she TALKS.
+        self.delivery_pace: str = "normal"
         # Round format (multiple-choice WO): the CURRENT round's format,
         # plus the sticky explicit override set by lily_set_round_format
         # (None = follow the default schedule: round DEFAULT_MC_ROUND runs
@@ -2122,6 +2154,7 @@ class LilyScorekeeper:
             "round": self.round,
             "mode": self.mode,
             "pacing": self.pacing,
+            "delivery_pace": self.delivery_pace,
             "round_format": self.round_format,
             "round_format_override": self.round_format_override,
             "media_mode": self.media_mode,
@@ -2146,6 +2179,9 @@ class LilyScorekeeper:
         self.round = snap.get("round", self.round)
         self.mode = snap.get("mode", self.mode)
         self.pacing = snap.get("pacing", self.pacing)
+        self.delivery_pace = snap.get("delivery_pace", self.delivery_pace)
+        if self.delivery_pace not in ("normal", "slow"):
+            self.delivery_pace = "normal"
         self.round_format = snap.get("round_format", self.round_format)
         self.round_format_override = snap.get(
             "round_format_override", self.round_format_override
