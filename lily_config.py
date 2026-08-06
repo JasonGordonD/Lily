@@ -212,6 +212,36 @@ def room_discharge_seconds() -> float:
     return _get_float("LILY_ROOM_DISCHARGE_SECONDS", 0.5)
 
 
+def mc_answer_aborts_read() -> bool:
+    """WS-5 (WO-LILY-OMNIBUS-003): a final landing DURING an in-flight
+    multiple-choice options read that Tier-1-matches a read option (or the
+    canonical set) TRUNCATES the remaining options and jumps to
+    adjudication — options 3-4 never air, the point goes to the answerer.
+    Default on; LILY_MC_ANSWER_ABORTS_READ=off restores the
+    wait-for-full-options-playout behavior."""
+    return _get_bool("LILY_MC_ANSWER_ABORTS_READ", True)
+
+
+def buzz_prewindow_seconds() -> float:
+    """WS-5: the buzz buffer widens to cover this many seconds BEFORE the
+    delivery claim, so a final that landed just as the question was being
+    asked is folded into the pre-window buffer and scored at window open,
+    not left inert. 0 disables the pre-claim backfill (buffering still runs
+    from the claim forward, exactly as before)."""
+    return _get_float("LILY_BUZZ_PREWINDOW_SECONDS", 3.0)
+
+
+def mc_stem_protect_words_per_second() -> float:
+    """WS-5: estimated spoken words/second used to MODEL when the MC stem
+    finishes reading, so the stem stays protected — an early answer can
+    only truncate the OPTIONS, never cut the question before the table has
+    heard it. There is no per-sentence playout signal at livekit-agents
+    1.6.6 (the delivery stem+options are one SpeechHandle), so the
+    stem-completion boundary is estimated from the stem word count. Lower =
+    a longer protected stem span."""
+    return _get_float("LILY_MC_STEM_PROTECT_WPS", 3.0)
+
+
 # ---------------------------------------------------------------------------
 # Game tunables
 # ---------------------------------------------------------------------------

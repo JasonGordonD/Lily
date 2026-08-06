@@ -83,6 +83,12 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_RELAXED_WINDOW_MULTIPLIER",
     "LILY_SUPPLY_FALLBACK_SECONDS",
     "LILY_UNDELIVERED_RECONCILE_SECONDS",
+    # WS-5 MC answer-aborts-read tunables (default-backed; ship on
+    # in-code defaults). Feature toggle + buzz-buffer pre-claim horizon +
+    # stem-protection words/second model.
+    "LILY_MC_ANSWER_ABORTS_READ",
+    "LILY_BUZZ_PREWINDOW_SECONDS",
+    "LILY_MC_STEM_PROTECT_WPS",
     # WS-8 identity reconciliation tunables (default-backed).
     "LILY_ENROLL_RETRY_COOLDOWN_SECONDS",
     "LILY_GHOST_FOLD_WINDOW_SECONDS",
