@@ -249,6 +249,38 @@ def test_fallback_blocked_by_stuck_claim(monkeypatch):
     assert game.instructed_replies == []
 
 
+def test_fallback_holds_off_stuck_then_arms_on_clear(monkeypatch):
+    # Full reconciliation-first cycle, meaningful ONLY on the hardened WS-2
+    # predicate (no_stuck_claims keys on _undelivered_refires, which holds
+    # False for the whole re-fire cycle — on the pre-hardening predicate the
+    # False window had zero observable duration and this guard was toothless):
+    #   stuck (predicate False)  -> fallback HOLDS OFF
+    #   claim releases (True)    -> fallback then ARMS
+    game = _make_game()
+    _arm_stuck(game)
+    assert game.no_stuck_claims() is False
+    calls = _patch_bank(monkeypatch, BANK_Q)
+
+    # Phase 1 — genuinely stuck: the fallback must NOT arm over the ghost.
+    assert _run(game.arm_supply_fallback()) == "blocked"
+    assert calls == []
+    assert game.instructed_replies == []
+    assert game.armed_question.get("id") == "kb_777"  # the stuck one, intact
+
+    # Phase 2 — WS-2 releases the ghost (armed dropped, re-fire signal
+    # cleared): the real release helper produces exactly this state.
+    game._release_armed_question_to_supply()
+    assert game.no_stuck_claims() is True
+    assert game.armed_question is None
+
+    # Phase 3 — predicate clear: the fallback now arms a fresh bank question.
+    assert _run(game.arm_supply_fallback()) == "armed"
+    assert game.armed_question is not None
+    assert len(calls) == 1
+    assert game._pending_delivery_qnum == game.sk.question_number
+    assert len(game.instructed_replies) == 1
+
+
 def test_fallback_empty_when_bank_exhausted(monkeypatch):
     game = _make_game()
     _patch_bank(monkeypatch, None)
