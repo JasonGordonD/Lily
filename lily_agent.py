@@ -400,12 +400,18 @@ class LilyGame:
         # Structural delivery intent (desync WO Sub-agent B): question
         # number whose delivery the NEXT outbound spoken turn was
         # code-dispatched to perform — that turn claims q_{N}_delivery at
-        # dispatch regardless of phrasing. None = no delivery in flight.
+        # dispatch once it carries the question text (WS-1: drifted turns
+        # are rewritten to the sheet first). None = no delivery in flight.
         self._pending_delivery_qnum: int | None = None
-        # Post-reveal delivery is strict: if the generated turn does not
-        # contain the armed prompt (and every MC option), tts_node replaces
-        # it with the deterministic question sheet before any claim opens.
+        # Every structural delivery is strict (WS-1): if the generated
+        # turn does not contain the armed prompt (and every MC option),
+        # tts_node replaces it with the deterministic question sheet
+        # before any claim opens.
         self._strict_delivery_qnum: int | None = None
+        # WS-1 intake gate: wall-clock of the most recent speaker bind.
+        # While a bind is fresher than lily_config.intake_settle_seconds()
+        # the round-robin is still growing and start_game defers.
+        self._last_bind_at: float | None = None
         # Screen-sync phase hold (voice/glass sync fix, 2026-07-31): while
         # set, publish_attributes reports THIS phase instead of ui_phase.
         # Set to "lobby" when the FIRST question arms mid-greeting so the
@@ -778,7 +784,9 @@ class LilyGame:
     #   (a) STRUCTURAL — code dispatched a turn whose job is to perform
     #       the armed question (begin_round post-tool turn, the question
     #       nudges, skip/game-start follow-ups): expect_delivery() arms
-    #       the flag, and that turn claims regardless of phrasing;
+    #       the flag; the turn claims only when it carries the question
+    #       text — otherwise it is rewritten to the deterministic sheet
+    #       first (WS-1: never claimed silently);
     #   (b) ORGANIC — any turn while the question is armed and undelivered
     #       that performs its core answer-bearing sentence as written
     #       (lily_evaluation.lily_turn_presents_question).
@@ -788,8 +796,11 @@ class LilyGame:
     def expect_delivery(self, *, strict: bool = False) -> None:
         """Arm the structural delivery flag: the next outbound spoken turn
         was just dispatched to perform the armed question and will claim
-        q_{N}_delivery at dispatch. No-op when nothing is armed, the
-        window is already open, or the delivery is already claimed."""
+        q_{N}_delivery at dispatch. No-op pre-game (WS-1: intake turns can
+        never become deliveries), when nothing is armed, the window is
+        already open, or the delivery is already claimed."""
+        if not getattr(self, "game_started", False):
+            return
         if self.armed_question is None or self.sk.answer_window_open:
             return
         key = f"q_{self.sk.question_number}_delivery"
@@ -888,14 +899,24 @@ class LilyGame:
         armed = self.armed_question
         if armed is None or self.sk.answer_window_open:
             return None
+        if not getattr(self, "game_started", False):
+            # WS-1 pre-game gate: THE claim choke point. While the intake
+            # round-robin runs, no outbound turn — structural flag or not
+            # — may register a delivery (the 22:48 evidence session
+            # claimed q_1_delivery on "Hi, Chris! Got you locked in.").
+            return None
         qnum = self.sk.question_number
         key = f"q_{qnum}_delivery"
-        strict = getattr(self, "_strict_delivery_qnum", None) == qnum
         structural = self.consume_pending_delivery(qnum)
         if structural:
             self._strict_delivery_qnum = None
         textual = self._delivery_text_matches_armed(spoken_text)
-        if structural and strict and not textual:
+        if structural and not textual:
+            # WS-1: the strict text-sanity rewrite applies to EVERY
+            # structural claim, not just the post-reveal turn — a delivery
+            # turn without the question text is rewritten to the sheet
+            # before claiming, never claimed silently (the q_7 "My bad,
+            # team!" apology claim).
             logger.error(
                 "LILY_DELIVERY | STRICT_REWRITE | session=%s q=%d "
                 "reason=spoken_question_mismatch",
@@ -2453,6 +2474,15 @@ class LilyGame:
     def open_window(
         self, duration: float | None = None, steal: bool = False
     ) -> None:
+        if not getattr(self, "game_started", False):
+            # WS-1: no window arming in any pre-game phase — the ghost
+            # q_0001 window adjudicated Rhonda's self-introduction as a
+            # wrong answer to a question never spoken.
+            logger.error(
+                "LILY_WINDOW | PRE_GAME_REFUSED | session=%s q=%d",
+                self.sk.session_id, self.sk.question_number,
+            )
+            return
         dur = duration if duration is not None else self._answer_window_duration()
         self.sk.open_answer_window(duration=dur, reset_candidates=not steal)
         self._steal_window = steal
@@ -4361,6 +4391,18 @@ class LilyGame:
     async def start_game(self, source: str) -> None:
         if self.game_started:
             return
+        if self.intake_roundrobin_active():
+            # WS-1: every begin_round path (tool, voice, UI, auto-start)
+            # converges here — while the intake round-robin is still
+            # growing the start DEFERS, so no question can arm against a
+            # half-built roster. The per-segment auto-start net retries
+            # once names stop landing.
+            logger.info(
+                "LILY_STATE | START_DEFERRED | session=%s source=%s "
+                "reason=intake_active",
+                self.sk.session_id, source,
+            )
+            return
         self.game_started = True
         logger.info("LILY_STATE | GAME_START | session=%s source=%s",
                     self.sk.session_id, source)
@@ -4785,6 +4827,7 @@ class LilyGame:
     def on_speaker_bound(self, speaker_label: str, player_name: str) -> str:
         """Post-bind side effects: pending open-floor award, max_speakers
         bump, bind event, attribute publish."""
+        self._last_bind_at = time.time()
         note = ""
         pending = self._pending_unbound_award
         if pending and pending["speaker_label"] == speaker_label:
@@ -4837,6 +4880,18 @@ class LilyGame:
 
     # -- auto-start safety net --------------------------------------------------------
 
+    def intake_roundrobin_active(self) -> bool:
+        """True while the pre-game name round-robin is still growing: a
+        speaker bind landed within the settle window, so more
+        introductions are likely in flight (the 22:48 evidence session
+        auto-started between Chris's bind and Rhonda's introduction)."""
+        if self.game_started or self.game_over:
+            return False
+        last = getattr(self, "_last_bind_at", None)
+        if last is None:
+            return False
+        return time.time() - last < lily_config.intake_settle_seconds()
+
     def _maybe_auto_start_after_lobby(self) -> None:
         """Kick off round one when the lobby has clearly settled but no
         one — neither Lily via lily_begin_round nor the UI via
@@ -4844,6 +4899,17 @@ class LilyGame:
         we never start while there is only one voice, before the first
         question has been prefetched, or before the lobby grace period."""
         if self.game_started or self.game_over:
+            return
+        if self.intake_roundrobin_active():
+            # WS-1: a name just landed — the round-robin is still growing.
+            # start_game carries the same gate (it is the choke point for
+            # the tool/voice/UI paths); checking here keeps the AUTO_START
+            # log truthful and skips scheduling a start that would defer.
+            logger.info(
+                "LILY_STATE | START_DEFERRED | session=%s "
+                "source=auto_after_lobby reason=intake_active",
+                self.sk.session_id,
+            )
             return
         if self.sk.roster_size() < lily_config.auto_start_min_players():
             return
@@ -5127,7 +5193,20 @@ class LilyAgent(Agent):
         first ask. No-op if the game is already running."""
         if self._game.game_started:
             return "Already running — the next question is in the state block."
+        intake_hold = (
+            "Hold that thought — a name just landed and the intake "
+            "round-robin is still going. Finish collecting names "
+            "('who's next?', then 'that everyone?'), and once the "
+            "roster is settled call lily_begin_round again."
+        )
+        if self._game.intake_roundrobin_active():
+            # WS-1: a bind just landed — the round-robin is still growing.
+            return intake_hold
         await self._game.start_game(source="host_tool")
+        if not self._game.game_started:
+            # A bind landed between the gate check above and start_game's
+            # own gate — the start deferred (WS-1).
+            return intake_hold
         # BUG-2 authoritative-delivery contract: this tool result carries
         # the question payload, and the post-tool turn (this result's
         # continuation) is the SOLE deliverer — start_game deliberately
@@ -5138,7 +5217,8 @@ class LilyAgent(Agent):
         if q is not None:
             # Structural delivery claim (desync WO Sub-agent B): the
             # post-tool turn is the sole deliverer BY CONTRACT — it claims
-            # q_{N}_delivery at dispatch regardless of phrasing.
+            # q_{N}_delivery at dispatch (WS-1: rewritten to the sheet
+            # first when it drifts from the question text).
             self._game.expect_delivery()
             return (
                 "Round one is armed and YOU deliver the first question in "
@@ -5727,7 +5807,8 @@ class LilyAgent(Agent):
         # turn claims when (a) code dispatched it to deliver the armed
         # question (the one-shot pending-delivery flag: begin_round
         # post-tool turn, question nudges, skip/game-start follow-ups) —
-        # regardless of phrasing; or (b) it organically performs the
+        # and it carries the question text, else it is rewritten to the
+        # deterministic sheet first (WS-1); or (b) it organically performs the
         # question's core answer-bearing sentence as written
         # (lily_turn_presents_question). BUG-2 duplicate suppression
         # stands: a turn that textually re-performs an already-claimed

@@ -225,6 +225,16 @@ def auto_start_lobby_grace_seconds() -> float:
     return _get_float("LILY_AUTO_START_LOBBY_GRACE_SECONDS", 60.0)
 
 
+def intake_settle_seconds() -> float:
+    """Quiet period after the most recent speaker bind before the game may
+    start (WS-1 claim integrity): while the intake round-robin is still
+    growing — a name just landed — begin_round and the auto-start net
+    hold, so question one never arms against a half-built roster. The
+    22:48 evidence session started between two introductions and turned
+    an intake acknowledgment into q_1_delivery."""
+    return _get_float("LILY_INTAKE_SETTLE_SECONDS", 20.0)
+
+
 def group_id_override() -> Optional[str]:
     """Stable group id for voiceprint rematch (v2); defaults to room name."""
     return _get("LILY_GROUP_ID")

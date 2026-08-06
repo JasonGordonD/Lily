@@ -1,0 +1,119 @@
+{
+ "session_id": "lily-81BCB0-583a0f16",
+ "note": "Evidence rows exported 2026-08-05 from lily_transcripts / lily_answers / lily_asked_history for WS-1 (WO-LILY-OMNIBUS-003) structural-claim integrity. speaker_name on LILY rows carries the say-gate act key the live session attached to that turn.",
+ "transcripts": [
+  {
+   "created_at": "2026-08-05T22:47:34.859077+00:00",
+   "speaker_label": "LILY",
+   "speaker_name": "session_greet",
+   "text": "Hi, I'm Lily — I host trivia here! This device looks familiar, but I don't want to make any assumptions before we get started. Who is playing tonight?"
+  },
+  {
+   "created_at": "2026-08-05T22:48:33.422894+00:00",
+   "speaker_label": "LILY",
+   "speaker_name": null,
+   "text": "Welcome! I love a full table. \n\nAlright, crew, introduce yourselves one by one so I can get your names and voices down, and then I'll give you the quick rundown on who I am and how we play! Who's up first?"
+  },
+  {
+   "created_at": "2026-08-05T22:48:37.144828+00:00",
+   "speaker_label": "S1",
+   "speaker_name": null,
+   "text": "Hi, my name is Chris."
+  },
+  {
+   "created_at": "2026-08-05T22:48:38.000295+00:00",
+   "speaker_label": "LILY",
+   "speaker_name": null,
+   "text": "Welcome! I love a full table. \n\nAlright, crew, introduce yourselves one by one so I can get your names and voices down, and then I'll give you the quick rundown on who I am and how we play! Who's up first? …[cut off]"
+  },
+  {
+   "created_at": "2026-08-05T22:48:45.969428+00:00",
+   "speaker_label": "LILY",
+   "speaker_name": "q_1_delivery",
+   "text": "Hi, Chris! Got you locked in. \n\nThat leaves two more. Who's next?"
+  },
+  {
+   "created_at": "2026-08-05T22:48:50.043118+00:00",
+   "speaker_label": "S2",
+   "speaker_name": null,
+   "text": "Hi. My name is Rhonda."
+  },
+  {
+   "created_at": "2026-08-05T22:48:50.090757+00:00",
+   "speaker_label": "LILY",
+   "speaker_name": null,
+   "text": "Hi, Chris! Got you locked in. \n\nThat leaves two more. Who's next? …[cut off]"
+  },
+  {
+   "created_at": "2026-08-05T22:49:27.1549+00:00",
+   "speaker_label": "S3",
+   "speaker_name": null,
+   "text": "Hi. My name is Paige."
+  },
+  {
+   "created_at": "2026-08-05T22:58:44.349204+00:00",
+   "speaker_label": "LILY",
+   "speaker_name": "q_7_delivery",
+   "text": "My bad, team! Let's get this settled and move right along. \n\nThe correct answer is indeed **Walter White**! I suppose everyone was too busy debating my processing speeds to lock it in officially, so we're leaving that point on the table. \n\nWith that, we are deadlocked: Rhonda and Rami are tied with 2 points, while Chris and Paige are right behind with 1! \n\nLet's see what the machine serves up next."
+  }
+ ],
+ "answers": [
+  {
+   "player_name": null,
+   "question_id": "q_0001",
+   "question_index": 1,
+   "transcript": "Hi. My name is Rhonda.",
+   "verdict": "incorrect",
+   "awarded_points": 0,
+   "ts": "2026-08-05T22:49:00.979697+00:00"
+  },
+  {
+   "player_name": null,
+   "question_id": "q_8231",
+   "question_index": 7,
+   "transcript": "No no no no no no no no no wait.",
+   "verdict": "incorrect",
+   "awarded_points": 0,
+   "ts": "2026-08-05T22:58:59.365999+00:00"
+  },
+  {
+   "player_name": null,
+   "question_id": "q_8231",
+   "question_index": 7,
+   "transcript": "The Wizard of Oz.",
+   "verdict": "incorrect",
+   "awarded_points": 0,
+   "ts": "2026-08-05T22:58:59.366949+00:00"
+  },
+  {
+   "player_name": "Rami",
+   "question_id": "q_8231",
+   "question_index": 7,
+   "transcript": "[Rami] No no wait wait. So Chris called it first but you ignored him. I think you have something against Chris Lily. I don't know, I think it's there's some discrimination happening there.",
+   "verdict": "incorrect",
+   "awarded_points": 0,
+   "ts": "2026-08-05T22:58:59.368308+00:00"
+  },
+  {
+   "player_name": null,
+   "question_id": "q_8231",
+   "question_index": 7,
+   "transcript": "Okay.",
+   "verdict": "incorrect",
+   "awarded_points": 0,
+   "ts": "2026-08-05T22:58:59.36749+00:00"
+  }
+ ],
+ "asked_history": [
+  {
+   "question_id": "q_0001",
+   "asked_at": "2026-08-05T22:48:39.062138+00:00",
+   "canonical_answer": "Jupiter"
+  },
+  {
+   "question_id": "q_8231",
+   "asked_at": "2026-08-05T22:55:27.28902+00:00",
+   "canonical_answer": "Walter White"
+  }
+ ]
+}

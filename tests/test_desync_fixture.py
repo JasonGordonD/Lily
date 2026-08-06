@@ -202,20 +202,27 @@ def test_fixture_paraphrases_are_below_the_old_tiers():
 
 def test_q2_replay_structural_claim_registers_delivery(caplog):
     # The code-dispatched delivery turn (question nudge / begin_round
-    # post-tool / skip follow-up) claims at dispatch REGARDLESS of
-    # phrasing: the 01:33 q2 paraphrase registers, the window opens off
-    # the claim at that turn's playout, and FALLBACK_OPEN never fires.
+    # post-tool / skip follow-up): the 01:33 q2 paraphrase drifts from
+    # the sheet, so WS-1 strict registration rewrites it to the
+    # deterministic sheet before claiming (never a silent claim on a
+    # paraphrase); the window opens off the claim at the sheet turn's
+    # playout, and FALLBACK_OPEN never fires.
     game = _make_game()
     _arm(game, Q2_PROMPT)
 
     async def scenario():
         game.expect_delivery()  # the structural dispatch signal
-        verdict = game.register_delivery_claim(Q2_PARAPHRASE)
+        assert game.register_delivery_claim(Q2_PARAPHRASE) == "rewrite_strict"
+        assert game.say_registry.state("q_1_delivery") is None
+        # tts_node rewrite protocol: re-arm, speak the sheet, claim.
+        game.expect_delivery(strict=True)
+        sheet = game.rendered_armed_question()
+        verdict = game.register_delivery_claim(sheet)
         assert verdict == "claimed_structural"
         assert game.say_registry.state("q_1_delivery") is not None
         assert not game.sk.answer_window_open  # opens at playout, not claim
         with caplog.at_level(logging.INFO):
-            game.on_agent_speech_finished(Q2_PARAPHRASE)
+            game.on_agent_speech_finished(sheet)
         await _drain()
 
     _run(scenario(), game)
@@ -234,7 +241,8 @@ def test_q3_replay_no_ghost_window_then_nudged_delivery(caplog):
     # any recognizable performance. The window must NOT open on those
     # turns (the old fallback opened it — the ghost game); instead, after
     # WINDOW_FALLBACK_AGENT_TURNS finished turns, ONE structural delivery
-    # nudge dispatches, its turn claims, and the window opens on a
+    # nudge dispatches; a nudged turn that still paraphrases is rewritten
+    # to the sheet (WS-1), the sheet claims, and the window opens on a
     # registered delivery. Zero FALLBACK_OPEN, zero re-runs.
     game = _make_game()
     _arm(game, Q3_PROMPT)
@@ -249,10 +257,15 @@ def test_q3_replay_no_ghost_window_then_nudged_delivery(caplog):
             # ...but the pipeline did not stall: ONE delivery nudge went out.
             assert len(game.session.instructions) == 1
             assert "exactly as written" in game.session.instructions[0]
-            # The nudged turn claims at dispatch regardless of phrasing:
-            verdict = game.register_delivery_claim(Q3_PARAPHRASE)
-            assert verdict == "claimed_structural"
-            game.on_agent_speech_finished(Q3_PARAPHRASE)
+            # The nudged turn still paraphrased — strict registration
+            # rewrites it to the sheet before any claim (WS-1):
+            assert game.register_delivery_claim(Q3_PARAPHRASE) == (
+                "rewrite_strict"
+            )
+            game.expect_delivery(strict=True)
+            sheet = game.rendered_armed_question()
+            assert game.register_delivery_claim(sheet) == "claimed_structural"
+            game.on_agent_speech_finished(sheet)
         await _drain()
 
     _run(scenario(), game)
@@ -402,8 +415,15 @@ def test_scripted_round_every_question_delivered_and_registered_once(caplog):
                 _arm(game, prompt)
                 key = f"q_{idx}_delivery"
                 if mode == "structural":
+                    # WS-1: a structural turn that drifts from the sheet
+                    # is rewritten before claiming — never claimed silently.
                     game.expect_delivery()
-                    spoken = "Off we go — the one everybody paints red!"
+                    drifted = "Off we go — the one everybody paints red!"
+                    assert game.register_delivery_claim(drifted) == (
+                        "rewrite_strict"
+                    )
+                    game.expect_delivery(strict=True)
+                    spoken = game.rendered_armed_question()
                     assert game.register_delivery_claim(spoken) == (
                         "claimed_structural"
                     )
@@ -413,11 +433,16 @@ def test_scripted_round_every_question_delivered_and_registered_once(caplog):
                         "claimed_core_sentence"
                     )
                 else:
-                    spoken = "Somebody is hoarding moons out there, friends!"
+                    drifted = "Somebody is hoarding moons out there, friends!"
                     for _ in range(WINDOW_FALLBACK_AGENT_TURNS):
-                        assert game.register_delivery_claim(spoken) is None
-                        game.on_agent_speech_finished(spoken)
+                        assert game.register_delivery_claim(drifted) is None
+                        game.on_agent_speech_finished(drifted)
                     assert game.sk.answer_window_open is False
+                    assert game.register_delivery_claim(drifted) == (
+                        "rewrite_strict"
+                    )
+                    game.expect_delivery(strict=True)
+                    spoken = game.rendered_armed_question()
                     assert game.register_delivery_claim(spoken) == (
                         "claimed_structural"
                     )
