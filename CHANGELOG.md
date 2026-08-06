@@ -134,6 +134,62 @@ delta to include custom categories). Zero regressions.
 deploy predates the 2026-07-31 XAI seed, redeploy so the agent container
 picks it up.
 
+### Scope addition — generated categories persist to a compounding bank
+
+Operator ask: an on-the-fly category should be SAVED (category + its
+questions) so future rounds draw from it instead of regenerating.
+
+**Ground truth first (prod svqbfxdhpsmioaosuhkb, verified vs Lily's
+deployed SUPABASE_URL).** The bank already self-grows: `lily_agent.py`
+banks every armed question into `lily_questions` tagged by category
+(`_curate_generated_question` -> `lily_bank_generated_question`), and
+`lily_questions` already carries the image triplet (migration 012). So
+generated on-the-fly questions already persist with `category=<topic>`.
+What was missing: the category was never registered as first-class, and
+the supply path regenerated every time instead of drawing the topic's
+banked questions.
+
+- **Category registration (first-class, idempotent):**
+  `lily_bank.lily_register_operator_category` upserts the operator topic
+  into `lily_category_candidates` by name (no duplicate), marked
+  `operator_requested=true` so it is first-class immediately — it does not
+  wait on the use_count>=10 / >=3-groups promotion gate that model
+  proposals must clear. `lily_load_promoted_categories` now surfaces
+  operator categories too. `lily_set_category` fires this
+  register (fire-and-forget); the round serves regardless of the write.
+- **Serve-from-bank (compounding arsenal):** for an operator topic,
+  `_prefetch_inner` now prefers `lily_fetch_bank_question(category)` before
+  regenerating (reusing the verified `from_bank` path); generation only
+  runs — and banks a fresh question — when the bank runs dry. The fixed
+  family rotation still generates-first (freshness). Gated by
+  `_is_operator_category`.
+- **Never-lose (Cardinal Rule):** the write is additive — the live round
+  never blocks on it — and a failed bank write now logs the COMPLETE
+  category+question payload (`LILY_BANK | BANK_FAILED | RECOVERY_PAYLOAD`),
+  not just the 80-char prompt head, so a dropped generation is recoverable.
+- **Schema:** migration `020_lily_category_operator_requested.sql` adds
+  `lily_category_candidates.operator_requested boolean default false`
+  (additive, idempotent `add column if not exists`). Applied live to
+  svqbfxdhpsmioaosuhkb and verified; no other DDL needed (question bank +
+  image columns already existed).
+- **Live proof:** registered "Game of Thrones" and "Japan" (the genuine
+  topics Rami asked for at 18:20) via the real function against prod ->
+  both rows land `operator_requested=true`, use_count 1, no duplicate, and
+  `lily_load_promoted_categories` returns both. Suite 1176 passed
+  (+`tests/test_category_bank.py`).
+
+**The 18:17 picture "regression" — reconciled to ground truth.** The
+operator saw a picture earlier today; the logs confirm it: `lily_image_
+attempts` holds exactly ONE row ever — 05:23:49 UTC, session
+lily-AAC431-6208ff7c, the "show me" DEMO picture (`lily_show_demo_picture`,
+qid `demo_lily-AAC431-6208ff7c`), a GENERATED image via
+`gemini-2.5-flash-image`, published to the display rail. That path is
+UNGATED (generates regardless of the XAI/EXA flags). The later 18:21
+denial (session lily-0BD414-ba80eb97) was the CATEGORY denial ("my general
+deck is already pre-loaded... I can't") — no tool existed, now fixed. The
+two are different paths with different gates, not a deploy/secret flip
+between calls; image generation demonstrably ran at runtime today (gemini).
+
 ## 2026-08-06 — WO-LILY-HOTFIX-002: transcript echo-dups + group-binding loudness
 
 **Evidence re-audit first (session `lily-AAC431-6208ff7c`, 05:19–05:25).**

@@ -2352,6 +2352,15 @@ class LilyGame:
             return override
         return CATEGORY_FAMILIES[(rnd - 1) % len(CATEGORY_FAMILIES)]
 
+    def _is_operator_category(self, category: str) -> bool:
+        """True when `category` is a topic the table asked for on the fly
+        (lily_set_category), not a fixed family-rotation slot. Operator
+        topics prefer the bank (previously-generated questions for that
+        topic) before regenerating — the compounding arsenal."""
+        if not category:
+            return False
+        return category in set(getattr(self, "_category_override", {}).values())
+
     def _difficulty_for_round(self, rnd: int) -> int:
         if rnd <= 1:
             return 1
@@ -2483,7 +2492,19 @@ class LilyGame:
             # only runs when no picture question landed above.
             if question is None:
                 from_bank = None
-                if lily_config.kb_only() and self.supabase is not None:
+                # Operator-requested topics prefer the bank: serve a
+                # previously-generated question for this topic before
+                # regenerating, and only generate (and bank a fresh one)
+                # when the bank runs dry — the arsenal compounds per topic.
+                # The fixed family rotation still generates-first (freshness).
+                prefer_bank = (
+                    self._is_operator_category(category)
+                    and self.supabase is not None
+                    and self.sk.media_mode != "pictures"
+                )
+                if (lily_config.kb_only() or prefer_bank) and (
+                    self.supabase is not None
+                ):
                     # Bounded: the sync client has no HTTP timeout of its
                     # own — an unbounded hang here wedges the supply line.
                     from_bank = await asyncio.wait_for(
@@ -6841,6 +6862,20 @@ class LilyAgent(Agent):
             )
         target_round = game._round_for_next_question()
         game._category_override[target_round] = subject
+        # Persist the category as a first-class bank entry (idempotent by
+        # name — no duplicate for one that already exists). Fire-and-forget:
+        # the round serves regardless of the write, and a failed write logs
+        # the full payload for recovery (Cardinal Rule). The category's
+        # generated questions bank themselves through the normal curate path
+        # (_curate_generated_question -> lily_bank_generated_question), so a
+        # later request for this topic can draw them from the bank.
+        if getattr(game, "supabase", None) is not None:
+            asyncio.ensure_future(
+                lily_bank.lily_register_operator_category(
+                    game.supabase, subject, subject,
+                    getattr(game, "group_id", None),
+                )
+            )
         # The prefetched next question was drawn on the OLD category — drop
         # it and redraw under the new topic. A live/delivered armed question
         # stays on the glass; the override takes the first UNDELIVERED slot

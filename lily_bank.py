@@ -29,6 +29,7 @@ into the live session.
 import asyncio
 import difflib
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -254,7 +255,18 @@ async def lily_bank_generated_question(
         )
         return row_id
     except Exception as e:
-        logger.error("LILY_BANK | BANK_FAILED | error=%s prompt=%r", e, prompt[:80])
+        # Cardinal Rule (no memory is bad memory): a failed bank write must
+        # never silently drop a generated question — log the COMPLETE
+        # category+question payload so it can be recovered later, not just
+        # the 80-char prompt head.
+        try:
+            recover = json.dumps(payload, default=str)
+        except Exception:
+            recover = repr(payload)
+        logger.error(
+            "LILY_BANK | BANK_FAILED | RECOVERY_PAYLOAD | error=%s payload=%s",
+            e, recover,
+        )
         return None
 
 
@@ -370,25 +382,132 @@ async def lily_record_category_proposal(
                      norm, e)
 
 
+def lily_apply_operator_category(existing_row, name, family, group_id) -> dict:
+    """Pure upsert-payload builder for an OPERATOR-requested category
+    (WO-LILY-CAPABILITY-RESTORE-001). Stronger provenance than a model
+    proposal: latches operator_requested=True so it is first-class
+    immediately and never waits on the use_count/group promotion gate.
+    Still bumps use_count and records the group like a proposal."""
+    row = existing_row or {}
+    groups = [g for g in (row.get("groups") or []) if g]
+    gid = str(group_id or "").strip()
+    if gid and gid not in groups:
+        groups.append(gid)
+    norm = lily_normalize_category_name(name)
+    return {
+        "name": norm,
+        "family": row.get("family") or family or norm,
+        "use_count": int(row.get("use_count") or 0) + 1,
+        "groups": groups,
+        "operator_requested": True,
+    }
+
+
+async def lily_register_operator_category(
+    supabase, name: str, family: str, group_id: str,
+) -> bool:
+    """Register an operator-requested category as first-class in
+    lily_category_candidates (idempotent upsert by name — no duplicate for
+    a category that already exists). Returns True on write. Never raises:
+    the live round must serve even if this fails, and a failed write logs
+    the full payload for recovery (Cardinal Rule — no memory is bad
+    memory). Fire-and-forget from the tool; read-modify-write is fine at
+    operator-request rates."""
+    norm = lily_normalize_category_name(name)
+    if supabase is None or not norm:
+        return False
+    payload = None
+    try:
+        existing = await asyncio.to_thread(
+            lambda: supabase.table("lily_category_candidates")
+            .select("name, family, use_count, groups, operator_requested")
+            .eq("name", norm)
+            .maybe_single()
+            .execute()
+        )
+        row = getattr(existing, "data", None) if existing else None
+        payload = lily_apply_operator_category(row, norm, family, group_id)
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_category_candidates")
+            .upsert(payload, on_conflict="name")
+            .execute()
+        )
+        logger.info(
+            "LILY_BANK | OPERATOR_CATEGORY_REGISTERED | name=%s family=%s "
+            "use_count=%d groups=%d",
+            norm, payload.get("family"), payload["use_count"],
+            len(payload["groups"]),
+        )
+        return True
+    except Exception as e:
+        # Migration-lag tolerance: a pre-020 schema without
+        # operator_requested must still register the category (drop the
+        # flag and retry as a proposal-shaped row).
+        if payload is not None and "operator_requested" in str(e):
+            try:
+                fallback = {
+                    k: v for k, v in payload.items()
+                    if k != "operator_requested"
+                }
+                await asyncio.to_thread(
+                    lambda: supabase.table("lily_category_candidates")
+                    .upsert(fallback, on_conflict="name")
+                    .execute()
+                )
+                logger.info(
+                    "LILY_BANK | OPERATOR_CATEGORY_REGISTERED | name=%s "
+                    "(pre-020 schema — flag skipped)", norm,
+                )
+                return True
+            except Exception as e2:
+                e = e2
+        try:
+            recover = json.dumps(payload, default=str)
+        except Exception:
+            recover = repr(payload)
+        logger.error(
+            "LILY_BANK | OPERATOR_CATEGORY_FAILED | RECOVERY_PAYLOAD | "
+            "name=%s error=%s payload=%s", norm, e, recover,
+        )
+        return False
+
+
+def _promoted_or_operator(row) -> bool:
+    """A candidate is first-class if it EARNED promotion (use_count/groups)
+    OR was operator-requested (WO-LILY-CAPABILITY-RESTORE-001)."""
+    return bool(row.get("operator_requested")) or lily_category_promotion_ready(
+        row.get("use_count"), len(row.get("groups") or [])
+    )
+
+
 async def lily_load_promoted_categories(supabase) -> list:
-    """Names of PROMOTED category candidates (use_count >= 10 AND >= 3
-    distinct groups) — the only proposals Lily may ever announce. Sorted
-    for deterministic state-block lines."""
+    """Names of first-class category candidates — those PROMOTED
+    (use_count >= 10 AND >= 3 distinct groups) OR operator-requested (which
+    are first-class on registration). The only categories Lily may
+    announce. Sorted for deterministic state-block lines."""
     if supabase is None:
         return []
     try:
-        result = await asyncio.to_thread(
-            lambda: supabase.table("lily_category_candidates")
-            .select("name, use_count, groups")
-            .execute()
-        )
+        try:
+            result = await asyncio.to_thread(
+                lambda: supabase.table("lily_category_candidates")
+                .select("name, use_count, groups, operator_requested")
+                .execute()
+            )
+        except Exception as e:
+            # Migration-lag tolerance (pre-020 schema): fall back to the
+            # count-based columns only.
+            if "operator_requested" not in str(e):
+                raise
+            result = await asyncio.to_thread(
+                lambda: supabase.table("lily_category_candidates")
+                .select("name, use_count, groups")
+                .execute()
+            )
         promoted = sorted(
             r["name"]
             for r in (result.data or [])
-            if r.get("name")
-            and lily_category_promotion_ready(
-                r.get("use_count"), len(r.get("groups") or [])
-            )
+            if r.get("name") and _promoted_or_operator(r)
         )
         if promoted:
             logger.info(

@@ -190,6 +190,23 @@ reach it.
   "Japan" → *Edo*) and that Grok vision analyzes a seeded photo is in the
   WO record; those need funded keys and run against the deployed agent,
   not CI.
+- **Generated categories persist to a compounding bank.** An on-the-fly
+  topic is saved so future rounds draw from it. The bank already
+  self-grows — every armed question banks into `lily_questions` tagged by
+  category (`_curate_generated_question` -> `lily_bank_generated_question`),
+  and `lily_questions` carries the image triplet (migration 012) — so
+  generated on-the-fly questions already persist with `category=<topic>`.
+  Added: `lily_bank.lily_register_operator_category` upserts the topic into
+  `lily_category_candidates` by name (idempotent, no duplicate), marked
+  `operator_requested=true` so it is first-class immediately (it skips the
+  use_count>=10 / >=3-groups promotion gate model proposals must clear;
+  migration `020`). `lily_set_category` fires the register (fire-and-forget
+  — the round serves regardless). For an operator topic, `_prefetch_inner`
+  prefers `lily_fetch_bank_question(category)` before regenerating (the
+  compounding arsenal), generating and banking a fresh one only when the
+  bank runs dry; the fixed family rotation still generates-first. A failed
+  bank write logs the COMPLETE payload (`RECOVERY_PAYLOAD`) so a dropped
+  generation is recoverable (Cardinal Rule), never gating the live round.
 - **Pictures / vision were never an omnibus code regression.** The
   availability gating predates the 1.6.4→1.6.6 rebuild (`40c71e1` for the
   EXA-gated real-photo sourcing, `3a17144` for the XAI-gated vision); WS-0
