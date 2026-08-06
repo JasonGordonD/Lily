@@ -531,6 +531,11 @@ class LilyGame:
         self._pending_unbound_award: dict | None = None
         self._last_assistant_text = ""
         self._suppressed_speech_ids: set[str] = set()
+        # PATCH-001 T1/T2 (RETIRE_WITH_WS6): live speech handles by id
+        # (cancellation reach) + the answered-question set (an answered
+        # question never re-airs).
+        self._speech_handles: dict = {}
+        self._answered_questions: set = set()
         self._enroll_started = False
         self._last_enroll_retry_ts = 0.0  # WS-8 under-threshold retry cooldown
         self._armed_speech_misses = 0  # agent turns finished w/o performing q
@@ -1356,6 +1361,9 @@ class LilyGame:
             or getattr(self, "game_over", False)
         ):
             return False
+        # T2 (PATCH-001): an answered question never re-airs.
+        if self.question_already_answered(self.sk.question_number):
+            return False
         key = f"q_{self.sk.question_number}_delivery"
         if self.say_registry.state(key) is not None:
             return False
@@ -1872,16 +1880,21 @@ class LilyGame:
         clean = (text or "").strip()
         if not clean:
             return
-        # WO-LILY-HOTFIX-002 Defect 1 belt: a verbatim repeat of the
-        # IMMEDIATELY-preceding recorded turn is the fallback-echo bug
-        # class, never a real utterance (the say gate + repeat lint make
-        # honest back-to-back verbatim repeats a non-path). Skip loudly.
+        # HOTFIX-002 belt, WIDENED by PATCH-001 T3 (RETIRE_WITH_WS6): a
+        # verbatim repeat of ANY recently-recorded turn is the echo/re-air
+        # bug class — every live duplicate pair had a user row interleaved,
+        # so last-turn-only matching missed all of them. Short turns are
+        # exempt (an honest "Nice one!" may legitimately recur).
         prior_turns = getattr(self.sk, "agent_turns", None) or []
-        if not interrupted and prior_turns and clean == prior_turns[-1]:
+        if (
+            not interrupted
+            and len(clean) >= 15
+            and clean in prior_turns[-6:]
+        ):
             logger.warning(
-                "LILY_TURNS | DUP_TURN_SKIPPED | session=%s — verbatim "
-                "repeat of the previous recorded turn (fallback-echo "
-                "class), not recorded", self.sk.session_id,
+                "LILY_TURNS | DUP_TURN_SKIPPED | path=record | session=%s "
+                "— verbatim repeat of a recent recorded turn, not recorded",
+                self.sk.session_id,
             )
             return
         try:
@@ -2949,20 +2962,53 @@ class LilyGame:
             self._undelivered_ticks = 0
             self._undelivered_refires = 0
             return "idle"
+        # T2 (PATCH-001, RETIRE_WITH_WS6): an ANSWERED question never
+        # re-airs. Once answer candidates exist (answer_heard) or its
+        # verdict committed, every outstanding delivery attempt for it is
+        # invalid — the live triples (Saturn re-read 4s after the answer,
+        # Mitochondria 2s after the correct verdict) were this watchdog
+        # re-airing a question the table had already answered.
+        qnum = self.sk.question_number
+        key = f"q_{qnum}_delivery"
+        if self.question_already_answered(qnum):
+            self._undelivered_ticks = 0
+            self._undelivered_refires = 0
+            if self.say_registry.release(key):
+                logger.warning(
+                    "LILY_WATCHDOG | ANSWERED_NO_REAIR | session=%s q=%d — "
+                    "answer heard/verdict committed; outstanding delivery "
+                    "attempt invalidated, not re-aired",
+                    self.sk.session_id, qnum,
+                )
+            return "idle"
+        # T1 (PATCH-001, RETIRE_WITH_WS6 — leases): re-verify "never
+        # aired" against playout truth before ANY re-dispatch. A PENDING
+        # claim whose speech started airing (playout-started ledger) or
+        # while agent audio is live (host_speaking) is mid-flight, not
+        # stuck — the live "Nobody…"/"Hey…" triples were false refires on
+        # turns that actually played.
+        owner = self.say_registry.owner_of(key)
+        if owner and owner in getattr(self, "_playout_started_ids", set()):
+            self._undelivered_ticks = 0
+            return "idle"
+        if getattr(self.sk, "host_speaking", False):
+            self._undelivered_ticks = 0
+            return "idle"
         # Armed, window closed, delivery unconfirmed (never registered or
         # stuck PENDING): count consecutive stuck ticks.
         self._undelivered_ticks = getattr(self, "_undelivered_ticks", 0) + 1
         if self._undelivered_ticks < self._undelivered_reconcile_ticks():
             return "idle"
         self._undelivered_ticks = 0
-        qnum = self.sk.question_number
-        key = f"q_{qnum}_delivery"
         if getattr(self, "_undelivered_refires", 0) < UNDELIVERED_MAX_REFIRES:
             self._undelivered_refires += 1
             # Drop a stale never-played claim so the re-dispatched delivery
             # re-claims cleanly (a confirmed claim can never reach here, so
-            # this only ever releases a stuck PENDING one).
+            # this only ever releases a stuck PENDING one) — and CANCEL its
+            # speech handle so a late start cannot double-air after the
+            # release (T1: the starts-after-release hole).
             self.say_registry.release(key)
+            self.cancel_speech(owner, reason="undelivered_refire")
             logger.error(
                 "LILY_WATCHDOG | UNDELIVERED_REFIRE | session=%s q=%d "
                 "attempt=%d — delivery registered but never aired; "
@@ -2992,6 +3038,101 @@ class LilyGame:
             self.sk.session_id, qnum, UNDELIVERED_MAX_REFIRES,
         )
         return "released"
+
+    # -- PATCH-001 T1/T2 helpers (RETIRE_WITH_WS6: the journal reducer's
+    # leases + event-sourced question state replace all of this) ----------
+
+    def question_already_answered(self, qnum: int) -> bool:
+        """T2: True when question `qnum` has been ANSWERED — candidates
+        heard for the current question, or its verdict/adjudication
+        already ran (the answered-set survives the question transition,
+        so a stale refire for N after the game moved to N+1 is caught
+        too). An answered question never re-airs."""
+        answered = getattr(self, "_answered_questions", None) or set()
+        if qnum in answered:
+            return True
+        if qnum == self.sk.question_number and self.sk.answer_candidates:
+            return True
+        return False
+
+    def note_answer_heard(self, qnum: int) -> None:
+        """T2 marking point: adjudication is starting (answer_heard) —
+        every outstanding delivery attempt for this question is now
+        invalid, in-flight playout included."""
+        answered = getattr(self, "_answered_questions", None)
+        if answered is None:
+            answered = self._answered_questions = set()
+        answered.add(qnum)
+        self.invalidate_deliveries_for(qnum)
+
+    def invalidate_deliveries_for(self, qnum: int) -> None:
+        """Release a pending (unconfirmed) delivery claim for `qnum` and
+        cancel its speech mid-playout — the fixture class where the
+        question re-read aired seconds AFTER the correct answer."""
+        key = f"q_{qnum}_delivery"
+        if self.say_registry.state(key) != lily_say_gate.CLAIM_PENDING:
+            return
+        owner = self.say_registry.owner_of(key)
+        self.say_registry.release(key)
+        self.cancel_speech(owner, reason="question_answered")
+        logger.warning(
+            "LILY_DELIVERY | INVALIDATED | session=%s q=%d reason=answered "
+            "— outstanding delivery attempt cancelled",
+            self.sk.session_id, qnum,
+        )
+
+    def cancel_speech(self, speech_id: str | None, reason: str) -> None:
+        """T1: cancel/invalidate one dispatched speech so a late start can
+        never air after its claim was released. Marks it suppressed (the
+        playout watcher routes it to the not-recorded path) and interrupts
+        the live handle when we hold one. Safe on unknown ids."""
+        if not speech_id:
+            return
+        suppressed = getattr(self, "_suppressed_speech_ids", None)
+        if suppressed is None:
+            suppressed = self._suppressed_speech_ids = set()
+        suppressed.add(speech_id)
+        handles = getattr(self, "_speech_handles", None) or {}
+        handle = handles.get(speech_id)
+        if handle is None:
+            return
+        try:
+            handle.interrupt(force=True)
+            logger.warning(
+                "LILY_SPEECH | CANCELLED | speech_id=%s reason=%s",
+                speech_id, reason,
+            )
+        except Exception as e:
+            logger.warning(
+                "LILY_SPEECH | CANCEL_FAILED | speech_id=%s reason=%s "
+                "error=%s", speech_id, reason, e,
+            )
+
+    def note_speech_handle(self, handle) -> None:
+        """Track live SpeechHandles by id (bounded) so cancel_speech can
+        reach them. Wired from the speech_created watcher."""
+        speech_id = getattr(handle, "id", None)
+        if not speech_id:
+            return
+        handles = getattr(self, "_speech_handles", None)
+        if handles is None:
+            handles = self._speech_handles = {}
+        handles[speech_id] = handle
+        while len(handles) > 16:
+            handles.pop(next(iter(handles)))
+
+    def air_dup_guard(self, full: str, delivery: str | None) -> bool:
+        """T3 air-path guard: True = this outbound turn is a verbatim
+        repeat of a RECENTLY-PLAYED turn (last 6, interleaving ignored)
+        and must be made silent. Delivery turns are exempt (a re-read of
+        the sheet is deliberate); short turns are exempt (an honest "Nice
+        one!" may legitimately recur). HOTFIX-002's guard only compared
+        the immediately-preceding turn; every live duplicate pair had a
+        user row interleaved."""
+        if delivery is not None or len(full or "") < 15:
+            return False
+        recent = (getattr(self.sk, "agent_turns", None) or [])[-6:]
+        return full in recent
 
     def _release_armed_question_to_supply(self) -> None:
         """Deregister the armed question from the in-memory asked_history
@@ -3472,9 +3613,10 @@ class LilyGame:
         # can never be redelivered); only a claimed-but-never-played act
         # releases, on the tts_node playback-failure path.
         # Stale-claim recovery bookkeeping: this speech's playout lifecycle
-        # is over either way — its airing marker is spent.
+        # is over either way — its airing marker and handle are spent.
         if speech_id:
             getattr(self, "_playout_started_ids", set()).discard(speech_id)
+            (getattr(self, "_speech_handles", None) or {}).pop(speech_id, None)
         if interrupted or suppressed:
             released = (
                 self.say_registry.release_owner(speech_id)
@@ -3599,6 +3741,11 @@ class LilyGame:
                 self._armed_speech_misses < WINDOW_FALLBACK_AGENT_TURNS
                 or self.ui_phase != "question"
             ):
+                return
+            # T2 (PATCH-001): an answered question never re-airs — the
+            # nudge included.
+            if self.question_already_answered(self.sk.question_number):
+                self._armed_speech_misses = 0
                 return
             self._armed_speech_misses = 0
             logger.warning(
@@ -4706,6 +4853,11 @@ class LilyGame:
         ):
             return
         self._adjudicating = True
+        # T2 (PATCH-001): answer_heard — adjudication starting means this
+        # question was answered; every outstanding delivery attempt for it
+        # is invalidated NOW, in-flight playout included (the fixture
+        # class: the question re-read airing seconds after the answer).
+        self.note_answer_heard(self.sk.question_number)
         # SCORING prior (WO-ADDRESSEE-H1 Task 2): mirror the in-flight flag
         # onto the pure scorekeeper so segments arriving DURING adjudication
         # classify under SCORING (backchannels expected, nothing scoreable).
@@ -4899,14 +5051,36 @@ class LilyGame:
             )
 
             # Commit — scores land in the scorekeeper BEFORE Lily speaks.
+            # T6 (PATCH-001): a failed commit means NO award narration —
+            # an in-character hold plus an ERROR, never a celebration the
+            # ledger can't back (the live "Saturn is correct — you're on
+            # the board!" ×3 with zero answers rows).
             if winner_candidate is not None:
                 if winner_candidate["player"]:
                     winner = winner_candidate["player"]
-                    self.sk.record_result(
-                        winner, correct=True, points=points,
-                        question_id=question.get("id"),
-                        transcript=winner_candidate["text"],
-                    )
+                    try:
+                        self.sk.record_result(
+                            winner, correct=True, points=points,
+                            question_id=question.get("id"),
+                            transcript=winner_candidate["text"],
+                        )
+                    except Exception:
+                        logger.exception(
+                            "LILY_AWARD | COMMIT_FAILED | session=%s q=%d "
+                            "player=%s — award NOT committed; no narration",
+                            self.sk.session_id, self.sk.question_number,
+                            winner,
+                        )
+                        self.gated_say(
+                            None,
+                            "verdict_hold",
+                            "Something needs a second look on that answer. "
+                            "Hold warmly and in character — 'ooh, let me "
+                            "double-check that one—' — and do NOT announce "
+                            "any verdict, points, or the answer.",
+                            source="adjudicate_commit_failed",
+                        )
+                        return
                 else:
                     # Open-floor winner: never silently attributed. Hold the
                     # award until lily_bind_speaker lands for that voice.
@@ -4999,6 +5173,29 @@ class LilyGame:
 
             # Reveal — stinger is the ruling; packet fires on TTS playback.
             self._stinger(correct=winner_candidate is not None)
+            # T4 (PATCH-001): VERDICT-FIRST. The measured live cost of the
+            # single long reveal turn was 11–12s from commit to a spoken
+            # verdict — long enough that players re-answered ("Saturn"
+            # twice, "Kama Sutra" ×15). The verdict word now airs as its
+            # own SHORT turn dispatched immediately at commit (budget:
+            # dispatch within ~1.5s of commit, logged below; flourish and
+            # standings follow as a separate turn). The organic-preempt
+            # guard stands: a conversational turn that already performed
+            # the verdict makes the beat silently done.
+            verdict_commit_ts = time.monotonic()
+            verdict_qnum = self.sk.question_number
+            verdict_key = f"q_{verdict_qnum}_reveal"
+            verdict_spoken_organically = self._verdict_already_spoken(
+                question, winner_candidate
+            )
+            if verdict_spoken_organically:
+                if self.say_registry.claim(verdict_key):
+                    self.say_registry.confirm(verdict_key)
+                logger.info(
+                    "LILY_REVEAL | ORGANIC_PREEMPTED | session=%s q=%d — "
+                    "verdict already spoken in her last turn",
+                    self.sk.session_id, verdict_qnum,
+                )
             reveal_payload = {
                 "correct": winner_candidate is not None,
                 "winner": winner,
@@ -5042,6 +5239,37 @@ class LilyGame:
                 ),
                 self.publish_attributes(),
             )
+            # T4 dispatch point: AFTER the score/reveal publishes (desync-E:
+            # the committed score reaches the glass before the verdict
+            # speaks) but before all remaining bookkeeping — the budget is
+            # commit → dispatch within ~1.5s, logged for telemetry.
+            if not verdict_spoken_organically:
+                answer_text = str(question.get("canonical_answer", ""))
+                if winner_candidate is not None:
+                    verdict_instr = (
+                        "VERDICT BEAT — one short, hot line and NOTHING "
+                        f"else: correct, the answer is {answer_text!r}, "
+                        f"point to {winner or 'the table'}. No flourish, "
+                        "no trivia color, no next question — those come "
+                        "in your next turn."
+                    )
+                else:
+                    verdict_instr = (
+                        "VERDICT BEAT — one short line and NOTHING else: "
+                        "nobody landed it, the answer was "
+                        f"{answer_text!r}. No flourish, no next question "
+                        "— those come in your next turn."
+                    )
+                self.gated_say(
+                    verdict_key, "verdict", verdict_instr,
+                    source="adjudicate_verdict",
+                )
+                logger.info(
+                    "LILY_VERDICT | COMMIT_TO_DISPATCH_MS | session=%s "
+                    "q=%d ms=%.0f",
+                    self.sk.session_id, verdict_qnum,
+                    (time.monotonic() - verdict_commit_ts) * 1000.0,
+                )
             # Burn the revealed question (WS-4): its canonical answer is
             # now going to air (winner confirmation OR a timeout Lily
             # resolves by speaking the answer with nobody scoring). A
@@ -5098,43 +5326,32 @@ class LilyGame:
             # round-closing reveal also claims round_{N}_scores and the
             # final reveal claims finale — one speech, every act it
             # performs claimed, so no other path can re-deliver them.
-            extra: tuple[str, ...] = ()
-            act = "reveal"
+            # T4 (PATCH-001): the FLOURISH turn — reveal color, standings,
+            # the bridge to N+1 — as a SEPARATE beat that never restates
+            # the just-announced verdict. The q_{N}_reveal key was claimed
+            # by the verdict beat (or confirmed by the organic preempt);
+            # round-closing and finale beats keep their own keys. A plain
+            # reveal whose verdict aired organically owes nothing more.
+            act: str | None = "reveal_flourish"
+            flourish_key: str | None = None
             if was_final:
-                extra, act = ("finale",), "reveal_finale"
+                flourish_key, act = "finale", "reveal_finale"
             elif round_over:
-                extra, act = (f"round_{revealed_round}_scores",), "reveal_scores"
-            # Organic-preempt echo guard (live 2026-07-15 20:41): her
-            # conversational reply often performs the verdict the moment
-            # the instant path commits ("Spot on! Jupiter is correct —
-            # 2 for 2"); the scripted reveal then queues behind it and
-            # replays the settled ruling seconds later ("Rami came in
-            # first and said... Jupiter"), sometimes mid-next-question.
-            # If her LAST finished turn already carries this question's
-            # answer plus a verdict cue, the reveal act is DONE — claim
-            # and confirm the key silently so nothing re-delivers it.
-            # Round-closing and finale reveals always dispatch (the
-            # standings/finale beats are theirs alone).
-            if (
-                act == "reveal"
-                and self._verdict_already_spoken(question, winner_candidate)
-            ):
-                key = f"q_{revealed_qnum}_reveal"
-                if self.say_registry.claim(key):
-                    self.say_registry.confirm(key)
-                logger.info(
-                    "LILY_REVEAL | ORGANIC_PREEMPTED | session=%s q=%d — "
-                    "verdict already spoken in her last turn; scripted "
-                    "reveal suppressed",
-                    self.sk.session_id, revealed_qnum,
+                flourish_key, act = (
+                    f"round_{revealed_round}_scores", "reveal_scores"
                 )
-            else:
+            elif verdict_spoken_organically:
+                act = None
+            if act is not None:
                 self.gated_say(
-                    f"q_{revealed_qnum}_reveal",
+                    flourish_key,
                     act,
-                    reveal_instr,
+                    reveal_instr
+                    + "\n\nThe verdict word was JUST announced in your "
+                    "previous beat — do NOT restate correct/incorrect and "
+                    "do NOT re-award the point; go straight to the color "
+                    "and onward.",
                     source="adjudicate",
-                    extra_keys=extra,
                 )
         except Exception:
             # Adjudication runs inside fire-and-forget timer tasks — an
@@ -7660,6 +7877,33 @@ class LilyAgent(Agent):
             )
             return
 
+        # T3 (PATCH-001, RETIRE_WITH_WS6) — AIR-path dup guard: a verbatim
+        # repeat of a recently-PLAYED turn (interleaving ignored; delivery
+        # turns exempt — their re-reads are deliberate) never airs again.
+        # The live class: greet ×2, "my bad" ×2, the Miranda greeting.
+        if self._game.air_dup_guard(full, delivery):
+            logger.warning(
+                "LILY_TURNS | DUP_TURN_SKIPPED | path=air | session=%s — "
+                "verbatim repeat of a recently played turn suppressed",
+                self._game.sk.session_id,
+            )
+            if speech_id:
+                suppressed_ids = getattr(
+                    self._game, "_suppressed_speech_ids", None
+                )
+                if suppressed_ids is None:
+                    self._game._suppressed_speech_ids = set()
+                    suppressed_ids = self._game._suppressed_speech_ids
+                suppressed_ids.add(speech_id)
+                self._game.say_registry.release_owner(speech_id)
+            yield rtc.AudioFrame(
+                data=b"\x00\x00" * 2400,
+                sample_rate=24000,
+                num_channels=1,
+                samples_per_channel=2400,
+            )
+            return
+
         # MANDATORY punctuation-flush guard (Lovebirds fix): LilyTTS is
         # streaming=False, so the framework wraps it in StreamAdapter gated
         # by blingfire sentence tokenization. Lily's suspense holds produce
@@ -8340,6 +8584,9 @@ async def entrypoint(ctx: JobContext) -> None:
     @session.on("speech_created")
     def _on_speech_created(ev) -> None:
         handle = ev.speech_handle
+        # T1 (PATCH-001): track the live handle so a released claim can
+        # CANCEL its speech — a late start must never air after release.
+        game.note_speech_handle(handle)
 
         async def _watch() -> None:
             await handle.wait_for_playout()

@@ -745,20 +745,27 @@ def test_round_transition_reveal_and_question_use_separate_strict_turns():
 
     assert game.sk.question_number == 7
     assert game.armed_question["id"] == ROUND_TWO_MC["id"]
-    assert len(game.session.instructions) == 1
-    reveal = game.session.instructions[0]
+    # PATCH-001 T4: adjudication now dispatches TWO beats — the immediate
+    # verdict word, then the standings flourish that never restates it.
+    # The strict q7 delivery dispatches only at reveal playout completion
+    # (delivery_scenario below).
+    assert len(game.session.instructions) == 2
+    verdict, reveal = game.session.instructions
+    assert "VERDICT BEAT" in verdict
     assert "separate authoritative delivery turn follows" in reveal
+    assert "do NOT restate" in reveal
+    assert ROUND_TWO_MC["prompt"] not in verdict
     assert ROUND_TWO_MC["prompt"] not in reveal
     assert game._pending_delivery_qnum is None
 
     async def delivery_scenario():
-        # Completing q6's reveal dispatches, but does not yet open, q7.
+        # Completing the reveal playout dispatches, but does not open, q7.
         game._pending_reveal_event = None  # UI plumbing is outside this test
         game.on_agent_speech_finished(
             "The femur is correct. Round one is over."
         )
-        assert len(game.session.instructions) == 2
-        delivery = game.session.instructions[1]
+        assert len(game.session.instructions) == 3
+        delivery = game.session.instructions[2]
         assert ROUND_TWO_MC["prompt"] in delivery
         for choice in ROUND_TWO_MC["choices"]:
             assert choice in delivery
