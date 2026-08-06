@@ -7295,11 +7295,12 @@ class LilyAgent(Agent):
             "the adult question, then ask it word for word. "
             "ADULT PICTURES: adult image heat defaults to SUGGESTIVE. "
             "Ask the whole table clearly: for grown-up pictures do they "
-            "want spicy-but-suggestive, or full explicit? Wait for the "
-            "table (not one enthusiast) to agree, then call "
+            "want spicy-but-suggestive, full explicit, or a mix? (A mix "
+            "varies the heat question to question.) Wait for the table "
+            "(not one enthusiast) to agree, then call "
             "lily_set_adult_image_intensity with intensity="
-            "'suggestive'|'explicit' and confirmed_table=true. Do not "
-            "assume explicit. Re-ask only if they change it."
+            "'suggestive'|'explicit'|'mix' and confirmed_table=true. Do "
+            "not assume explicit. Re-ask only if they change it."
         )
 
     @function_tool()
@@ -7309,9 +7310,11 @@ class LilyAgent(Agent):
         intensity: str = "suggestive",
         confirmed_table: bool = False,
     ) -> str:
-        """Set adult picture heat after the table agrees: 'suggestive' or
-        'explicit'. Call only when adult mode is on and the table has
-        clearly chosen. Default stays suggestive until they pick explicit.
+        """Set adult picture heat after the table agrees: 'suggestive',
+        'explicit', or 'mix' (varies question to question, within an
+        explicit ceiling — 'both' is a valid answer). Call only when adult
+        mode is on and the table has clearly chosen. Default stays
+        suggestive until they pick.
         """
         if self._game.sk.mode != "adult":
             return (
@@ -7319,21 +7322,21 @@ class LilyAgent(Agent):
                 "Enter the grown-up deck first, then ask the table."
             )
         level = (intensity or "").strip().lower()
-        if level not in ("suggestive", "explicit"):
+        if level not in ("suggestive", "explicit", "mix"):
             return (
-                "Invalid intensity. Use intensity='suggestive' or "
-                "intensity='explicit' only."
+                "Invalid intensity. Use intensity='suggestive', "
+                "'explicit', or 'mix' only."
             )
         if not confirmed_table and not lily_config.architect_mode():
             return (
                 "Intensity is NOT changed yet. Ask every player at the "
-                "table: 'For grown-up pictures — spicy-but-suggestive, or "
-                "full explicit? Everyone has to be good with it.' Call "
-                "again with confirmed_table=true only after the table "
-                "agrees. If anyone wants softer, stay on suggestive."
+                "table: 'For grown-up pictures — spicy-but-suggestive, "
+                "full explicit, or a mix? Everyone has to be good with "
+                "it.' Call again with confirmed_table=true only after the "
+                "table agrees. If anyone wants softer, stay on suggestive."
             )
         if not self._game.sk.set_adult_image_intensity(level):
-            return "Intensity not accepted — use suggestive or explicit."
+            return "Intensity not accepted — use suggestive, explicit, or mix."
         self._game.publish_attributes_nowait()
         return (
             f"Adult image intensity is now {level.upper()} — sticky for "

@@ -183,7 +183,34 @@ GENERATION_TIMEOUT_SECONDS = 45.0
 # Intensity (suggestive | explicit) is player-chosen at the table;
 # default is suggestive until the table confirms explicit.
 
-ADULT_IMAGE_INTENSITIES: Final[tuple[str, ...]] = ("suggestive", "explicit")
+# PATCH-003 P3 (supersedes RULINGS-001 R3): heat is THREE-way. "mix" is a
+# session CEILING, never a render level — choosing mix IS the explicit
+# opt-up (ceiling explicit, floor suggestive), and each question resolves
+# to a concrete render level for range. Render levels stay the two the
+# generator actually paints.
+ADULT_IMAGE_INTENSITIES: Final[tuple[str, ...]] = (
+    "suggestive", "explicit", "mix",
+)
+ADULT_IMAGE_RENDER_LEVELS: Final[tuple[str, ...]] = ("suggestive", "explicit")
+
+
+def lily_resolve_render_intensity(intensity: Optional[str], seed: str) -> str:
+    """Resolve a session heat choice to the CONCRETE render level for ONE
+    image. suggestive/explicit pass through; 'mix' varies per question
+    within [suggestive, explicit] (deterministic by the question's own
+    content — no Math.random per fleet rule — so a replay is stable and
+    the distribution is roughly even). Never exceeds the explicit ceiling;
+    the hardcoded structural floor lives in the render addenda."""
+    value = (intensity or "").strip().lower()
+    if value in ("suggestive", "explicit"):
+        return value
+    if value == "mix":
+        # Stable parity bit from the question content.
+        h = 0
+        for ch in (seed or "mix"):
+            h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+        return "explicit" if (h & 1) else "suggestive"
+    return "suggestive"
 
 LILY_ADULT_IMAGE_STYLE = (
     "Rendered as a realistic comic-book illustration: bold inked "
@@ -314,8 +341,16 @@ async def lily_generate_image_bytes(
     if mode == "adult":
         # Adult deck -> Grok. Style chokepoint applies here so every adult
         # generation (demo, picture rounds, bank image_prompt) gets the
-        # same art brief + player-chosen intensity.
-        styled = lily_adult_style(prompt, intensity=intensity)
+        # same art brief + player-chosen intensity. P3: a 'mix' session
+        # resolves to a concrete render level per question (the prompt is
+        # the deterministic seed) and the resolved level is logged so the
+        # mix distribution is a log query.
+        render_level = lily_resolve_render_intensity(intensity, prompt)
+        if (intensity or "").strip().lower() == "mix":
+            logger.info(
+                "LILY_IMAGEGEN | MIX_RESOLVED | render_level=%s", render_level
+            )
+        styled = lily_adult_style(prompt, intensity=render_level)
         return await _generate_image_bytes_xai(styled, model=model)
     mdl = model or lily_config.imagegen_model()
     clamped = clamp_and_log(aspect_ratio)

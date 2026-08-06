@@ -1858,10 +1858,10 @@ class LilyScorekeeper:
             self.adult_image_intensity = "suggestive"
 
     def set_adult_image_intensity(self, intensity: str) -> bool:
-        """Sticky adult image heat: suggestive | explicit. Returns True if
-        the value was accepted (even if unchanged)."""
+        """Sticky adult image heat: suggestive | explicit | mix (P3).
+        Returns True if the value was accepted (even if unchanged)."""
         value = (intensity or "").strip().lower()
-        if value not in ("suggestive", "explicit"):
+        if value not in ("suggestive", "explicit", "mix"):
             return False
         if value != self.adult_image_intensity:
             logger.info(
@@ -2154,7 +2154,7 @@ class LilyScorekeeper:
         self.adult_image_intensity = snap.get(
             "adult_image_intensity", self.adult_image_intensity
         )
-        if self.adult_image_intensity not in ("suggestive", "explicit"):
+        if self.adult_image_intensity not in ("suggestive", "explicit", "mix"):
             self.adult_image_intensity = "suggestive"
         self.category = snap.get("category", self.category)
         self.question_number = snap.get("question_number", self.question_number)
