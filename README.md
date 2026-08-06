@@ -1733,6 +1733,7 @@ thresholds section),
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
 `LILY_STT_MAX_ALTERNATIVES` (default 3; 1 = n-best injection kill switch) /
 `LILY_NBEST_DISPERSION_THRESHOLD` (default 0.02 — deliberation escalation),
+`LILY_ADULT_DECK` (**default `open`** — adult deck available, spoken 18+ opt-in still required; `sensor` restores the legacy Audeering coupling),
 `LILY_NOISE_CANCELLATION` (**default `off`** since WO-LILY-HOTFIX-001;
 `nc` opts back in only after the NC-BENCH-001 bench gate — see the WS-14
 memo section; `bvc` and every unknown value coerce to `off`),

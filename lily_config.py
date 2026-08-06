@@ -748,6 +748,24 @@ def audeering_child_step_up_enabled() -> bool:
     return _get_bool("AUDEERING_CHILD_STEP_UP_ENABLED", True)
 
 
+def adult_deck_gate_mode() -> str:
+    """Adult-deck availability gating: "open" (DEFAULT) or "sensor".
+
+    Owner directive 2026-08-06: the deck is open by default — the
+    Audeering child-signal sensor is NOT the gate (its age estimation is
+    unreliable in live rooms per the owner's own testing, and the lane
+    has been quota-blocked fleet-wide since WS-11, which made the deck
+    permanently unavailable in production). The spoken 18+ opt-in
+    ceremony REMAINS required in open mode — every player confirms
+    aloud before the deck switches on; only the sensor coupling is
+    removed. "sensor" restores the legacy fail-closed one-unit coupling
+    (deck available only while the acoustic pipeline is live), and an
+    ACTIVE child veto still blocks entry in every mode whenever the
+    sensor happens to be running."""
+    mode = _get("LILY_ADULT_DECK", "open")
+    return mode if mode in ("open", "sensor") else "open"
+
+
 def architect_mode() -> bool:
     """Server-authenticated operator override for controlled testing.
 

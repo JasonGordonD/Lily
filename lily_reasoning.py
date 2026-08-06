@@ -748,23 +748,40 @@ class LilyReasoning:
     # -- picture-question supply (WO-LILY-OMNIBUS-002 H/I/J) ------------------
 
     async def generate_demo_image(
-        self, supabase, *, session_id: str
+        self, supabase, *, session_id: str, adult: bool = False
     ) -> Optional[str]:
         """Self-knowledge WO "show me" demo (12:47 live fixture): ONE
         generated tabletop image so a skeptic asking to SEE picture
         rounds gets shown — through this, the one legal image seam.
         Cache-first via the shared no-silent-crash wrapper (a session's
-        demo generates at most once); returns a public bucket URL or
-        None. Never raises."""
-        return await lily_imagegen.lily_generate_question_image(
-            supabase,
-            session_id=session_id,
-            question_id=f"demo_{session_id}",
-            prompt=(
+        demo generates at most once per deck); returns a public bucket
+        URL or None. Never raises.
+
+        adult=True (owner directive 2026-08-06): the sample renders in
+        the adult deck's art direction — realistic comic-book
+        illustration via lily_imagegen.lily_adult_style — so a table
+        asking what the grown-up deck's pictures look like gets shown
+        the real style, in a suggestive-not-explicit sample."""
+        if adult:
+            prompt = lily_imagegen.lily_adult_style(
+                "A grown-up cocktail-lounge trivia scene: a dimly lit "
+                "speakeasy table, martini glasses, playing cards and a "
+                "smoldering-glance couple leaning close mid-question, "
+                "flirtatious grown-up energy, suggestive but tasteful"
+            )
+            question_id = f"demo_adult_{session_id}"
+        else:
+            prompt = (
                 "A warm, playful pub-trivia tabletop scene: a wooden "
                 "table with scattered answer cards, a chalkboard "
                 "scoreboard, soft rose-colored lighting, no text"
-            ),
+            )
+            question_id = f"demo_{session_id}"
+        return await lily_imagegen.lily_generate_question_image(
+            supabase,
+            session_id=session_id,
+            question_id=question_id,
+            prompt=prompt,
             aspect_ratio="16:9",
         )
 

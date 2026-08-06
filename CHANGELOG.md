@@ -5,6 +5,33 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-06 — Adult deck open by default + comic-book adult imagery (owner directive)
+
+The Audeering child-signal sensor was the adult deck's availability gate
+— and the Audeering lane has been quota-blocked fleet-wide since WS-11,
+which made the deck PERMANENTLY unavailable in production (the 16:48
+session: repeated refusals with no path to enable). Owner directive:
+the sensor's age estimation is unreliable in live rooms and is not the
+gate.
+
+- **`LILY_ADULT_DECK` — "open" (DEFAULT) | "sensor"** (new,
+  `lily_config.adult_deck_gate_mode`, forwarded by deploy.yml). Open:
+  the deck is available; the SPOKEN 18+ opt-in ceremony remains required
+  before it switches on (consent step unchanged), and an ACTIVE child
+  veto still blocks entry whenever the sensor happens to be running.
+  Sensor: the legacy fail-closed one-unit coupling, now opt-in.
+  Availability flag + `lily_enter_adult_mode` both honor the mode.
+- **Adult imagery: realistic comic-book style.**
+  `lily_imagegen.lily_adult_style` is the single style chokepoint (bold
+  inked linework, painterly shading, stylized — never photorealistic).
+  `lily_show_demo_picture(adult=true)` shows the grown-up deck's sample
+  in that style (suggestive, tasteful, never explicit; gated on the
+  deck's availability flag); the general demo is unchanged. Structured
+  picture slots stay text in adult mode — the real-photo web rail never
+  serves the adult deck.
+- Legacy sensor-mode behavior pinned in `tests/test_adult_safety_gate.py`
+  (the three fail-closed tests now run under `LILY_ADULT_DECK=sensor`).
+
 ## 2026-08-06 — WO-LILY-HOTFIX-002: transcript echo-dups + group-binding loudness
 
 **Evidence re-audit first (session `lily-AAC431-6208ff7c`, 05:19–05:25).**
