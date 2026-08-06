@@ -393,6 +393,11 @@ class LilyGame:
         # confirms.
         self._undelivered_ticks = 0
         self._undelivered_refires = 0
+        # WS-6 supply-stall fallback: consecutive watchdog ticks the game
+        # has sat live-idle with no question in hand (none armed, none
+        # prefetched). Past the fallback window a curated-bank question
+        # arms directly. Reset whenever a question is armed or prefetched.
+        self._supply_stall_ticks = 0
         # True while the currently-open answer window is a steal window
         # (seam: rides answer_window JSON as the optional `steal` key).
         self._steal_window = False
@@ -587,6 +592,17 @@ class LilyGame:
                 "media_mode": self.sk.media_mode,
                 "players": json.dumps(self._players_payload()),
                 "answer_window": json.dumps(window),
+                # SEAM ADDITION (WS-6, WO-LILY-OMNIBUS-003): supply
+                # readiness. "false" only in the live supply-stall state
+                # (game running, no question armed OR prefetched, no ruling
+                # in flight) — the starvation the 583a0f16 session sat in
+                # with no screen cue. WS-9 renders a "next question loading"
+                # cue off this flag. String-valued like the rest of the LWW
+                # attribute set; read as `attributes.next_question_ready ===
+                # "true"`.
+                "next_question_ready": (
+                    "true" if self.next_question_ready() else "false"
+                ),
                 "last_active_at": str(int(time.time())),
             }
             await self.ctx.room.local_participant.set_attributes(attrs)
@@ -595,6 +611,33 @@ class LilyGame:
 
     def publish_attributes_nowait(self) -> None:
         asyncio.ensure_future(self.publish_attributes())
+
+    def next_question_ready(self) -> bool:
+        """WS-6 seam predicate (published as the `next_question_ready`
+        attribute). True when a deliverable question is in hand — armed
+        (playing or awaiting) or prefetched and ready to arm — or a ruling
+        is in flight. False ONLY in the live supply-stall state: the game
+        is running, the window is closed, no ruling is adjudicating or
+        transitioning, and neither an armed nor a prefetched question
+        exists — the starvation the 583a0f16 session sat in with no screen
+        cue. Pre-game and post-game report ready (the lobby/final screens
+        carry their own state, not a supply cue)."""
+        if not getattr(self, "game_started", False) or getattr(
+            self, "game_over", False
+        ):
+            return True
+        if (
+            getattr(self, "armed_question", None) is not None
+            or getattr(self, "next_question", None) is not None
+        ):
+            return True
+        if (
+            self.sk.answer_window_open
+            or getattr(self, "_adjudicating", False)
+            or getattr(self, "_question_transitioning", False)
+        ):
+            return True
+        return False
 
     async def publish_metadata(
         self,
@@ -1973,6 +2016,7 @@ class LilyGame:
         self._armed_limbo_ticks = 0
         self._undelivered_ticks = 0
         self._undelivered_refires = 0
+        self._supply_stall_ticks = 0
         self._watchdog_task = asyncio.ensure_future(self._idle_watchdog())
 
     async def _idle_watchdog(self) -> None:
@@ -1988,6 +2032,7 @@ class LilyGame:
                 ):
                     self._prefetch_stall_ticks = 0
                     self._armed_limbo_ticks = 0
+                    self._supply_stall_ticks = 0
                     continue
                 if self.armed_question is not None:
                     # Armed with a CLOSED window and no ruling in flight.
@@ -2000,6 +2045,7 @@ class LilyGame:
                     # parked on Q3 forever while the watchdog trusted
                     # "armed = in progress"). Recover deterministically.
                     self._prefetch_stall_ticks = 0
+                    self._supply_stall_ticks = 0
                     claim = self.say_registry.state(
                         f"q_{self.sk.question_number}_delivery"
                     )
@@ -2045,6 +2091,7 @@ class LilyGame:
                 # in flight. Someone must move the game — that someone is
                 # now guaranteed to exist.
                 if self.next_question is not None:
+                    self._supply_stall_ticks = 0
                     if self.arm_next_question() and self.session is not None:
                         logger.warning(
                             "LILY_WATCHDOG | IDLE_REARM | session=%s q=%d",
@@ -2065,6 +2112,34 @@ class LilyGame:
                             source="idle_watchdog",
                         )
                     continue
+                # WS-6 supply-stall fallback. Nothing armed, nothing
+                # prefetched: count the stall independently of
+                # _prefetch_stall_ticks. A starved generator that returns
+                # nothing every tick keeps re-prefetching below (task.done()
+                # each tick), so the hard timeout never climbs — the
+                # 583a0f16 five-minute stall lived exactly there. Past the
+                # fallback window, arm straight from the curated bank — but
+                # only once reconciliation reports no stuck claim (WS-2), so
+                # a fallback never queues behind a ghost.
+                self._supply_stall_ticks = (
+                    getattr(self, "_supply_stall_ticks", 0) + 1
+                )
+                logger.warning(
+                    "LILY_WATCHDOG | SUPPLY_STALL | session=%s q=%d "
+                    "ticks=%d (~%ds) — no question in hand",
+                    self.sk.session_id, self.sk.question_number,
+                    self._supply_stall_ticks,
+                    int(self._supply_stall_ticks * self.WATCHDOG_INTERVAL_SECONDS),
+                )
+                if (
+                    self._supply_stall_ticks >= self._supply_fallback_ticks()
+                    and self.no_stuck_claims()
+                ):
+                    if await self.arm_supply_fallback() == "armed":
+                        self._supply_stall_ticks = 0
+                        continue
+                    # empty / blocked / error: fall through so the normal
+                    # re-prefetch keeps trying and the honest vamp holds.
                 task = self._prefetch_task
                 if task is None or task.done():
                     self._prefetch_stall_ticks = 0
@@ -2255,6 +2330,155 @@ class LilyGame:
         self._armed_speech_misses = 0
         self._undelivered_ticks = 0
         self._undelivered_refires = 0
+
+    # -- supply-stall fallback (WS-6, WO-LILY-OMNIBUS-003) ---------------------
+    #
+    # WS-2 heals a delivery that armed but never aired. WS-6 heals the class
+    # UPSTREAM of it: generation itself starves — the supply line returns
+    # nothing tick after tick, so nothing ever arms. The idle watchdog
+    # already re-prefetches every idle tick, but a genuinely dead generator
+    # re-prefetches into the same void; the 583a0f16 session sat there for
+    # five minutes, vamping, with no fallback and no screen cue. Past the
+    # fallback window, arm a question straight from the curated bank (the
+    # SAME lily_questions source the LILY_KB_ONLY runbook and the
+    # generation-failed insurance path draw from — not a new store). Ordered
+    # reconciliation-first: arm only when no_stuck_claims() holds, so a
+    # fallback never queues behind a WS-2 ghost.
+
+    def _supply_fallback_ticks(self) -> int:
+        """Watchdog ticks the game may sit live-idle with no question in
+        hand before the curated-bank fallback arms one (config seconds /
+        the tick interval, floor one tick). Independent of the prefetch
+        hard timeout: a generator returning nothing every tick keeps
+        re-prefetching (task.done() each tick) so the hard timeout never
+        climbs — this window fires anyway."""
+        seconds = lily_config.supply_fallback_seconds()
+        return max(1, round(seconds / self.WATCHDOG_INTERVAL_SECONDS))
+
+    async def arm_supply_fallback(self) -> str:
+        """Arm a question straight from the curated bank when generation
+        has starved the supply line (WS-6). Re-guards every precondition,
+        so it is safe to call standalone. Returns:
+          "armed"   — a bank question armed and one structural delivery
+                      dispatched (exactly one active claim);
+          "blocked" — a stuck delivery claim is present; WS-2 reconciliation
+                      must clear it first (reconciliation-first ordering);
+          "empty"   — no eligible bank row (deck exhausted for this group,
+                      no supabase, or the only draw was a duplicate) — the
+                      game keeps its honest vamp;
+          "idle"    — not in the live supply-stall state;
+          "error"   — the draw path raised; the game keeps vamping.
+        """
+        if not getattr(self, "game_started", False) or getattr(
+            self, "game_over", False
+        ):
+            return "idle"
+        # Reconciliation-first (the WO's explicit ordering): never queue a
+        # fallback behind a ghost. A stuck registered-undelivered claim
+        # always has an armed question, so it is reported here as "blocked"
+        # (WS-2 reconciliation must re-fire or release it first) rather than
+        # falling through to the armed-guard "idle" below.
+        if not self.no_stuck_claims():
+            return "blocked"
+        if (
+            self.armed_question is not None
+            or self.next_question is not None
+            or self.sk.answer_window_open
+            or self._adjudicating
+            or getattr(self, "_question_transitioning", False)
+        ):
+            return "idle"
+        if self.supabase is None:
+            return "empty"
+        rnd = self._round_for_next_question()
+        category = self._category_for_round(rnd)
+        tier = self._difficulty_for_round(rnd)
+        mc = self.sk.format_for_round(rnd) == "multiple_choice"
+        if getattr(self, "_drawn_ids", None) is None:
+            self._drawn_ids = set()
+            self._drawn_hashes = set()
+        history_ids = (
+            lily_bank.lily_history_question_ids(self.asked_history)
+            | self._drawn_ids
+        )
+        history_hashes = (
+            lily_bank.lily_history_hashes(self.asked_history)
+            | self._drawn_hashes
+        )
+        try:
+            # Bounded: the sync client has no HTTP timeout of its own — an
+            # unbounded hang here would wedge the very watchdog that is
+            # supposed to be un-wedging the game.
+            question = await asyncio.wait_for(
+                lily_persistence.lily_fetch_bank_question(
+                    self.supabase, category, tier, self.used_prompts,
+                    mode=self.sk.mode,
+                    exclude_ids=history_ids, exclude_hashes=history_hashes,
+                ),
+                timeout=20.0,
+            )
+        except Exception:
+            logger.exception(
+                "LILY_WATCHDOG | SUPPLY_FALLBACK_ERROR | session=%s q=%d",
+                self.sk.session_id, self.sk.question_number,
+            )
+            return "error"
+        if question is None:
+            logger.error(
+                "LILY_WATCHDOG | SUPPLY_BANK_EMPTY | session=%s q=%d — supply "
+                "stalled and the curated bank has no eligible row; holding "
+                "the honest vamp",
+                self.sk.session_id, self.sk.question_number,
+            )
+            return "empty"
+        # G2 idempotency: a bank row already drawn this session is a
+        # duplicate — discard rather than serve it twice.
+        if not self._register_draw(question):
+            return "empty"
+        if mc and not question.get("choices"):
+            # Bank rows outside the adult MC deck carry no choices —
+            # synthesize them the same way the insurance path does.
+            try:
+                await self.reasoning.ensure_choices(question)
+            except Exception:
+                logger.exception(
+                    "LILY_WATCHDOG | SUPPLY_FALLBACK_CHOICES | session=%s",
+                    self.sk.session_id,
+                )
+        if self.sk.media_mode != "pictures":
+            # Voice-only never rides a bank row's cached image (sub-agent K).
+            question.pop("image_url", None)
+            question.pop("image_license_note", None)
+            question.pop("image_prompt", None)
+            if question.get("image_source"):
+                question["image_source"] = "none"
+        self.next_question = question
+        if not self.arm_next_question():
+            return "idle"
+        # The stall is over: clear the honest-vamp status note the watchdog
+        # or prefetch-crash path may have set.
+        self.sk.clear_status_notes()
+        logger.error(
+            "LILY_WATCHDOG | SUPPLY_FALLBACK_ARMED | session=%s q=%d id=%s — "
+            "generation starved; armed a curated-bank question",
+            self.sk.session_id, self.sk.question_number, question.get("id"),
+        )
+        if self.session is not None:
+            # Structural delivery claim: the nudged turn IS the delivery and
+            # claims q_{N}_delivery at dispatch — exactly one active claim.
+            self.expect_delivery()
+            self.gated_say(
+                None,
+                "question_nudge",
+                (
+                    "The next question just landed in the state block from "
+                    "the curated bank. Bridge in one short beat and ask it "
+                    "now — its question sentence exactly as written, whole, "
+                    "in one breath."
+                ),
+                source="supply_fallback",
+            )
+        return "armed"
 
     # -- mode-switch flush + re-arm (WO-LILY-DESYNC-HONESTY-001 D) -------------
     #
@@ -2452,6 +2676,7 @@ class LilyGame:
         self._pending_delivery_qnum = None  # stale delivery intent dies at arm
         self._undelivered_ticks = 0  # WS-2: reconcile counters are per-question
         self._undelivered_refires = 0
+        self._supply_stall_ticks = 0  # WS-6: a question is in hand now
         self._pre_window_segments = []  # early-buzz buffer is per-question
         self._strict_delivery_qnum = None
         self._judged_keys = set()

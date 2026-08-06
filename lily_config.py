@@ -309,6 +309,17 @@ def undelivered_reconcile_seconds() -> float:
     return _get_float("LILY_UNDELIVERED_RECONCILE_SECONDS", 20.0)
 
 
+def supply_fallback_seconds() -> float:
+    """How long the game may sit live-idle with no question in hand (none
+    armed, none prefetched) before the idle watchdog arms one straight from
+    the curated bank (WS-6 supply-stall fallback). Independent of the
+    prefetch hard timeout: a generator that returns nothing every tick
+    keeps re-prefetching so the hard timeout never climbs — this window
+    fires anyway. The 583a0f16 session sat starved for five minutes filled
+    with vamping and never fell back."""
+    return _get_float("LILY_SUPPLY_FALLBACK_SECONDS", 30.0)
+
+
 def group_id_override() -> Optional[str]:
     """Stable group id for voiceprint rematch (v2); defaults to room name."""
     return _get("LILY_GROUP_ID")
