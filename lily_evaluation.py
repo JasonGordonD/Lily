@@ -760,3 +760,56 @@ def lily_parse_judge_response(raw: str) -> Optional[dict]:
         "normalized_answer": data.get("normalized_answer") or "",
         "reason": data.get("reason") or "",
     }
+
+
+# ---------------------------------------------------------------------------
+# PATCH-001 T5(c) — non-answer utterance gate (evaluator hygiene).
+#
+# Live fixtures (Aug 6): "Yeah" (a backchannel) was formally adjudicated
+# as an answer attempt and scored incorrect; a bare name fragment
+# ("Chris.") produced a null-player answers row. Non-answer-shaped
+# utterances in an open window are LOGGED, never scored as attempts —
+# per-player stats stay honest. Conservative by design: anything that
+# matches the question's own answer surface is ALWAYS an answer, so a
+# yes/no question keeps "yeah" scoreable.
+# ---------------------------------------------------------------------------
+
+LILY_BACKCHANNELS: frozenset = frozenset({
+    "yeah", "yes", "yep", "yup", "no", "nope", "ok", "okay", "oh",
+    "uh huh", "mhm", "mm", "hmm", "huh", "right", "wow", "no way",
+    "come on", "wait", "what", "really", "nice", "cool", "haha", "lol",
+})
+
+
+def lily_non_answer_utterance(
+    text: str, question: Optional[dict], roster_names: Optional[list] = None
+) -> Optional[str]:
+    """Return the reason a final is NOT an answer attempt ("backchannel"
+    or "bare_name"), or None when it is answer-shaped and must be judged.
+
+    Answer-surface match always wins: a final matching the canonical
+    answer, an acceptable variant, an MC choice, or an MC letter is an
+    answer no matter what else it looks like."""
+    norm = lily_normalize_answer(text or "")
+    if not norm:
+        return "empty"
+    q = question or {}
+    surfaces = {
+        lily_normalize_answer(str(q.get("canonical_answer") or ""))
+    }
+    for acc in q.get("acceptable_answers") or []:
+        surfaces.add(lily_normalize_answer(str(acc)))
+    for choice in q.get("choices") or []:
+        surfaces.add(lily_normalize_answer(str(choice)))
+    surfaces.discard("")
+    if norm in surfaces:
+        return None
+    # A longer final containing an answer surface is an answer sentence.
+    if any(f" {s} " in f" {norm} " for s in surfaces if s):
+        return None
+    if norm in LILY_BACKCHANNELS:
+        return "backchannel"
+    for name in roster_names or []:
+        if norm == lily_normalize_answer(str(name)):
+            return "bare_name"
+    return None

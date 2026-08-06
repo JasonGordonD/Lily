@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import lily_config
+import lily_evaluation
 
 logger = logging.getLogger("lily_scorekeeper")
 
@@ -1473,6 +1474,24 @@ class LilyScorekeeper:
             seg_end = (
                 segment_end_time if segment_end_time is not None else seg_start
             )
+            # PATCH-001 T5(c) evaluator hygiene: a backchannel ("Yeah") or
+            # a bare roster-name fragment ("Chris.") in an open window is
+            # LOGGED, never adjudicated as an attempt — the live fixtures
+            # scored "Yeah" incorrect and wrote a null-player "Chris." row,
+            # consuming those players' judgments. Answer-surface matches
+            # always pass (a yes/no question keeps "yeah" scoreable).
+            non_answer = lily_evaluation.lily_non_answer_utterance(
+                clean, self.current_question, list(self.players)
+            )
+            if non_answer:
+                result["non_answer"] = non_answer
+                logger.info(
+                    "LILY_ANSWER | NON_ANSWER_LOGGED | session=%s q=%d "
+                    "label=%s reason=%s text=%r — not an attempt",
+                    self.session_id, self.question_number,
+                    speaker_label, non_answer, clean[:60],
+                )
+                return result
             if player:
                 key = player
             else:

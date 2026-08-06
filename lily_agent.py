@@ -1443,7 +1443,15 @@ class LilyGame:
             # in the buzz window just BEFORE this claim into the pre-window
             # buffer, so an early buzzer is scored at open, not left inert.
             self._note_mc_delivery_start(qnum)
-            self._backfill_prewindow_from_recent()
+            # PATCH-001 T5(a) / OMNIBUS-004 WS-2: the pre-window buffer
+            # covers CLAIM-TO-OPEN ONLY. The old backfill folded finals
+            # from BEFORE the delivery claim into the buffer — speech
+            # predating the claim cannot answer a not-yet-aired question
+            # (live: two pre-question Mars-conversation fragments scored
+            # into the Socrates window, consuming Rami's judgment so his
+            # real answer went inert). The rolling store is cleared so
+            # pre-claim speech can never leak in.
+            self._recent_finals = []
             return f"claimed_{trigger}"
         if textual:
             logger.warning(
