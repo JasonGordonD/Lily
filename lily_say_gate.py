@@ -267,6 +267,57 @@ def lily_repeat_flag(text: str, previous_turns: list) -> Optional[str]:
     return None
 
 
+_SELF_HOLD_RE = re.compile(
+    r"\b(?:take your time|no rush|whenever you(?:'re| are) ready"
+    r"|i(?:'ll| will) wait|no hurry|in your own time|whenever you like"
+    r"|take a (?:moment|beat|breath)|i(?:'ll| will) hold|i(?:'ll| will) pause)\b",
+    re.IGNORECASE,
+)
+
+
+def lily_self_hold_phrase(text: str) -> bool:
+    """PATCH-002 A4b — True when a played agent turn promised to wait
+    ('take your time', 'no rush', 'whenever you're ready'). Her own words
+    bind her: the turn that says it enters the hold, so she can't then
+    keep talking 5s later. Pure."""
+    return bool(_SELF_HOLD_RE.search(text or ""))
+
+
+def lily_paraphrase_repeat_flag(
+    text: str, previous_turns: list, threshold: float = 0.6
+) -> Optional[str]:
+    """PATCH-002 A4a — SEMANTIC repeat lint. lily_repeat_flag catches
+    verbatim/n-gram cycling; this catches repeat-in-MEANING (the live
+    reassurance storm: three semantically identical 'take your time'
+    turns in 30s). Returns "paraphrase" when the turn's content-word set
+    overlaps any recent agent turn above `threshold` (Jaccard on
+    stopword-stripped tokens), else None. Cheap and dependency-free — a
+    bag-of-content-words proxy for semantic similarity, tuned
+    conservative so only genuine restatements flag. Pure; log/suppress
+    decision is the caller's."""
+    words = set(_repeat_norm_words(text)) - _STOPWORDS
+    if len(words) < 3 or not previous_turns:
+        return None
+    for prev in previous_turns:
+        prev_words = set(_repeat_norm_words(prev)) - _STOPWORDS
+        if len(prev_words) < 3:
+            continue
+        union = words | prev_words
+        if not union:
+            continue
+        jaccard = len(words & prev_words) / len(union)
+        if jaccard >= threshold:
+            return "paraphrase"
+    return None
+
+
+_STOPWORDS: frozenset = frozenset({
+    "a", "an", "the", "and", "or", "but", "so", "to", "of", "in", "on",
+    "for", "with", "your", "you", "i", "im", "ill", "well", "just",
+    "is", "are", "it", "its", "that", "this", "we", "me", "my", "at", "as",
+})
+
+
 def lily_mirror_flag(text: str) -> Optional[str]:
     """Return the matched mirror pattern when the turn OPENS with a
     flattery/agreement-echo reflex, else None. Only the first ~120 chars

@@ -89,6 +89,9 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_RELAXED_WINDOW_MULTIPLIER",
     "LILY_SUPPLY_FALLBACK_SECONDS",
     "LILY_UNDELIVERED_RECONCILE_SECONDS",
+    # PATCH-002 A4 solo-vamping hold tunables — ship on in-code defaults.
+    "LILY_HOLD_TIMEOUT_SECONDS",
+    "LILY_PARAPHRASE_REPEAT_THRESHOLD",
     # WS-3 cut-recovery grace (WO-LILY-STREAM-INTEGRITY-002): the dead-air
     # window before an auto-resume fires. Default-backed threshold (3.5s);
     # ships on its in-code default, tune via deploy.yml `vars.` if needed.

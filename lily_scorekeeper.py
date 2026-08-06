@@ -327,6 +327,35 @@ _FORGET_NEGATION_RE = _re.compile(
 )
 
 
+# STOP primitive (WO-LILY-PATCH-002 A5/T12) — the runaway-agent brake.
+# When Lily runs away (re-airing, talking over a request, question-storming),
+# an addressed "Lily, stop" is recognized at the dispatch gate BEFORE the
+# LLM, so the halt can never itself be answered by a re-aired question. She
+# stops, takes a breath, waits. Garble tolerant (the stop/staap/stahp STT
+# class). An ADDRESSED stop ("Lily, stop") always fires; a BARE stop fires
+# only in solo (one player — no ambiguity about who is being told to stop).
+_STOP_WORD = r"st[ao][h']?[ao]?p+|st[ao]wp|stlop|halt|freeze"
+_STOP_CORE_RE = _re.compile(rf"\b(?:{_STOP_WORD})\b")
+_STOP_ADDRESSED_RE = _re.compile(
+    rf"\b(?:lily|lilly|lil)\b[\s,.!]*(?:{_STOP_WORD})"
+    rf"|(?:{_STOP_WORD})\b[\s,.!]*\b(?:lily|lilly|lil)\b"
+)
+_STOP_NEGATION_RE = _re.compile(r"\b(?:do not|dont|don t|please dont|never)\s+st")
+
+
+def lily_detect_stop(text: str, *, solo: bool = False) -> bool:
+    """True when this utterance is an addressed STOP (or a bare stop in a
+    solo room) — the runaway-agent brake. Deterministic + garble-tolerant.
+    Word-bounded (never 'stopwatch'/'unstoppable') and negation-guarded
+    ('don't stop')."""
+    normalized = _normalize_command_text(text)
+    if not normalized or _STOP_NEGATION_RE.search(normalized):
+        return False
+    if _STOP_ADDRESSED_RE.search(normalized):
+        return True
+    return bool(solo and _STOP_CORE_RE.search(normalized))
+
+
 def lily_detect_control_command(text: str) -> Optional[str]:
     """
     Detect a sticky player command in an utterance.

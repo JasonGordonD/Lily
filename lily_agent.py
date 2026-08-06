@@ -82,6 +82,7 @@ from lily_binding import (
     lily_is_valid_name,
 )
 from lily_reasoning import LilyReasoning
+import lily_scorekeeper
 from lily_scorekeeper import LilyScorekeeper, lily_detect_state_contradiction
 import lily_images
 import lily_vision
@@ -536,6 +537,13 @@ class LilyGame:
         # question never re-airs).
         self._speech_handles: dict = {}
         self._answered_questions: set = set()
+        # PATCH-002 A4/A5 (RETIRE_WITH_WS6): the hold state binds EVERY
+        # dispatch lane. A decline/wait/STOP puts the session in hold —
+        # no unsolicited conversational turns AND no question deliveries
+        # until user speech releases it, a hard game event fires, or the
+        # generous timeout elapses. Her own "take your time" binds her too.
+        self._hold_active = False
+        self._hold_since = 0.0
         self._enroll_started = False
         self._last_enroll_retry_ts = 0.0  # WS-8 under-threshold retry cooldown
         self._armed_speech_misses = 0  # agent turns finished w/o performing q
@@ -965,6 +973,17 @@ class LilyGame:
         prefetch nudge) still log LILY_SAY for the audit trail.
         extra_keys are claimed alongside (e.g. the finale rides the final
         reveal's dispatch) without gating it."""
+        # PATCH-002 A4: the hold state binds every dispatch lane. While
+        # held (a decline/wait/STOP), NO unsolicited conversational turn
+        # and NO question delivery airs until the hold releases. The
+        # release beats and the STOP acknowledgment are the sole exempt
+        # sources (they carry hold_exempt via the allowlist below).
+        if self.hold_blocks_dispatch(act, source):
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=hold | act=%s | source=%s",
+                act, source,
+            )
+            return False
         reservation = f"dispatch_{uuid.uuid4().hex}"
         if key is not None and not self.say_registry.claim(key, owner=reservation):
             # WO-LILY-HOTFIX-001: dup suppression is only legitimate against
@@ -2736,6 +2755,15 @@ class LilyGame:
                     return
                 if not self.game_started or self.game_over:
                     continue
+                # PATCH-002 A4: the hold binds every lane. While held, the
+                # watchdog itself must not refire/nudge/vamp — that would be
+                # the runaway it exists to prevent. It only lifts the hold
+                # on its generous timeout (user speech lifts it sooner).
+                if getattr(self, "_hold_active", False):
+                    if self.hold_timed_out():
+                        self.release_hold(reason="timeout")
+                    else:
+                        continue
                 if (
                     self.sk.answer_window_open
                     or self._adjudicating
@@ -3117,6 +3145,99 @@ class LilyGame:
                 "LILY_SPEECH | CANCEL_FAILED | speech_id=%s reason=%s "
                 "error=%s", speech_id, reason, e,
             )
+
+    # -- PATCH-002 A4/A5: hold state + STOP primitive (RETIRE_WITH_WS6) ----
+
+    # Sources allowed to speak WHILE HELD: the STOP/hold acknowledgment
+    # itself and the deterministic mode-revert/hold-release beats. Question
+    # deliveries, nudges, verdicts, reveals, and free conversation are all
+    # blocked until the hold releases.
+    _HOLD_EXEMPT_SOURCES = frozenset({
+        "stop_primitive", "hold_ack", "hold_release",
+    })
+
+    def hold_blocks_dispatch(self, act: str, source: str) -> bool:
+        """True when the hold state must suppress this dispatch. Exempt
+        sources (the STOP ack, hold-release) always pass; everything else
+        — conversational turns AND question deliveries — is blocked while
+        held."""
+        if not getattr(self, "_hold_active", False):
+            return False
+        return source not in self._HOLD_EXEMPT_SOURCES
+
+    def enter_hold(self, reason: str) -> None:
+        """Bind every dispatch lane: one acknowledgment then yield. A
+        player's decline/wait, Lily's own 'take your time', and STOP all
+        route here. Idempotent — re-entering while held only refreshes the
+        clock."""
+        already = getattr(self, "_hold_active", False)
+        self._hold_active = True
+        self._hold_since = time.time()
+        if not already:
+            logger.warning(
+                "LILY_HOLD | ENTERED | session=%s reason=%s — all dispatch "
+                "lanes yield until user release / hard event / timeout",
+                self.sk.session_id, reason,
+            )
+
+    def release_hold(self, reason: str) -> bool:
+        """Lift the hold (user spoke, a hard game event fired, or the
+        timeout elapsed). Returns True if a hold was actually lifted."""
+        if not getattr(self, "_hold_active", False):
+            return False
+        self._hold_active = False
+        logger.info(
+            "LILY_HOLD | RELEASED | session=%s reason=%s",
+            self.sk.session_id, reason,
+        )
+        return True
+
+    def hold_timed_out(self, now: float | None = None) -> bool:
+        if not getattr(self, "_hold_active", False):
+            return False
+        ref = now if now is not None else time.time()
+        return (ref - getattr(self, "_hold_since", 0.0)) >= lily_config.hold_timeout_seconds()
+
+    def handle_stop_primitive(self, source_text: str) -> None:
+        """A5/T12: the dispatch-gate STOP reflex — the runaway-agent
+        brake, called BEFORE the LLM ever sees the turn. Halt playout,
+        cancel every queued/in-flight dispatch for the turn (no re-fire,
+        no watchdog resurrection), enter the hold, one brief
+        acknowledgment, then yield."""
+        logger.warning(
+            "LILY_STOP | PRIMITIVE | session=%s text=%r — halting playout, "
+            "cancelling dispatches, entering hold",
+            self.sk.session_id, (source_text or "")[:60],
+        )
+        # 1. Halt anything airing + cancel every tracked handle.
+        for speech_id in list(getattr(self, "_speech_handles", {})):
+            self.cancel_speech(speech_id, reason="stop_primitive")
+        # 2. Kill the delivery watchdog's ability to resurrect the turn.
+        released = self.say_registry.release_pending()
+        if released:
+            logger.info(
+                "LILY_STOP | CLAIMS_RELEASED | keys=%s", ",".join(sorted(released))
+            )
+        self._armed_speech_misses = 0
+        self._undelivered_ticks = 0
+        # 3. Interrupt the live session speech if the framework holds one.
+        session = getattr(self, "session", None)
+        interrupt = getattr(session, "interrupt", None)
+        if callable(interrupt):
+            try:
+                interrupt()
+            except Exception as e:
+                logger.warning("LILY_STOP | session interrupt failed: %s", e)
+        # 4. Enter the hold and speak ONE short acknowledgment.
+        self.enter_hold(reason="stop_primitive")
+        self.gated_say(
+            None,
+            "stop_ack",
+            "The player just told you to stop. Stop immediately: one short, "
+            "warm acknowledgment ('got it — I'll hold') and NOTHING else. "
+            "No question, no recap, no next move — wait for them.",
+            source="stop_primitive",
+        )
 
     def note_speech_handle(self, handle) -> None:
         """Track live SpeechHandles by id (bounded) so cancel_speech can
@@ -3688,6 +3809,12 @@ class LilyGame:
         self.record_agent_turn(
             spoken_text, act_keys=sorted(confirmed or []), interrupted=False
         )
+        # PATCH-002 A4b: her own wait-promise binds her. A turn that just
+        # played and said "take your time" enters the hold — no unsolicited
+        # turn or delivery until the table speaks (the live "take your
+        # time" followed by more talking 5s later).
+        if lily_say_gate.lily_self_hold_phrase(spoken_text):
+            self.enter_hold(reason="self_wait_promise")
         # Honesty assist (desync WO Sub-agent C): the state note serviced
         # the turn that just finished playing — one-shot, consumed here.
         self._state_note = None
@@ -4470,6 +4597,19 @@ class LilyGame:
         nothing was buffered) — optional and additive, existing callers
         unchanged."""
         ts = segment_ts if segment_ts is not None else time.time()
+
+        # PATCH-002 A5/T12 — STOP primitive, at the very top so it bypasses
+        # the LLM and can never be answered by a re-aired question. A bare
+        # stop counts only in a solo room (one rostered player).
+        solo = self.sk.roster_size() <= 1
+        if lily_scorekeeper.lily_detect_stop(text, solo=solo):
+            self.handle_stop_primitive(text)
+            return
+        # PATCH-002 A4 — any user final RELEASES the hold (they've spoken;
+        # she may resume). The hold's own STOP ack is exempt (it's hers).
+        if getattr(self, "_hold_active", False):
+            self.release_hold(reason="user_speech")
+
         self.request_device_verification("final_transcript")
 
         # n-best telemetry (WO-ADDRESSEE-H1 Task 1): dispersion logged per
@@ -7746,6 +7886,22 @@ class LilyAgent(Agent):
                 "LILY_SAY | REPEAT_FLAG | session=%s kind=%s",
                 self._game.sk.session_id, repeat_kind,
             )
+        # PATCH-002 A4a — SEMANTIC repeat lint over the last few PLAYED
+        # turns (the reassurance-storm class: three ways of saying the same
+        # thing in 30s). Log-only here; the regen gate below promotes it to
+        # a suppression on a genuine consecutive restatement, so she doesn't
+        # loop synonyms. Delivery acts are exempt (the regen gate handles
+        # that), and short turns rarely trip the token-overlap threshold.
+        paraphrase_kind = lily_say_gate.lily_paraphrase_repeat_flag(
+            full, self._game.sk.agent_turns[-3:],
+            threshold=lily_config.paraphrase_repeat_threshold(),
+        )
+        if paraphrase_kind and not repeat_kind:
+            logger.info(
+                "LILY_SAY | PARAPHRASE_FLAG | session=%s kind=%s",
+                self._game.sk.session_id, paraphrase_kind,
+            )
+            repeat_kind = repeat_kind or paraphrase_kind
 
         # Regeneration GATE (WS-3): on a RE-AIR (this turn was re-dispatched
         # after its prior airing was cut/suppressed), the repeat lint is no

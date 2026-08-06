@@ -360,6 +360,22 @@ def steal_window_seconds() -> float:
     return _get_float("LILY_STEAL_WINDOW_SECONDS", 5.0)
 
 
+def hold_timeout_seconds() -> float:
+    """PATCH-002 A4: how long the hold state (a decline/wait/'take your
+    time') binds every dispatch lane before it lifts on its own. Generous
+    by design — the point is to yield to the table, not to time them out
+    quickly. User speech or a hard game event releases it sooner."""
+    return _get_float("LILY_HOLD_TIMEOUT_SECONDS", 90.0)
+
+
+def paraphrase_repeat_threshold() -> float:
+    """PATCH-002 A4: cosine-ish token-overlap ratio above which a
+    consecutive agent turn counts as a semantic repeat of a recent one
+    (the reassurance-storm class — three ways of saying 'take your time').
+    Deliberately high so only genuine restatements flag."""
+    return _get_float("LILY_PARAPHRASE_REPEAT_THRESHOLD", 0.6)
+
+
 def segment_max_span_seconds() -> float:
     """Segment sanity gate S (WO-LILY-OMNIBUS-003 WS-10): finals whose
     spoken span exceeds this are quarantined — session lily-81BCB0 shipped
