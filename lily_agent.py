@@ -111,6 +111,39 @@ CATEGORY_FAMILIES = ["academic", "pop culture", "wordplay", "lifestyle-potpourri
 # them (live defect: adult questions introduced as "academic category").
 ADULT_CATEGORY_FAMILIES = ["adult_couples", "adult_kink"]
 
+# Adaptive thinking (operator rule 2026-08-06): the vocal model runs LOW by
+# default for fast hosting patter, and ESCALATES to HIGH on turns that need
+# real reasoning — rules disputes, adjudication challenges, ambiguity,
+# multi-step/long requests. (Content GENERATION — categories/questions — runs
+# HIGH in the reasoning node, a separate model/call-site.) Gemini 3.x accepts
+# only 'low'/'high'.
+_COMPLEX_TURN_RE = re.compile(
+    r"\b(wrong|isn'?t right|that'?s not|not correct|incorrect|actually|"
+    r"why|how come|rule|rules|cheat|cheating|unfair|doesn'?t count|"
+    r"does not count|dispute|disput\w+|challenge|overrule|reconsider|"
+    r"object|explain|clarify|confus\w+|what if|too hard|too easy|redo|"
+    # multi-step / multi-constraint requests (e.g. "... but only the "
+    # emperors and also skip the obscure ones")
+    r"and also|but only|but not|except for|only the)\b",
+    re.IGNORECASE,
+)
+
+
+def _lily_thinking_level_for_text(text: str) -> str:
+    """LOW for short reflexive banter; HIGH when a turn needs genuine
+    reasoning (dispute/adjudication/ambiguity/multi-step). Bias HIGH on
+    clearly non-trivial turns; stay LOW otherwise. Pure + testable."""
+    t = (text or "").strip()
+    if not t:
+        return "low"
+    if _COMPLEX_TURN_RE.search(t):
+        return "high"
+    # Long or multi-question turns carry real complexity.
+    if len(t) > 140 or t.count("?") >= 2:
+        return "high"
+    return "low"
+
+
 EVENTS_TOPIC = "lily.events"
 
 # Contract-note packet-kind spellings for the `event` discriminator alias
@@ -7230,10 +7263,57 @@ class LilyAgent(Agent):
         self._apply_context_blocks(chat_ctx)
         self._game.publish_attributes_nowait()
 
-        async for chunk in Agent.default.llm_node(
-            self, chat_ctx, tools, model_settings
-        ):
-            yield chunk
+        # Adaptive thinking (operator 2026-08-06): escalate the vocal model to
+        # HIGH for complex/high-stakes user turns (disputes, adjudication
+        # challenges, ambiguity, multi-step), LOW for reflexive banter. The
+        # plugin's chat() reads _opts.thinking_config per call, so a contained
+        # per-turn override + finally-restore keeps LOW as the default and
+        # never rips out the LiveKit LLM integration. thinking_level only
+        # affects reasoning depth/latency, never output structure — so a rare
+        # overlap with a preemptive turn is a latency detail, not a bug.
+        _sentinel = object()
+        _restore = _sentinel
+        _opts = getattr(getattr(self, "llm", None), "_opts", None)
+        if _opts is not None and self._thinking_level_for_turn(chat_ctx) == "high":
+            _restore = getattr(_opts, "thinking_config", None)
+            try:
+                _opts.thinking_config = {"thinking_level": "high"}
+            except Exception:
+                _restore = _sentinel
+        try:
+            async for chunk in Agent.default.llm_node(
+                self, chat_ctx, tools, model_settings
+            ):
+                yield chunk
+        finally:
+            if _restore is not _sentinel and _opts is not None:
+                try:
+                    _opts.thinking_config = _restore
+                except Exception:
+                    pass
+
+    def _thinking_level_for_turn(self, chat_ctx) -> str:
+        """'high'/'low' for THIS turn from the last user message. Only user
+        turns escalate; instruction-driven generations (reveal, greeting,
+        tool follow-ups — no user turn) stay LOW."""
+        try:
+            items = (
+                getattr(chat_ctx, "items", None)
+                or getattr(chat_ctx, "messages", None)
+                or []
+            )
+            for item in reversed(list(items)):
+                if getattr(item, "role", None) != "user":
+                    continue
+                content = getattr(item, "content", None)
+                if isinstance(content, (list, tuple)):
+                    text = " ".join(str(c) for c in content if isinstance(c, str))
+                else:
+                    text = str(content or "")
+                return _lily_thinking_level_for_text(text)
+        except Exception:
+            pass
+        return "low"
 
     async def tts_node(self, text, model_settings):
         chunks = []

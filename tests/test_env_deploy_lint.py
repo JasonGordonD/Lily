@@ -115,6 +115,10 @@ LILY_LOCAL_ONLY_ENV = {
     # Misc: image model id (prefetch-only) and voice preset 1 (hardcoded
     # default ID, same pattern as Zuna's VOICE_NADIA).
     "LILY_IMAGEGEN_MODEL",
+    # Adult-deck image model id — ships on its in-code default
+    # (grok-imagine-image); the xAI credential it uses (XAI_API_KEY) is
+    # already forwarded.
+    "LILY_ADULT_IMAGEGEN_MODEL",
     "LILY_VOICE_1",
 }
 

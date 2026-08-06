@@ -59,8 +59,17 @@ _CURRENT_EVENTS_RE = re.compile(
     re.IGNORECASE,
 )
 
-REASONING_THINKING_LEVEL = "medium"  # spec §4.4: thinking_level, never thinking_budget
-JUDGE_THINKING_LEVEL = "low"
+# Content GENERATION (categories, questions, round-building) runs at HIGH
+# thinking — operator rule 2026-08-06: generation is never low, quality over
+# latency. Live-verified on gemini-3.1-pro-preview: thinking_level=high with
+# response_schema returns valid structured JSON (finishReason STOP, no body
+# starvation — the old starvation trap was thinking_BUDGET, not level).
+REASONING_THINKING_LEVEL = "high"  # spec §4.4: thinking_level, never thinking_budget
+# Tier-2 adjudication of a close/ambiguous player answer is a HIGH-stakes
+# reasoning call (operator rule 2026-08-06: adjudication -> HIGH). The 12s
+# bound in judge() + Tier-1 fallback protects the critical path if a HIGH
+# turn runs long.
+JUDGE_THINKING_LEVEL = "high"
 PREFETCH_TIMEOUT_SECONDS = 30.0
 
 # Adult-product context (§11.1): explicit safety settings on every call —

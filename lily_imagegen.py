@@ -42,9 +42,11 @@ an emoji round would not exercise the donor stack at all.
 """
 
 import asyncio
+import base64
 import logging
 from typing import Final, Optional
 
+import aiohttp
 from google import genai as google_genai
 from google.genai import types as genai_types
 
@@ -171,21 +173,87 @@ def clamp_and_log(requested: str) -> str:
 GENERATION_TIMEOUT_SECONDS = 45.0
 
 
+_XAI_IMAGES_URL: Final = "https://api.x.ai/v1/images/generations"
+
+
+async def _generate_image_bytes_xai(
+    prompt: str, *, model: Optional[str] = None
+) -> tuple[bytes, str, str]:
+    """ADULT-deck image generation via xAI Grok Imagine. Same contract as
+    the Gemini path: returns (image_bytes, mime, model), RAISES RuntimeError
+    with the provider's words on any failure. Gemini refuses adult content,
+    so the adult deck routes here. Live-verified: POST /v1/images/generations
+    returns data[0].url on imgen.x.ai."""
+    mdl = model or lily_config.adult_imagegen_model()
+    api_key = lily_config.xai_api_key()
+    if not api_key:
+        raise RuntimeError("adult image provider unconfigured (XAI_API_KEY)")
+    payload = {"model": mdl, "prompt": prompt, "n": 1}
+    timeout = aiohttp.ClientTimeout(total=GENERATION_TIMEOUT_SECONDS)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        async with http.post(
+            _XAI_IMAGES_URL, json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+        ) as resp:
+            try:
+                body = await resp.json(content_type=None)
+            except Exception:
+                body = {"raw": await resp.text()}
+            if resp.status < 200 or resp.status >= 300:
+                err = body.get("error") if isinstance(body, dict) else body
+                raise RuntimeError(
+                    f"xAI image HTTP {resp.status}: {str(err)[:300]}"
+                )
+        item = (body.get("data") or [{}])[0] if isinstance(body, dict) else {}
+        b64 = item.get("b64_json")
+        if b64:
+            raw = base64.b64decode(b64)
+            mime = item.get("mime_type") or "image/jpeg"
+        else:
+            url = item.get("url")
+            if not url:
+                raise RuntimeError("xAI image response carried no url/b64")
+            async with http.get(url) as img_resp:
+                if img_resp.status < 200 or img_resp.status >= 300:
+                    raise RuntimeError(f"xAI image fetch HTTP {img_resp.status}")
+                raw = await img_resp.read()
+                mime = (
+                    img_resp.headers.get("Content-Type")
+                    or item.get("mime_type") or "image/jpeg"
+                )
+    if not raw:
+        raise RuntimeError("xAI image fetch returned empty body")
+    logger.info(
+        "LILY_IMAGEGEN | GENERATED | provider=xai model=%s bytes=%d",
+        mdl, len(raw),
+    )
+    return raw, mime, mdl
+
+
 async def lily_generate_image_bytes(
     prompt: str,
     *,
     aspect_ratio: str = "16:9",
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    mode: str = "general",
 ) -> tuple[bytes, str, str]:
     """One image generation call. Returns (image_bytes, mime_type, model).
 
-    RAISES RuntimeError with the provider's message on any failure —
-    callers (the no-silent-crash wrappers below) turn that into a visible
-    lily_image_attempts error row. Aspect ratio is clamped before the wire
-    (the donor crash class: an off-list value 400s AFTER a good render)."""
+    Provider routing by DECK (read-only on mode — never touches the adult
+    gate): general/standard -> Gemini image model; adult -> xAI Grok Imagine
+    (Gemini refuses adult content). RAISES RuntimeError with the provider's
+    message on any failure — callers (the no-silent-crash wrappers below)
+    turn that into a visible lily_image_attempts error row. Aspect ratio is
+    clamped before the wire (the donor crash class: an off-list value 400s
+    AFTER a good render)."""
     if not (prompt or "").strip():
         raise RuntimeError("empty image prompt")
+    if mode == "adult":
+        # Adult deck -> Grok. NOTE: adult picture-trivia is currently gated
+        # OFF upstream (prefetch_picture_question bails on adult mode); this
+        # branch makes the routing correct-and-ready if that opens.
+        return await _generate_image_bytes_xai(prompt, model=model)
     mdl = model or lily_config.imagegen_model()
     clamped = clamp_and_log(aspect_ratio)
     config = None
@@ -235,20 +303,26 @@ async def lily_generate_question_image(
     question_id: str,
     prompt: str,
     aspect_ratio: str = "16:9",
+    mode: str = "general",
 ) -> Optional[str]:
     """NO-SILENT-CRASH wrapper: generate + store one INVENTED-content image
     and return its public bucket URL, or None (text-only fallback).
 
-    CACHE-FIRST: a bank row (kb_ id) that already carries an image
+    Provider routing by deck: general -> Gemini, adult -> Grok (read-only on
+    mode). CACHE-FIRST: a bank row (kb_ id) that already carries an image
     short-circuits — nothing is generated. Every attempt writes a visible
     lily_image_attempts row; this function NEVER raises."""
     # Cache-first (sub-agent H rule): check the bank row before generating.
     cached = await lily_images.lily_cached_bank_image(supabase, question_id)
     if cached is not None:
         return cached["image_url"]
+    attempt_model = (
+        lily_config.adult_imagegen_model() if mode == "adult"
+        else lily_config.imagegen_model()
+    )
     try:
         data, mime, mdl = await lily_generate_image_bytes(
-            prompt, aspect_ratio=aspect_ratio
+            prompt, aspect_ratio=aspect_ratio, mode=mode
         )
     except Exception as e:
         await lily_images.lily_record_image_attempt(
@@ -258,7 +332,7 @@ async def lily_generate_question_image(
             if "safety" in str(e).lower() or "no image in response" in str(e)
             else lily_images.ATTEMPT_ERROR,
             failure_reason=f"{type(e).__name__}: {e}",
-            model=lily_config.imagegen_model(),
+            model=attempt_model,
         )
         return None
     url = await lily_images.lily_upload_image_bytes(

@@ -193,6 +193,39 @@ def test_vision_flag_tracks_the_xai_key(monkeypatch):
     assert lily_vision.lily_vision_available() is True
 
 
+def test_vision_flag_bound_to_the_live_check_in_the_entrypoint():
+    """MUTATION GUARD (operator 2026-08-06): the runtime vision flag MUST be
+    computed from lily_vision.lily_vision_available(), never a literal. If a
+    future edit hardcodes it off (the 'manifest lies, she relays the lie'
+    defect — vision works but she denies photo analysis), this goes red."""
+    src = _availability_flags_source()
+    assert '"vision": lily_vision.lily_vision_available()' in src, (
+        "vision availability flag is no longer bound to the live key check "
+        "— it must never be a hardcoded literal"
+    )
+
+
+def test_vision_off_line_is_scoped_not_a_blanket_picture_denial():
+    """When vision is off (no XAI key), the line must name photo-LOOKING
+    specifically and affirm that picture rounds / generated images still
+    work — it must NEVER collapse into 'pictures are off tonight' (the
+    2026-08-06 user-facing symptom). Generated pictures ride Gemini/Grok
+    image-gen, which need no vision key."""
+    flags = {
+        entry["availability_key"]: True
+        for entry in lily_capabilities.LILY_CAPABILITIES
+        if entry.get("availability_key")
+    }
+    flags["vision"] = False  # only photo-analysis off; everything else on
+    lines = lily_capabilities.lily_availability_lines(flags)
+    vision_lines = [ln for ln in lines if ln.startswith("image_ingestion")]
+    assert len(vision_lines) == 1
+    line = vision_lines[0].lower()
+    assert "picture rounds" in line and "still work" in line, line
+    # No other capability is reported off in this scenario.
+    assert lines == vision_lines
+
+
 def test_availability_lines_never_overclaim_and_stay_honest():
     all_on = {
         entry["availability_key"]: True

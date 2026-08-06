@@ -219,6 +219,32 @@ reach it.
   A session that still heard "off" was a deployed-runtime key gap, not
   code — a redeploy carries the keys.
 
+## Model stack + thinking policy (operator-directed, 2026-08-06)
+
+Every model ID below was verified live on the funded keys before wiring.
+
+- **Brain (vocal LLM):** `gemini-3.6-flash` (`lily_config.vocal_model`), text-mode
+  via the LiveKit `GoogleLLM` plugin — NOT Gemini Live. Streaming is on by
+  default (plugin streams into TTS). `previous_interaction_id` is not used —
+  local `chat_ctx` stays authoritative for the game's structural/desync/floor
+  logic.
+- **Image gen — standard deck:** `gemini-3.1-flash-lite-image` (Nano Banana 2
+  Lite; `lily_config.imagegen_model`) on the classic `generate_content` path
+  (no Interactions API migration needed).
+- **Image gen — adult deck:** xAI Grok Imagine `grok-imagine-image`
+  (`lily_config.adult_imagegen_model`) via `_generate_image_bytes_xai`, because
+  Gemini refuses adult content. `lily_generate_image_bytes(..., mode=...)` picks
+  the provider READ-ONLY on deck — the adult gate is untouched. Adult
+  picture-trivia stays gated off upstream by the safe-for-table rule
+  (`prefetch_picture_question`), so this routing is correct-and-ready but latent.
+- **thinking_level** is per call-site, never global: content GENERATION
+  (`REASONING_THINKING_LEVEL`) and close-answer ADJUDICATION
+  (`JUDGE_THINKING_LEVEL`) run HIGH; hosting banter runs LOW (the `GoogleLLM`
+  default); complex conversational turns (disputes/adjudication/ambiguity/
+  multi-step) escalate to HIGH via `_thinking_level_for_turn` in `llm_node`,
+  which overrides `_opts.thinking_config` for that turn and restores in
+  `finally`. Gemini 3.x accepts only `low`/`high`.
+
 ## Both-sides record, continuous recognition, variety (WO-LILY-RECOGNITION-VARIETY-001)
 
 From the 2026-08-04 solo-probe fixture (`lily-CC9E19-19c2b804`) — the

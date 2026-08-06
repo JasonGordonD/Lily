@@ -1,0 +1,169 @@
+"""WO-LILY-CAPABILITY-RESTORE-001 (operator model addenda 2026-08-06) —
+brain/image model pins, thinking-level policy, and image provider routing.
+
+Operator-directed swaps (override the fleet no-model-pin rule for these):
+  - brain (vocal) -> gemini-3.6-flash (text-mode via the LiveKit google
+    plugin, NOT Gemini Live); live-verified chat + tool call.
+  - standard-deck image gen -> gemini-3.1-flash-lite-image (Nano Banana 2
+    Lite); live-verified via generate_content.
+  - adult-deck image gen -> xAI grok-imagine-image (Gemini refuses adult).
+  - thinking_level: HIGH for content generation + adjudication (never low),
+    LOW for reflexive banter, ESCALATE to HIGH on complex user turns.
+
+Model IDs are pinned constants here (defaults) — the live resolve/status:ok
+proof runs against the funded GOOGLE_API_KEY / XAI_API_KEY and is attached
+to the WO report, not CI (keys + cost).
+"""
+
+import asyncio
+import inspect
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import lily_config
+import lily_imagegen
+import lily_reasoning
+from lily_agent import _lily_thinking_level_for_text
+
+
+# -- model pins ----------------------------------------------------------------
+
+
+def test_brain_model_is_gemini_3_6_flash():
+    assert lily_config.vocal_model() == "gemini-3.6-flash"
+
+
+def test_standard_imagegen_is_nano_banana_2_lite():
+    assert lily_config.imagegen_model() == "gemini-3.1-flash-lite-image"
+
+
+def test_adult_imagegen_routes_to_grok():
+    assert lily_config.adult_imagegen_model() == "grok-imagine-image"
+
+
+def test_image_and_brain_pins_are_separate_constants():
+    # 3.6-flash does NOT do image generation — the pins must not collapse.
+    assert lily_config.vocal_model() != lily_config.imagegen_model()
+    assert lily_config.vocal_model() != lily_config.adult_imagegen_model()
+
+
+# -- thinking-level policy -----------------------------------------------------
+
+
+def test_generation_thinking_is_high_never_low():
+    # Operator firm rule: content generation is never low.
+    assert lily_reasoning.REASONING_THINKING_LEVEL == "high"
+
+
+def test_adjudication_thinking_is_high():
+    # Tier-2 adjudication of a close/ambiguous answer is high-stakes.
+    assert lily_reasoning.JUDGE_THINKING_LEVEL == "high"
+
+
+def test_banter_stays_low():
+    for turn in [
+        "haha nice",
+        "yeah",
+        "okay let's go",
+        "Sarah's up next",
+        "woo!",
+    ]:
+        assert _lily_thinking_level_for_text(turn) == "low", turn
+
+
+def test_complex_turns_escalate_to_high():
+    for turn in [
+        "wait that's not right, the answer should be Paris",  # dispute
+        "why does that count? she said it after the buzzer",   # adjudication
+        "actually I think you scored that wrong",              # dispute
+        "that's unfair, the rule says otherwise",              # rules
+        # multi-step / ambiguous / long
+        "can you do a round about the Ming dynasty but only the "
+        "emperors and also skip the really obscure ones please",
+        "what if two of us answer at once? and who gets the point?",
+    ]:
+        assert _lily_thinking_level_for_text(turn) == "high", turn
+
+
+def test_empty_or_none_turn_is_low():
+    assert _lily_thinking_level_for_text("") == "low"
+    assert _lily_thinking_level_for_text(None) == "low"
+
+
+def test_llm_node_escalation_is_guarded_and_restores():
+    # The per-turn override must snapshot + restore so LOW is the default
+    # the plugin always returns to (source-level contract check).
+    from lily_agent import LilyAgent
+    src = inspect.getsource(LilyAgent.llm_node)
+    assert "_thinking_level_for_turn" in src
+    assert "finally" in src
+    assert "thinking_config" in src
+
+
+# -- image provider routing ----------------------------------------------------
+
+
+def test_adult_mode_routes_image_gen_to_xai(monkeypatch):
+    called = {}
+
+    async def _fake_xai(prompt, *, model=None):
+        called["xai"] = (prompt, model)
+        return (b"xai-bytes", "image/jpeg", "grok-imagine-image")
+
+    monkeypatch.setattr(lily_imagegen, "_generate_image_bytes_xai", _fake_xai)
+    data, mime, mdl = asyncio.new_event_loop().run_until_complete(
+        lily_imagegen.lily_generate_image_bytes("a scene", mode="adult")
+    )
+    assert called["xai"][0] == "a scene"
+    assert mdl == "grok-imagine-image"
+    assert data == b"xai-bytes"
+
+
+def test_general_mode_does_not_touch_xai(monkeypatch):
+    # General deck must NEVER hit the adult provider.
+    async def _boom(prompt, *, model=None):
+        raise AssertionError("general mode must not route to xAI")
+
+    monkeypatch.setattr(lily_imagegen, "_generate_image_bytes_xai", _boom)
+
+    # Stub the Gemini client so no network call happens; assert general
+    # takes the Gemini branch (model = the standard Lite pin).
+    class _Inline:
+        data = b"gemini-bytes"
+        mime_type = "image/jpeg"
+
+    class _Part:
+        inline_data = _Inline()
+        text = None
+
+    class _Content:
+        parts = [_Part()]
+
+    class _Cand:
+        content = _Content()
+
+    class _Resp:
+        candidates = [_Cand()]
+
+    class _Models:
+        def generate_content(self, **kw):
+            return _Resp()
+
+    class _Client:
+        def __init__(self, **kw):
+            self.models = _Models()
+
+    monkeypatch.setattr(lily_imagegen.google_genai, "Client", _Client)
+    monkeypatch.setattr(lily_config, "google_api_key", lambda: "k")
+    data, mime, mdl = asyncio.new_event_loop().run_until_complete(
+        lily_imagegen.lily_generate_image_bytes("a scene", mode="general")
+    )
+    assert data == b"gemini-bytes"
+    assert mdl == "gemini-3.1-flash-lite-image"
+
+
+def test_default_mode_is_general():
+    sig = inspect.signature(lily_imagegen.lily_generate_image_bytes)
+    assert sig.parameters["mode"].default == "general"

@@ -199,6 +199,15 @@ LILY_CAPABILITIES: list = [
         # Grok vision rides XAI_API_KEY — fleet-standard; unset = she can
         # receive the photo but must honestly say she can't look tonight.
         "availability_key": "vision",
+        # SCOPED partial (operator 2026-08-06): vision-off is ONLY about
+        # looking at a shared photo. Generated picture rounds and demo
+        # pictures run on Gemini/Grok image-gen, which need no vision key —
+        # so an off vision flag must NEVER collapse into a blanket "pictures
+        # are off tonight." Name exactly what's off.
+        "availability_partial": (
+            "looking at a photo you share needs the vision key; picture "
+            "rounds and generated images still work"
+        ),
     },
 ]
 

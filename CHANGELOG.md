@@ -6,6 +6,78 @@ nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
 
+## 2026-08-06 — WO-LILY-CAPABILITY-RESTORE-001 (model addenda): 3.6-flash brain, Nano Banana 2 Lite, provider routing, thinking policy
+
+Operator-directed model upgrades (override the fleet no-model-pin rule for
+these). **Every model ID was verified live on the funded keys before
+wiring — no blind swaps.**
+
+**Brain LLM -> `gemini-3.6-flash`** (`lily_config.vocal_model`). Text-mode
+via the LiveKit `GoogleLLM` plugin (NOT Gemini Live — Lily is Speechmatics
+STT + ElevenLabs TTS with the LLM in generateContent mode; confirmed). Live
+proof: chat status:ok ("OK") and a function call fired correctly
+(`lily_set_category(topic="Japan")`). Streaming was ALREADY on (the plugin
+streams by default into TTS) — confirmed, not re-plumbed. `previous_
+interaction_id` deliberately NOT adopted: Lily's LOCAL `chat_ctx` is the
+authoritative context (structural q_{N}_delivery claims, desync integrity,
+floor/addressee logic); server-side chaining would conflict with those.
+
+**Standard-deck image gen -> `gemini-3.1-flash-lite-image`** (Nano Banana 2
+Lite; `lily_config.imagegen_model`). Fastest/cheapest for fun trivia cards.
+Kept on the existing `client.models.generate_content` path — live-verified
+it works there, so NO migration to the Interactions API was needed. Live
+proof: 1.0 MB JPEG generated through `lily_generate_image_bytes`.
+
+**Adult-deck image gen -> xAI Grok Imagine** (`grok-imagine-image`;
+`lily_config.adult_imagegen_model`). Gemini refuses adult content, so
+`lily_generate_image_bytes(..., mode="adult")` routes to
+`POST /v1/images/generations` (new `_generate_image_bytes_xai`), fetches the
+returned `imgen.x.ai` URL, returns bytes on the same contract. Live proof:
+343 KB JPEG. **Read-only on mode — the adult GATE is untouched.** NOTE:
+adult picture-trivia is currently gated OFF upstream by a documented
+safe-for-table rule (`lily_reasoning.prefetch_picture_question` returns
+None on adult mode); this routing is correct-and-ready but latent. Enabling
+adult pictures is a separate behavior decision (touches the safe-for-table
+rule) and was NOT made here.
+
+**thinking_level policy** (adaptive, per call-site — never a global
+default):
+- Content GENERATION (categories, questions, round-building) -> **HIGH**
+  (`REASONING_THINKING_LEVEL` medium->high). Live-verified HIGH + response_
+  schema returns valid structured JSON (finishReason STOP — the old
+  starvation trap was thinking_BUDGET, not level).
+- Tier-2 adjudication of a close/ambiguous answer -> **HIGH**
+  (`JUDGE_THINKING_LEVEL` low->high; the 12s bound + Tier-1 fallback
+  protects the critical path).
+- Reflexive hosting banter -> **LOW** (the `GoogleLLM` construction default).
+- Complex/high-stakes conversational turns (disputes, adjudication
+  challenges, ambiguity, multi-step) -> escalate to **HIGH** via a
+  lightweight heuristic in `llm_node` (`_lily_thinking_level_for_text` +
+  `_thinking_level_for_turn`) that overrides the plugin's
+  `_opts.thinking_config` for that turn and restores in `finally` (the
+  plugin reads it per `chat()` call). Contained — never rips out the
+  LiveKit LLM integration; thinking_level affects reasoning depth/latency
+  only, so a rare overlap with a preemptive turn is a latency detail, not a
+  correctness bug. Gemini 3.x accepts only `low`/`high`.
+
+**Vision/EXA availability reconciled** (so she stops blanket-denying
+pictures): both `XAI_API_KEY` (vision) and `EXA_API_KEY` (real-photo
+sourcing) are present + funded (live-checked) and forwarded, so at runtime
+both flags are ON. The runtime `vision` flag is bound to
+`lily_vision.lily_vision_available()` in the entrypoint (a truth-test
+mutation guard now fails if that's ever hardcoded off — the "manifest lies,
+she relays it" defect). Added a SCOPED `availability_partial` to the vision
+entry: an off vision flag now says only that *looking at a shared photo*
+needs the key, and affirms picture rounds + generated images still work —
+it can never collapse into "pictures are off tonight."
+
+**Tests:** full suite **1214 passed** on the isolated 1.6.6 venv
+(`tests/test_model_and_thinking.py` 13 cases: model pins, thinking policy,
+provider routing; plus vision mutation guards in `test_capability_truth.py`;
+`LILY_ADULT_IMAGEGEN_MODEL` registered local-only in the env/deploy lint).
+Zero regressions. STT/TTS config, the adult gate, and the safety ladder
+were not touched.
+
 ## 2026-08-06 — WO-LILY-STREAM-INTEGRITY-002: mid-sentence cut recovery
 
 **WS-1 root cause (from real runtime logs + transcripts, session

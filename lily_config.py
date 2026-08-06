@@ -100,7 +100,12 @@ def google_api_key() -> str:
 
 
 def vocal_model() -> str:
-    return _get("LILY_VOCAL_MODEL", "gemini-3.5-flash")
+    # gemini-3.6-flash (operator-directed upgrade 2026-08-06): 1M ctx,
+    # function-calling + structured outputs + thinking, text-mode via the
+    # LiveKit google plugin (NOT Gemini Live). Live-verified: chat + tool
+    # call status:ok on the funded GOOGLE_API_KEY. Image gen is a SEPARATE
+    # pin (imagegen_model) — 3.6-flash does NOT do image generation.
+    return _get("LILY_VOCAL_MODEL", "gemini-3.6-flash")
 
 
 def reasoning_model() -> str:
@@ -183,9 +188,22 @@ def tavily_api_key() -> Optional[str]:
 
 
 def imagegen_model() -> str:
-    """Gemini image model for invented-content picture questions
-    (sub-agent J; image_source='generated' only, prefetch-time only)."""
-    return _get("LILY_IMAGEGEN_MODEL", "gemini-2.5-flash-image")
+    """Gemini image model for STANDARD-deck invented-content picture
+    questions (sub-agent J; image_source='generated' only, prefetch-time
+    only). gemini-3.1-flash-lite-image = Nano Banana 2 Lite (operator-
+    directed 2026-08-06): fastest/cheapest for fun trivia cards, 1K.
+    Live-verified via generate_content on the funded GOOGLE_API_KEY."""
+    return _get("LILY_IMAGEGEN_MODEL", "gemini-3.1-flash-lite-image")
+
+
+def adult_imagegen_model() -> str:
+    """Image model for the ADULT deck. Gemini refuses adult content, so the
+    adult picture path routes to xAI Grok Imagine (grok-imagine-image, via
+    xai_api_key()). Live-verified: POST /v1/images/generations returns a
+    url. NOTE: adult picture-trivia is currently gated OFF upstream
+    (lily_reasoning.prefetch_picture_question bails on adult mode); this
+    pin makes the provider routing correct-and-ready if that opens."""
+    return _get("LILY_ADULT_IMAGEGEN_MODEL", "grok-imagine-image")
 
 
 # ---------------------------------------------------------------------------
