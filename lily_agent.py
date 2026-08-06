@@ -4903,21 +4903,59 @@ class LilyGame:
         # instantly, in code — same discipline as "back to normal".
         media_choice = result.get("media_choice")
         if media_choice and media_choice != self.sk.media_mode:
-            self.sk.set_media_mode(media_choice)
-            self.publish_attributes_nowait()
             if media_choice == "pictures":
-                line = (
-                    "The table asked for pictures. Picture rounds are ON — "
-                    "committed, in code. One short confirmation (the screen "
-                    "is in the game now), then keep moving."
-                )
+                # PATCH-003 P1: activation is a REAL flip, dependency-checked.
+                # A down lane never flips to a false "ON" — the honest,
+                # specific unavailability line names the real cause (P4
+                # grounding) and media_mode stays voice_only.
+                outcome = self.picture_activation_outcome()
+                status = {
+                    "generation_available": outcome != "unavailable_gen",
+                    "pipeline_available": outcome != "unavailable_pipeline",
+                }
+                if not status["generation_available"]:
+                    self.gated_say(
+                        None, "media_mode_unavailable",
+                        "The table asked for pictures but the image "
+                        "GENERATION lane is not configured (no key). Do "
+                        "NOT say pictures are on. Say plainly that pictures "
+                        "aren't available tonight because the image "
+                        "generator isn't switched on, offer to keep going "
+                        "voice-only, and move on. Name no other cause.",
+                        source="voice_command",
+                    )
+                elif not status["pipeline_available"]:
+                    self.gated_say(
+                        None, "media_mode_unavailable",
+                        "The table asked for pictures but the picture "
+                        "PIPELINE is unreachable right now. Do NOT say "
+                        "pictures are on. Say plainly the picture system "
+                        "isn't reachable this session, offer voice-only, "
+                        "and move on. Name no other cause.",
+                        source="voice_command",
+                    )
+                else:
+                    self.sk.set_media_mode("pictures")
+                    self.publish_attributes_nowait()
+                    self.gated_say(
+                        None, "media_mode",
+                        "Picture rounds are ON — committed, in code, the "
+                        "lane is healthy. One short confirmation (the "
+                        "screen is in the game now), then keep moving. Only "
+                        "claim an image is on the screen once one actually "
+                        "lands there.",
+                        source="voice_command",
+                    )
             else:
-                line = (
+                self.sk.set_media_mode(media_choice)
+                self.publish_attributes_nowait()
+                self.gated_say(
+                    None, "media_mode",
                     "The table asked for voice only. Pictures are OFF — "
                     "committed, in code. One short confirmation, no "
-                    "ceremony, keep moving."
+                    "ceremony, keep moving.",
+                    source="voice_command",
                 )
-            self.gated_say(None, "media_mode", line, source="voice_command")
 
         # Safety-net auto-start: cheap gate check on every user segment so
         # the game can start off the ambient chatter of a settled lobby —
@@ -6545,6 +6583,18 @@ class LilyGame:
                 "actually reached the screen this question"
             )
         return None
+
+    def picture_activation_outcome(self) -> str:
+        """PATCH-003 P1: can pictures-on actually flip right now? Reads the
+        picture lane and returns 'on' (flip + confirm), 'unavailable_gen'
+        (no generation key), or 'unavailable_pipeline' (pipeline down).
+        Generation is checked first — no lane exists without it."""
+        status = self.picture_lane_status()
+        if not status["generation_available"]:
+            return "unavailable_gen"
+        if not status["pipeline_available"]:
+            return "unavailable_pipeline"
+        return "on"
 
     def build_state_block(self) -> str:
         block = self.sk.build_state_block()
