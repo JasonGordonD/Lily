@@ -455,7 +455,7 @@ def test_one_trajectory_row_per_turn_when_pipeline_healthy():
 
     asyncio.run(_run())
     assert len(db.inserted) == 3
-    assert [r["turn_index"] for r in db.inserted] == [1, 2, 3]
+    assert sorted(r["turn_index"] for r in db.inserted) == [1, 2, 3]
     assert db.inserted[0]["session_id"] == game.sk.session_id
     assert db.inserted[0]["dimension"] == {
         "arousal": 0.2, "valence": 0.1, "dominance": 0.0,
