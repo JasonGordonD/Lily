@@ -91,6 +91,41 @@ _VOCATIVE_RE = _re.compile(
 
 _NAME_RE = _re.compile(r"\blily\b")
 
+# Floor-hold declaration: an utterance ADDRESSED to Lily whose content
+# asserts the table holds the floor. Both 81BCB0 derailment corrections
+# are this shape ("Okay. Carry on. Lily. We're not talking to you." /
+# "Carry on. Lily. We're having a conversation."): host-directed speech
+# that DECLARES a side conversation — it locks/sustains the cluster
+# instead of breaking it. "Carry on" alone is NOT a hold (Rami also uses
+# it as plain "proceed"); the hold is carried by the we-clause.
+_FLOOR_HOLD_RE = _re.compile(
+    r"\b(?:we'?re?|we are)\s+not\s+talking\s+to\s+you\b"
+    r"|\bnot\s+talking\s+to\s+you\b"
+    r"|\b(?:we'?re?|we are)\s+having\s+a\s+conversation\b"
+    r"|\b(?:we'?re?|we are)\s+talking\s+to\s+each\s+other\b"
+    r"|\b(?:we'?re?|we are)\s+in\s+the\s+middle\s+of\s+something\b"
+    r"|\bgive\s+us\s+a\s+(?:minute|moment|second|sec)\b"
+)
+
+# Table-address: speech aimed at the OTHER PLAYERS as a group ("Have you
+# guys seen Loki?") — player-to-player evidence at the language layer,
+# and the solo-run cluster anchor (diarization only captures the audible
+# side of a conversation; a solo-attributed run addressing the table is
+# one side of a multi-person exchange).
+_TABLE_ADDRESS_RE = _re.compile(
+    r"\byou guys\b|\by'?all\b|\byou two\b|\byou both\b|\bguys\b|\beverybody\b"
+)
+
+
+def lily_floor_hold(text: str) -> bool:
+    """Whether the utterance declares the table holds the floor."""
+    return _FLOOR_HOLD_RE.search(_normalize_for_name(text)) is not None
+
+
+def lily_table_address(text: str) -> bool:
+    """Whether the utterance addresses the other players as a group."""
+    return _TABLE_ADDRESS_RE.search(_normalize_for_name(text)) is not None
+
 
 def _normalize_for_name(text: str) -> str:
     return _DIAR_TAG_RE.sub("", text or "").strip().lower()
@@ -367,8 +402,11 @@ class LilyAddresseeClassifier:
         adjacency_bonus: float = 0.25,
         cluster_min_utterances: int = 3,
         cluster_min_speakers: int = 2,
-        cluster_max_gap_seconds: float = 6.0,
-        cluster_break_gap_seconds: float = 10.0,
+        # 81BCB0 ground truth: the feedback-beat run carries a 12.5s
+        # intra-run gap (one 11-second utterance); the break gap must sit
+        # clearly above the intra-run bound.
+        cluster_max_gap_seconds: float = 15.0,
+        cluster_break_gap_seconds: float = 25.0,
         acoustic_weight: float = 0.3,
     ) -> None:
         self.host_threshold = host_threshold
@@ -439,10 +477,9 @@ class LilyAddresseeClassifier:
             > self.cluster_break_gap_seconds
         )
 
-    def _try_lock(self, ts: float) -> Optional[int]:
-        """Lock a side-cluster off the trailing run of side-leaning,
-        gap-bounded utterances: enough of them, from enough distinct
-        speakers, with content cohering between them."""
+    def _trailing_run(self) -> list:
+        """Trailing gap-bounded run of side-leaning utterances, newest
+        first."""
         run: list = []
         prev_ts: Optional[float] = None
         for entry in reversed(self._recent):
@@ -452,23 +489,54 @@ class LilyAddresseeClassifier:
                 break
             run.append(entry)
             prev_ts = entry.ts
-        if len(run) < self.cluster_min_utterances:
-            return None
-        speakers = {e.speaker for e in run}
-        if len(speakers) < self.cluster_min_speakers:
-            return None
-        links = len(run) - 1
-        cohesive = sum(1 for e in run[:-1] if e.cohesive_with_prev)
-        if cohesive < max(1, (links + 1) // 2):
-            return None
+        return run
+
+    def _lock_cluster(self, ts: float, speakers: set, started_ts: float) -> int:
         self._cluster_counter += 1
         self._active_cluster = {
             "id": self._cluster_counter,
             "speakers": set(speakers),
             "last_ts": ts,
-            "started_ts": run[-1].ts,
+            "started_ts": started_ts,
         }
         return self._cluster_counter
+
+    def _try_lock(self, ts: float) -> Optional[int]:
+        """Lock a side-cluster off the trailing run of side-leaning,
+        gap-bounded utterances. Two routes:
+
+        - alternation: enough utterances from >=2 distinct speakers with
+          content cohering between them;
+        - solo run (81BCB0 reality — diarization captures only the
+          audible side of a conversation): enough utterances from one
+          voice, anchored by a table-address ("Have you guys seen
+          Loki?") or fully-cohering links.
+        """
+        run = self._trailing_run()
+        if len(run) < self.cluster_min_utterances:
+            return None
+        speakers = {e.speaker for e in run}
+        links = len(run) - 1
+        cohesive = sum(1 for e in run[:-1] if e.cohesive_with_prev)
+        if len(speakers) >= self.cluster_min_speakers:
+            if cohesive < max(1, (links + 1) // 2):
+                return None
+        else:
+            table_address = any(lily_table_address(e.text) for e in run)
+            if not table_address and cohesive < links:
+                return None
+        return self._lock_cluster(ts, speakers, run[-1].ts)
+
+    def _declare_cluster(self, ts: float) -> Optional[int]:
+        """A floor-hold declaration locks the cluster the declarer is
+        protecting: the trailing side run (any length) becomes the
+        cluster. None when there is no RECENT side speech to protect —
+        the run must reach into the declaration's own gap window."""
+        run = self._trailing_run()
+        if not run or ts - run[0].ts > self.cluster_max_gap_seconds:
+            return None
+        speakers = {e.speaker for e in run}
+        return self._lock_cluster(ts, speakers, run[-1].ts)
 
     # -- the judgment --------------------------------------------------------
 
@@ -492,23 +560,48 @@ class LilyAddresseeClassifier:
 
         cluster_id: Optional[int] = None
         cluster_event: Optional[str] = None
+        floor_hold = lily_floor_hold(signals.text)
 
-        # Hard host rules — each breaks a live side-cluster.
+        # Hard host rules. Definitional and plain vocative/command break a
+        # live side-cluster; a FLOOR-HOLD declaration ("Carry on, Lily.
+        # We're not talking to you.") is host-directed speech that ASSERTS
+        # the side conversation — it locks/sustains the cluster instead.
         definitional = signals.window_open and signals.expectation_match
-        if definitional or name_evidence == NAME_VOCATIVE or signals.command_shaped:
+        if definitional:
             if self._active_cluster is not None:
                 cluster_id = self._active_cluster["id"]
                 cluster_event = CLUSTER_BREAK
                 self._active_cluster = None
-            if definitional:
-                score = max(score, 0.95)
-                reason = "window+match"
-            elif name_evidence == NAME_VOCATIVE:
-                score = max(score, self.host_threshold)
-                reason = "vocative"
+            score = max(score, 0.95)
+            reason = "window+match"
+            classification = CLASS_HOST_DIRECTED
+        elif floor_hold:
+            score = max(score, self.host_threshold)
+            reason = "floor-hold"
+            classification = CLASS_HOST_DIRECTED
+            if self._active_cluster is not None:
+                cluster = self._active_cluster
+                cluster["last_ts"] = signals.ts
+                cluster["speakers"].add(signals.speaker_label)
+                cluster_id = cluster["id"]
+                cluster_event = CLUSTER_EXTEND
             else:
-                score = max(score, self.host_threshold)
-                reason = "command"
+                declared = self._declare_cluster(signals.ts)
+                if declared is not None:
+                    self._active_cluster["speakers"].add(
+                        signals.speaker_label
+                    )
+                    cluster_id = declared
+                    cluster_event = CLUSTER_LOCK
+        elif name_evidence == NAME_VOCATIVE or signals.command_shaped:
+            if self._active_cluster is not None:
+                cluster_id = self._active_cluster["id"]
+                cluster_event = CLUSTER_BREAK
+                self._active_cluster = None
+            score = max(score, self.host_threshold)
+            reason = (
+                "vocative" if name_evidence == NAME_VOCATIVE else "command"
+            )
             classification = CLASS_HOST_DIRECTED
         elif self._active_cluster is not None:
             # Inside a locked cluster: utterances classify as a cluster,
@@ -533,7 +626,12 @@ class LilyAddresseeClassifier:
                 ts=signals.ts,
                 speaker=signals.speaker_label,
                 text=signals.text,
-                side_leaning=classification != CLASS_HOST_DIRECTED,
+                # A floor-hold is host-classified but belongs to the
+                # table's conversation by its own claim — it must not
+                # reset the side-run bookkeeping.
+                side_leaning=(
+                    classification != CLASS_HOST_DIRECTED or floor_hold
+                ),
                 cohesive_with_prev=lily_content_cohesion(
                     prev.text if prev else None, signals.text
                 ),

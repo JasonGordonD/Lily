@@ -1,0 +1,384 @@
+[
+ {
+  "id": 96,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:48:48.16701+00",
+  "speaker_label": "S2",
+  "player_name": null,
+  "transcript": "Hi. My name is Rhonda.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "2.197",
+  "fuzzy_matched_answer": false,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": null,
+  "label_source": null,
+  "asr_n_best": [
+   {
+    "text": "Hi My name is Rhonda",
+    "confidence": 0.95
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 97,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:50:39.361929+00",
+  "speaker_label": "Rami",
+  "player_name": "Rami",
+  "transcript": "[Rami] Hydrogen.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "7.446",
+  "fuzzy_matched_answer": true,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": "host_directed",
+  "label_source": "implicit_scored_unappealed",
+  "asr_n_best": [
+   {
+    "text": "Hydrogen",
+    "confidence": 1
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 98,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:51:37.334292+00",
+  "speaker_label": "S4",
+  "player_name": null,
+  "transcript": "Pacific ocean.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "3.525",
+  "fuzzy_matched_answer": true,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": "host_directed",
+  "label_source": "implicit_scored_unappealed",
+  "asr_n_best": [
+   {
+    "text": "Pacific ocean",
+    "confidence": 0.73
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 99,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:52:29.925792+00",
+  "speaker_label": "S2",
+  "player_name": "Rhonda",
+  "transcript": "Mark.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "2.286",
+  "fuzzy_matched_answer": true,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": "host_directed",
+  "label_source": "implicit_scored_unappealed",
+  "asr_n_best": [
+   {
+    "text": "Mark",
+    "confidence": 0.63
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 100,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:53:57.721373+00",
+  "speaker_label": "S3",
+  "player_name": "Paige",
+  "transcript": "Femur.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "5.905",
+  "fuzzy_matched_answer": true,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": null,
+  "label_source": null,
+  "asr_n_best": [
+   {
+    "text": "Femur",
+    "confidence": 0.57
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 101,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:54:04.257691+00",
+  "speaker_label": "S3",
+  "player_name": "Paige",
+  "transcript": "Femur.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "12.441",
+  "fuzzy_matched_answer": true,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": "host_directed",
+  "label_source": "implicit_scored_unappealed",
+  "asr_n_best": [
+   {
+    "text": "Femur",
+    "confidence": 0.85
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 103,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:54:41.043158+00",
+  "speaker_label": "Rami",
+  "player_name": "Rami",
+  "transcript": "[Rami] It.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "0.0",
+  "fuzzy_matched_answer": false,
+  "system_directed_hit": false,
+  "agent_action": "clarified",
+  "label": "unknown",
+  "label_source": "explicit_clarify",
+  "asr_n_best": null,
+  "n_best_dispersion": null,
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 102,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:54:59.845891+00",
+  "speaker_label": "Rami",
+  "player_name": "Rami",
+  "transcript": "[Rami] It.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "1.543",
+  "fuzzy_matched_answer": false,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": null,
+  "label_source": null,
+  "asr_n_best": [
+   {
+    "text": "It",
+    "confidence": 0.85
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 104,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:55:03.771217+00",
+  "speaker_label": "S4",
+  "player_name": "Chris",
+  "transcript": "Also",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "5.468",
+  "fuzzy_matched_answer": false,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": "host_directed",
+  "label_source": "implicit_scored_unappealed",
+  "asr_n_best": null,
+  "n_best_dispersion": null,
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 105,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:55:06.909265+00",
+  "speaker_label": "Rami",
+  "player_name": "Rami",
+  "transcript": "[Rami] Sahara. Desert.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "8.606",
+  "fuzzy_matched_answer": true,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": "host_directed",
+  "label_source": "implicit_scored_unappealed",
+  "asr_n_best": [
+   {
+    "text": "Sahara Desert",
+    "confidence": 1
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 106,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:58:55.395813+00",
+  "speaker_label": "Rami",
+  "player_name": "Rami",
+  "transcript": "[Rami] Okay. Lily.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "11.046",
+  "fuzzy_matched_answer": false,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": "host_directed",
+  "label_source": "implicit_scored_unappealed",
+  "asr_n_best": [
+   {
+    "text": "Okay Lily",
+    "confidence": 0.93
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 107,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 22:58:57.845881+00",
+  "speaker_label": "Rami",
+  "player_name": "Rami",
+  "transcript": "[Rami] One. Will then be now.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "0.0",
+  "fuzzy_matched_answer": false,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": null,
+  "label_source": null,
+  "asr_n_best": [
+   {
+    "text": "One Will then be now",
+    "confidence": 0.974
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 108,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 23:00:03.14062+00",
+  "speaker_label": "Rami",
+  "player_name": "Rami",
+  "transcript": "[Rami] Okay, okay. Okay, okay. Let's let's just skip the, uh, the air gap like dead air thing. Give me another question right now. Not a joke.",
+  "is_final": true,
+  "phase": "question",
+  "answer_window_open": false,
+  "seconds_into_window": null,
+  "fuzzy_matched_answer": false,
+  "system_directed_hit": false,
+  "agent_action": "adjudicated_other",
+  "label": null,
+  "label_source": null,
+  "asr_n_best": [
+   {
+    "text": "Okay okay Okay okay Let's let's just skip the uh the air gap like dead air thing Give me another question right now Not a joke",
+    "confidence": 0.9912
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "IDLE",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ },
+ {
+  "id": 109,
+  "session_id": "lily-81BCB0-583a0f16",
+  "utterance_ts": "2026-08-05 23:07:52.58677+00",
+  "speaker_label": "S3",
+  "player_name": "Paige",
+  "transcript": "C Hawkins.",
+  "is_final": true,
+  "phase": "answering",
+  "answer_window_open": true,
+  "seconds_into_window": "8.072",
+  "fuzzy_matched_answer": false,
+  "system_directed_hit": false,
+  "agent_action": "scored",
+  "label": "host_directed",
+  "label_source": "implicit_scored_unappealed",
+  "asr_n_best": [
+   {
+    "text": "C Hawkins",
+    "confidence": 0.59
+   }
+  ],
+  "n_best_dispersion": "0.0",
+  "agent_classification": null,
+  "prior_state": "OPEN_WINDOW",
+  "overlap_flag": false,
+  "acoustic_snapshot": null
+ }
+]

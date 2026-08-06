@@ -30,7 +30,16 @@ supply stalls pushing her to fill gaps that belonged to the table.
 - **Side-cluster machine**: rapid player-to-player alternation with
   content cohering BETWEEN the players locks a cluster — utterances
   inside it classify as a cluster, not one by one, until it breaks
-  (vocative/command/window-match/gap/a played Lily turn).
+  (plain vocative/command/window-match/gap/a played Lily turn). Two
+  additions the REAL 81BCB0 session forced: (a) diarization only
+  captures the audible side of a room conversation, so a SOLO-attributed
+  run anchored by a table-address ("Have you guys seen Loki?") or fully
+  self-cohering also locks; (b) a FLOOR-HOLD declaration — host-directed
+  speech whose content asserts the side conversation ("we're not talking
+  to you" / "we're having a conversation", both recorded verbatim) —
+  locks or sustains the cluster instead of breaking it, unlike a bare
+  vocative. Real intra-run gaps reach 12.5s, so the gap bounds are 15s
+  intra-run / 25s break.
 - **Emission BEFORE the reply**: `classify_addressee` runs in the
   transcript layer (`on_transcript_event`), lands on
   `last_addressee_judgment` (the FL-2/FL-4 consumption surface), logs
@@ -44,13 +53,22 @@ supply stalls pushing her to fill gaps that belonged to the table.
   `addressee_score_components`, `side_cluster_id`, `side_cluster_event`.
   The old window-open/acted-on gate is gone; clarify re-log rows keep
   NULL judgment columns (the utterance's primary row carries it).
-- Fixture replay (`tests/test_addressee_classifier.py`) pins the WO's
-  verification: both 81BCB0 derailment beats classify side-cluster
-  before Lily would have spoken; every scored answer classifies
-  host-directed with no name; the log populates per utterance with no
-  nulls. `LILY_FEATURE_VERSION` unchanged — the single whole-WO bump is
-  assigned to a later workstream, and the capability-manifest entry for
-  the floor feature rides with it.
+- **Real fixture** (`tests/fixtures/lily-81BCB0-583a0f16.*.json`):
+  the actual session extracted verbatim from Supabase `lily_transcripts`
+  (170 rows) + `lily_addressee_log` (14 rows) and committed in-repo per
+  the desync/recognition-variety fixture idiom (no conftest, per-file
+  fakes). `tests/test_addressee_classifier.py` replays all 78 player
+  utterances through the production path — answer windows reconstructed
+  from the addressee log's own ground truth (`utterance_ts −
+  seconds_into_window`), driven on the STT `segment_start` clock (the
+  same clock the addressee log stamps, verified equal). Pins the WO's
+  verification: both recorded derailment beats classify as table talk /
+  floor-held side-cluster before Lily would have spoken; every one of
+  the 12 scored answers classifies host-directed with no name; the log
+  populates per utterance (78/78) with `agent_classification` never null
+  (the live session had it null on all 14 rows). `LILY_FEATURE_VERSION`
+  unchanged — the single whole-WO bump is assigned to a later
+  workstream, and the capability-manifest entry rides with it.
 
 ## 2026-08-04 — Wrong score on the screen: score truth rides the reveal beat (live report)
 
