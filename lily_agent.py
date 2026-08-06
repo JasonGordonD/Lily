@@ -1873,6 +1873,11 @@ class LilyGame:
         itself acts on the memory and this stays silent."""
         if not self.memory_block or self._late_recognition_fired:
             return
+        # P5: recognized AT the greet — the door already caught them; the
+        # late beat is a duplicate and is killed for the session.
+        if getattr(self, "_recognized_at_greet", False):
+            self._late_recognition_fired = True
+            return
         # getattr: test harnesses build LilyGame via __new__.
         registry = getattr(self, "say_registry", None)
         greeted = (
@@ -1881,6 +1886,17 @@ class LilyGame:
         )
         if not greeted and not getattr(self, "game_started", False):
             return  # door path: greeting_instructions will act on it
+        # P5: never fire OVER an open exchange — an open answer window or a
+        # pending clarify is a live beat. Defer (don't consume the once);
+        # the next transcript event past the seam re-invokes this and fires
+        # it at the seam.
+        if self.sk.answer_window_open or getattr(self, "pending_clarify", None):
+            logger.info(
+                "LILY_MEMORY | LATE_RECOGNITION_DEFERRED | session=%s — "
+                "open exchange; holding for the next seam",
+                self.sk.session_id,
+            )
+            return
         self._late_recognition_fired = True
         # Stored 'usual' honored for the remainder: apply stored pacing
         # only when this session hasn't spoken its own choice.
@@ -2357,6 +2373,11 @@ class LilyGame:
                 "must happen first."
             )
         elif self.memory_block:
+            # PATCH-003 P5: the greeting itself recognizes this table — the
+            # late-recognition catch-up beat must NOT fire later (the live
+            # double: recognized at greet, then "NOW I've got you" two
+            # minutes on, over an open question).
+            self._recognized_at_greet = True
             parts.append(
                 "PART TWO — your memory KNOWS this table (the "
                 "[RETURNING TABLE] context has who they are), so act on it "
@@ -8030,6 +8051,14 @@ class LilyAgent(Agent):
             logger.info(
                 "LILY_SAY | MIRROR_FLAG | session=%s pattern=%r",
                 self._game.sk.session_id, mirror_pattern,
+            )
+        # PATCH-003 P10 lint (LOG-ONLY): stacked questions in one turn —
+        # one question per turn is the rule (asking obligates listening).
+        n_questions = lily_say_gate.lily_stacked_question_flag(full)
+        if n_questions > 1:
+            logger.info(
+                "LILY_SAY | STACKED_QUESTION_FLAG | session=%s count=%d",
+                self._game.sk.session_id, n_questions,
             )
         # Repetition lint (RECOGNITION-VARIETY Task 3b) — LOG-ONLY, against
         # turns that actually PLAYED (sk.agent_turns records at playout, so

@@ -318,6 +318,23 @@ _STOPWORDS: frozenset = frozenset({
 })
 
 
+def lily_stacked_question_flag(text: str) -> int:
+    """PATCH-003 P10 lint — count DISTINCT questions posed in one outbound
+    turn. Asking creates an obligation to listen, and one question per
+    turn is the rule (two stacked questions, neither answer awaited, was
+    the live 'anything I should know — or ready to dive straight in?'
+    pattern). LOG-ONLY: returns the question count so tts_node can flag
+    >1; the rewrite/split stays a prompt-contract concern (Doc-owned), not
+    a mechanical edit to her words. A rhetorical '?' inside one sentence
+    is not double-counted — only sentence-terminal question marks count."""
+    if not text:
+        return 0
+    # Strip audio tags, then count sentence-terminal question marks (a
+    # '?' followed by whitespace/end, not mid-token).
+    cleaned = re.sub(r"\[[^\]]*\]", " ", text)
+    return len(re.findall(r"\?(?=\s|$|[\"'’”)])", cleaned.strip()))
+
+
 def lily_mirror_flag(text: str) -> Optional[str]:
     """Return the matched mirror pattern when the turn OPENS with a
     flattery/agreement-echo reflex, else None. Only the first ~120 chars
