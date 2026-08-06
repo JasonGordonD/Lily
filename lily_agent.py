@@ -1705,6 +1705,18 @@ class LilyGame:
         clean = (text or "").strip()
         if not clean:
             return
+        # WO-LILY-HOTFIX-002 Defect 1 belt: a verbatim repeat of the
+        # IMMEDIATELY-preceding recorded turn is the fallback-echo bug
+        # class, never a real utterance (the say gate + repeat lint make
+        # honest back-to-back verbatim repeats a non-path). Skip loudly.
+        prior_turns = getattr(self.sk, "agent_turns", None) or []
+        if not interrupted and prior_turns and clean == prior_turns[-1]:
+            logger.warning(
+                "LILY_TURNS | DUP_TURN_SKIPPED | session=%s — verbatim "
+                "repeat of the previous recorded turn (fallback-echo "
+                "class), not recorded", self.sk.session_id,
+            )
+            return
         try:
             self.sk.record_agent_turn(
                 clean,
@@ -1713,18 +1725,32 @@ class LilyGame:
                 interrupted=interrupted,
             )
         except Exception as e:
-            logger.warning("LILY_TURNS | local record failed: %s", e)
+            logger.error("LILY_TURNS | LOCAL_RECORD_FAILED | %s", e)
         batcher = getattr(self, "transcripts", None)
         if batcher is None:
+            # A live session always has the batcher; its absence means the
+            # agent side of the record is dark — say so (HOTFIX-002: a
+            # silent write failure blinded a full session).
+            logger.error(
+                "LILY_TURNS | TRANSCRIPT_PERSIST_UNAVAILABLE | session=%s "
+                "— no batcher, LILY row not written", self.sk.session_id,
+            )
             return
         try:
+            # segment_end = playout completion (this method runs at
+            # on_agent_speech_finished) — the LILY row's timing anchor,
+            # same epoch clock as the player rows (HOTFIX-002).
             batcher.add(
                 clean + (" …[cut off]" if interrupted else ""),
                 speaker_label="LILY",
                 speaker_name=(act_keys[0] if act_keys else None),
+                segment_end=time.time(),
             )
         except Exception as e:
-            logger.warning("LILY_TURNS | transcript persist failed: %s", e)
+            logger.error(
+                "LILY_TURNS | TRANSCRIPT_PERSIST_FAILED | session=%s | %s",
+                self.sk.session_id, e,
+            )
 
     def note_intake_overlap(
         self, label: str, start_ts: float, end_ts: float
@@ -1914,8 +1940,19 @@ class LilyGame:
         candidate = getattr(self, "device_candidate_group_id", None)
         if not candidate or getattr(self, "stt", None) is None:
             return None
+        # HOTFIX-002 observability: attempts counted so a session that
+        # ends still-quarantined can say how hard it tried (the WARN in
+        # the close handler) instead of leaving silent amnesia.
+        self._device_verify_attempts = (
+            getattr(self, "_device_verify_attempts", 0) + 1
+        )
         get_ids = getattr(self.stt, "get_speaker_ids", None)
         if get_ids is None:
+            logger.warning(
+                "LILY_MEMORY | DEVICE_VERIFY_UNAVAILABLE | trigger=%s "
+                "reason=stt_has_no_get_speaker_ids — candidate can never "
+                "promote this session", trigger,
+            )
             return None
         try:
             current = get_ids()
@@ -7250,12 +7287,14 @@ async def _resolve_initial_group_id(ctx: JobContext, room_name: str) -> tuple[st
     Always returns (group_id, source) — the caller logs the mandatory
     LILY_MEMORY | GROUP_ID | source=... line."""
     # (a1) dispatch/job metadata — strongest immediately-available signal.
+    unreadable_token_seen = False
     try:
         job_meta = getattr(getattr(ctx, "job", None), "metadata", None)
         candidate = lily_memory.lily_parse_group_id_from_metadata(job_meta)
         if candidate:
             return candidate, "dispatch_metadata"
         if job_meta:
+            unreadable_token_seen = True
             logger.info(
                 "LILY_MEMORY | GROUP_ID | dispatch metadata present but "
                 "unparseable: %r", str(job_meta)[:120],
@@ -7279,6 +7318,8 @@ async def _resolve_initial_group_id(ctx: JobContext, room_name: str) -> tuple[st
                 if candidate:
                     return candidate, non_agents
                 if meta:
+                    nonlocal unreadable_token_seen
+                    unreadable_token_seen = True
                     logger.info(
                         "LILY_MEMORY | GROUP_ID | participant %s metadata "
                         "present but unparseable: %r",
@@ -7312,6 +7353,16 @@ async def _resolve_initial_group_id(ctx: JobContext, room_name: str) -> tuple[st
 
     if lily_config.group_id_override():
         return lily_config.group_id_override(), "env_override"
+    # WO-LILY-HOTFIX-002 Defect 2: minting a throwaway group is ALWAYS
+    # loud, with the discriminating reason on the line — silent amnesia
+    # (a full session keyed to a random id with nobody told why) is the
+    # defect class this WARN exists to make impossible.
+    logger.warning(
+        "LILY_MEMORY | THROWAWAY_GROUP_MINTED | group=%s reason=%s — "
+        "session runs memoryless unless a voiceprint upgrade lands",
+        room_name,
+        "token_unreadable" if unreadable_token_seen else "no_token_present",
+    )
     return room_name, "room_name"
 
 
@@ -7835,17 +7886,30 @@ async def entrypoint(ctx: JobContext) -> None:
                     getattr(handle, "id", "?"), e,
                 )
             spoken = ""
+            had_items = False
             try:
                 for item in handle.chat_items:
+                    had_items = True
                     if getattr(item, "role", None) == "assistant":
                         spoken += " " + _message_text(item)
             except Exception:
                 pass
+            spoken = spoken.strip()
+            # WO-LILY-HOTFIX-002 Defect 1: the last-assistant-text fallback
+            # applies ONLY to an unreadable handle (no chat items at all).
+            # A handle that carried items but no assistant text is a
+            # tool-call-only turn — it aired no new words, and falling back
+            # re-recorded the PREVIOUS spoken turn as a duplicate LILY row
+            # (4 verbatim dups in lily-AAC431, each right after a tool
+            # turn). An empty record is correct there; a fabricated one is
+            # the defect.
+            if not spoken and not had_items:
+                spoken = game._last_assistant_text
             suppressed_ids = getattr(game, "_suppressed_speech_ids", set())
             suppressed = handle.id in suppressed_ids
             suppressed_ids.discard(handle.id)
             game.on_agent_speech_finished(
-                spoken.strip() or game._last_assistant_text,
+                spoken,
                 speech_id=handle.id,
                 interrupted=handle.interrupted,
                 suppressed=suppressed or failed,
@@ -7905,6 +7969,25 @@ async def entrypoint(ctx: JobContext) -> None:
                     except Exception as e:
                         logger.warning("LILY_AUDEERING | stop failed: %s", e)
                 await transcripts.flush()
+                # WO-LILY-HOTFIX-002 Defect 2: a session ending with its
+                # device candidate still quarantined is the silent-amnesia
+                # outcome — say so, with the attempt count, so the next
+                # log bundle discriminates "verification never ran" from
+                # "ran and never matched".
+                if getattr(game, "device_candidate_group_id", None) and not (
+                    getattr(game, "device_identity_verified", False)
+                ):
+                    logger.warning(
+                        "LILY_MEMORY | DEVICE_CANDIDATE_UNRESOLVED | "
+                        "session=%s candidate=%s source=%s "
+                        "verify_attempts=%d — session ends memoryless; "
+                        "group stays %s",
+                        scorekeeper.session_id,
+                        game.device_candidate_group_id,
+                        getattr(game, "device_candidate_source", "?"),
+                        getattr(game, "_device_verify_attempts", 0),
+                        game.group_id,
+                    )
                 standings = sorted(
                     game._players_payload(), key=lambda p: -p["score"]
                 )

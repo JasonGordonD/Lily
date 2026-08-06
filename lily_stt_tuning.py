@@ -164,12 +164,23 @@ def lily_tuned_stt_kwargs(
 
 
 def lily_filter_enrollable_speakers(rows: list[dict]) -> list[dict]:
-    """Drop dunder-wrapped labels (`__ASSISTANT__`-style) from known-speaker
-    rows. The engine reserves dunder labels for ignore semantics; a corrupt
-    voiceprint row must never enroll real identifiers under one — that would
-    convert the inert echo-guard label into an ACTIVE matcher for a real
-    voice and silently drop that player's speech."""
-    out = []
+    """Enrollment hygiene chokepoint for known-speaker rows.
+
+    1. Drop dunder-wrapped labels (`__ASSISTANT__`-style). The engine
+       reserves dunder labels for ignore semantics; a corrupt voiceprint
+       row must never enroll real identifiers under one — that would
+       convert the inert echo-guard label into an ACTIVE matcher for a
+       real voice and silently drop that player's speech.
+    2. MERGE duplicate labels (WO-LILY-HOTFIX-002 Defect 2). A group can
+       hold several voiceprint rows for the same player name (one per
+       engine label they were heard under — the live 41dfc215 group
+       carried Chris twice, via S1 and S4). Duplicate labels inside
+       StartRecognition's speakers list are undefined engine behaviour;
+       the same-name rows are the same human, so their identifier blobs
+       merge under one label (all blobs kept as match hints).
+    """
+    merged: dict[str, dict] = {}
+    order: list[str] = []
     for row in rows or []:
         label = str((row or {}).get("label") or "")
         if label.startswith("__") and label.endswith("__"):
@@ -177,8 +188,23 @@ def lily_filter_enrollable_speakers(rows: list[dict]) -> list[dict]:
                 "LILY_STT_TUNING | dunder label dropped from enrollment: %s", label
             )
             continue
-        out.append(row)
-    return out
+        identifiers = (row or {}).get("speaker_identifiers") or []
+        if not isinstance(identifiers, list):
+            identifiers = [identifiers]
+        if label not in merged:
+            merged[label] = dict(row)
+            merged[label]["speaker_identifiers"] = list(identifiers)
+            order.append(label)
+            continue
+        existing = merged[label]["speaker_identifiers"]
+        added = [i for i in identifiers if i not in existing]
+        if added:
+            existing.extend(added)
+        logger.warning(
+            "LILY_STT_TUNING | duplicate enrollment label merged: %s "
+            "(+%d identifier(s))", label, len(added),
+        )
+    return [merged[label] for label in order]
 
 
 # ---------------------------------------------------------------------------
@@ -260,10 +286,24 @@ def lily_install_stt_tuning_patch(
                         af = tc.setdefault("audio_filtering_config", {})
                         if isinstance(af, dict):
                             af["volume_threshold"] = float(volume_threshold)
+                        # WO-LILY-HOTFIX-002 Defect 2: wire-level truth of
+                        # known-speaker enrollment. "VOICEPRINT | injected"
+                        # at construction says what Lily HANDED the plugin;
+                        # this says what actually rode StartRecognition —
+                        # the discriminator between "injection broken" and
+                        # "engine didn't match" when recognition fails.
+                        dz_out = tc.get("speaker_diarization_config")
+                        enrolled = (
+                            dz_out.get("speakers")
+                            if isinstance(dz_out, dict)
+                            else getattr(dz_out, "speakers", None)
+                        )
                         logger.info(
                             "LILY_STT_TUNING | config_injected "
-                            "get_speakers=%s volume_threshold=%.2f",
+                            "get_speakers=%s volume_threshold=%.2f "
+                            "wire_known_speakers=%d",
                             get_speakers, float(volume_threshold),
+                            len(enrolled) if isinstance(enrolled, list) else 0,
                         )
                     else:
                         logger.warning(

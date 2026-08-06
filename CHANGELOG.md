@@ -5,6 +5,72 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-06 — WO-LILY-HOTFIX-002: transcript echo-dups + group-binding loudness
+
+**Evidence re-audit first (session `lily-AAC431-6208ff7c`, 05:19–05:25).**
+The reported "zero LILY rows / 25 user rows" was a miscount: the session
+holds **25 rows total — 14 LILY + 11 user**, live-interleaved with
+correct timestamps. Agent-transcript persistence was working. The REAL
+Defect-1-class regression the rows exposed: **four verbatim duplicate
+LILY rows**, each landing right after a tool-call-only turn. Root cause:
+the playout watcher's `spoken or _last_assistant_text` fallback — a
+handle carrying chat items but no assistant text (a tool turn) aired no
+new words, and the fallback fabricated a re-record of the PREVIOUS
+spoken turn (also silently double-feeding the SAID-ALREADY ledger and
+repeat lint).
+
+- **Fixed:** the fallback now applies only to a genuinely unreadable
+  handle (no chat items at all); tool-call-only turns record nothing.
+  Belt: a verbatim repeat of the immediately-preceding recorded turn is
+  skipped with `LILY_TURNS | DUP_TURN_SKIPPED`. Loud-fail: transcript
+  persist failures are ERROR logs (`TRANSCRIPT_PERSIST_FAILED` /
+  `TRANSCRIPT_PERSIST_UNAVAILABLE`), never silence. LILY rows now carry
+  a playout-completion `segment_end` anchor (same epoch clock as player
+  rows).
+
+**Defect 2 — group binding.** Trace results: the frontend is
+**exonerated** — the lobby still posts `lily_group_id` into `/api/token`,
+and the token route embeds it in both participant metadata and
+`RoomAgentDispatch` (the WS-9 frontend commit touched only game-state UI
+files). `group_id == session_id` at session start is the device-identity
+quarantine's designed resting state (July 15, `f4e4e42`); the severed
+link is PROMOTION — voiceprint verification never re-keyed any
+post-deploy session (last successful bind 22:47 Aug 5, old build). The
+live discriminator: the engine labeled the returning speaker `S1`, not
+their enrolled name, so enrolled-voice matching failed at the engine.
+Two concrete faults fixed, everything else made loud so the next log
+bundle pins the remainder:
+
+- **Duplicate enrollment labels merge** (`lily_filter_enrollable_speakers`):
+  the group's voiceprint table carried the same player under two engine
+  labels (Chris via S1 AND S4, written by the old build's session-close
+  enrollment at 22:51) — duplicate labels inside StartRecognition's
+  speakers list are undefined engine behaviour; same-name rows are the
+  same human and their identifier blobs now merge under one label.
+- **Wire-level enrollment truth:** the WS-13 StartRecognition wrap logs
+  `wire_known_speakers=N` — the discriminator between "injection broken"
+  and "engine didn't match" that tonight's logs couldn't answer.
+- **Throwaway mint is loud:** `LILY_MEMORY | THROWAWAY_GROUP_MINTED |
+  reason=no_token_present|token_unreadable` WARN on the room-name
+  fallback.
+- **Quarantined-to-the-end is loud:** session close WARNs
+  `DEVICE_CANDIDATE_UNRESOLVED` with staged source + verify-attempt
+  count; an STT surface that can never verify (`get_speaker_ids`
+  missing) WARNs `DEVICE_VERIFY_UNAVAILABLE` instead of returning an
+  eternal silent None.
+- **Forward check:** the group token rides job/participant metadata,
+  fully independent of the RoomOptions swap shipping in this same deploy
+  — token resolution regression-tested in `tests/test_hotfix002.py`
+  (dispatch metadata, both throwaway reasons, unverifiable candidate).
+
+Version audit en route: prod's fresh image build resolves the same
+`speechmatics-voice 0.2.8` / `speechmatics-rt 1.1.0` as the bench env
+(plugin 1.6.6 floors, no drift); the promotion-chain suite passes under
+the real plugin 1.6.6. Cleanup: tonight's throwaway sessions carry
+nothing worth migrating (per the WO); the established group is intact.
+Full suite green (1149). Ships in ONE deploy with HOTFIX-001's wedge
+protections.
+
 ## 2026-08-06 — WO-LILY-HOTFIX-001 + WO-LILY-NC-BENCH-001: the deaf-mute wedge
 
 **P0 (04:21–04:30 UTC): four consecutive sessions opened deaf and mute**
