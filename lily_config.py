@@ -446,6 +446,25 @@ def overlap_fusion_neutral_confidence() -> float:
     )
 
 
+def enroll_retry_cooldown_seconds() -> float:
+    """WS-8: minimum spacing between under-threshold voiceprint enrollment
+    retries. Long enough that a bound-but-quiet player accrues real words
+    between GET_SPEAKERS round-trips; short enough that they cross the
+    ~5-word floor within a normal round rather than never enrolling."""
+    return max(0.0, _get_float("LILY_ENROLL_RETRY_COOLDOWN_SECONDS", 15.0))
+
+
+def ghost_fold_window_seconds() -> float:
+    """WS-8 ghost-label posture: an unbound single-utterance diarization
+    label whose text duplicates a bound player's just-recorded answer
+    within this window is a diarizer echo phantom (the max_speakers=7
+    ceiling spawning S5/S6/S7 to absorb a reverberant copy) and folds
+    instead of scoring. Bounds the window so a genuine second player
+    legitimately repeating a short answer well after the fact is never
+    swallowed."""
+    return max(0.0, _get_float("LILY_GHOST_FOLD_WINDOW_SECONDS", 8.0))
+
+
 # ---------------------------------------------------------------------------
 # n-best ASR recovery (WO-LILY-ADDRESSEE-H1-001 Task 1)
 # ---------------------------------------------------------------------------

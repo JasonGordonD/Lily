@@ -203,6 +203,14 @@ def _normalize_command_text(text: str) -> str:
     return _re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _normalize_answer_text(text: str) -> str:
+    """Answer-equality normalizer for the WS-8 ghost-fold echo check —
+    same casing/punctuation flattening as command normalization, reused so
+    a diarizer echo copy ("Mark." vs "Mark") compares equal to the bound
+    player's recorded answer."""
+    return _normalize_command_text(text)
+
+
 # Pacing choice — group prefs WO: "timed" (the standard clock, today's
 # behavior) vs "relaxed" (no time pressure; the answer window stretches by
 # LILY_RELAXED_WINDOW_MULTIPLIER). Deterministic, paraphrase-tolerant
@@ -651,6 +659,13 @@ class LilyScorekeeper:
         # Log-only unrostered speaker sightings
         self.unrostered_labels: dict[str, int] = {}
 
+        # WS-8 ghost-label posture: rolling (t, normalized_text, player) of
+        # bound-player finals, pruned to the ghost-fold window. An unbound
+        # single-utterance label duplicating one of these is a diarizer echo
+        # phantom (max_speakers ceiling spawning S5/S6/S7 to absorb a
+        # reverberant copy) and folds instead of scoring.
+        self._recent_bound_answers: list[tuple[float, str, str]] = []
+
     # -- roster ------------------------------------------------------------
 
     def bind_speaker(
@@ -736,11 +751,16 @@ class LilyScorekeeper:
                 if state.get("speaker_id") and state["speaker_id"] == speaker_id:
                     return name, "speaker_id"
 
-        # Path 2: diarization label
+        # Path 2: diarization label — primary, or a merge alias (WS-8: a
+        # person the diarizer split across two labels resolves on either
+        # after an operator merge).
         if speaker_label:
             for name, state in self.players.items():
                 if state.get("speaker_label") == speaker_label:
                     return name, "label_match"
+            for name, state in self.players.items():
+                if speaker_label in (state.get("alias_labels") or ()):
+                    return name, "merge_alias_match"
 
         # Path 2b: the diarization label IS a rostered player's name —
         # voiceprint identification labels a recognized stream by the
@@ -953,6 +973,168 @@ class LilyScorekeeper:
 
     # -- transcript ingestion ----------------------------------------------
 
+    def _record_bound_answer(self, text: str, player: str, now: float) -> None:
+        """Append a bound player's final to the ghost-fold reference log,
+        pruned to the fold window. Trivial (empty-after-normalize) finals
+        are ignored so filler never masquerades as a foldable answer."""
+        norm = _normalize_answer_text(text)
+        if not norm:
+            return
+        window = lily_config.ghost_fold_window_seconds()
+        self._recent_bound_answers.append((now, norm, player))
+        self._recent_bound_answers = [
+            (t, n, p)
+            for (t, n, p) in self._recent_bound_answers
+            if now - t <= window
+        ]
+
+    def _ghost_fold_echo(
+        self,
+        speaker_label: Optional[str],
+        text: str,
+        now: float,
+        echo_copy_signal: Optional[bool] = None,
+    ) -> bool:
+        """WS-8: decide whether an unbound label's final is a diarizer echo
+        phantom of a bound player's just-recorded answer.
+
+        Heuristic (text + timing): the label has been seen at most once
+        (a single-utterance phantom, not a real recurring voice) AND its
+        normalized text equals a bound player's answer recorded within the
+        ghost-fold window.
+
+        `echo_copy_signal` is WS-13's per-word volume determination
+        (True = measurably quieter copy → corroborates the fold;
+        False = as loud as the original → a real second speaker, veto the
+        fold; None = signal absent, decide on text+timing alone). It never
+        forces a fold on its own — a match is still required."""
+        window = lily_config.ghost_fold_window_seconds()
+        if window <= 0:
+            return False
+        norm = _normalize_answer_text(text)
+        if not norm:
+            return False
+        # A label already seen more than once is a recurring voice, not a
+        # one-shot phantom — never fold it (it may be a genuine unrostered
+        # player). unrostered_labels was incremented for this segment just
+        # above, so its first sighting reads as count 1.
+        seen = self.unrostered_labels.get(speaker_label, 0) if speaker_label else 0
+        if seen > 1:
+            return False
+        if echo_copy_signal is False:
+            return False
+        for (t, bound_norm, player) in self._recent_bound_answers:
+            if now - t > window:
+                continue
+            if bound_norm == norm:
+                logger.info(
+                    "LILY_STATE | GHOST_FOLD | session=%s label=%s text=%r "
+                    "echo_of=%s dt=%.2fs volume_signal=%s",
+                    self.session_id, speaker_label, norm[:60], player,
+                    now - t, echo_copy_signal,
+                )
+                return True
+        return False
+
+    def merge_speakers(
+        self,
+        from_label: str,
+        into_player: str,
+        now: Optional[float] = None,
+    ) -> dict:
+        """WS-8 operator merge — roster side of one reconciliation
+        transaction (the persistence side is
+        lily_persistence.lily_merge_speaker). Fold every utterance the
+        diarizer split onto `from_label` back onto the player it really
+        belongs to.
+
+        - Binds `into_player` (creating the roster row if the merge names a
+          voice that was never bound — the S1-holding-Chris's-intro case).
+        - Releases `from_label` from any OTHER player it was bound to.
+        - Retro-attributes in-memory state: open answer candidates keyed to
+          the merged label and the rolling transcript buffer move to
+          `into_player`.
+
+        Returns a summary dict for the caller's spoken confirmation. Score
+        is NOT recomputed here — a held open-floor award is committed
+        through the normal on_speaker_bound path; this only makes the
+        identity coherent."""
+        t = now if now is not None else time.time()
+        into = (into_player or "").strip()
+        label = (from_label or "").strip()
+        result = {
+            "into_player": into,
+            "from_label": label,
+            "candidates_moved": 0,
+            "buffer_lines_moved": 0,
+            "created_player": False,
+        }
+        if not into or not label:
+            return result
+        if into not in self.players:
+            result["created_player"] = True
+        # Release the merged label from any OTHER player it was bound to
+        # (primary or alias) — one voice, one owner.
+        for other, state in self.players.items():
+            if other == into:
+                continue
+            if state.get("speaker_label") == label:
+                state["speaker_label"] = None
+            aliases = state.get("alias_labels")
+            if aliases and label in aliases:
+                state["alias_labels"] = [a for a in aliases if a != label]
+        target = self.players.get(into)
+        if target is None:
+            # Create the roster row (the S1-holding-Chris's-intro case) —
+            # bind_speaker sets its primary label and every default field.
+            self.bind_speaker(label, into)
+        else:
+            primary = target.get("speaker_label")
+            if not primary:
+                target["speaker_label"] = label
+            elif primary != label:
+                # The player already has a primary label (e.g. Chris on
+                # S4); the diarizer's second split-label (S1) becomes an
+                # alias so BOTH keep resolving to the player going forward,
+                # not just historically.
+                aliases = set(target.get("alias_labels") or ())
+                aliases.add(label)
+                target["alias_labels"] = sorted(aliases)
+        # Retro-attribute any open answer candidate the diarizer parked
+        # under the merged label (both the unrostered key form and a bare
+        # label key) onto the player.
+        moved_keys = [
+            key for key in list(self.answer_candidates.keys())
+            if key in (f"unrostered:{label}", label)
+        ]
+        for key in moved_keys:
+            cand = self.answer_candidates.pop(key)
+            cand["player"] = into
+            cand["unrostered"] = False
+            existing = self.answer_candidates.get(into)
+            if existing is None:
+                self.answer_candidates[into] = cand
+            else:
+                # Fold the merged attempts into the player's existing slot,
+                # preserving their earlier order position.
+                existing.setdefault("attempts", []).extend(
+                    cand.get("attempts", [])
+                )
+            result["candidates_moved"] += 1
+        # Retro-attribute the rolling transcript buffer.
+        for entry in self.transcript_buffer:
+            if entry.get("speaker_label") == label or entry.get("speaker") == label:
+                entry["speaker"] = into
+                result["buffer_lines_moved"] += 1
+        self.unrostered_labels.pop(label, None)
+        logger.info(
+            "LILY_STATE | SPEAKER_MERGE | session=%s from_label=%s into=%s "
+            "candidates=%d buffer=%d created=%s",
+            self.session_id, label, into, result["candidates_moved"],
+            result["buffer_lines_moved"], result["created_player"],
+        )
+        return result
+
     def on_transcript_segment(
         self,
         text: str,
@@ -969,6 +1151,7 @@ class LilyScorekeeper:
         now: Optional[float] = None,
         timestamp: Optional[str] = None,
         addressee_confidence: Optional[float] = None,
+        echo_copy_signal: Optional[bool] = None,
     ) -> dict:
         """
         Process one transcript segment. Called on every STT event.
@@ -1007,6 +1190,7 @@ class LilyScorekeeper:
             "overlap_flag": self.overlap_flag,
             "addressee_fused_confidence": None,
             "attribution_demoted": False,
+            "ghost_folded": False,
         }
 
         if not text or not text.strip():
@@ -1151,6 +1335,11 @@ class LilyScorekeeper:
             state = self.players[player]
             state["talk_time_s"] += duration
             state["questions_since_spoke"] = 0
+            # Ghost-fold reference: record this bound final so a later echo
+            # copy on a phantom label can be recognized. Pruned to the fold
+            # window; survives question transitions (the echo may land in a
+            # different window than the original).
+            self._record_bound_answer(clean, player, t)
         elif speaker_label:
             self.unrostered_labels[speaker_label] = (
                 self.unrostered_labels.get(speaker_label, 0) + 1
@@ -1191,6 +1380,17 @@ class LilyScorekeeper:
             if player:
                 key = player
             else:
+                # WS-8 ghost-label posture: an unbound single-utterance
+                # label duplicating a bound player's just-recorded answer
+                # inside the echo window is a diarizer echo phantom — fold
+                # it (no candidate, no score, no "and you are?" prompt)
+                # rather than letting a ceiling-spawned S5/S6/S7 absorb a
+                # reverberant copy of a real answer.
+                if self._ghost_fold_echo(
+                    speaker_label, clean, t, echo_copy_signal=echo_copy_signal
+                ):
+                    result["ghost_folded"] = True
+                    return result
                 # Open-floor fallback: unrostered answer is never silently
                 # attributed — recorded under its label for Lily to resolve
                 # in character ("great answer — and you are?").

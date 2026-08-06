@@ -79,6 +79,9 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_MEMORY_MIN_QUESTIONS",
     "LILY_RELAXED_WINDOW_MULTIPLIER",
     "LILY_UNDELIVERED_RECONCILE_SECONDS",
+    # WS-8 identity reconciliation tunables (default-backed).
+    "LILY_ENROLL_RETRY_COOLDOWN_SECONDS",
+    "LILY_GHOST_FOLD_WINDOW_SECONDS",
     # n-best ASR recovery tunables (default OFF — see lily_config.stt_*).
     "LILY_NBEST_DISPERSION_THRESHOLD",
     "LILY_STT_MAX_ALTERNATIVES",

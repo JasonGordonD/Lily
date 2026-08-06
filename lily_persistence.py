@@ -990,6 +990,31 @@ async def lily_enroll_voiceprints(
                 "speaker_identifiers": identifiers,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
+        # WS-8 under-threshold surfacing: a bound player whose label produced
+        # NO identifiers this pass is below Speechmatics' ~5-word floor (the
+        # live Chris case: 0.4s of attributed speech never crossed it). Such
+        # a player is silently absent from get_speaker_ids() output — record
+        # the gap on the scorekeeper so the multi-trigger schedule keeps
+        # retrying on their next speech instead of never enrolling them.
+        enrolled_labels = {
+            str(r.get("speaker_label")) for r in rows if r.get("speaker_identifiers")
+        }
+        try:
+            unenrolled = {
+                str(state.get("speaker_label"))
+                for state in (scorekeeper.players or {}).values()
+                if state.get("speaker_label")
+                and str(state.get("speaker_label")) not in enrolled_labels
+            }
+            setattr(scorekeeper, "unenrolled_bound_labels", unenrolled)
+            if unenrolled:
+                logger.info(
+                    "LILY_ENROLL | UNDER_THRESHOLD | trigger=%s group=%s "
+                    "labels=%s (below ~5-word floor — retry on next speech)",
+                    trigger, gid, sorted(unenrolled),
+                )
+        except Exception:
+            pass  # tracking is enrichment; never break the enrollment write
         if not rows:
             logger.error(
                 "LILY_ENROLL | FAILED | trigger=%s reason=no_usable_identifiers "
@@ -1064,6 +1089,159 @@ async def lily_load_voiceprints_by_players(
     except Exception as e:
         logger.error("lily_load_voiceprints_by_players error: %s", e)
         return []
+
+
+# ---------------------------------------------------------------------------
+# WS-8 identity reconciliation — operator speaker merge (one transaction
+# across roster/voiceprints + retro-attribution of the merged label's prior
+# utterances). The scorekeeper side is LilyGame.merge_speakers; this is the
+# durable side.
+# ---------------------------------------------------------------------------
+
+async def lily_dedupe_group_voiceprints(
+    supabase: SupabaseClient,
+    group_id: str,
+    player_name: str,
+) -> int:
+    """Collapse a group's voiceprint rows for one player down to a single
+    row (WS-8 deliverable: one row per player per group). The freshest row
+    with usable identifiers wins; the rest are deleted by id. Returns the
+    number of rows deleted (0 = already deduped or nothing to do).
+
+    Deletion is row-scoped and id-keyed — never a bare DELETE. The winner
+    is chosen by (has-identifiers, updated_at) so a stale duplicate can
+    never overwrite a good enrollment."""
+    if supabase is None or not group_id or not player_name:
+        return 0
+    try:
+        res = await asyncio.to_thread(
+            lambda: supabase.table("lily_speaker_voiceprints")
+            .select("id, speaker_label, player_name, speaker_identifiers, updated_at")
+            .eq("group_id", group_id)
+            .eq("player_name", player_name)
+            .execute()
+        )
+        rows = [r for r in (res.data or []) if isinstance(r, dict)]
+        if len(rows) <= 1:
+            return 0
+
+        def _rank(row: dict):
+            has_ids = 1 if row.get("speaker_identifiers") else 0
+            return (has_ids, str(row.get("updated_at") or ""))
+
+        winner = max(rows, key=_rank)
+        loser_ids = [
+            r.get("id") for r in rows
+            if r.get("id") is not None and r.get("id") != winner.get("id")
+        ]
+        deleted = 0
+        for lid in loser_ids:
+            await asyncio.to_thread(
+                lambda lid=lid: supabase.table("lily_speaker_voiceprints")
+                .delete().eq("id", lid).execute()
+            )
+            deleted += 1
+        logger.info(
+            "LILY_MERGE | VOICEPRINT_DEDUPE | group=%s player=%s kept=%s "
+            "deleted=%d",
+            group_id, player_name, winner.get("id"), deleted,
+        )
+        return deleted
+    except Exception as e:
+        logger.error(
+            "LILY_MERGE | VOICEPRINT_DEDUPE_FAILED | group=%s player=%s error=%s",
+            group_id, player_name, e,
+        )
+        return 0
+
+
+async def lily_merge_speaker(
+    supabase: SupabaseClient,
+    session_id: str,
+    group_id: Optional[str],
+    from_label: str,
+    into_player: str,
+) -> dict:
+    """Durable side of an operator speaker merge — retro-attribute the
+    merged label's prior utterances and dedupe voiceprints, as ONE logical
+    reconciliation (each leg tolerates its own failure so a partial merge
+    still lands what it can, and logs what it couldn't).
+
+    1. lily_transcripts.speaker_name  ← into_player   (this session, label)
+    2. lily_addressee_log.player_name ← into_player   (this session, label)
+    3. lily_speaker_voiceprints.player_name ← into_player (group, label),
+       then collapse the group's rows for that player to one.
+
+    Returns a per-leg summary. lily_answers has no speaker_label column
+    (it is already keyed on player_name), so it needs no retro pass — the
+    scorekeeper merge makes subsequent awards land under the right name."""
+    label = (from_label or "").strip()
+    into = (into_player or "").strip()
+    summary = {
+        "transcripts_updated": None,
+        "addressee_updated": None,
+        "voiceprint_relabeled": None,
+        "voiceprints_deduped": 0,
+    }
+    if supabase is None or not label or not into:
+        return summary
+    # 1. transcripts (speaker_name is the attributed-player column).
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_transcripts")
+            .update({"speaker_name": into})
+            .eq("session_id", session_id)
+            .eq("speaker_label", label)
+            .execute()
+        )
+        summary["transcripts_updated"] = True
+    except Exception as e:
+        summary["transcripts_updated"] = False
+        logger.error(
+            "LILY_MERGE | TRANSCRIPT_RETRO_FAILED | session=%s label=%s error=%s",
+            session_id, label, e,
+        )
+    # 2. addressee log.
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_addressee_log")
+            .update({"player_name": into})
+            .eq("session_id", session_id)
+            .eq("speaker_label", label)
+            .execute()
+        )
+        summary["addressee_updated"] = True
+    except Exception as e:
+        summary["addressee_updated"] = False
+        logger.error(
+            "LILY_MERGE | ADDRESSEE_RETRO_FAILED | session=%s label=%s error=%s",
+            session_id, label, e,
+        )
+    # 3. voiceprints — relabel then dedupe (group-scoped).
+    if group_id:
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("lily_speaker_voiceprints")
+                .update({"player_name": into})
+                .eq("group_id", group_id)
+                .eq("speaker_label", label)
+                .execute()
+            )
+            summary["voiceprint_relabeled"] = True
+        except Exception as e:
+            summary["voiceprint_relabeled"] = False
+            logger.error(
+                "LILY_MERGE | VOICEPRINT_RELABEL_FAILED | group=%s label=%s error=%s",
+                group_id, label, e,
+            )
+        summary["voiceprints_deduped"] = await lily_dedupe_group_voiceprints(
+            supabase, group_id, into
+        )
+    logger.info(
+        "LILY_MERGE | DONE | session=%s group=%s from_label=%s into=%s summary=%s",
+        session_id, group_id, label, into, summary,
+    )
+    return summary
 
 
 async def lily_rekey_group(

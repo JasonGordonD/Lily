@@ -412,6 +412,7 @@ class LilyGame:
         self._last_assistant_text = ""
         self._suppressed_speech_ids: set[str] = set()
         self._enroll_started = False
+        self._last_enroll_retry_ts = 0.0  # WS-8 under-threshold retry cooldown
         self._armed_speech_misses = 0  # agent turns finished w/o performing q
         # Structural delivery intent (desync WO Sub-agent B): question
         # number whose delivery the NEXT outbound spoken turn was
@@ -3269,6 +3270,14 @@ class LilyGame:
         if player and player in self.pending_clarify:
             self._resolve_clarify(player, text)
 
+        # WS-8 enrollment retry driver: a bound player who was below the
+        # ~5-word Speechmatics floor at the last enrollment pass is tracked
+        # in scorekeeper.unenrolled_bound_labels. Every further final from
+        # them adds words toward the floor, so re-fire enrollment (cooldown
+        # so a chatty under-threshold voice doesn't spam get_speaker_ids)
+        # — the point that never enrolled silently now keeps retrying.
+        self._maybe_retry_enrollment(player)
+
         command = result.get("control_command")
 
         # Honesty assist (desync WO Sub-agent C): a player calling out the
@@ -4233,6 +4242,30 @@ class LilyGame:
                 "at game start)", self.sk.session_id, pacing,
             )
 
+    def _maybe_retry_enrollment(self, player: str | None) -> None:
+        """WS-8: re-fire enrollment for a bound player still below the
+        ~5-word floor. Bound off scorekeeper.unenrolled_bound_labels (set
+        by the last enroll pass); rate-limited so a talkative but
+        not-yet-crossed voice doesn't hammer the GET_SPEAKERS round-trip."""
+        if not player:
+            return
+        unenrolled = getattr(self.sk, "unenrolled_bound_labels", None)
+        if not unenrolled:
+            return
+        label = (self.sk.players.get(player) or {}).get("speaker_label")
+        if not label or str(label) not in unenrolled:
+            return
+        now = time.time()
+        if now - self._last_enroll_retry_ts < lily_config.enroll_retry_cooldown_seconds():
+            return
+        self._last_enroll_retry_ts = now
+        logger.info(
+            "LILY_ENROLL | RETRY | session=%s player=%s label=%s "
+            "(under-threshold, more speech accrued)",
+            self.sk.session_id, player, label,
+        )
+        self.fire_enrollment("under_threshold_retry")
+
     def fire_enrollment(self, trigger: str) -> None:
         """Voiceprint enrollment, fire-and-forget. group_id is passed as a
         callable so the upsert lands under whatever id is resolved by the
@@ -4247,6 +4280,47 @@ class LilyGame:
             self.stt, self.supabase, lambda: self.group_id, self.sk,
             trigger=trigger,
         ))
+
+    async def merge_speakers(
+        self, from_label: str, into_player: str, source: str = "operator"
+    ) -> dict:
+        """WS-8 operator identity reconciliation — ONE transaction across
+        roster and voiceprints, retro-attributing the merged label's prior
+        utterances. The diarizer split one person across two labels (the
+        live S1/S4 = Chris case); this folds them back together so roster,
+        transcripts, and voiceprints agree and no duplicate voiceprint row
+        survives.
+
+        Roster side runs synchronously (in-memory, immediate); the durable
+        side (transcript/addressee retro + voiceprint dedupe) is awaited so
+        the caller can confirm the reconciliation actually landed."""
+        label = (from_label or "").strip().strip("[]")
+        into = (into_player or "").strip()
+        if not label or not into:
+            return {"ok": False, "reason": "missing_label_or_player"}
+        roster = self.sk.merge_speakers(label, into)
+        logger.info(
+            "LILY_MERGE | ROSTER | session=%s source=%s from_label=%s into=%s "
+            "candidates=%d",
+            self.sk.session_id, source, label, into,
+            roster.get("candidates_moved", 0),
+        )
+        # A held open-floor award for the merged label commits now that the
+        # voice has an owner — same path as a late bind.
+        pending = self._pending_unbound_award
+        if pending and pending.get("speaker_label") == label:
+            self._pending_unbound_award = None
+            self.sk.record_result(into, correct=True, points=pending["points"])
+        durable = {}
+        if self.supabase is not None:
+            durable = await lily_persistence.lily_merge_speaker(
+                self.supabase, self.sk.session_id, self.group_id, label, into
+            )
+        self.publish_attributes_nowait()
+        # Re-enroll so the surviving single voiceprint row carries the
+        # merged label's identifiers under the resolved name.
+        self.fire_enrollment("speaker_merge")
+        return {"ok": True, "roster": roster, "durable": durable}
 
     async def upgrade_group_id(self, new_group_id: str, source: str) -> None:
         """Mid-session group-id upgrade: re-key this session's rows to the
@@ -6876,8 +6950,24 @@ async def entrypoint(ctx: JobContext) -> None:
         await game.skip_question(source="rpc")
         return json.dumps({"ok": True, "question_number": scorekeeper.question_number})
 
+    async def _rpc_merge(data: rtc.RpcInvocationData) -> str:
+        # WS-8 operator identity reconciliation: {"from_label":"S4",
+        # "into_player":"Chris"} — folds a diarizer-split label back onto
+        # the player it belongs to, roster + voiceprints + retro in one call.
+        try:
+            payload = json.loads(data.payload or "{}")
+        except Exception:
+            return json.dumps({"ok": False, "reason": "bad_payload"})
+        outcome = await game.merge_speakers(
+            payload.get("from_label", ""),
+            payload.get("into_player", ""),
+            source="rpc",
+        )
+        return json.dumps(outcome)
+
     ctx.room.local_participant.register_rpc_method("lily_control.start", _rpc_start)
     ctx.room.local_participant.register_rpc_method("lily_control.skip", _rpc_skip)
+    ctx.room.local_participant.register_rpc_method("lily_control.merge", _rpc_merge)
 
     # --- Player photo ingest (vision, Zuna port — the 12:48 "you don't
     # have image ingestion" fix). Topic `lily.image.upload` carries the
