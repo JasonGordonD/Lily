@@ -3,3 +3,4 @@ __pycache__/
 .env
 logs/
 .pytest_cache/
+.venv-ws12/

@@ -61,6 +61,12 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_ADDRESSEE_CONFIDENCE_PENALTY_MAX",
     "LILY_ADDRESSEE_FUSION_ACOUSTIC_WEIGHT",
     "LILY_ADDRESSEE_FUSION_DIARIZATION_WEIGHT",
+    # Report-assessment pipeline tunables (WS-12): deadline/sweep pacing and
+    # the model pin all ship on in-code defaults.
+    "LILY_ASSESSMENT_MODEL",
+    "LILY_REPORT_DEADLINE_S",
+    "LILY_REPORT_SWEEP_LIMIT",
+    "LILY_REPORT_SWEEP_MIN_AGE_S",
     # Overlap (crosstalk) fusion tunables.
     "LILY_OVERLAP_EPSILON_SECONDS",
     "LILY_OVERLAP_FUSION_DIARIZATION_WEIGHT",

@@ -740,10 +740,25 @@ loud; the published label follows the row.
 (idempotent upsert on `session_id`): the in-memory transcript (the
 scorekeeper's rolling buffer — never re-queried from the DB) plus `game_stats`
 (final standings, rounds/questions played, per-player answers
-attempted/correct, mode changes, callouts, `duration_s`); `report_status`
-stays `'pending'` and `assessment` is filled later by the clinical desk,
-never by agent code. A session that executed or partially executed forget
-does not write a report.
+attempted/correct, mode changes, callouts, `duration_s`). A session that
+executed or partially executed forget does not write a report.
+
+**Clinical desk (WS-12, WO-LILY-OMNIBUS-003):** the assessment fill is now
+built (`lily_assessment.py` — it never existed before; every production row
+sat at `'pending'`). Two triggers, neither on the shutdown/close path
+(fleet: shutdown callbacks fire in 0-22% of sessions): the **wrap-up beat**
+(`finish_game` writes the report row and assesses it immediately — exit
+bar: assessed within `LILY_REPORT_DEADLINE_S`, default 5 min) and a
+**reconciliation sweep** at session start for orphaned pending rows
+(aborted sessions / past failures; assessed from stored data,
+`LILY_REPORT_SWEEP_MIN_AGE_S` grace, `LILY_REPORT_SWEEP_LIMIT` per boot).
+The desk runs on the reasoning model (`LILY_ASSESSMENT_MODEL` to pin), its
+own genai client (§11.5 isolation). The fill is pending-guarded (UPDATE
+WHERE `report_status='pending'` → sets `assessment` +
+`report_status='complete'`), so the close path's later transcript re-upsert
+(which omits both columns) and any re-run never clobber it. Failure is
+fail-visible — `LILY_REPORT | ASSESS_FAILED` at ERROR — and leaves the row
+pending for the sweep to retry.
 
 ### Addressee-label corpus (B1)
 

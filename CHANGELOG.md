@@ -159,6 +159,27 @@ close-out" section. Shipped:
   acoustic matrix replay is deferred to WS-15's recorded fixture.
 
 Tests: +27 (`tests/test_stt_tuning.py`), suite 885 green.
+## 2026-08-05 — WS-12 (WO-LILY-OMNIBUS-003): report pipeline unstick — the clinical desk gets built
+
+Root cause was NOT the primed fleet trap (shutdown-callback unreliability):
+the close-path report WRITE works — all 41 production `lily_session_reports`
+rows existed with transcripts. What never existed was the assessment layer
+itself; `assessment` had no producer anywhere, so 41/41 rows sat at
+`report_status='pending'` forever.
+
+Built `lily_assessment.py` (reasoning model, own genai client, JSON
+assessment: summary / group_dynamics / per_player / host_performance /
+flags) with two shutdown-independent triggers: the wrap-up beat in
+`finish_game` (report row + assessment within `LILY_REPORT_DEADLINE_S`,
+default 5 min) and a session-start reconciliation sweep for orphaned
+pending rows (stored transcript/game_stats; min-age grace + per-boot
+limit). Fill is pending-guarded so the close path's later re-upsert and
+re-runs never clobber a completed assessment; failure logs
+`LILY_REPORT | ASSESS_FAILED` at ERROR and leaves the row pending for the
+sweep (fail-visible, retryable). Session `lily-81BCB0-583a0f16` backfilled
+through the production assess path (row id 42 now `complete`). Pinned by
+`tests/test_report_assessment.py` (11 tests, incl. the wrap-up-beat
+deadline exit bar driven directly).
 
 ## 2026-08-04 — Wrong score on the screen: score truth rides the reveal beat (live report)
 

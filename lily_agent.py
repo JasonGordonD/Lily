@@ -60,6 +60,7 @@ from livekit.plugins.speechmatics import (
 
 import lily_addressee
 import lily_addressee_classifier
+import lily_assessment
 import lily_audeering_client
 import lily_audeering_consumers
 import lily_bank
@@ -5507,6 +5508,16 @@ class LilyGame:
                 standings, self.sk.question_number, self.highlights,
                 round_reached=self.sk.round,
             ))
+            # WS-12 report pipeline: report row + assessment on the WRAP-UP
+            # beat — the close/shutdown path fires in only 0-22% of sessions
+            # fleet-wide, so the clinical-desk fill can never hang off it.
+            # Idempotent with the close-path write (upsert on session_id;
+            # the assessment fill is pending-guarded).
+            asyncio.ensure_future(lily_assessment.lily_wrap_up_report(
+                self.supabase, self.sk.session_id, self.group_id,
+                transcript=list(self.sk.transcript_buffer),
+                game_stats=self.build_game_stats(standings),
+            ))
 
     # -- session report (B3) --------------------------------------------------------
 
@@ -7193,6 +7204,13 @@ async def entrypoint(ctx: JobContext) -> None:
             "without memory/persistence for this session (%s)",
             room_name, e,
         )
+
+    # WS-12 reconciliation sweep: assess orphaned pending report rows from
+    # prior sessions (aborted before their wrap-up beat, or past assessment
+    # failures). Fire-and-forget off the boot path; the sweep never raises
+    # and its min-age grace window keeps it off live sessions' rows.
+    if supabase is not None:
+        asyncio.ensure_future(lily_assessment.lily_report_sweep(supabase))
 
     scorekeeper = LilyScorekeeper(
         session_id=room_name,  # session_id = room name, never random UUIDs

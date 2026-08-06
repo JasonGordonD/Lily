@@ -107,6 +107,26 @@ def reasoning_model() -> str:
     return _get("LILY_REASONING_MODEL", "gemini-3.1-pro-preview")
 
 
+def assessment_model() -> str:
+    # WS-12 clinical desk: post-session assessment runs on the reasoning
+    # model unless pinned separately.
+    return _get("LILY_ASSESSMENT_MODEL", reasoning_model())
+
+
+def report_deadline_seconds() -> float:
+    # WS-12 exit bar M: wrap-up beat -> assessed report, and the per-call
+    # generation timeout.
+    return _get_float("LILY_REPORT_DEADLINE_S", 300.0)
+
+
+def report_sweep_min_age_seconds() -> float:
+    return _get_float("LILY_REPORT_SWEEP_MIN_AGE_S", 600.0)
+
+
+def report_sweep_limit() -> int:
+    return _get_int("LILY_REPORT_SWEEP_LIMIT", 10)
+
+
 def vocal_max_output_tokens() -> int:
     # Spec §4.4: max_output_tokens >= 600 on live calls.
     return max(600, _get_int("LILY_MAX_OUTPUT_TOKENS", 800))
