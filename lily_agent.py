@@ -6490,9 +6490,76 @@ class LilyGame:
 
     # -- state block --------------------------------------------------------------
 
+    def picture_lane_status(self) -> dict:
+        """PATCH-003 P4: field-granular picture-lane truth. Each field is
+        SEPARATELY readable so a claim or refusal cites only the field that
+        actually reads off — the anti-fabrication mechanism ('picture
+        search is off tonight' was false against the ledger; tone cannot
+        be the mechanism). Pure read, no side effects."""
+        adult = self.sk.mode == "adult"
+        gen_key = bool(
+            lily_config.xai_api_key() if adult else lily_config.google_api_key_present()
+        )
+        return {
+            "media_mode": getattr(self.sk, "media_mode", "voice_only"),
+            "pictures_on": getattr(self.sk, "media_mode", "voice_only") == "pictures",
+            "generation_available": gen_key,
+            "pipeline_available": getattr(self, "supabase", None) is not None,
+            "deck": "adult" if adult else "general",
+            "heat": self.sk.adult_image_intensity if adult else None,
+        }
+
+    def picture_lane_state_line(self) -> str | None:
+        """One grounded state-block line built from picture_lane_status —
+        the verb of any picture claim/refusal must match these reads.
+        Returns None when nothing about the lane needs grounding (voice-
+        only and no missing dependency to be honest about)."""
+        s = self.picture_lane_status()
+        if not s["pictures_on"] and s["generation_available"] and s["pipeline_available"]:
+            # Voice-only with a healthy lane: only worth grounding the
+            # switched-off truth so 'pictures are live' can't be fabricated.
+            return (
+                "picture lane read — pictures are NOT switched on "
+                "(media_mode=voice_only); the lane is healthy, so if asked, "
+                "the true line is 'not switched on yet — want them on?', "
+                "never 'off tonight' and never 'already live'"
+            )
+        missing = []
+        if not s["generation_available"]:
+            missing.append("image generation key is not configured")
+        if not s["pipeline_available"]:
+            missing.append("the picture pipeline is unreachable")
+        if missing:
+            return (
+                "picture lane read — a real dependency is down: "
+                + "; ".join(missing)
+                + ". THIS is the only honest reason for no pictures; name "
+                "exactly it if asked, never a different cause"
+            )
+        if s["pictures_on"]:
+            return (
+                f"picture lane read — pictures ARE on (media_mode=pictures, "
+                f"deck={s['deck']}"
+                + (f", heat={s['heat']}" if s["heat"] else "")
+                + "); a picture claim is true only for an image that "
+                "actually reached the screen this question"
+            )
+        return None
+
     def build_state_block(self) -> str:
         block = self.sk.build_state_block()
         extra = []
+        # PATCH-003 P4: field-granular picture-lane truth — claims and
+        # refusals about pictures take their verb from THIS read, never
+        # from conversational momentum (the dual fabrication: 'pictures
+        # are live' then 'picture search is off', both false). Context
+        # only; the leak filter keeps it off the air.
+        try:
+            lane_line = self.picture_lane_state_line()
+            if lane_line:
+                extra.append(lane_line)
+        except Exception:
+            pass  # grounding is enrichment; never breaks the state block
         # Room-temperature read (WO-LILY-AUDEERING-001 Task 3): NL descriptor
         # lines only — zero scalars; neutral room injects NOTHING. The [env:]
         # line appears at most once per refresh. Synchronous read — never

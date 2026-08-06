@@ -99,6 +99,13 @@ def google_api_key() -> str:
     return _require("GOOGLE_API_KEY")
 
 
+def google_api_key_present() -> bool:
+    """Non-raising presence check for the picture-lane grounding read
+    (PATCH-003 P4) — google_api_key() raises, which the state-block read
+    must never do."""
+    return bool(_get("GOOGLE_API_KEY"))
+
+
 def vocal_model() -> str:
     # gemini-3.6-flash (operator-directed upgrade 2026-08-06): 1M ctx,
     # function-calling + structured outputs + thinking, text-mode via the
