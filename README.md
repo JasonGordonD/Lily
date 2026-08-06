@@ -235,8 +235,11 @@ Every model ID below was verified live on the funded keys before wiring.
   (`lily_config.adult_imagegen_model`) via `_generate_image_bytes_xai`, because
   Gemini refuses adult content. `lily_generate_image_bytes(..., mode=...)` picks
   the provider READ-ONLY on deck — the adult gate is untouched. Adult
-  picture-trivia stays gated off upstream by the safe-for-table rule
-  (`prefetch_picture_question`), so this routing is correct-and-ready but latent.
+  picture-trivia is LIVE (WO-LILY-ADULT-PICTURES-001): the adult deck supplies
+  picture rounds exactly like the other decks. `_picture_kind_for_slot` gates
+  on `media_mode` only, and `prefetch_picture_question` threads `mode='adult'`
+  through `lily_build_real_or_imagined_question` so its GENERATED branch routes
+  to Grok. The web-sourced (real-entity / real-photo) branches are unchanged.
 - **thinking_level** is per call-site, never global: content GENERATION
   (`REASONING_THINKING_LEVEL`) and close-answer ADJUDICATION
   (`JUDGE_THINKING_LEVEL`) run HIGH; hosting banter runs LOW (the `GoogleLLM`

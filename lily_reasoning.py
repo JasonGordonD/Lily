@@ -799,9 +799,10 @@ class LilyReasoning:
 
         Returns the §4.2 question shape with image attached, or None on
         ANY failure — the caller falls back to the standard text supply
-        (text-only fallback). Adult mode never gets web-sourced or
-        generated images (safe-for-table rule): returns None."""
-        if supabase is None or mode == "adult":
+        (text-only fallback). Adult mode supplies picture rounds exactly
+        like the other decks; generated images route to the Grok adult
+        image model (mode is threaded to the builders below)."""
+        if supabase is None:
             return None
         # Picture builders use deterministic ids for a slot. Honour the
         # shared supply interface's id exclusion before doing expensive web
@@ -827,7 +828,7 @@ class LilyReasoning:
             if kind == "real_or_imagined":
                 return await lily_imagegen.lily_build_real_or_imagined_question(
                     supabase, index=question_index, session_id=session_id,
-                    approve=self.approve_entity_image,
+                    approve=self.approve_entity_image, mode=mode,
                 )
             if kind == "real_entity":
                 return await lily_search.lily_build_real_entity_picture_question(

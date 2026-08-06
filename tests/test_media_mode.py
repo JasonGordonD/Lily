@@ -209,12 +209,23 @@ def test_picture_slots_in_pictures_mode():
     assert game._picture_kind_for_slot(4) is None
 
 
-def test_picture_slots_excluded_in_adult_mode():
+def test_picture_slots_enabled_in_adult_mode():
+    # WO-LILY-ADULT-PICTURES-001: adult mode supplies picture slots exactly
+    # like the other decks (generation routes to the Grok adult model
+    # downstream). The only picture gate left is media_mode.
     game = _make_game()
     game.sk.set_media_mode("pictures")
     game.sk.set_mode("adult")
-    for rnd in (1, 2, 3):
-        assert game._picture_kind_for_slot(rnd) is None
+    # Reference round: every question is real-or-imagined.
+    game.sk.question_number = 8  # mid round 2
+    assert game._picture_kind_for_slot(
+        lily_reasoning.REAL_OR_IMAGINED_ROUND
+    ) == "real_or_imagined"
+    # Other rounds: first question of the round is a real-entity slot.
+    game.sk.question_number = 0
+    assert game._picture_kind_for_slot(1) == "real_entity"
+    # The wager round is always text, in adult mode too.
+    assert game._picture_kind_for_slot(game.rounds_total + 1) is None
 
 
 class _FakeReasoning:
@@ -325,6 +336,36 @@ def test_real_picture_prefetch_accepts_supply_exclusions(monkeypatch):
     ))
     assert result["id"] == "pic_0003"
     assert calls
+
+
+def test_adult_mode_reaches_builder_and_threads_mode(monkeypatch):
+    # WO-LILY-ADULT-PICTURES-001: adult mode no longer short-circuits;
+    # prefetch reaches the real_or_imagined builder and threads mode='adult'
+    # so generation routes to the Grok adult model downstream.
+    reasoning = lily_reasoning.LilyReasoning.__new__(lily_reasoning.LilyReasoning)
+    reasoning.approve_entity_image = None
+    seen = {}
+
+    async def _builder(supabase, **kwargs):
+        seen.update(kwargs)
+        return {"id": "roi_0007", "prompt": "Real, or imagined?",
+                "image_source": "generated"}
+
+    monkeypatch.setattr(
+        lily_reasoning.lily_imagegen,
+        "lily_build_real_or_imagined_question",
+        _builder,
+    )
+    result = asyncio.run(reasoning.prefetch_picture_question(
+        object(),
+        kind="real_or_imagined",
+        question_index=7,
+        session_id="room",
+        mode="adult",
+    ))
+    assert result is not None
+    assert result["id"] == "roi_0007"
+    assert seen["mode"] == "adult"
 
 
 def test_excluded_picture_id_skips_builder(monkeypatch):

@@ -200,9 +200,9 @@ def adult_imagegen_model() -> str:
     """Image model for the ADULT deck. Gemini refuses adult content, so the
     adult picture path routes to xAI Grok Imagine (grok-imagine-image, via
     xai_api_key()). Live-verified: POST /v1/images/generations returns a
-    url. NOTE: adult picture-trivia is currently gated OFF upstream
-    (lily_reasoning.prefetch_picture_question bails on adult mode); this
-    pin makes the provider routing correct-and-ready if that opens."""
+    url. Adult picture-trivia is LIVE upstream
+    (lily_reasoning.prefetch_picture_question threads mode='adult' to the
+    picture builders); this pin routes those generated images to Grok."""
     return _get("LILY_ADULT_IMAGEGEN_MODEL", "grok-imagine-image")
 
 

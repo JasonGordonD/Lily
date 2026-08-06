@@ -6,6 +6,35 @@ nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
 
+## 2026-08-06 — WO-LILY-ADULT-PICTURES-001: adult deck picture rounds enabled (generated images -> Grok)
+
+Operator-directed: turn ON picture rounds for the adult deck, end to end,
+like the other decks. Two adult-mode picture suppressions were removed (the
+adult GATE, STT/TTS, and the safety ladder were NOT touched):
+
+- **`lily_agent._picture_kind_for_slot`** no longer returns `None` for
+  `mode == "adult"` — the slot gate now keys on `media_mode` only. Adult
+  sessions in `media_mode='pictures'` get the same picture slots as normal
+  mode (reference `real_or_imagined` round + first-of-round `real_entity`
+  landmark slots; the wager round stays text).
+- **`lily_reasoning.prefetch_picture_question`** dropped the
+  `mode == "adult"` early-return; only the `supabase is None` guard remains.
+  It now threads `mode` into `lily_build_real_or_imagined_question`.
+- **Generated adult images route to Grok:** the builder's GENERATED branch
+  passes `mode` to `lily_generate_question_image` ->
+  `lily_generate_image_bytes(mode='adult')` -> `_generate_image_bytes_xai`
+  (`grok-imagine-image`). The `image_license_note` now names the actual
+  model per deck. Web-sourced (real-photo / landmark) branches unchanged.
+
+Tests: `test_media_mode.test_picture_slots_enabled_in_adult_mode` (slot gate
+now enables adult), `test_media_mode.test_adult_mode_reaches_builder_and_
+threads_mode` (prefetch reaches the builder with `mode='adult'`),
+`test_imagegen.test_generation_routes_to_grok_in_adult_mode` (provider
+routing) and `test_imagegen.test_real_or_imagined_generated_adult_threads_
+mode_and_names_grok` (end-to-end thread + license note). Full suite green
+(1212 passed, 5 pre-existing skips) on the livekit-agents 1.6.6 venv.
+
+
 ## 2026-08-06 — WO-LILY-CAPABILITY-RESTORE-001 (model addenda): 3.6-flash brain, Nano Banana 2 Lite, provider routing, thinking policy
 
 Operator-directed model upgrades (override the fleet no-model-pin rule for

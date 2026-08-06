@@ -240,6 +240,47 @@ def test_real_or_imagined_odd_index_is_generated(monkeypatch):
     assert q["image_url"].endswith("fake.png")
 
 
+def test_generation_routes_to_grok_in_adult_mode(monkeypatch):
+    # WO-LILY-ADULT-PICTURES-001: adult-deck generation goes to xAI Grok
+    # Imagine; the Gemini path must never run for adult.
+    calls = {}
+
+    async def fake_xai(prompt, *, model=None):
+        calls["xai"] = {"prompt": prompt, "model": model}
+        return b"png", "image/png", lily_imagegen.lily_config.adult_imagegen_model()
+
+    monkeypatch.setattr(lily_imagegen, "_generate_image_bytes_xai", fake_xai)
+    data, mime, model = run(
+        lily_imagegen.lily_generate_image_bytes("invented place", mode="adult")
+    )
+    assert calls["xai"]["prompt"] == "invented place"
+    assert model == lily_imagegen.lily_config.adult_imagegen_model()
+    assert model == "grok-imagine-image"
+
+
+def test_real_or_imagined_generated_adult_threads_mode_and_names_grok(monkeypatch):
+    # The builder's GENERATED branch must thread mode='adult' down to
+    # generation and label the license note with the Grok adult model.
+    seen = {}
+
+    async def fake_gen_q_image(supabase, **kw):
+        seen["mode"] = kw.get("mode")
+        return "https://cdn.example/lily-images/generated/adult.png"
+
+    monkeypatch.setattr(
+        lily_imagegen, "lily_generate_question_image", fake_gen_q_image
+    )
+    q = run(lily_imagegen.lily_build_real_or_imagined_question(
+        object(), index=1, session_id="room-1", mode="adult"
+    ))
+    assert seen["mode"] == "adult"
+    assert q["image_source"] == "generated"
+    assert lily_imagegen.lily_config.adult_imagegen_model() in q[
+        "image_license_note"
+    ]
+    assert "grok-imagine-image" in q["image_license_note"]
+
+
 def test_real_or_imagined_failure_is_text_only_fallback(monkeypatch):
     async def fake_gen_q_image(supabase, **kw):
         return None  # generation failed; error row already written inside

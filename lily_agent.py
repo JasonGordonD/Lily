@@ -2405,11 +2405,13 @@ class LilyGame:
         """Which picture builder serves the NEXT question, if any
         (WO-LILY-OMNIBUS-002 K gating). Pictures are a lobby choice:
         media_mode='voice_only' (the default) excludes picture questions
-        entirely. Adult mode and the final wager round stay text. In
-        pictures mode, round REAL_OR_IMAGINED_ROUND is the reference
-        picture round (every question); otherwise the first question of
-        each round is a real-entity 'name this landmark' slot."""
-        if self.sk.media_mode != "pictures" or self.sk.mode == "adult":
+        entirely. The final wager round stays text. Adult mode supplies
+        picture rounds exactly like the other decks (generated images route
+        to the Grok adult model downstream). In pictures mode, round
+        REAL_OR_IMAGINED_ROUND is the reference picture round (every
+        question); otherwise the first question of each round is a
+        real-entity 'name this landmark' slot."""
+        if self.sk.media_mode != "pictures":
             return None
         if rnd > self.rounds_total:
             return None  # the wager question is always text
