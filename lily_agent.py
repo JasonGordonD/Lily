@@ -372,6 +372,11 @@ class LilyGame:
         # and the promoted category-candidate names (F — the only
         # proposals Lily may ever announce).
         self.asked_history: list[dict] = []
+        # Revealed-question burn (WS-4): ids and normalized-text hashes of
+        # questions whose answer has gone to air this session. A burned
+        # question can never re-arm and rides the no-repeat draw exclusion.
+        self._burned_question_ids: set[str] = set()
+        self._burned_question_hashes: set[str] = set()
         self.promoted_categories: list[str] = []
         self._prefetch_task: asyncio.Task | None = None
         self._window_timer: asyncio.Task | None = None
@@ -1778,20 +1783,14 @@ class LilyGame:
             # this session's already-drawn set (G2): a question drawn but
             # not yet served (or discarded) must never be drawn again;
             # arm-time registration alone left the window the live q_0492
-            # double-draw ran through.
+            # double-draw ran through. WS-4 adds the revealed/burned set so
+            # a timed-out-and-revealed question is never re-drawn either.
             if getattr(self, "_drawn_ids", None) is None:
                 # Test harnesses build LilyGame via __new__ without the
                 # full __init__ attribute set.
                 self._drawn_ids = set()
                 self._drawn_hashes = set()
-            history_ids = (
-                lily_bank.lily_history_question_ids(self.asked_history)
-                | self._drawn_ids
-            )
-            history_hashes = (
-                lily_bank.lily_history_hashes(self.asked_history)
-                | self._drawn_hashes
-            )
+            history_ids, history_hashes = self._no_repeat_exclusion()
             # Answer-level no-repeat (migration 017): steer generation away
             # from facts this group has already played, in any wording.
             history_answers = sorted(
@@ -2390,6 +2389,19 @@ class LilyGame:
         if self.next_question is None:
             self.start_prefetch()
             return False
+        # Burn guard (WS-4): a prefetched question whose answer already
+        # went to air this session is dead — discard it and pull a
+        # replacement rather than re-perform the revealed question (the
+        # live "re-ask the timed-out question, score the echo" defect).
+        if self._is_burned(self.next_question):
+            logger.info(
+                "LILY_BURN | REARM_BLOCKED | session=%s question_id=%s — "
+                "answer already revealed; discarding and re-prefetching",
+                self.sk.session_id, self.next_question.get("id"),
+            )
+            self.next_question = None
+            self.start_prefetch()
+            return False
         self.armed_question = self.next_question
         self.next_question = None
         self.sk.start_question(self.armed_question)
@@ -2470,6 +2482,19 @@ class LilyGame:
         """
         self.game_started = True
         question = self.sk.current_question
+        if question is not None and self._is_burned(question):
+            # WS-4: a reconnect must never resurrect a question whose
+            # answer already went to air. Drop it; the supply path serves
+            # a fresh one.
+            logger.info(
+                "LILY_BURN | RECONNECT_SKIP | session=%s question_id=%s — "
+                "burned question not restored",
+                self.sk.session_id, question.get("id"),
+            )
+            self.armed_question = None
+            self.sk.current_question = None
+            self.ui_phase = "question"
+            question = None
         if question is not None and self.sk.phase != "wrapup":
             self.armed_question = dict(question)
             self._register_draw(self.armed_question)
@@ -3913,6 +3938,14 @@ class LilyGame:
                 ),
                 self.publish_attributes(),
             )
+            # Burn the revealed question (WS-4): its canonical answer is
+            # now going to air (winner confirmation OR a timeout Lily
+            # resolves by speaking the answer with nobody scoring). A
+            # burned question can never re-arm and is excluded from every
+            # future draw, so an echo of the just-revealed answer has no
+            # live window to land in — and the idempotency key on
+            # apply_score_event backstops any award that still fires.
+            self._burn_question(question, reason="revealed")
             # Consume the question; round/phase bookkeeping. Capture the
             # question/round numbers NOW — arm_next_question() below
             # advances both, and the say-gate keys must name the question
@@ -4912,7 +4945,13 @@ class LilyGame:
         simply discarded), and the prompt joins used_prompts so the
         generator never re-produces it this session. Scope is GLOBAL
         today (migration 009 status column); per-group burn rides
-        lily_asked_history later."""
+        lily_asked_history later.
+
+        WS-4: the burn also joins an in-session dead set (id + normalized
+        text hash) so a burned question can never re-arm and is excluded
+        from every future draw — the reveal path burns here too (a
+        timed-out question whose answer Lily spoke aloud is dead), so its
+        echo has no live window to score into."""
         qid = question.get("id")
         logger.warning(
             "LILY_BURN | question_id=%s | session=%s | reason=%s",
@@ -4921,10 +4960,49 @@ class LilyGame:
         prompt = question.get("prompt", "")
         if prompt and prompt not in self.used_prompts:
             self.used_prompts.append(prompt)
+        burned_ids = getattr(self, "_burned_question_ids", None)
+        if burned_ids is None:
+            self._burned_question_ids = burned_ids = set()
+            self._burned_question_hashes = set()
+        if qid:
+            burned_ids.add(str(qid))
+        if prompt:
+            self._burned_question_hashes.add(
+                lily_bank.lily_question_text_hash(prompt)
+            )
         if self.supabase is not None:
             asyncio.ensure_future(
                 lily_persistence.lily_burn_question(self.supabase, qid)
             )
+
+    def _is_burned(self, question: dict | None) -> bool:
+        """True if this question's answer has already gone to air this
+        session (WS-4) — matched by id or normalized-text hash."""
+        if not question:
+            return False
+        qid = str(question.get("id") or "")
+        qhash = lily_bank.lily_question_text_hash(question.get("prompt"))
+        return (
+            (bool(qid) and qid in getattr(self, "_burned_question_ids", set()))
+            or qhash in getattr(self, "_burned_question_hashes", set())
+        )
+
+    def _no_repeat_exclusion(self) -> tuple[set, set]:
+        """The within-session no-repeat guard (WS-4): the id and
+        text-hash sets a fresh draw must avoid — the group's served
+        asked_history, this session's already-drawn set, AND every
+        revealed/burned question. Returned as (ids, hashes)."""
+        ids = (
+            lily_bank.lily_history_question_ids(self.asked_history)
+            | getattr(self, "_drawn_ids", set())
+            | getattr(self, "_burned_question_ids", set())
+        )
+        hashes = (
+            lily_bank.lily_history_hashes(self.asked_history)
+            | getattr(self, "_drawn_hashes", set())
+            | getattr(self, "_burned_question_hashes", set())
+        )
+        return ids, hashes
 
     def on_answer_leak(self) -> None:
         """Leak-filter hit while a question is armed/prefetched: its

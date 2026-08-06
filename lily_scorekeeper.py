@@ -1340,6 +1340,26 @@ class LilyScorekeeper:
                 self.session_id, player_name, cause,
             )
             return None
+        # Idempotent awards (WS-4): one point-earning award per
+        # (question_id, player) per session, capped at that award's value.
+        # Duplicate resolution dispatches — a timed-out question re-armed
+        # and the revealed answer echoed, a held award bound twice — cannot
+        # double-increment. Keyed on the ledger itself, so the guard
+        # travels with the checkpoint for free (rehydrate seeds it). Only
+        # positive movements are keyed: an incorrect commit (points=0) still
+        # audits and never consumes the key; bonuses carry no question_id
+        # and are intentionally exempt.
+        if question_id is not None and points and correct is not False:
+            prior = self._existing_award(question_id, player_name)
+            if prior is not None:
+                logger.info(
+                    "LILY_STATE | SCORE_DUPLICATE_AWARD | session=%s player=%s "
+                    "question_id=%s cause=%s points=%d — already awarded "
+                    "%d; refused (no mutation)",
+                    self.session_id, player_name, question_id, cause, points,
+                    prior.get("points") or 0,
+                )
+                return prior
         if correct is False:
             points = 0
             state["streak"] = 0
@@ -1372,6 +1392,23 @@ class LilyScorekeeper:
             state["score"], state["streak"],
         )
         return entry
+
+    def _existing_award(
+        self, question_id: str, player_name: str
+    ) -> Optional[dict]:
+        """The prior point-earning ledger entry for this (question_id,
+        player), or None. The idempotency key (WS-4): a positive award
+        already on the ledger for the same question and player means any
+        further positive movement is a duplicate dispatch."""
+        for entry in self.score_ledger:
+            if (
+                entry.get("question_id") == question_id
+                and entry.get("player") == player_name
+                and entry.get("correct") is not False
+                and (entry.get("points") or 0) > 0
+            ):
+                return entry
+        return None
 
     def record_result(
         self,
