@@ -32,6 +32,7 @@ from livekit.agents import (
     AutoSubscribe,
     InterruptionOptions,
     JobContext,
+    RoomInputOptions,
     RunContext,
     TurnHandlingOptions,
     WorkerOptions,
@@ -2647,7 +2648,7 @@ class LilyGame:
                     "ratio=%.2f",
                     self.sk.session_id, self.sk.question_number, ratio,
                 )
-                self.open_window()
+                self.open_window_after_discharge()
                 return
             # No registered delivery: NEVER open a ghost window (the old
             # fallback opened windows on questions nobody heard — the
@@ -2694,6 +2695,43 @@ class LilyGame:
         if self.sk.pacing == "relaxed":
             return base * lily_config.relaxed_window_multiplier()
         return base
+
+    def open_window_after_discharge(
+        self, duration: float | None = None
+    ) -> None:
+        """Room-discharge pacing (WS-14, AMENDMENT-002): a structural gap
+        of lily_config.room_discharge_seconds() between question-delivery
+        playout completion and the window's mic-sensitive phase, letting
+        the room's acoustic energy decay so player answers arrive at
+        higher effective SNR. Gap 0 = open immediately (pre-WS-14
+        behavior). Answers spoken during the gap keep buffering through
+        buffer_pre_window_answer (window closed + delivery claimed = its
+        exact buffering condition) and replay at open — nothing is lost
+        to the pause.
+
+        WS-5 interface: this is the pacing hook. When the window moves to
+        stem completion (stem completes -> window arms -> options continue
+        -> discharge gap governs adjudication sensitivity), call THIS at
+        the arming point instead of open_window(); the gap and its config
+        knob do not move. Steal windows never discharge — they open off a
+        ruling, not a delivery playout."""
+        gap = lily_config.room_discharge_seconds()
+        if gap <= 0:
+            self.open_window(duration=duration)
+            return
+        logger.info(
+            "LILY_WINDOW | DISCHARGE | session=%s q=%d gap=%.2fs",
+            self.sk.session_id, self.sk.question_number, gap,
+        )
+
+        async def _discharge() -> None:
+            await asyncio.sleep(gap)
+            # A racing open (ARMED_LIMBO reopen, adjudication start) wins.
+            if self.sk.answer_window_open or self._adjudicating:
+                return
+            self.open_window(duration=duration)
+
+        asyncio.ensure_future(_discharge())
 
     def open_window(
         self, duration: float | None = None, steal: bool = False
@@ -6279,6 +6317,23 @@ class LilyAgent(Agent):
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def lily_noise_cancellation_options():
+    """Resolve the Krisp model for the room input (WS-14). Returns the
+    ambient-NC options, or None when LILY_NOISE_CANCELLATION=off (the
+    kill switch for the historical NcSession sample-rate SIGABRT).
+
+    BVC can NEVER come out of this function. BVC isolates the primary
+    speaker and suppresses "background voices" — in Lily's one-mic
+    multiplayer room those are the other players, so BVC would erase the
+    table. lily_config coerces every unknown value (including "bvc") to
+    "nc"; this resolver only ever constructs noise_cancellation.NC()."""
+    if lily_config.noise_cancellation_mode() == "off":
+        logger.info("LILY_NOISE | NC=off (LILY_NOISE_CANCELLATION kill switch)")
+        return None
+    logger.info("LILY_NOISE | Krisp ambient NC enabled (BVC excluded by design)")
+    return noise_cancellation.NC()
+
+
 def _setup_session_log(room_name: str) -> None:
     """Optional per-session log file (fleet pattern)."""
     log_dir = lily_config.session_log_dir()
@@ -6649,6 +6704,26 @@ async def entrypoint(ctx: JobContext) -> None:
             interruption=InterruptionOptions(
                 min_words=1,
                 min_duration=0.8,
+                # WS-14: pinned explicitly (they match 1.6.6 defaults) —
+                # a noise burst that produces NO transcript pauses playout
+                # and resumes from the pause point after the timeout,
+                # instead of hard-cutting the turn. This is the
+                # framework-layer end of the verbatim-replay storm: the
+                # cut→release→re-dispatch loop only starts when a trigger
+                # actually interrupts. Requires can_pause audio output
+                # (room output: pause=True, room_io/_output.py).
+                resume_false_interruption=True,
+                false_interruption_timeout=(
+                    lily_config.false_interruption_timeout()
+                ),
+                # WS-14: adaptive interruption (GA on Cloud). Speechmatics
+                # qualifies (capabilities.aligned_transcript="chunk",
+                # streaming=True) and the session's turn detection resolves
+                # to "vad" — all gates in 1.6.6's
+                # _resolve_interruption_detection pass. On any detector
+                # failure the framework logs and degrades to plain VAD
+                # interruption by itself; "vad" here is the manual pin-back.
+                mode=lily_config.interruption_mode(),
             ),
         ),
     )
@@ -6869,6 +6944,17 @@ async def entrypoint(ctx: JobContext) -> None:
             )
 
         asyncio.ensure_future(_watch())
+
+    # WS-14 validation surface: one line per false-interruption event so
+    # barge-in-vs-backchannel behavior is a log query against live
+    # sessions (resumed=True: noise burst paused-and-resumed playout;
+    # resumed=False: pause window was superseded before resume).
+    @session.on("agent_false_interruption")
+    def _on_false_interruption(ev) -> None:
+        logger.warning(
+            "LILY_INTERRUPT | FALSE_INTERRUPTION | session=%s resumed=%s",
+            scorekeeper.session_id, getattr(ev, "resumed", None),
+        )
 
     @session.on("agent_state_changed")
     def _on_agent_state(ev) -> None:
@@ -7118,17 +7204,22 @@ async def entrypoint(ctx: JobContext) -> None:
         ],
     )
     game.agent = agent  # P2: per-turn preemptive-generation control
-    # NOTE: `noise_cancellation.NC()` aborts the worker at Krisp init on
-    # livekit-agents==1.6.4 + livekit-plugins-noise-cancellation==0.2.6
-    # (historical incident; NOT re-tested at 1.6.6, NC stays out) —
-    # SIGABRT with `NcSession::initSession: Input and output sample rates
-    # must be equal`. Every job accept died 2s in until this was dropped.
-    # BVC() would ship but is designed to isolate the primary speaker and
-    # would clip other players at the table; Lily is multi-mic-per-table
-    # by design. Speechmatics ENHANCED already does its own denoise
-    # server-side, so no NC on the client audio path is the safe default
-    # until upstream fixes the NC model or exposes matching I/O rates.
-    await session.start(room=ctx.room, agent=agent)
+    # WS-14: Krisp ambient NC on the room input. BVC stays structurally
+    # excluded — in a one-mic multiplayer room the "background voices" ARE
+    # the other players (lily_noise_cancellation_options coerces any
+    # attempt, including LILY_NOISE_CANCELLATION=bvc, back to NC). The
+    # 1.6.4 incident (NcSession SIGABRT `Input and output sample rates
+    # must be equal`, every job accept dead in 2s) is why the kill switch
+    # exists: LILY_NOISE_CANCELLATION=off drops NC via slot secret with no
+    # redeploy if the abort recurs at 1.6.6. Metering: Krisp models bill
+    # ~$0.002–0.004/min on Cloud from May 2026.
+    await session.start(
+        room=ctx.room,
+        agent=agent,
+        room_input_options=RoomInputOptions(
+            noise_cancellation=lily_noise_cancellation_options(),
+        ),
+    )
 
     # --- Acoustic pipeline: room audio -> devAIce (WO-LILY-AUDEERING-001) ---
     # Missing AUDEERING_API_KEY -> pipeline is None (breaker open, one

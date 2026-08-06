@@ -169,6 +169,50 @@ def imagegen_model() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Interruption + noise layer (WS-14)
+# ---------------------------------------------------------------------------
+
+def interruption_mode() -> str:
+    """Session interruption strategy: "adaptive" (LiveKit Cloud ML model —
+    distinguishes true barge-ins from backchannels/coughs/reverberant
+    cross-talk) or "vad" (plain energy VAD). Default adaptive; the
+    framework degrades to VAD on its own when the detector is unavailable
+    or errors (agent_activity._resolve_interruption_detection), so
+    adaptive is never a hard dependency."""
+    mode = _get("LILY_INTERRUPTION_MODE", "adaptive")
+    return mode if mode in ("adaptive", "vad") else "adaptive"
+
+
+def false_interruption_timeout() -> float:
+    """Seconds of post-trigger silence before an interruption with no
+    transcript is classified FALSE and the paused speech resumes from its
+    pause point (framework default 2.0). The 4-player echo room's noise
+    bursts land here: pause-and-resume instead of a hard cut."""
+    return _get_float("LILY_FALSE_INTERRUPTION_TIMEOUT", 2.0)
+
+
+def noise_cancellation_mode() -> str:
+    """Krisp noise cancellation on the room input: "nc" (ambient model,
+    default) or "off" (kill switch — the 1.6.4 NcSession sample-rate
+    SIGABRT killed every job accept; if that recurs at 1.6.6 this disables
+    NC via slot secret, no redeploy). BVC is NOT a value: in a one-mic
+    multiplayer room the "background voices" are the other players — BVC
+    would erase the table. Any unknown value (including "bvc") coerces to
+    "nc"."""
+    mode = _get("LILY_NOISE_CANCELLATION", "nc")
+    return mode if mode in ("nc", "off") else "nc"
+
+
+def room_discharge_seconds() -> float:
+    """Room-discharge pacing gap (AMENDMENT-002): structural pause between
+    question-delivery playout completion and the answer window's
+    mic-sensitive phase, letting the room's acoustic energy decay so
+    answers arrive at higher effective SNR. 0 disables (window opens
+    immediately, pre-WS-14 behavior)."""
+    return _get_float("LILY_ROOM_DISCHARGE_SECONDS", 0.5)
+
+
+# ---------------------------------------------------------------------------
 # Game tunables
 # ---------------------------------------------------------------------------
 
