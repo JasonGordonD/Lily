@@ -4424,6 +4424,7 @@ class LilyGame:
         if command == "back_to_normal":
             if self.sk.mode == "adult":
                 self.sk.set_mode("general")  # sticky flag flips instantly
+                getattr(self, "exit_adult_vocal", lambda: None)()  # restore the general vocal node
                 # D: no question survives the deck change — the armed
                 # adult question is flushed and the general deck re-draws
                 # immediately.
@@ -6253,6 +6254,7 @@ class LilyGame:
             lily_audeering_consumers.PERCEIVED_FRAMING,
         )
         self.sk.set_mode("general")  # sticky flag flips instantly, in code
+        getattr(self, "exit_adult_vocal", lambda: None)()  # restore the general vocal node
         # D: same flush as every other mode switch — the armed adult
         # question is dead and the general deck re-draws immediately.
         self.flush_for_mode_switch(source="child_signal")
@@ -6271,6 +6273,86 @@ class LilyGame:
                 source="child_signal",
             )
 
+    # -- adult-mode vocal swap (owner directive 2026-08-06) -------------------
+    #
+    # Gemini's PROHIBITED_CONTENT filter is non-overridable (BLOCK_NONE
+    # does not cover it) and blocks spoken turns around adult-deck
+    # material — live at 21:33: four blocked generations on the Kama
+    # Sutra answer, ~58s of retry stall. On adult entry the vocal LLM
+    # swaps to xAI Grok (the fleet's adult-content provider — vision and
+    # adult imagegen already ride XAI_API_KEY); every adult exit swaps
+    # the general Gemini node back. Question generation swaps too, in
+    # lily_reasoning (mode-routed to _generate_grok_json).
+
+    def enter_adult_vocal(self) -> bool:
+        """Swap the session's vocal LLM to Grok for the adult deck.
+        False (with an ERROR log) when the swap is impossible — the
+        session then keeps Gemini, which is tonight's degraded status
+        quo, never a crash."""
+        agent = getattr(self, "agent", None)
+        update = getattr(agent, "update_options", None)
+        key = lily_config.xai_api_key()
+        if update is None or not key:
+            logger.error(
+                "LILY_ADULT_VOCAL | SWAP_UNAVAILABLE | session=%s "
+                "reason=%s — adult rounds stay on the general vocal node "
+                "(Gemini may refuse explicit turns)",
+                self.sk.session_id,
+                "no_xai_key" if update is not None else "no_agent_handle",
+            )
+            return False
+        llm = getattr(self, "_adult_llm", None)
+        if llm is None:
+            try:
+                from livekit.plugins import openai as openai_plugin
+                llm = openai_plugin.LLM.with_x_ai(
+                    model=lily_config.adult_vocal_model(),
+                    api_key=key,
+                    reasoning_effort=lily_config.adult_vocal_effort(),
+                )
+            except Exception as e:
+                logger.error(
+                    "LILY_ADULT_VOCAL | SWAP_UNAVAILABLE | session=%s "
+                    "reason=llm_construction_failed error=%s",
+                    self.sk.session_id, e,
+                )
+                return False
+            self._adult_llm = llm
+        try:
+            update(llm=llm)
+        except Exception as e:
+            logger.error(
+                "LILY_ADULT_VOCAL | SWAP_FAILED | session=%s error=%s",
+                self.sk.session_id, e,
+            )
+            return False
+        logger.warning(
+            "LILY_ADULT_VOCAL | SWAPPED_IN | session=%s model=%s effort=%s",
+            self.sk.session_id, lily_config.adult_vocal_model(),
+            lily_config.adult_vocal_effort(),
+        )
+        return True
+
+    def exit_adult_vocal(self) -> None:
+        """Restore the general (Gemini) vocal LLM on any adult exit —
+        idempotent; a session that never swapped is a no-op."""
+        agent = getattr(self, "agent", None)
+        update = getattr(agent, "update_options", None)
+        general = getattr(self, "_general_llm", None)
+        if update is None or general is None:
+            return
+        try:
+            update(llm=general)
+            logger.warning(
+                "LILY_ADULT_VOCAL | SWAPPED_OUT | session=%s — general "
+                "vocal node restored", self.sk.session_id,
+            )
+        except Exception as e:
+            logger.error(
+                "LILY_ADULT_VOCAL | RESTORE_FAILED | session=%s error=%s",
+                self.sk.session_id, e,
+            )
+
     def on_child_gate_lost(self, reason: str) -> None:
         """Mid-session CLOSED->OPEN breaker transition while adult mode is
         active -> automatic exit through the SAME sticky-flag revert path
@@ -6287,6 +6369,7 @@ class LilyGame:
             self.sk.session_id, reason,
         )
         self.sk.set_mode("general")  # sticky flag flips instantly, in code
+        getattr(self, "exit_adult_vocal", lambda: None)()  # restore the general vocal node
         self.flush_for_mode_switch(source="child_gate")
         self.publish_attributes_nowait()
         if self.session is not None:
@@ -6690,6 +6773,10 @@ class LilyAgent(Agent):
         # the deterministic "back to normal" path, a fresh consensus, the
         # child-signal ladder veto (on_child_signal), or a mid-session
         # breaker trip (on_child_gate_lost) — all the same sticky path.
+        # Vocal swap (owner directive 2026-08-06): Grok voices the adult
+        # deck — Gemini's hard filter blocks it. Failure keeps Gemini
+        # (degraded, loud), never blocks entry.
+        getattr(self._game, "enter_adult_vocal", lambda: None)()
         # D: no question survives the deck change — the leftover general
         # question is flushed (the live "powerhouse of the cell" defect)
         # and the adult deck starts drawing immediately.
@@ -8017,24 +8104,30 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("VOICEPRINT | injected %d known speakers", len(known_speakers))
 
     # --- Session: vocal node gemini-3.5-flash, explicit safety settings ---
+    # The general-deck vocal LLM is held on the game so the adult-mode
+    # vocal swap (enter/exit_adult_vocal — Gemini's non-overridable
+    # PROHIBITED_CONTENT filter blocks adult-round speech) can restore it
+    # on every adult exit.
+    general_vocal_llm = GoogleLLM(
+        model=lily_config.vocal_model(),
+        # Default sampling — never set temperature/top_p/top_k on 3.x.
+        thinking_config={"thinking_level": "low"},
+        max_output_tokens=lily_config.vocal_max_output_tokens(),
+        # §11.1 CRITICAL: without these, adult mode silently dies
+        # (empty candidate, no error).
+        safety_settings=[
+            {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ],
+        api_key=lily_config.google_api_key(),
+    )
+    game._general_llm = general_vocal_llm
     session = AgentSession(
         userdata={"scorekeeper": scorekeeper, "game": game},
         stt=stt,
-        llm=GoogleLLM(
-            model=lily_config.vocal_model(),
-            # Default sampling — never set temperature/top_p/top_k on 3.x.
-            thinking_config={"thinking_level": "low"},
-            max_output_tokens=lily_config.vocal_max_output_tokens(),
-            # §11.1 CRITICAL: without these, adult mode silently dies
-            # (empty candidate, no error).
-            safety_settings=[
-                {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ],
-            api_key=lily_config.google_api_key(),
-        ),
+        llm=general_vocal_llm,
         tts=LilyTTS(),  # voice1 (primary) via lily_config.lily_voice_id()
         vad=silero.VAD.load(),  # barge-in enabled; no STT gating during TTS
         turn_handling=TurnHandlingOptions(

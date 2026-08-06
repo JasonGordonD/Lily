@@ -196,6 +196,45 @@ def imagegen_model() -> str:
     return _get("LILY_IMAGEGEN_MODEL", "gemini-3.1-flash-lite-image")
 
 
+def adult_vocal_model() -> str:
+    """Vocal LLM for ADULT mode (owner directive 2026-08-06). Gemini's
+    non-overridable PROHIBITED_CONTENT filter blocks spoken turns around
+    adult-deck material (live: the Kama Sutra answer at 21:33 — four
+    blocked generations, ~58s of retry stall), so on adult entry the
+    session's vocal LLM swaps to xAI Grok (the fleet's established
+    adult-content provider: vision + adult imagegen already ride
+    XAI_API_KEY) and swaps back on every adult exit."""
+    return _get("LILY_ADULT_VOCAL_MODEL", "grok-4.5")
+
+
+def adult_vocal_effort() -> str:
+    """Grok reasoning effort for the adult VOCAL swap: "high" (owner
+    lean, richer banter) or "low" (snappier turn-taking). Flip via slot
+    secret if high-effort latency drags the room."""
+    effort = _get("LILY_ADULT_VOCAL_EFFORT", "high")
+    return effort if effort in ("low", "medium", "high") else "high"
+
+
+def adult_reasoning_model() -> str:
+    """Question/verification generation model for the ADULT deck (owner
+    directive 2026-08-06: Grok 4.2's multi-agent high tier — "16
+    agents"). Pinned to the base id + high reasoning effort; if the
+    console's heavy tier carries its own model id, set it here via slot
+    secret (generation failures are visible and fall back to the bank,
+    never silent)."""
+    return _get("LILY_ADULT_REASONING_MODEL", "grok-4.2")
+
+
+def adult_reasoning_effort() -> Optional[str]:
+    """Reasoning effort for adult question generation (default high —
+    the multi-agent tier's lever). "off" disables sending the parameter
+    entirely (for model ids that reject it)."""
+    effort = (_get("LILY_ADULT_REASONING_EFFORT", "high") or "").lower()
+    if effort in ("off", "none", "0"):
+        return None
+    return effort if effort in ("low", "medium", "high") else "high"
+
+
 def adult_imagegen_model() -> str:
     """Image model for the ADULT deck. Gemini refuses adult content, so the
     adult picture path routes to xAI Grok Imagine (grok-imagine-image, via

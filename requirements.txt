@@ -10,3 +10,4 @@ supabase>=2.27.2
 httpx>=0.27.0
 aiohttp>=3.10.0
 python-dotenv>=1.2.1
+livekit-plugins-openai==1.6.6

@@ -30,6 +30,8 @@ import random
 import re
 from typing import Optional
 
+import aiohttp
+
 from google import genai as google_genai
 from google.genai import types as genai_types
 
@@ -159,6 +161,27 @@ _QUESTION_RESPONSE_SCHEMA = genai_types.Schema(
         "canonical_answer", "acceptable_answers", "reveal_color",
     ],
 )
+
+# Grok JSON mode carries no server-side schema — these addenda pin the
+# exact shapes the Gemini response_schema enforces, for the adult-deck
+# transport. The defensive parsers downstream cover any drift.
+_GROK_QUESTION_SHAPE_ADDENDUM = """
+
+Respond with ONLY a JSON object, no markdown fences, with EXACTLY these
+fields: "id" (string, shape q_<4 digits>), "category" (string),
+"difficulty_tier" (integer 1-4), "prompt" (the question exactly as the
+host should speak it), "canonical_answer" (string),
+"acceptable_answers" (array of lowercase strings: the canonical answer
+plus common variants), "reveal_color" (one short spicy fact for the
+reveal). Include "choices" (array of exactly 4 strings) ONLY for a
+multiple-choice question."""
+
+_GROK_VERDICT_SHAPE_ADDENDUM = """
+
+Respond with ONLY a JSON object, no markdown fences, with EXACTLY these
+fields: "verdict" ("pass" or "fail"), "reason" (string), and
+"corrected_canonical_answer" (string, ONLY when a small correction fixes
+the question; null otherwise)."""
 
 _VERIFICATION_RESPONSE_SCHEMA = genai_types.Schema(
     type=genai_types.Type.OBJECT,
@@ -392,6 +415,67 @@ class LilyReasoning:
             raise RuntimeError(f"empty candidate from {model} after retry")
         return text
 
+    async def _generate_grok_json(
+        self,
+        prompt: str,
+        *,
+        system_instruction: Optional[str] = None,
+        max_tokens: int,
+    ) -> str:
+        """ADULT-deck generation transport (owner directive 2026-08-06):
+        xAI Grok chat completions in JSON mode. Gemini's non-overridable
+        PROHIBITED_CONTENT filter refuses adult-deck material on both the
+        generation AND verification legs, so adult questions ride Grok —
+        the fleet's established adult-content provider (vision + adult
+        imagegen already use XAI_API_KEY). Same honest-failure contract
+        as _generate: raises on any failure; the prefetch wrapper turns
+        that into a status note + bank fallback, never silence."""
+        key = lily_config.xai_api_key()
+        if not key:
+            raise RuntimeError(
+                "XAI_API_KEY missing — adult-deck generation unavailable"
+            )
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+        body = {
+            "model": lily_config.adult_reasoning_model(),
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            "max_tokens": max_tokens,
+        }
+        effort = lily_config.adult_reasoning_effort()
+        if effort:
+            body["reasoning_effort"] = effort
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                "https://api.x.ai/v1/chat/completions",
+                json=body,
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=aiohttp.ClientTimeout(total=PREFETCH_TIMEOUT_SECONDS),
+            ) as resp:
+                if resp.status != 200:
+                    err = await resp.text()
+                    raise RuntimeError(
+                        f"xAI adult generation {resp.status}: {err[:300]}"
+                    )
+                data = await resp.json()
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise RuntimeError(f"xAI adult generation malformed response: {e}")
+        if not (text or "").strip():
+            raise RuntimeError(
+                f"empty candidate from {lily_config.adult_reasoning_model()}"
+            )
+        logger.info(
+            "LILY_REASONING | ADULT_GROK_GENERATION | model=%s effort=%s "
+            "chars=%d",
+            lily_config.adult_reasoning_model(), effort or "-", len(text),
+        )
+        return text
+
     async def approve_entity_image(
         self,
         image_bytes: bytes,
@@ -521,14 +605,24 @@ class LilyReasoning:
                     "prefetch — ground the question in one of these, and only "
                     "in what they actually say):\n" + brief
                 )
-        raw = await self._generate(
-            self._model,
-            prompt,
-            REASONING_THINKING_LEVEL,
-            response_mime_type="application/json",
-            response_schema=_QUESTION_RESPONSE_SCHEMA,
-            max_output_tokens=lily_config.reasoning_max_output_tokens(),
-        )
+        if mode == "adult":
+            # Owner directive 2026-08-06: adult questions generate on Grok
+            # (Gemini's hard filter refuses the material). JSON mode has no
+            # server-side schema — the shape addendum pins the fields and
+            # the defensive parser below covers drift.
+            raw = await self._generate_grok_json(
+                prompt + _GROK_QUESTION_SHAPE_ADDENDUM,
+                max_tokens=lily_config.reasoning_max_output_tokens(),
+            )
+        else:
+            raw = await self._generate(
+                self._model,
+                prompt,
+                REASONING_THINKING_LEVEL,
+                response_mime_type="application/json",
+                response_schema=_QUESTION_RESPONSE_SCHEMA,
+                max_output_tokens=lily_config.reasoning_max_output_tokens(),
+            )
         # Schema mode: the output IS the JSON document — parse it directly.
         parsed: Optional[dict] = None
         try:
@@ -552,8 +646,13 @@ class LilyReasoning:
             )
         return parsed
 
-    async def verify_question(self, question: dict) -> tuple[bool, str]:
-        """Verification at prefetch time on the 3.1 Pro node."""
+    async def verify_question(
+        self, question: dict, mode: str = "general"
+    ) -> tuple[bool, str]:
+        """Verification at prefetch time on the 3.1 Pro node — or on Grok
+        for the adult deck (Gemini's hard filter refuses to even VERIFY
+        adult material; a refused verification would reject every good
+        adult question)."""
         prompt = _VERIFICATION_PROMPT.format(
             question_json=json.dumps(question, ensure_ascii=False)
         )
@@ -578,14 +677,20 @@ class LilyReasoning:
                     "to check the fact; distrust it if it conflicts with "
                     "strong knowledge):\n" + web_context
                 )
-        raw = await self._generate(
-            self._model,
-            prompt,
-            REASONING_THINKING_LEVEL,
-            response_mime_type="application/json",
-            response_schema=_VERIFICATION_RESPONSE_SCHEMA,
-            max_output_tokens=lily_config.reasoning_max_output_tokens(),
-        )
+        if mode == "adult":
+            raw = await self._generate_grok_json(
+                prompt + _GROK_VERDICT_SHAPE_ADDENDUM,
+                max_tokens=lily_config.reasoning_max_output_tokens(),
+            )
+        else:
+            raw = await self._generate(
+                self._model,
+                prompt,
+                REASONING_THINKING_LEVEL,
+                response_mime_type="application/json",
+                response_schema=_VERIFICATION_RESPONSE_SCHEMA,
+                max_output_tokens=lily_config.reasoning_max_output_tokens(),
+            )
         # Schema mode: direct parse first; fence stripping is a defensive
         # last resort. Honest failure stays intact — an unparseable verdict
         # fails verification, never passes silently.
@@ -708,7 +813,7 @@ class LilyReasoning:
                 raise RuntimeError("question generation returned unparseable JSON")
             pre_verify_answer = str(question.get("canonical_answer", ""))
             ok, reason = await asyncio.wait_for(
-                self.verify_question(question),
+                self.verify_question(question, mode=scorekeeper.mode),
                 timeout=PREFETCH_TIMEOUT_SECONDS,
             )
             if not ok:

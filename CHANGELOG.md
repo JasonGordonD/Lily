@@ -5,6 +5,37 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-06 — HOTFIX-003: adult deck runs on Grok (voice text + question gen)
+
+Live root cause (session lily-105865, 21:33): `gemini-3.6-flash` refused
+the spoken turn around the Kama Sutra answer — `FinishReason.
+PROHIBITED_CONTENT`, Gemini's NON-overridable filter (the §11.1
+BLOCK_NONE settings cannot reach it). Four blocked generations, a 4x
+re-acknowledged answer, ~58s of retry stall. The deck opens; Gemini
+won't write its words.
+
+Owner directive, implemented (TTS untouched — ElevenLabs v3 remains the
+only voice; these models only produce the TEXT the TTS speaks):
+
+- **Adult vocal text → Grok 4.5** (`LILY_ADULT_VOCAL_MODEL`, default
+  `grok-4.5`; `LILY_ADULT_VOCAL_EFFORT` low|medium|high, default
+  **high**). Adult entry swaps the session LLM via
+  `Agent.update_options(llm=openai.LLM.with_x_ai(...))`; every adult
+  exit (back-to-normal, child-signal veto, gate-lost) restores the
+  general Gemini node. Missing XAI key = loud degradation
+  (`ADULT_VOCAL | SWAP_UNAVAILABLE`), never a blocked entry. Per the
+  xAI docs, reasoning_effort accepts low/medium/high, defaults high,
+  and cannot be disabled on grok-4.5.
+- **Adult question generation + verification → Grok 4.2**
+  (`LILY_ADULT_REASONING_MODEL` default `grok-4.2`,
+  `LILY_ADULT_REASONING_EFFORT` default **high** — the multi-agent
+  tier's lever; heavy-tier model id pin-able via slot secret). Gemini
+  refuses to even VERIFY adult material, which would have rejected
+  every good adult question. JSON-mode transport with shape addenda;
+  same honest-failure contract (visible errors, bank fallback).
+- New dep `livekit-plugins-openai==1.6.6`; all four pins forwarded in
+  deploy.yml. Pinned in tests/test_adult_grok.py; full suite 1227.
+
 ## 2026-08-06 — Live log-audit fixes (post-deploy hygiene)
 
 Evening log review of the freshly deployed build (session lily-05AAC9)
