@@ -46,7 +46,7 @@ from typing import Optional
 
 # Bumped whenever a player-facing feature lands. The delta a returning
 # table hears is every feature with `since` greater than their stamp.
-LILY_FEATURE_VERSION: int = 3
+LILY_FEATURE_VERSION: int = 4
 
 # The backfill (version 1) is the audited launch set; voice presets are
 # version 2 (Rami's direct change, 2026-07-31 — added at commit time per
