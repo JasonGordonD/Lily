@@ -209,10 +209,12 @@ def adult_vocal_model() -> str:
 
 def adult_vocal_effort() -> str:
     """Grok reasoning effort for the adult VOCAL swap: "high" (owner
-    lean, richer banter) or "low" (snappier turn-taking). Flip via slot
-    secret if high-effort latency drags the room."""
+    lean, richer banter) or "low" (snappier turn-taking) — grok-4.5
+    exposes exactly this two-way toggle (owner-verified against the
+    console; anything else coerces to high, the model default). Flip via
+    slot secret if high-effort latency drags the room."""
     effort = _get("LILY_ADULT_VOCAL_EFFORT", "high")
-    return effort if effort in ("low", "medium", "high") else "high"
+    return effort if effort in ("low", "high") else "high"
 
 
 def adult_reasoning_model() -> str:
@@ -232,7 +234,7 @@ def adult_reasoning_effort() -> Optional[str]:
     effort = (_get("LILY_ADULT_REASONING_EFFORT", "high") or "").lower()
     if effort in ("off", "none", "0"):
         return None
-    return effort if effort in ("low", "medium", "high") else "high"
+    return effort if effort in ("low", "high") else "high"
 
 
 def adult_imagegen_model() -> str:
