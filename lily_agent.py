@@ -3243,9 +3243,12 @@ class LilyGame:
         self.gated_say(
             None,
             "stop_ack",
-            "The player just told you to stop. Stop immediately: one short, "
-            "warm acknowledgment ('got it — I'll hold') and NOTHING else. "
-            "No question, no recap, no next move — wait for them.",
+            # RULINGS-001 R1: ratified STOP-ack register anchor.
+            "The player just told you to stop. Stop immediately and say "
+            "nothing more than a brief acknowledgment. REGISTER GUIDANCE "
+            "(vary freely within this length and temperature, never "
+            "longer): one or two calm words — 'Stopped.' / 'Say the "
+            "word.' No question, no recap, no next move — wait for them.",
             source="stop_primitive",
         )
 
@@ -5461,20 +5464,26 @@ class LilyGame:
             # commit → dispatch within ~1.5s, logged for telemetry.
             if not verdict_spoken_organically:
                 answer_text = str(question.get("canonical_answer", ""))
+                # RULINGS-001 R1: ratified verdict-beat register anchor —
+                # verdict word first, then at most one short flourish.
                 if winner_candidate is not None:
                     verdict_instr = (
-                        "VERDICT BEAT — one short, hot line and NOTHING "
-                        f"else: correct, the answer is {answer_text!r}, "
-                        f"point to {winner or 'the table'}. No flourish, "
-                        "no trivia color, no next question — those come "
-                        "in your next turn."
+                        "VERDICT BEAT. REGISTER GUIDANCE (vary freely "
+                        "within this length and temperature, never "
+                        "longer): the verdict word FIRST, then at most one "
+                        f"short flourish — 'Correct — {answer_text}!', "
+                        f"point to {winner or 'the table'}. No trivia "
+                        "color, no next question — those come in your next "
+                        "turn."
                     )
                 else:
                     verdict_instr = (
-                        "VERDICT BEAT — one short line and NOTHING else: "
-                        "nobody landed it, the answer was "
-                        f"{answer_text!r}. No flourish, no next question "
-                        "— those come in your next turn."
+                        "VERDICT BEAT. REGISTER GUIDANCE (vary freely "
+                        "within this length and temperature, never "
+                        "longer): the verdict first, then at most one "
+                        f"short line — nobody landed it, it was "
+                        f"{answer_text}. No next question — that comes in "
+                        "your next turn."
                     )
                 self.gated_say(
                     verdict_key, "verdict", verdict_instr,
