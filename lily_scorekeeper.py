@@ -423,6 +423,69 @@ def lily_detect_control_command(text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Returner-claim detector (WO-LILY-RECOGNITION-HONESTY-001) — a player
+# asserting prior contact or that Lily should recognize them, arriving in
+# ANY turn (not just the greeting landing). It exists to trip the honesty
+# gate: when memory is empty, Lily must never DENY prior contact or argue
+# with their memory ("we haven't played before" / "your voice isn't on
+# file" / "I promise my system doesn't have you saved" — the 19:41 live
+# failure). Conservative: a recognition/prior-contact VERB anchored to a
+# SELF/us reference, so "do you know the answer" and "you should know this
+# category" never fire.
+# ---------------------------------------------------------------------------
+
+_RETURNER_CLAIM_RE = _re.compile(
+    r"\b(?:"
+    # "do you know / remember / recognize who I am / me / my voice / us"
+    r"(?:do|don t|dont) you (?:know|remember|recogni[sz]e)"
+    r" (?:who (?:i|we) (?:am|are)|me|us|my voice|our voices)"
+    # "you know / remember / recognize me / my voice / who I am"
+    r"|you (?:should |ought to |do |must )?(?:know|remember|recogni[sz]e)"
+    r" (?:me|us|my voice|our voices|who (?:i|we) (?:am|are))"
+    # "you know my voice" phrased as a bare assertion
+    r"|you know my voice"
+    # "remember me / us"
+    r"|remember (?:me|us)\b"
+    # "we've met / played before", "I played with you before"
+    r"|(?:we|i) (?:have |ve |'ve )?(?:met|played)(?: with you)? before"
+    r"|(?:we|i) (?:have |ve |'ve )?(?:played|met) (?:with you )?(?:before|last time)"
+    # "we've crossed paths", "we know each other"
+    r"|we (?:have |ve |'ve )?crossed paths"
+    r"|we know each other"
+    # "it's not my/our first time" — an explicit returner assertion
+    r"|(?:it s|its|it is) not (?:my|our) first time"
+    r"|not (?:my|our) first (?:time|game)"
+    # contracted negation ("isn't/aren't/wasn't our first time" — the
+    # apostrophe normalizes to a space, so "isn't" arrives as "isn t")
+    r"|(?:isn|aren|wasn|weren) t (?:my|our) first (?:time|game)"
+    r")\b"
+)
+
+# Negations that turn a match into a NON-claim: "you don't know me" is the
+# player conceding, not asserting; "this is my first time" is a newcomer.
+_RETURNER_CLAIM_NEGATION_RE = _re.compile(
+    r"\b(?:"
+    r"(?:this is|it s|its|it is) (?:my|our) first time"
+    r"|you (?:don t|dont|do not) (?:know|remember|recogni[sz]e) (?:me|us)"
+    r"|(?:we|i) (?:have|ve|'ve)? ?(?:never|not) (?:met|played)"
+    r")\b"
+)
+
+
+def lily_detect_returner_claim(text: str) -> bool:
+    """True when the utterance ASSERTS prior contact / that Lily should
+    recognize this speaker. Trips the honesty gate (agent layer) only when
+    memory is empty — a grounded, never-denying response. Deterministic,
+    negation-guarded, self-anchored to avoid trivia-content false hits."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    if _RETURNER_CLAIM_NEGATION_RE.search(normalized):
+        return False
+    return bool(_RETURNER_CLAIM_RE.search(normalized))
+
+
+# ---------------------------------------------------------------------------
 # Media-mode spoken choice (WO-LILY-OMNIBUS-002 sub-agent K) — the lobby
 # offer: voice_only (default) or pictures. Same deterministic,
 # punctuation/fragment-proof command-layer pattern as the sticky commands

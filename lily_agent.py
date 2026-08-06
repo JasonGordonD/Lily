@@ -613,6 +613,11 @@ class LilyGame:
         # block for her next turn, cleared when that turn finishes playing.
         # The leak filter keeps the note itself off the air.
         self._state_note: str | None = None
+        # RECOGNITION-HONESTY: honesty conditioning for a mid-conversation
+        # returner-claim when memory is empty (never deny prior contact).
+        # Its own slot so it can coexist with a state-contradiction note on
+        # the same turn; cleared per-turn like _state_note.
+        self._returner_honesty_note: str | None = None
         self._group_facts_written: set = set()  # per-session fact dedupe
 
         # Persistent cross-session memory (rematch): the [RETURNING TABLE]
@@ -4078,6 +4083,9 @@ class LilyGame:
         # Honesty assist (desync WO Sub-agent C): the state note serviced
         # the turn that just finished playing — one-shot, consumed here.
         self._state_note = None
+        # RECOGNITION-HONESTY: same one-shot lifecycle — the returner-claim
+        # conditioning serviced this turn; a fresh claim re-sets it.
+        self._returner_honesty_note = None
         # Self-knowledge Task 3: the what's-new delta rode the greeting —
         # once the greet has genuinely played out, the stamp moves forward
         # (never before: an interrupted greet keeps the delta for a retry).
@@ -4955,6 +4963,41 @@ class LilyGame:
                     "note=%r",
                     self.sk.session_id, player, note[:120],
                 )
+
+        # RECOGNITION-HONESTY: a player asserting prior contact / that Lily
+        # should recognize them (the 19:41 live failure — she DENIED it
+        # three times). When her table card is genuinely blank (no memory
+        # block, no verified device identity), she must NOT deny or argue;
+        # the note conditions the reply toward the honest gap line. When she
+        # DOES have grounds (memory/verified), the recognition beats own the
+        # turn and this gate stays quiet.
+        if (
+            command is None
+            and not result.get("media_choice")
+            and not self.memory_block
+            and not getattr(self, "device_identity_verified", False)
+            and lily_scorekeeper.lily_detect_returner_claim(text)
+        ):
+            self._returner_honesty_note = (
+                "[returner-claim honesty — a player just asserted you've met "
+                "before, or that you should know their voice, and your table "
+                "card for tonight is blank. LAW: do NOT deny prior contact, "
+                "do NOT say you've never played together, do NOT tell them "
+                "their voice isn't on file as if that settles it, do NOT "
+                "argue with their memory of you. The honest truth you MAY "
+                "give, ONCE and lightly: your memory is keyed to a device or "
+                "browser, so a new device, a cleared browser, or a fresh key "
+                "leaves your card blank tonight even for someone who really "
+                "has played — a gap in YOUR records, never proof they're "
+                "wrong. Believe them, name the gap once if you haven't, then "
+                "move forward warmly. If you already named it this session, "
+                "don't repeat it — just don't deny.]"
+            )
+            logger.info(
+                "LILY_HONESTY | RETURNER_CLAIM | session=%s player=%s "
+                "text=%r — ungrounded, honesty gate armed",
+                self.sk.session_id, player, str(text)[:120],
+            )
 
         # WO-LILY-FORGETME-001: pending forget confirmation resolves
         # DETERMINISTICALLY (same pattern as the clarify resolution) — the
@@ -7071,6 +7114,12 @@ class LilyGame:
         state_note = getattr(self, "_state_note", None)
         if state_note:
             extra.append(state_note)
+        # RECOGNITION-HONESTY: returner-claim conditioning — context only,
+        # never spoken (leak-filtered like every state note); keeps a blank
+        # table card from becoming a denial of the player's own memory.
+        returner_note = getattr(self, "_returner_honesty_note", None)
+        if returner_note:
+            extra.append(returner_note)
         if not self.game_started:
             extra.append(
                 "game not started: you are in the lobby — bind names, fish "
