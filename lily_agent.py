@@ -276,6 +276,31 @@ _STRONG_GROUP_SOURCES = (
 
 
 # ---------------------------------------------------------------------------
+# Regeneration directives (WS-3, WO-LILY-OMNIBUS-003 + AMENDMENT-001).
+#
+# A spoken turn that is cut short (barge-in) or suppressed will have its
+# act re-dispatched. The live defect was that the re-dispatch replayed the
+# SAME words (greet ×2, a tension line ×4, the Black Panther reveal ×5).
+# These directives ride the re-dispatch so a barged turn REGENERATES
+# instead of replaying: the conversational variant leads with the result
+# and trims length; the delivery variant keeps the question exact (players
+# need every word) but strips any restart preamble.
+# ---------------------------------------------------------------------------
+
+_REGEN_REAIR_DIRECTIVE = (
+    "\n\nYou were cut short before finishing that line. Say it again in "
+    "fresh, shorter words — lead with the key result (the verdict, the "
+    "answer, the point), keep it to one crisp beat, and choose new phrasing "
+    "rather than your earlier wording."
+)
+_REGEN_DELIVERY_DIRECTIVE = (
+    "\n\nYou were cut short mid-question. Deliver it cleanly this time — the "
+    "question and every option exactly as written, in one unbroken beat, "
+    "straight to the read with no restart preamble."
+)
+
+
+# ---------------------------------------------------------------------------
 # Game director — the non-LLM surface: window timer, adjudication commit,
 # SFX dispatch, state publication, checkpointing triggers.
 # ---------------------------------------------------------------------------
@@ -422,6 +447,15 @@ class LilyGame:
         self._enroll_started = False
         self._last_enroll_retry_ts = 0.0  # WS-8 under-threshold retry cooldown
         self._armed_speech_misses = 0  # agent turns finished w/o performing q
+        # Regeneration gate (WS-3, WO-LILY-OMNIBUS-003): when a spoken turn
+        # is cut short (barge-in) or suppressed, the act it was performing
+        # re-dispatches. _reair_gate_armed marks that the NEXT dispatch is
+        # that re-air — so it carries a regeneration directive instead of
+        # replaying verbatim; _reair_turn_pending carries the signal one hop
+        # further, to tts_node, where a verbatim leak is caught and
+        # regenerated once. Both getattr-guarded for __new__ harnesses.
+        self._reair_gate_armed = False
+        self._reair_turn_pending = False
         # Structural delivery intent (desync WO Sub-agent B): question
         # number whose delivery the NEXT outbound spoken turn was
         # code-dispatched to perform — that turn claims q_{N}_delivery at
@@ -831,6 +865,16 @@ class LilyGame:
             return False
         for k in extra_keys:
             self.say_registry.claim(k, owner=reservation)
+        # Regeneration gate (WS-3): a re-air (this act's prior airing was
+        # cut/suppressed) carries a regeneration directive so the retry is
+        # spoken fresh, never replayed. Question deliveries keep their exact
+        # wording and take the clean-delivery variant. Consumed only once
+        # the claim survived above — a dup dispatch never eats the arm.
+        if self.take_reair_dispatch():
+            if act in ("question_delivery", "question_nudge"):
+                instructions = instructions + _REGEN_DELIVERY_DIRECTIVE
+            else:
+                instructions = instructions + _REGEN_REAIR_DIRECTIVE
         logger.info(
             "LILY_SAY | act=%s | key=%s | source=%s", act, key or "-", source
         )
@@ -915,6 +959,60 @@ class LilyGame:
             in normalized
             for choice in choices
         )
+
+    # -- regeneration gate (WS-3) --------------------------------------------
+
+    def arm_reair_gate(self) -> None:
+        """Mark that the act just cut/suppressed will re-dispatch as a
+        re-air: the next code-triggered speech regenerates rather than
+        replays (WS-3)."""
+        self._reair_gate_armed = True
+
+    def peek_reair_gate(self) -> bool:
+        """Read the re-air arm without consuming it."""
+        return getattr(self, "_reair_gate_armed", False)
+
+    def take_reair_dispatch(self) -> bool:
+        """Consume the re-air arm at DISPATCH time and hand the signal on
+        to tts_node via _reair_turn_pending. True = this dispatch is a
+        re-air and must carry a regeneration directive."""
+        if not getattr(self, "_reair_gate_armed", False):
+            return False
+        self._reair_gate_armed = False
+        self._reair_turn_pending = True
+        return True
+
+    def take_reair_turn(self) -> bool:
+        """Consume the re-air signal at PLAYOUT (tts_node). True = the
+        outbound turn is a re-air and its verbatim-replay lint is a GATE,
+        not telemetry."""
+        pending = getattr(self, "_reair_turn_pending", False)
+        self._reair_turn_pending = False
+        return pending
+
+    def is_question_delivery_turn(self, spoken_text: str) -> bool:
+        """True when the outbound turn is performing the armed question. A
+        barged re-read of the question is CORRECT verbatim (players need
+        the whole question), so it is exempt from the conversational
+        regeneration gate (WS-3)."""
+        if getattr(self, "_pending_delivery_qnum", None) is not None:
+            return True
+        armed = getattr(self, "armed_question", None)
+        if armed is not None and not self.sk.answer_window_open:
+            return self._delivery_text_matches_armed(spoken_text)
+        return False
+
+    def reair_verbatim_should_regenerate(
+        self, spoken_text: str, repeat_kind: "str | None"
+    ) -> bool:
+        """tts_node gate decision (WS-3): consume the re-air turn signal;
+        a re-air that STILL repeats an already-aired turn verbatim must be
+        suppressed and regenerated. Question deliveries are exempt (a
+        barged question is re-read verbatim on purpose)."""
+        reair_turn = self.take_reair_turn()
+        if not reair_turn or not repeat_kind:
+            return False
+        return not self.is_question_delivery_turn(spoken_text)
 
     def dispatch_armed_question(self, *, source: str) -> bool:
         """Dispatch one question-only turn after a completed reveal.
@@ -2800,6 +2898,12 @@ class LilyGame:
                 delivery_key = f"q_{self.sk.question_number}_delivery"
                 if delivery_key in released:
                     self.expect_delivery()
+            # Regeneration gate (WS-3): the act just cut/suppressed will
+            # re-dispatch — arm the gate so the retry is spoken fresh, not
+            # replayed. An interrupted turn partially aired (a re-air is
+            # coming); a suppressed turn only re-airs if a claim was freed.
+            if interrupted or released:
+                self.arm_reair_gate()
             # Task 0 (RECOGNITION-VARIETY): an INTERRUPTED turn partially
             # played — it belongs in the record, marked. A suppressed turn
             # never reached air and is not recorded as said.
@@ -5707,6 +5811,7 @@ class LilyAgent(Agent):
     def __init__(self, game: LilyGame, **kwargs) -> None:
         self._game = game
         self._empty_retry_pending = False
+        self._reair_regen_pending = False  # WS-3 regen-gate one-retry bound
         super().__init__(**kwargs)
 
     async def on_enter(self) -> None:
@@ -6538,6 +6643,47 @@ class LilyAgent(Agent):
                 "LILY_SAY | REPEAT_FLAG | session=%s kind=%s",
                 self._game.sk.session_id, repeat_kind,
             )
+
+        # Regeneration GATE (WS-3): on a RE-AIR (this turn was re-dispatched
+        # after its prior airing was cut/suppressed), the repeat lint is no
+        # longer telemetry — a verbatim replay of an already-aired turn is
+        # SUPPRESSED and regenerated once with the fresh-words directive.
+        # Question deliveries are exempt (a barged question is re-read
+        # verbatim on purpose). Bounded to one retry (via _reair_regen_pending)
+        # so a stubborn repeat still yields the floor rather than looping.
+        if (
+            not getattr(self, "_reair_regen_pending", False)
+            and self._game.reair_verbatim_should_regenerate(full, repeat_kind)
+        ):
+            self._reair_regen_pending = True
+            speech_id = _current_speech_id()
+            released = (
+                self._game.say_registry.release_owner(speech_id)
+                if speech_id
+                else self._game.say_registry.release_pending()
+            )
+            for k in released:
+                logger.warning(
+                    "LILY_SAY | RELEASED | key=%s | reason=regen_gate", k,
+                )
+            logger.warning(
+                "LILY_REGEN_GATE | verbatim re-air suppressed | session=%s "
+                "kind=%s — regenerating fresh",
+                self._game.sk.session_id, repeat_kind,
+            )
+            asyncio.ensure_future(
+                self.session.generate_reply(
+                    instructions=_REGEN_REAIR_DIRECTIVE.strip()
+                )
+            )
+            yield rtc.AudioFrame(
+                data=b"\x00\x00" * 2400,
+                sample_rate=24000,
+                num_channels=1,
+                samples_per_channel=2400,
+            )
+            return
+        self._reair_regen_pending = False
 
         if len(full) < 3:
             # §11.1: an empty candidate (safety-filter mute, truncation) is a
