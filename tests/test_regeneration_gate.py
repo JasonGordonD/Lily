@@ -71,7 +71,6 @@ def _make_game() -> LilyGame:
     game._pending_unbound_award = None
     game._armed_speech_misses = 0
     game._pending_delivery_qnum = None
-    game._strict_delivery_qnum = None
     game._reair_gate_armed = False
     game._reair_turn_pending = False
     game.eliminated = []

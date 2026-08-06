@@ -467,7 +467,6 @@ class LilyGame:
         # turn does not contain the armed prompt (and every MC option),
         # tts_node replaces it with the deterministic question sheet
         # before any claim opens.
-        self._strict_delivery_qnum: int | None = None
         # WS-5 (MC answer-aborts-read): the in-flight multiple-choice
         # delivery. Stem+options are ONE SpeechHandle turn (WS-1), so a
         # correct answer during the OPTIONS read truncates the remaining
@@ -923,7 +922,7 @@ class LilyGame:
     # The window still opens at the delivery TURN's playout completion
     # (on_agent_speech_finished) — what changed is WHAT registers delivery.
 
-    def expect_delivery(self, *, strict: bool = False) -> None:
+    def expect_delivery(self) -> None:
         """Arm the structural delivery flag: the next outbound spoken turn
         was just dispatched to perform the armed question and will claim
         q_{N}_delivery at dispatch. No-op pre-game (WS-1: intake turns can
@@ -936,9 +935,6 @@ class LilyGame:
         key = f"q_{self.sk.question_number}_delivery"
         if self.say_registry.state(key) is None:
             self._pending_delivery_qnum = self.sk.question_number
-            self._strict_delivery_qnum = (
-                self.sk.question_number if strict else None
-            )
 
     def consume_pending_delivery(self, qnum: int) -> bool:
         """One-shot consume of the structural delivery flag for question
@@ -1049,7 +1045,7 @@ class LilyGame:
         key = f"q_{self.sk.question_number}_delivery"
         if self.say_registry.state(key) is not None:
             return False
-        self.expect_delivery(strict=True)
+        self.expect_delivery()
         sheet = self.rendered_armed_question()
         return self.gated_say(
             None,
@@ -1092,8 +1088,6 @@ class LilyGame:
         qnum = self.sk.question_number
         key = f"q_{qnum}_delivery"
         structural = self.consume_pending_delivery(qnum)
-        if structural:
-            self._strict_delivery_qnum = None
         textual = self._delivery_text_matches_armed(spoken_text)
         if structural and not textual:
             # WS-1: the strict text-sanity rewrite applies to EVERY
@@ -1385,10 +1379,10 @@ class LilyGame:
         until the whole table has heard it."""
         started = getattr(self, "_mc_delivery_started_at", None)
         if started is None:
-            return False
+            return True
         wps = lily_config.mc_stem_protect_words_per_second()
         if wps <= 0:
-            return False
+            return True
         stem_words = getattr(self, "_mc_delivery_stem_words", 0)
         return now < started + (stem_words / wps)
 
@@ -2975,7 +2969,6 @@ class LilyGame:
         self._undelivered_refires = 0
         self._supply_stall_ticks = 0  # WS-6: a question is in hand now
         self._pre_window_segments = []  # early-buzz buffer is per-question
-        self._strict_delivery_qnum = None
         self._judged_keys = set()
         self._addressee_rows = {}  # B1: row-id tasks are per-question
         for _task in self._spec_judge.values():
@@ -6968,7 +6961,7 @@ class LilyAgent(Agent):
         )
         if delivery == "rewrite_strict":
             full = self._game.rendered_armed_question()
-            self._game.expect_delivery(strict=True)
+            self._game.expect_delivery()
             delivery = self._game.register_delivery_claim(
                 full, speech_id=speech_id
             )

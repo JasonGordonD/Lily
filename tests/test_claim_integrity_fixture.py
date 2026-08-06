@@ -129,7 +129,6 @@ def _make_game(game_started: bool) -> LilyGame:
     game._pending_unbound_award = None
     game._armed_speech_misses = 0
     game._pending_delivery_qnum = None
-    game._strict_delivery_qnum = None
     game._phase_hold = None
     game.eliminated = []
     game.acoustic = lily_audeering_consumers.LilyAcousticState()
@@ -395,7 +394,7 @@ def test_q7_apology_rewrites_to_sheet_before_claiming():
         assert game.sk.answer_window_open is False
 
         # tts_node rewrite protocol: re-arm, speak the sheet, claim.
-        game.expect_delivery(strict=True)
+        game.expect_delivery()
         sheet = game.rendered_armed_question()
         assert lily_evaluation.lily_turn_presents_question(
             Q7_WALTER["prompt"], sheet

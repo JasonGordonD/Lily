@@ -203,7 +203,6 @@ def _make_game() -> LilyGame:
     game.prewager_standings = None
     game._armed_speech_misses = 0
     game._pending_delivery_qnum = None
-    game._strict_delivery_qnum = None
     game._pre_window_segments = []
     game._judged_keys = set()
     game._spec_judge = {}

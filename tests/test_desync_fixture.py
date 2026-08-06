@@ -215,7 +215,7 @@ def test_q2_replay_structural_claim_registers_delivery(caplog):
         assert game.register_delivery_claim(Q2_PARAPHRASE) == "rewrite_strict"
         assert game.say_registry.state("q_1_delivery") is None
         # tts_node rewrite protocol: re-arm, speak the sheet, claim.
-        game.expect_delivery(strict=True)
+        game.expect_delivery()
         sheet = game.rendered_armed_question()
         verdict = game.register_delivery_claim(sheet)
         assert verdict == "claimed_structural"
@@ -262,7 +262,7 @@ def test_q3_replay_no_ghost_window_then_nudged_delivery(caplog):
             assert game.register_delivery_claim(Q3_PARAPHRASE) == (
                 "rewrite_strict"
             )
-            game.expect_delivery(strict=True)
+            game.expect_delivery()
             sheet = game.rendered_armed_question()
             assert game.register_delivery_claim(sheet) == "claimed_structural"
             game.on_agent_speech_finished(sheet)
@@ -422,7 +422,7 @@ def test_scripted_round_every_question_delivered_and_registered_once(caplog):
                     assert game.register_delivery_claim(drifted) == (
                         "rewrite_strict"
                     )
-                    game.expect_delivery(strict=True)
+                    game.expect_delivery()
                     spoken = game.rendered_armed_question()
                     assert game.register_delivery_claim(spoken) == (
                         "claimed_structural"
@@ -441,7 +441,7 @@ def test_scripted_round_every_question_delivered_and_registered_once(caplog):
                     assert game.register_delivery_claim(drifted) == (
                         "rewrite_strict"
                     )
-                    game.expect_delivery(strict=True)
+                    game.expect_delivery()
                     spoken = game.rendered_armed_question()
                     assert game.register_delivery_claim(spoken) == (
                         "claimed_structural"
@@ -763,7 +763,6 @@ def test_round_transition_reveal_and_question_use_separate_strict_turns():
         for choice in ROUND_TWO_MC["choices"]:
             assert choice in delivery
         assert game._pending_delivery_qnum == 7
-        assert game._strict_delivery_qnum == 7
         assert game.sk.answer_window_open is False
 
         # If the vocal turn resurrects Verona or emits a malformed
@@ -775,12 +774,12 @@ def test_round_transition_reveal_and_question_use_separate_strict_turns():
         )
         assert game.register_delivery_claim(malformed) == "rewrite_strict"
         assert game.say_registry.state("q_7_delivery") is None
-        game.expect_delivery(strict=True)
+        game.expect_delivery()
         stale = "Romeo and Juliet is set in which Italian city?"
         assert game.register_delivery_claim(stale) == "rewrite_strict"
         exact = game.rendered_armed_question()
         assert "D) Neptune" in exact
-        game.expect_delivery(strict=True)
+        game.expect_delivery()
         assert game.register_delivery_claim(exact) == "claimed_structural"
         await _drain()
 

@@ -342,7 +342,6 @@ def test_buffer_clears_at_arm():
     game._addressee_rows = {}
     game._spec_judge = {}
     game._nbest_by_key = {}
-    game._strict_delivery_qnum = None
     game._armed_speech_misses = 0
     game.armed_question = None
 

@@ -83,7 +83,6 @@ def _make_game(game_started: bool = True) -> LilyGame:
     game._question_transitioning = False
     game._armed_speech_misses = 0
     game._pending_delivery_qnum = None
-    game._strict_delivery_qnum = None
     game._undelivered_ticks = 0
     game._undelivered_refires = 0
     game.acoustic = lily_audeering_consumers.LilyAcousticState()

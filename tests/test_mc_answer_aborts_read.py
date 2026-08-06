@@ -106,7 +106,6 @@ def _make_game() -> LilyGame:
     game._undelivered_refires = 0
     # WS-5 state.
     game._pending_delivery_qnum = None
-    game._strict_delivery_qnum = None
     game._mc_delivery_qnum = None
     game._mc_delivery_started_at = None
     game._mc_delivery_stem_words = 0
