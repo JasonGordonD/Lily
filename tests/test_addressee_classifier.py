@@ -180,14 +180,30 @@ def test_register_none_when_pipeline_absent():
 
 
 def test_register_snapshot_adapter_reads_live_shape():
+    # arousal flows today (dimension.arousal); energy lands at the
+    # contract key prosody.energy once 003 produces it.
     register = LilyAcousticRegister.from_snapshot({
         "dimension": {"arousal": 0.7},
-        "prosody": {"loudness": 0.6},
+        "prosody": {"energy": 0.6},
         "features": {},
     })
     assert register is not None
     assert register.arousal == 0.7
     assert register.energy == 0.6
+
+
+def test_register_snapshot_adapter_arousal_only_today():
+    # Today's real snapshot: only dimension.arousal is a scalar;
+    # prosody.loudness is a nested dict and must NOT be read as energy
+    # (landing contract — overwriting loudness would break its readers).
+    register = LilyAcousticRegister.from_snapshot({
+        "dimension": {"arousal": 0.42},
+        "prosody": {"loudness": {"mean": 0.6, "max": 0.9}},
+        "features": {},
+    })
+    assert register is not None
+    assert register.arousal == 0.42
+    assert register.energy is None
 
 
 def test_register_snapshot_adapter_none_on_empty():

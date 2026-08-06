@@ -171,7 +171,40 @@ class LilyAcousticRegister:
         """Best-effort adapter from the live audEERING addressee snapshot
         (lily_audeering_consumers.addressee_snapshot() shape). Fields the
         pipeline does not deliver yet stay None; when WS-11/WS-13 write
-        their features into the snapshot they flow through unchanged."""
+        their features into the snapshot they flow through unchanged.
+
+        LANDING CONTRACT for the Omnibus-003 (WS-11/WS-13) producer — what
+        this adapter reads, audited 2026-08-06 against today's producer
+        (lily_audeering_client._snapshot_from_parsed):
+
+          arousal        <- dimension.arousal (FLOWS TODAY, scalar 0..1).
+          energy         <- prosody.energy OR features.energy, scalar
+                            0..1. NOT prosody.loudness: that key is ALREADY
+                            a nested dict today, and overwriting it with a
+                            scalar would break existing readers — land
+                            energy under a NEW key. (No producer path yet.)
+          speech_rate    <- prosody.speech_rate / speaking_rate /
+                            articulation_rate, NORMALIZED to 0..1. Today
+                            rate exists only as camelCase `speakingRate` in
+                            raw words/sec, which _f rejects as out-of-range
+                            — the producer must emit a snake_case,
+                            0..1-normalized field. (No producer path yet.)
+          articulation   <- prosody.articulation OR features.articulation,
+                            scalar 0..1. (No producer path yet.)
+          mic_orientation<- prosody.mic_orientation OR
+                            features.mic_orientation, scalar 0..1. (No
+                            producer path yet.)
+          per_word_volume<- features.per_word_volume / word_volumes OR
+                            prosody.per_word_volume, a sequence coerced to
+                            0..1. This is the WS-13 signal. NOTE: `features`
+                            is `{}` by construction today — the audEERING
+                            API request does not ask for it
+                            (lily_audeering_client.py:65) — so per-word
+                            volume, articulation, and mic_orientation have
+                            no producer path until 003 adds the request +
+                            parse leg. Only dimension.arousal flows now;
+                            the register degrades to all-None gracefully.
+        """
         if not isinstance(snapshot, dict):
             return None
         dimension = snapshot.get("dimension") or {}
@@ -203,9 +236,10 @@ class LilyAcousticRegister:
                 volumes = None
         register = cls(
             arousal=_f((dimension, "arousal")),
+            # Energy lands at prosody.energy / features.energy per the
+            # contract above — NOT prosody.loudness (a nested dict today).
             energy=_f(
-                (prosody, "loudness"), (prosody, "energy"),
-                (features, "energy"),
+                (prosody, "energy"), (features, "energy"),
             ),
             speech_rate=_f(
                 (prosody, "speech_rate"), (prosody, "speaking_rate"),
