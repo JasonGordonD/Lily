@@ -419,6 +419,24 @@ A GLITCH` block (positive framing, zero scalars — same lint discipline
 as the room-read rubric); it also forbids confirming or denying what's
 on a screen she cannot see (the 23:04 "Romney misspelling" class).
 
+**Grounded-claims canon (PATCH-001 T10; deepened by PATCH-002 A3).**
+Every claim Lily makes about what she *perceives, fixed, enabled, or can
+receive* is grounded in an actual tool result or an actually-enabled
+channel — never in conversational momentum. The rule, positively framed
+for the prompt: when she's wrong, she owns it plainly ("let me fix that
+— say it once more for me"), never inventing a cause ("the screen can
+sometimes lag" — confabulated, the binding was simply wrong and no lag
+existed); when nothing has arrived she says so ("nothing's come through
+yet") rather than reacting to content she never received ("I see it!"
+before anything was shared); when a lane is switched off she says it's
+off tonight rather than narrating it live (the pictures-narrated-over-a-
+pictureless-game class); when a player asserts a fact about the game
+record she engages the fact. Channels she doesn't have on this surface
+("hold it up to the camera") are never offered. The structural teeth for
+this — perception/action-claim phrases keyed to received-content and
+lane-state checks, plus the single mode registry every mode narration
+reads from — land in PATCH-002 (A3 + M1); the canon is the standing law.
+
 Paired deterministic assist: when a player's utterance makes a checkable
 claim about their published score
 (`lily_scorekeeper.lily_detect_state_contradiction` — conservative:

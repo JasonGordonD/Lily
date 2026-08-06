@@ -21,7 +21,7 @@ import logging
 import random
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -29,6 +29,7 @@ from postgrest.exceptions import APIError as PostgrestAPIError
 from supabase import Client as SupabaseClient, create_client as create_supabase_client
 from supabase.client import ClientOptions as SupabaseClientOptions
 
+import lily_evaluation
 import lily_bank
 import lily_config
 import lily_forget
@@ -266,6 +267,80 @@ async def lily_session_end(
         extra["final_standings"] = final_standings
     await lily_checkpoint(supabase, scorekeeper, phase="ended", **extra)
     logger.info("Session ended — session_id=%s", scorekeeper.session_id)
+
+
+ABANDONED_SESSION_MIN_AGE_SECONDS = 900.0  # 15 min inactive, non-ended
+
+
+async def lily_sweep_abandoned_sessions(
+    supabase: Optional[SupabaseClient],
+    min_age_s: Optional[float] = None,
+    limit: int = 20,
+) -> dict:
+    """PATCH-001 T9 (RETIRE_WITH_WS6): close out sessions that died
+    mid-game. A session whose phase is not 'ended' and whose updated_at
+    is older than the threshold crashed or was abandoned (the live
+    89A97A: phase stuck 'round', q_3812 registered at the instant of
+    death). Force phase -> ended with a loud WARN so a crash-instant
+    ghost leaves no active trace; the report sweep (separate) then
+    assesses it from the stored transcript. Runs at session start
+    alongside lily_report_sweep. Never raises; returns counts."""
+    stats = {"scanned": 0, "closed": 0}
+    if supabase is None:
+        return stats
+    try:
+        min_age = (
+            min_age_s if min_age_s is not None
+            else ABANDONED_SESSION_MIN_AGE_SECONDS
+        )
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=min_age)
+        ).isoformat()
+        result = await asyncio.to_thread(
+            lambda: supabase.table("lily_sessions")
+            .select("session_id, phase, updated_at")
+            .neq("phase", "ended")
+            .lt("updated_at", cutoff)
+            .order("updated_at")
+            .limit(limit)
+            .execute()
+        )
+        rows = result.data or []
+        for row in rows:
+            stats["scanned"] += 1
+            sid = row["session_id"]
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.table("lily_sessions")
+                    .update({
+                        "phase": "ended",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    .eq("session_id", sid)
+                    .neq("phase", "ended")
+                    .execute()
+                )
+                stats["closed"] += 1
+                logger.warning(
+                    "LILY_SWEEP | ABANDONED_SESSION_CLOSED | session=%s "
+                    "was_phase=%s last_active=%s — forced ended (crash/"
+                    "abandonment); report sweep will assess",
+                    sid, row.get("phase"), row.get("updated_at"),
+                )
+            except Exception as e:
+                logger.error(
+                    "LILY_SWEEP | ABANDONED_CLOSE_FAILED | session=%s error=%s",
+                    sid, e,
+                )
+        if stats["scanned"]:
+            logger.info(
+                "LILY_SWEEP | ABANDONED | scanned=%d closed=%d",
+                stats["scanned"], stats["closed"],
+            )
+    except Exception as e:
+        logger.error("LILY_SWEEP | ABANDONED_SWEEP_FAILED | error=%s", e)
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +671,7 @@ async def lily_fetch_bank_question(
     mode: str = "general",
     exclude_ids: Optional[set] = None,
     exclude_hashes: Optional[set] = None,
+    exclude_answers: Optional[set] = None,
 ) -> Optional[dict]:
     """Pull one unused curated question from lily_questions, preferring the
     requested category/tier, falling back to any unused row. Returns the
@@ -605,11 +681,21 @@ async def lily_fetch_bank_question(
     when mode == 'adult' — general mode hard-excludes them.
 
     Asked-history guard (bank-curation WO, migration 010): rows whose
-    kb_ id is in `exclude_ids` or whose normalized-text hash is in
-    `exclude_hashes` (the group's lily_asked_history) are never re-served
-    to that group."""
+    kb_ id is in `exclude_ids`, whose normalized-text hash is in
+    `exclude_hashes`, OR whose normalized canonical ANSWER is in
+    `exclude_answers` (the group's lily_asked_history) are never re-served
+    to that group. PATCH-001 T7: the answer guard closes the live
+    cross-session repeat (kb_469 'Mars' re-served to a group that played
+    a differently-worded Mars question the previous day — same answer,
+    distinct id and text hash, so id/hash exclusion alone missed it; the
+    generation path already avoided answers, the bank path did not)."""
     exclude_ids = exclude_ids or set()
     exclude_hashes = exclude_hashes or set()
+    exclude_answers = {
+        lily_evaluation.lily_normalize_answer(str(a))
+        for a in (exclude_answers or set())
+        if str(a).strip()
+    }
     try:
         def _query_stage(
             stage_category: Optional[str],
@@ -650,6 +736,12 @@ async def lily_fetch_bank_question(
                     not exclude_hashes
                     or lily_bank.lily_question_text_hash(r["question"])
                     not in exclude_hashes
+                )
+                and (
+                    not exclude_answers
+                    or lily_evaluation.lily_normalize_answer(
+                        str(r.get("canonical_answer") or r.get("answer") or "")
+                    ) not in exclude_answers
                 )
             ]
             if candidates:

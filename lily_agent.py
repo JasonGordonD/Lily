@@ -2573,6 +2573,7 @@ class LilyGame:
                             mode=supply_mode,
                             exclude_ids=history_ids,
                             exclude_hashes=history_hashes,
+                            exclude_answers=set(history_answers),
                         ),
                         timeout=20.0,
                     )
@@ -2602,6 +2603,7 @@ class LilyGame:
                         self.supabase, category, tier, self.used_prompts,
                         mode=supply_mode,
                         exclude_ids=history_ids, exclude_hashes=history_hashes,
+                        exclude_answers=set(history_answers),
                     ),
                     timeout=20.0,
                 )
@@ -3242,6 +3244,9 @@ class LilyGame:
             lily_bank.lily_history_hashes(self.asked_history)
             | self._drawn_hashes
         )
+        # PATCH-001 T7: the group's cross-session answers also exclude —
+        # a differently-worded bank question with a played answer repeats.
+        history_answers = set(lily_bank.lily_history_answers(self.asked_history))
         try:
             # Bounded: the sync client has no HTTP timeout of its own — an
             # unbounded hang here would wedge the very watchdog that is
@@ -3251,6 +3256,7 @@ class LilyGame:
                     self.supabase, category, tier, self.used_prompts,
                     mode=self.sk.mode,
                     exclude_ids=history_ids, exclude_hashes=history_hashes,
+                    exclude_answers=history_answers,
                 ),
                 timeout=20.0,
             )
@@ -8145,6 +8151,12 @@ async def entrypoint(ctx: JobContext) -> None:
     # failures). Fire-and-forget off the boot path; the sweep never raises
     # and its min-age grace window keeps it off live sessions' rows.
     if supabase is not None:
+        # T9 (PATCH-001): close any session that died mid-game BEFORE the
+        # report sweep, so the crash-instant ghost (89A97A) is force-ended
+        # and then assessed from its stored transcript.
+        asyncio.ensure_future(
+            lily_persistence.lily_sweep_abandoned_sessions(supabase)
+        )
         asyncio.ensure_future(lily_assessment.lily_report_sweep(supabase))
 
     scorekeeper = LilyScorekeeper(

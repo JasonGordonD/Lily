@@ -5,6 +5,57 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-06 — WO-LILY-PATCH-001: evening-defect pack (sessions 89A97A/48630B/05AAC9/105865)
+
+Ten tactical fixes on the current architecture (each marked
+`RETIRE_WITH_WS6` where OMNIBUS-004's journal reducer supersedes it),
+fixture-first from the four live evening sessions.
+
+- **T1 — retry re-airs killed.** The never-aired watchdog false-fired on
+  turns that PLAYED ("Nobody…" ×3, "Hey…" ×3, the doubled 18+ prompt).
+  It now re-verifies playout-start truth (agent_state→speaking ledger +
+  host_speaking) before any refire and force-cancels the original
+  SpeechHandle so a late start can't double-air after release.
+- **T2 — an answered question never re-airs.** answer_heard (adjudication
+  start) / a committed verdict invalidates every outstanding delivery
+  attempt for that question — watchdog, nudge, and post-reveal dispatch —
+  cancelling an in-flight delivery mid-playout (Mitochondria re-read 2s
+  after the answer; Saturn 4s after; Kama Sutra post-answer).
+- **T3 — dup guard widened.** Verbatim repeats now match the last 6
+  recorded turns regardless of interleaving (every live dup pair had a
+  user row between the copies), on both the record and air paths; short
+  turns exempt.
+- **T4 — verdict-first acks.** The verdict word airs as its own short
+  beat right after the score publish (COMMIT_TO_DISPATCH_MS telemetry,
+  ~1.5s budget); the flourish/standings turn follows and never restates
+  it. Live ack latency was 11–12s, causing re-answers ("Saturn" ×2,
+  "Kama Sutra" ×15).
+- **T5 — window hygiene.** The pre-window buffer is claim-to-open only
+  (pre-claim speech can't enter a not-yet-aired question — the Mars
+  fragments that ate the Socrates window); backchannels ("Yeah") and
+  bare roster-name fragments ("Chris.") are logged (NON_ANSWER_LOGGED),
+  never scored, with an answer-surface override keeping yes/no + MC
+  honest; Rami's dropped "Socrates" now scores.
+- **T6 — no spoken award without a committed row.** A failed score
+  commit produces an in-character hold + COMMIT_FAILED ERROR, never the
+  celebration ("Saturn is correct — you're on the board!" ×3, zero rows).
+- **T7 — cross-session no-repeat, answer-level.** Bank draws now exclude
+  the group's played canonical answers, not just ids/text-hashes — the
+  kb_469 Mars repeat (same answer, new wording/id) is closed. (PATCH-002
+  A1 extends this to group-scoped burn.)
+- **T9 — abandoned-session sweeper.** A non-ended session inactive past
+  15 min is force-closed (phase→ended, ABANDONED_SESSION_CLOSED WARN)
+  before the report sweep assesses it — the 89A97A crash-instant ghost
+  (q_3812 registered at death) leaves no active trace.
+- **T10 — grounded-claims canon** (README): claims about what Lily
+  perceives/fixed/enabled/can-receive are grounded in tool results and
+  enabled channels; when wrong she owns it plainly, never inventing a
+  cause. PATCH-002 A3 + M1 add the structural teeth.
+
+T8 (name-binding single-writer) folds into PATCH-002 A2/M1. Pinned in
+tests/test_patch001_reairs.py, _verdict.py, _window.py, _norepeat.py;
+full suite 1249 green.
+
 ## 2026-08-06 — HOTFIX-003: adult deck runs on Grok (voice text + question gen)
 
 Live root cause (session lily-105865, 21:33): `gemini-3.6-flash` refused

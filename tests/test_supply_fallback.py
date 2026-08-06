@@ -132,10 +132,12 @@ def _patch_bank(monkeypatch, result):
 
     async def _fake_fetch(supabase, category, difficulty_tier,
                           exclude_prompts, mode="general",
-                          exclude_ids=None, exclude_hashes=None):
+                          exclude_ids=None, exclude_hashes=None,
+                          exclude_answers=None):
         calls.append({
             "category": category, "tier": difficulty_tier, "mode": mode,
             "exclude_ids": exclude_ids, "exclude_hashes": exclude_hashes,
+            "exclude_answers": exclude_answers,
         })
         return dict(result) if isinstance(result, dict) else result
 
