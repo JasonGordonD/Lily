@@ -74,7 +74,7 @@ def test_name_set_hash_empty_returns_none():
 # ---------------------------------------------------------------------------
 
 class FakeSpeakerIdentifier:
-    """Shape-compatible with the Speechmatics SpeakerIdentifier at 1.6.4."""
+    """Shape-compatible with the Speechmatics SpeakerIdentifier at 1.6.6."""
 
     def __init__(self, label, speaker_identifiers):
         self.label = label

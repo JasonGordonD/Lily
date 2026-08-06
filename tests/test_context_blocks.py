@@ -7,7 +7,7 @@ user turn logged "chat context changed after on_user_turn_completed"
 
 The injections now run in on_user_turn_completed against BOTH the turn
 context and the persistent agent context, with stable item ids and
-rewrite-only-on-change, so livekit 1.6.4's equivalence check
+rewrite-only-on-change, so livekit 1.6.6's equivalence check
 (ChatContext.is_equivalent: item ids + content) validates the preemptive
 run whenever game state held still across the turn boundary. These tests
 drive that exact check.
@@ -144,7 +144,7 @@ def test_memory_block_injected_once():
     ) == 1
 
 
-# -- the hook + the 1.6.4 equivalence check --------------------------------------------
+# -- the hook + the 1.6.6 equivalence check --------------------------------------------
 
 def test_hook_applies_to_turn_ctx_and_persistent_ctx():
     agent, game = _make_agent()
@@ -158,7 +158,7 @@ def test_hook_applies_to_turn_ctx_and_persistent_ctx():
 
 
 def test_preemptive_equivalence_holds_when_state_unchanged():
-    # Simulates 1.6.4 agent_activity: preemptive snapshots agent.chat_ctx
+    # Simulates 1.6.6 agent_activity: preemptive snapshots agent.chat_ctx
     # DURING user speech; at end of turn the hook runs on a fresh copy and
     # the framework compares snapshot.is_equivalent(turn_ctx).
     agent, _ = _make_agent()

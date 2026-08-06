@@ -165,7 +165,7 @@ class LilyTTS(tts.TTS):
 
 class LilyChunkedStream(tts.ChunkedStream):
     # ChunkedStream subclass interface (_run(output_emitter) signature and
-    # AudioEmitter initialize/push/flush) verified unchanged at 1.6.4.
+    # AudioEmitter initialize/push/flush) verified unchanged at 1.6.6.
     def __init__(
         self,
         *,

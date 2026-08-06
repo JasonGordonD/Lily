@@ -161,7 +161,7 @@ def test_spoken_forget_flow_yes_deletes_and_tears_down():
     assert game.group_id != "grp_device_uuid"
     assert game.group_id.startswith("anon_")
     assert game.group_id_source == "post_forget_anonymous"
-    # STT enrolled speakers cleared (1.6.4: option-level clear — no live
+    # STT enrolled speakers cleared (1.6.6: option-level clear — no live
     # de-enrollment API exists on the plugin)
     assert game.stt._stt_options.known_speakers == []
     # [RETURNING TABLE] injection stops immediately

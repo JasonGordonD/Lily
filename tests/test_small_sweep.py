@@ -1,7 +1,7 @@
 """Small sweep (WO-LILY-DESYNC-HONESTY-001 Sub-agent G).
 
   G1 — preemptive generation is OFF while the game is live (during rounds
-       nearly every user turn honestly changes the state block, so 1.6.4's
+       nearly every user turn honestly changes the state block, so 1.6.6's
        equivalence check discarded the speculative run anyway — 10
        warnings/session and a dead LLM call each) and ON in the lobby and
        wrapup, where the quiet context lets the check pass. The P2

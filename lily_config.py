@@ -431,7 +431,7 @@ def overlap_fusion_neutral_confidence() -> float:
 def stt_max_alternatives() -> int:
     """Alternatives count injected into the Speechmatics StartRecognition
     transcription_config (per-word alternatives; there is no per-utterance
-    n-best at plugin 1.6.4 — see lily_nbest.py). 1 disables the injection
+    n-best at plugin 1.6.6 — see lily_nbest.py). 1 disables the injection
     patch entirely. Bounded to the lily_nbest synthesis ceiling.
 
     DEFAULT IS 1 (OFF) — LIVE INCIDENT 2026-07-14 23:31 (session
@@ -476,7 +476,8 @@ def session_log_dir() -> Optional[str]:
 
 
 def job_memory_limit_mb() -> float:
-    """Explicit worker memory limit (1.6.4 memory-monitor hardening)."""
+    """Explicit worker memory limit (1.6.4 memory-monitor hardening; monitor
+    code unchanged at 1.6.6, limits stay explicit)."""
     return _get_float("LILY_JOB_MEMORY_LIMIT_MB", 2048.0)
 
 

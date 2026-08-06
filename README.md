@@ -18,8 +18,8 @@ Living documentation lives here. Dated work-order and fix entries live in
 
 | Layer | Choice |
 |---|---|
-| Framework | `livekit-agents==1.6.4` (plugin family pinned to match; JRVS is the fleet reference install) |
-| STT | Speechmatics — `en`, diarization, ENHANCED, `speaker_sensitivity=0.5`, `prefer_current_speaker=True`, `max_speakers=7` (fixed at construction — no in-flight update path exists at 1.6.4), `ignore_speakers=["__ASSISTANT__"]` |
+| Framework | `livekit-agents==1.6.6` (plugin family pinned to match; upgraded from 1.6.4 under WO-LILY-OMNIBUS-003 WS-0 with the full migration audit below; JRVS stays the fleet 1.6.4 reference install) |
+| STT | Speechmatics — `en`, diarization, ENHANCED, `speaker_sensitivity=0.5`, `prefer_current_speaker=True`, `max_speakers=7` (fixed at construction — no in-flight update path exists at 1.6.6 either; 1.6.6's new `Agent.update_options(stt=...)` full-STT swap is the only live route, unwired), `ignore_speakers=["__ASSISTANT__"]` |
 | Vocal LLM | `gemini-3.5-flash` — every spoken turn; explicit `safety_settings` (adult-product context), `thinking_config={"thinking_level": "low"}`, `max_output_tokens ≥ 600`, default sampling |
 | Reasoning LLM | `gemini-3.1-pro-preview` — background node, own google-genai client (HTTP isolation): question prefetch (N+1) + verification at prefetch time; never speaks |
 | TTS | ElevenLabs v3 via `lily_tts.py` (`/v1/text-to-speech/{voice_id}/stream`; the dialogue endpoint stays off per fleet revert). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`) |
@@ -33,8 +33,11 @@ Living documentation lives here. Dated work-order and fix entries live in
   supply watchdog exists only to recover a stalled question pipeline.
 - **The scorekeeper owns order; the LLM owns correctness.** First-committed-answer
   is a timestamp comparison in `lily_scorekeeper.py`, never an LLM judgment.
-- **Answer window** opens on question TTS playout completion (SpeechHandle — 1.6.4
-  has no dedicated playout event), runs a bounded duration; finals-only scoring, one
+- **Answer window** opens on question TTS playout completion (SpeechHandle — 1.6.6
+  has no dedicated playout event either; 1.6.6 change: a failed generation
+  no longer raises out of `wait_for_playout()` — the error moved to
+  `SpeechHandle.exception()`, and the playout watcher maps a failed handle
+  onto the suppressed path so say-gate claims release instead of confirming), runs a bounded duration; finals-only scoring, one
   candidate per player, segments outside the window are game-inert.
 - **Two-tier adjudication:** Tier-1 conservative fuzzy/phonetic match against
   `acceptable_answers` (uncertainty escalates, never rejects); Tier-2 is one
@@ -421,7 +424,7 @@ off the reveal moment:
 - **Preemptive generation repair (P2):** the state-block/adult-layer/memory
   injections moved from `llm_node` into `on_user_turn_completed`, applied to
   both the turn context and the persistent context with stable item ids and
-  rewrite-only-on-change — so 1.6.4's equivalence check validates the
+  rewrite-only-on-change — so 1.6.6's equivalence check validates the
   preemptive LLM run whenever game state held still across the turn boundary
   (previously every run was discarded: 13 "chat context changed" warnings per
   session, double LLM cost). `llm_node` keeps one documented injection for
@@ -524,7 +527,7 @@ migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt 
 migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
 tests/               790 tests, run with `python -m pytest tests/` — no network; needs
-                     livekit-agents 1.6.4 + google-genai installed
+                     livekit-agents 1.6.6 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
                      test_multiple_choice.py / test_group_prefs.py import livekit)
@@ -610,8 +613,8 @@ No-silent-crash: every failure path logs a structured
 `LILY_ENROLL | FAILED | reason=...` (no client, plugin API drift, no
 identifiers yet, no usable rows, exception); success logs
 `LILY_ENROLL | OK | trigger=... group=... speakers=...`.
-**1.6.4 API notes:** `stt.get_speaker_ids()` is **async** at
-`livekit-plugins-speechmatics 1.6.4` and returns useful identifiers only
+**1.6.6 API notes (re-verified — plugin source byte-identical to 1.6.4):**
+`stt.get_speaker_ids()` is **async** at `livekit-plugins-speechmatics 1.6.6` and returns useful identifiers only
 after ~5 spoken words per speaker (the multi-trigger schedule exists
 precisely so an early empty result self-heals); the code tolerates a future
 plugin making it synchronous, and logs `reason=no_get_speaker_ids_api` if a
@@ -794,7 +797,7 @@ finding (the host's last dialogue act is a top addressee predictor):
   an argument gets checked, never auto-scored.
 - **`HOST_SPEAKING` / `SCORING`** — Lily is on air (wired off the
   framework's `agent_state_changed` → `speaking` transition, which at
-  livekit-agents 1.6.4 fires on actual TTS playout start and leaves on
+  livekit-agents 1.6.6 fires on actual TTS playout start and leaves on
   playout end/interrupt) or adjudication is in flight
   (`LilyGame._adjudicating`, mirrored onto `sk.adjudicating`) → biased
   against acceptance (default `1.01`): backchannels expected, nothing
@@ -813,7 +816,8 @@ inside the open window records a per-speaker span
 speaker identities flip `OVERLAP` when
 `min(end₁,end₂) − max(start₁,start₂) > LILY_OVERLAP_EPSILON_SECONDS`
 (default `0.3`, strict inequality — conservative by construction).
-`UserInputTranscribedEvent` still lacks word timing at 1.6.4, but the raw
+`UserInputTranscribedEvent` still lacks word timing at 1.6.6 (it gained only
+an `item_id` field), but the raw
 Speechmatics n-best tap now carries stream-relative word spans. A bounded
 `LilyTimestampReconciler` maps those spans onto the event-arrival wall clock,
 records drift/source telemetry, and falls back to arrival time when the stream
@@ -909,7 +913,7 @@ produce exactly the high-variance hypothesis sets where 1-best fails
 alternatives and runs BOTH tiers across the whole set (`lily_nbest.py`).
 
 **Verified plugin behavior** (installed source of
-livekit-plugins-speechmatics 1.6.4 / speechmatics-voice 0.2.8 /
+livekit-plugins-speechmatics 1.6.6 / speechmatics-voice 0.2.8 /
 speechmatics-rt 1.1.0 — read, not recalled):
 
 - **There is NO per-utterance n-best anywhere in the stack.** The voice
@@ -927,7 +931,7 @@ speechmatics-rt 1.1.0 — read, not recalled):
   combinatorial paths, hard ceiling 8). Treat the synthesized set as a
   recall-widener, never as a true lattice.
 - **There is no supported config knob for the count.** The plugin's
-  `transcription_config=` kwarg is deprecated and ignored at 1.6.4, and the
+  `transcription_config=` kwarg is deprecated and ignored at 1.6.6, and the
   `VoiceAgentConfig.advanced_engine_control` merge is silently dropped from
   the wire (`TranscriptionConfig.to_dict()` is `dataclasses.asdict` —
   declared fields only, and `max_alternatives` is not declared anywhere in
@@ -1138,7 +1142,7 @@ ORIGINAL id. Logs `LILY_FORGET | group=... | tables=... | rows=...` with
 per-table counts.
 
 **In-session teardown:** STT `_stt_options.known_speakers` is cleared
-(1.6.4 limitation, documented in code: the Speechmatics plugin has no live
+(1.6.6 limitation, documented in code: the Speechmatics plugin has no live
 de-enrollment API — `update_speakers()` only takes focus/ignore/focus_mode
 and `known_speakers` ride the one-shot StartRecognition message, so the
 clear guarantees any STT reconnect starts unenrolled while the open stream
@@ -1503,7 +1507,7 @@ and `livekit.toml` — a mismatch means rooms spin forever with no agent joining
 
 ## Pre-demo smoke test
 
-0. One full session watching worker memory (1.6.4 memory-monitor issue; limits set
+0. One full session watching worker memory (1.6.4 memory-monitor issue — monitor code unchanged at 1.6.6; limits set
    explicitly in WorkerOptions). 1. Dispatch targets `Lily` exactly. 2. Cold session:
    3 speakers bound conversationally in the lobby. 3. Collision: narrated order call
    matches reality. 4. "Lily, are you there?" during an open window must NOT score.

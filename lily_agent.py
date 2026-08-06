@@ -124,7 +124,7 @@ _EVENT_CONTRACT_ALIAS = {
 
 
 def _chat_items(chat_ctx) -> list:
-    # ChatContext._items confirmed at 1.6.4 (fleet injection pattern).
+    # ChatContext._items confirmed at 1.6.6 (fleet injection pattern).
     items = getattr(chat_ctx, "_items", None)
     if items is None:
         items = getattr(chat_ctx, "items", [])
@@ -139,7 +139,7 @@ def _message_text(msg) -> str:
 
 
 def _current_speech_id() -> str | None:
-    """Return the pinned LiveKit 1.6.4 SpeechHandle id for this TTS task."""
+    """Return the pinned LiveKit 1.6.6 SpeechHandle id for this TTS task."""
     try:
         handle = _SpeechHandleContextVar.get(None)
         return getattr(handle, "id", None)
@@ -661,12 +661,12 @@ class LilyGame:
         timers and tool commits, and its assistant items land in the
         persistent chat context whenever the speech is scheduled. Any
         preemptive user-turn run started while this speech is in flight is
-        therefore dead by construction — the 1.6.4 equivalence check
+        therefore dead by construction — the 1.6.6 equivalence check
         (agent_activity.py: preemptive.chat_ctx.is_equivalent(...)) will
         discard it. Rather than paying for that dead LLM run, preemptive
         generation is paused here and resumed on TTS playout completion
         (on_agent_speech_finished), using the live-read agent-level
-        turn_handling["preemptive_generation"]["enabled"] flag that 1.6.4
+        turn_handling["preemptive_generation"]["enabled"] flag that 1.6.6
         exposes."""
         if self.session is None:
             return None
@@ -700,9 +700,9 @@ class LilyGame:
         during rounds nearly EVERY user turn still changes the state block
         honestly — the utterance being processed lands as an answer
         candidate line, and answer_window open/closed flips on the clock —
-        so 1.6.4's equivalence check (preemptive.chat_ctx.is_equivalent)
+        so 1.6.6's equivalence check (preemptive.chat_ctx.is_equivalent)
         rightly discarded the speculative run anyway: 10 warnings/session
-        and a dead LLM call each, zero realized latency win. 1.6.4 has no
+        and a dead LLM call each, zero realized latency win. 1.6.6 has no
         pre-snapshot injection hook (on_preemptive_generation copies
         agent.chat_ctx synchronously inside AudioRecognition), so the
         supported lever is the agent-level live-read enabled flag."""
@@ -3870,7 +3870,7 @@ class LilyGame:
         self.asked_history = await lily_bank.lily_load_asked_history(
             self.supabase, new_group_id
         )
-        # Refresh known_speakers under the resolved id. 1.6.4 applies this
+        # Refresh known_speakers under the resolved id. 1.6.6 applies this
         # list at stream start, so this primarily protects reconnect paths.
         if self.stt is not None:
             try:
@@ -4171,8 +4171,8 @@ class LilyGame:
         # fresh under the anonymous id like the other post-forget writes.
         self.prefs = {}
         # STT: clear the enrolled speakers so no future STT stream this
-        # session re-injects the deleted voiceprints. 1.6.4 NOTE:
-        # livekit-plugins-speechmatics 1.6.4 has NO live de-enrollment
+        # session re-injects the deleted voiceprints. 1.6.6 NOTE:
+        # livekit-plugins-speechmatics 1.6.6 has NO live de-enrollment
         # path — update_speakers() only takes focus/ignore/focus_mode, and
         # known_speakers ride the one-shot StartRecognition message.
         # Clearing _stt_options.known_speakers guarantees any STT
@@ -4626,10 +4626,13 @@ class LilyGame:
             self._pending_unbound_award = None
             self.sk.record_result(player_name, correct=True, points=pending["points"])
             note = f" Their held point ({pending['points']}) is now committed."
-        # NOTE (supersedes the spec's dynamic max_speakers idea): the 1.6.4
+        # NOTE (supersedes the spec's dynamic max_speakers idea): the 1.6.6
         # Speechmatics plugin has NO in-flight update path for max_speakers
         # (only update_speakers(focus/ignore/focus_mode)). The cap is set at
-        # construction to product max (6 players + 1).
+        # construction to product max (6 players + 1). 1.6.6 does add
+        # Agent.update_options(stt=...) — a full live STT swap (fresh
+        # StartRecognition) that COULD carry a new max_speakers; not wired
+        # here (ghost-speaker WS decision).
         logger.info(
             "LILY_STT | roster=%d (max_speakers fixed at construction)",
             self.sk.roster_size(),
@@ -5276,7 +5279,7 @@ class LilyAgent(Agent):
     # -- preemptive-generation control (P2) ----------------------------------------
 
     def set_preemptive_generation(self, enabled: bool) -> None:
-        """Per-turn preemptive control. 1.6.4 reads the agent-level
+        """Per-turn preemptive control. 1.6.6 reads the agent-level
         turn_handling["preemptive_generation"] dict LIVE at fire time
         (agent_activity.preemptive_generation_opts merges it over the
         session options on every access), so flipping this flag pauses /
@@ -5291,7 +5294,7 @@ class LilyAgent(Agent):
     # ONLY in llm_node — i.e. AFTER preemptive generation snapshots the
     # agent's chat context, and on a per-generation copy the persistent
     # context never saw. Every user turn therefore ran against a context
-    # the 1.6.4 equivalence check (preemptive.chat_ctx.is_equivalent(...))
+    # the 1.6.6 equivalence check (preemptive.chat_ctx.is_equivalent(...))
     # could not certify, and the preemptive LLM run was discarded — the
     # observed "chat context changed after on_user_turn_completed"
     # warnings, 13/session, double LLM cost.
@@ -5397,7 +5400,7 @@ class LilyAgent(Agent):
     # -- node overrides ------------------------------------------------------------
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
-        # Signature verified against livekit-agents 1.6.4
+        # Signature verified against livekit-agents 1.6.6
         # (voice/agent.py: async def on_user_turn_completed(self,
         # turn_ctx: llm.ChatContext, new_message: llm.ChatMessage)).
         # Runs after end-of-turn, before the reply generation is chosen —
@@ -5424,7 +5427,7 @@ class LilyAgent(Agent):
         #    pass through on_user_turn_completed, and the reveal turn MUST
         #    see the just-armed NEXT QUESTION / just-flipped mode. This
         #    call mutates only the per-generation copy created inside
-        #    _pipeline_reply_task_impl (verified at 1.6.4), which is
+        #    _pipeline_reply_task_impl (verified at 1.6.6), which is
         #    invisible to the preemptive equivalence check — it can never
         #    invalidate a preemptive run. For user turns the hook already
         #    ran, the blocks are current, and this is a no-op.
@@ -5940,7 +5943,7 @@ async def entrypoint(ctx: JobContext) -> None:
         game.nbest_collector = _nbest_collector
 
     # --- STT: Speechmatics multi-speaker fleet profile (Part II §1.1) ---
-    # NOTE: livekit-plugins-speechmatics 1.6.4 does not expose a `model=`
+    # NOTE: livekit-plugins-speechmatics 1.6.6 does not expose a `model=`
     # kwarg — `operating_point` is the only path to select ENHANCED, and the
     # SDK-level deprecation warning about `TranscriptionConfig.operating_point`
     # is emitted from inside the plugin wrapper. Fix requires an upstream
@@ -5952,7 +5955,7 @@ async def entrypoint(ctx: JobContext) -> None:
         speaker_active_format="[{speaker_id}] {text}",
         speaker_sensitivity=0.5,
         prefer_current_speaker=True,  # [VERIFY live] rapid answer collisions
-        # No in-flight max_speakers update exists at 1.6.4 — fixed at
+        # No in-flight max_speakers update exists at 1.6.6 — fixed at
         # construction to product cap (2-6 players) + 1. Applies only to
         # generic speakers on top of enrolled ones.
         max_speakers=7,
@@ -6151,13 +6154,26 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # --- Answer window opens on TTS playback completion (per-utterance
     # precise via SpeechHandle.wait_for_playout; no dedicated
-    # playout-finished session event exists at 1.6.4) ---
+    # playout-finished session event exists at 1.6.6 either) ---
     @session.on("speech_created")
     def _on_speech_created(ev) -> None:
         handle = ev.speech_handle
 
         async def _watch() -> None:
             await handle.wait_for_playout()
+            # 1.6.6 semantic change: a failed generation no longer raises out
+            # of wait_for_playout (the error moved to SpeechHandle.exception());
+            # at 1.6.4 the raise killed this watcher, so a failed speech never
+            # reached on_agent_speech_finished. Map failure to the suppressed
+            # path — claims release instead of confirming, the turn is not
+            # recorded as heard, and (better than 1.6.4) preemptive resume
+            # still fires. getattr: test fakes predate exception().
+            failed = False
+            try:
+                exc_fn = getattr(handle, "exception", None)
+                failed = callable(exc_fn) and exc_fn() is not None
+            except Exception:
+                pass
             spoken = ""
             try:
                 for item in handle.chat_items:
@@ -6172,7 +6188,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 spoken.strip() or game._last_assistant_text,
                 speech_id=handle.id,
                 interrupted=handle.interrupted,
-                suppressed=suppressed,
+                suppressed=suppressed or failed,
             )
 
         asyncio.ensure_future(_watch())
@@ -6180,7 +6196,7 @@ async def entrypoint(ctx: JobContext) -> None:
     @session.on("agent_state_changed")
     def _on_agent_state(ev) -> None:
         # HOST_SPEAKING prior (WO-ADDRESSEE-H1 Task 2): the framework's
-        # agent-state machine is the speech lifecycle at 1.6.4 — verified
+        # agent-state machine is the speech lifecycle at 1.6.6 — verified
         # in agent_activity.py: `speaking` is entered when TTS playout
         # actually starts (started_speaking_at) and left for
         # listening/thinking when playout ends or is interrupted. The pure
@@ -6410,7 +6426,8 @@ async def entrypoint(ctx: JobContext) -> None:
     )
     game.agent = agent  # P2: per-turn preemptive-generation control
     # NOTE: `noise_cancellation.NC()` aborts the worker at Krisp init on
-    # livekit-agents==1.6.4 + livekit-plugins-noise-cancellation==0.2.6 —
+    # livekit-agents==1.6.4 + livekit-plugins-noise-cancellation==0.2.6
+    # (historical incident; NOT re-tested at 1.6.6, NC stays out) —
     # SIGABRT with `NcSession::initSession: Input and output sample rates
     # must be equal`. Every job accept died 2s in until this was dropped.
     # BVC() would ship but is designed to isolate the primary speaker and
@@ -6548,7 +6565,8 @@ if __name__ == "__main__":
         # Explicit memory settings (smoke-test item 0). Default limit is 0
         # (monitor DISABLED); a nonzero limit deliberately enables the job
         # memory monitor, which KILLS the job process on breach — the known
-        # 1.6.4 issue only bites when limit>0, so the ceiling is set
+        # 1.6.4 issue only bites when limit>0 (monitor code byte-identical
+        # at 1.6.6, re-verified — limits stay explicit), so the ceiling is set
         # consciously high (default 2048MB, LILY_JOB_MEMORY_LIMIT_MB).
         job_memory_warn_mb=lily_config.job_memory_limit_mb() * 0.75,
         job_memory_limit_mb=lily_config.job_memory_limit_mb(),

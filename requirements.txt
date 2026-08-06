@@ -1,7 +1,7 @@
-livekit-agents==1.6.4
-livekit-plugins-speechmatics==1.6.4
-livekit-plugins-google==1.6.4
-livekit-plugins-silero==1.6.4
+livekit-agents==1.6.6
+livekit-plugins-speechmatics==1.6.6
+livekit-plugins-google==1.6.6
+livekit-plugins-silero==1.6.6
 livekit-plugins-noise-cancellation==0.2.6
 google-genai>=2.0.0
 supabase>=2.27.2

@@ -370,7 +370,7 @@ def test_sequential_speakers_do_not_flip():
 
 
 def test_degenerate_zero_length_spans_never_flip(monkeypatch):
-    # Production reality at 1.6.4: no per-segment word timings, so
+    # Production reality at 1.6.6: no per-segment word timings, so
     # segment_start == arrival time. Point spans must never flip OVERLAP,
     # even at epsilon 0 (strict inequality).
     monkeypatch.setenv("LILY_OVERLAP_EPSILON_SECONDS", "0")

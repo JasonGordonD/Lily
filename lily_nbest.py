@@ -2,7 +2,7 @@
 lily_nbest.py — n-best ASR hypothesis recovery (WO-LILY-ADDRESSEE-H1-001 Task 1).
 
 VERIFIED against the pinned installed stack (source read, not docs/training
-data): livekit-plugins-speechmatics 1.6.4, speechmatics-voice 0.2.8,
+data): livekit-plugins-speechmatics 1.6.6, speechmatics-voice 0.2.8,
 speechmatics-rt 1.1.0.
 
   * There is NO per-utterance n-best anywhere in the stack. The Speechmatics
@@ -16,7 +16,7 @@ speechmatics-rt 1.1.0.
     (`_BaseClient._recv_loop` emits `msg["message"]`), so an extra
     `client.on("AddTranscript", cb)` handler recovers them losslessly.
   * There is NO supported config knob for the alternatives count: the plugin's
-    `transcription_config=` kwarg is DEPRECATED AND IGNORED at 1.6.4, and the
+    `transcription_config=` kwarg is DEPRECATED AND IGNORED at 1.6.6, and the
     `VoiceAgentConfig.advanced_engine_control` merge sets attributes that
     `TranscriptionConfig.to_dict()` (dataclasses.asdict — declared fields
     only) silently DROPS from the wire. The only reliable injection point is

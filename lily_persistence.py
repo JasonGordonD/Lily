@@ -818,7 +818,7 @@ async def lily_enroll_voiceprints(
         if get_ids is None:
             logger.error(
                 "LILY_ENROLL | FAILED | trigger=%s reason=no_get_speaker_ids_api "
-                "(plugin drift vs livekit-plugins-speechmatics 1.6.4)", trigger
+                "(plugin drift vs livekit-plugins-speechmatics 1.6.6)", trigger
             )
             return False
         # Live 2026-07-15 finding: the plugin's get_speaker_ids() returns
@@ -839,7 +839,7 @@ async def lily_enroll_voiceprints(
                 "before teardown)", trigger,
             )
             return False
-        # get_speaker_ids() is ASYNC at 1.6.4 and needs ~5 spoken words per
+        # get_speaker_ids() is ASYNC at 1.6.6 and needs ~5 spoken words per
         # speaker before it returns useful identifiers — this task stays in
         # the background and tolerates (but LOGS) empty results. Awaitable
         # check kept defensive in case a plugin bump makes it synchronous.
