@@ -548,6 +548,10 @@ class LilyGame:
         # generous timeout elapses. Her own "take your time" binds her too.
         self._hold_active = False
         self._hold_since = 0.0
+        # PATCH-003 P6/P10: yield-after-question state.
+        self._question_pending = False
+        self._question_pending_since = 0.0
+        self._question_pending_reoffered = False
         self._enroll_started = False
         self._last_enroll_retry_ts = 0.0  # WS-8 under-threshold retry cooldown
         self._armed_speech_misses = 0  # agent turns finished w/o performing q
@@ -986,6 +990,14 @@ class LilyGame:
             logger.warning(
                 "LILY_SAY_SUPPRESSED | reason=hold | act=%s | source=%s",
                 act, source,
+            )
+            return False
+        # PATCH-003 P10: a pending conversational question yields the floor
+        # — no follow-on beat until the table answers or the re-offer.
+        if self.question_pending_blocks_dispatch(act, source):
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=question_pending | act=%s | "
+                "source=%s", act, source,
             )
             return False
         # PATCH-003 P8: a game-lane payload (delivery, verdict, reveal,
@@ -2812,6 +2824,27 @@ class LilyGame:
                         self.release_hold(reason="timeout")
                     else:
                         continue
+                # PATCH-003 P10: a pending conversational question that goes
+                # unanswered past the timeout gets ONE gentle re-offer, then
+                # holds. The re-offer is exempt from the pending block.
+                if getattr(self, "_question_pending", False):
+                    if self._question_pending_timed_out():
+                        if not getattr(self, "_question_pending_reoffered", False):
+                            self._question_pending_reoffered = True
+                            self.gated_say(
+                                None, "question_reoffer",
+                                "The table hasn't answered the question you "
+                                "asked. REGISTER GUIDANCE (vary freely within "
+                                "this length and temperature, never longer): "
+                                "gently re-ask the SAME question once, no new "
+                                "content stacked on it, then wait.",
+                                source="question_reoffer",
+                            )
+                        else:
+                            # Re-offer already spent — convert to a hold.
+                            self.release_question_pending(reason="reoffer_timeout")
+                            self.enter_hold(reason="question_unanswered")
+                    continue
                 if (
                     self.sk.answer_window_open
                     or self._adjudicating
@@ -3266,6 +3299,57 @@ class LilyGame:
             return False
         ref = now if now is not None else time.time()
         return (ref - getattr(self, "_hold_since", 0.0)) >= lily_config.hold_timeout_seconds()
+
+    # -- PATCH-003 P6/P10: yield-after-question ------------------------------
+    #
+    # A conversational question Lily poses opens a question-pending state:
+    # she yields the floor (no follow-on content, no second question, no
+    # queued beat) until the table answers (a user final releases it) or a
+    # generous timeout gives ONE gentle re-offer, then a hold. Composes
+    # with P6 — the user's next turn IS the response, engaged first.
+
+    def enter_question_pending(self, question_text: str) -> None:
+        already = getattr(self, "_question_pending", False)
+        self._question_pending = True
+        self._question_pending_since = time.time()
+        self._question_pending_reoffered = False
+        self._question_pending_text = (question_text or "")[:300]
+        if not already:
+            logger.info(
+                "LILY_ASK | QUESTION_PENDING | session=%s — floor yielded "
+                "until the table answers", self.sk.session_id,
+            )
+
+    def release_question_pending(self, reason: str) -> bool:
+        if not getattr(self, "_question_pending", False):
+            return False
+        self._question_pending = False
+        logger.info(
+            "LILY_ASK | QUESTION_PENDING_RELEASED | session=%s reason=%s",
+            self.sk.session_id, reason,
+        )
+        return True
+
+    def _question_pending_timed_out(self, now: float | None = None) -> bool:
+        if not getattr(self, "_question_pending", False):
+            return False
+        ref = now if now is not None else time.time()
+        return (
+            ref - getattr(self, "_question_pending_since", 0.0)
+        ) >= lily_config.hold_timeout_seconds()
+
+    def question_pending_blocks_dispatch(self, act: str, source: str) -> bool:
+        """While a conversational question is pending, unsolicited beats
+        hold. Exempt: the same sources the hold exempts (STOP/hold/release
+        acks) plus game-lane acts (their own windows govern them) and the
+        pending re-offer itself."""
+        if not getattr(self, "_question_pending", False):
+            return False
+        if source in self._HOLD_EXEMPT_SOURCES or source == "question_reoffer":
+            return False
+        if act in self._GAME_LANE_ACTS:
+            return False
+        return True
 
     def handle_stop_primitive(self, source_text: str) -> None:
         """A5/T12: the dispatch-gate STOP reflex — the runaway-agent
@@ -3933,6 +4017,20 @@ class LilyGame:
         # time" followed by more talking 5s later).
         if lily_say_gate.lily_self_hold_phrase(spoken_text):
             self.enter_hold(reason="self_wait_promise")
+        # PATCH-003 P6/P10: asking obligates listening. A CONVERSATIONAL
+        # turn (not a game delivery — game questions carry their own
+        # engine windows) that ends on a question yields the floor: her
+        # queued beats hold until the table answers or the timeout gives
+        # one gentle re-offer. Released the instant a user final lands
+        # (on_transcript_event). game deliveries/verdicts/reveals are
+        # exempt — their own machinery governs them.
+        game_act = any(
+            k in self._GAME_LANE_ACTS
+            or k.endswith("_delivery") or k.endswith("_reveal")
+            for k in (confirmed or [])
+        )
+        if not game_act and lily_say_gate.lily_stacked_question_flag(spoken_text) >= 1:
+            self.enter_question_pending(spoken_text)
         # Honesty assist (desync WO Sub-agent C): the state note serviced
         # the turn that just finished playing — one-shot, consumed here.
         self._state_note = None
@@ -4730,6 +4828,11 @@ class LilyGame:
         # she may resume). The hold's own STOP ack is exempt (it's hers).
         if getattr(self, "_hold_active", False):
             self.release_hold(reason="user_speech")
+        # PATCH-003 P6 — the table answered the question she asked: release
+        # the pending state so her normal speak-by-default engages this
+        # turn as the response (she finishes the conversation she started).
+        if getattr(self, "_question_pending", False):
+            self.release_question_pending(reason="user_answered")
 
         self.request_device_verification("final_transcript")
 
