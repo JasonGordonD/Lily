@@ -189,6 +189,24 @@ def steal_window_seconds() -> float:
     return _get_float("LILY_STEAL_WINDOW_SECONDS", 5.0)
 
 
+def segment_max_span_seconds() -> float:
+    """Segment sanity gate S (WO-LILY-OMNIBUS-003 WS-10): finals whose
+    spoken span exceeds this are quarantined — session lily-81BCB0 shipped
+    corrupted 104s/206s spans, while a real table answer lives well under
+    the 15s window. Provisional default; WS-13's segmentation audit binds
+    the tuned value here."""
+    return _get_float("LILY_SEGMENT_MAX_SPAN_SECONDS", 30.0)
+
+
+def segment_max_finalization_lag_seconds() -> float:
+    """Segment sanity gate L (WS-10): finals arriving more than this many
+    seconds after the speech ended are quarantined — the stale utterance
+    that scored into the Black Panther window finalized ~3.5 minutes late;
+    healthy reconciler drift is under a couple of seconds. Provisional
+    default; WS-13 binds the tuned value here."""
+    return _get_float("LILY_SEGMENT_MAX_FINALIZATION_LAG_SECONDS", 20.0)
+
+
 def checkpoint_interval_seconds() -> float:
     return _get_float("LILY_CHECKPOINT_INTERVAL_SECONDS", 60.0)
 

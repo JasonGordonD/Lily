@@ -42,6 +42,7 @@ logger = logging.getLogger("lily_scorekeeper")
 TRANSCRIPT_BUFFER_SIZE = 30
 DEFAULT_ANSWER_WINDOW_SECONDS = 15.0
 FRAGMENT_JOIN_WINDOW_SECONDS = 2.0  # ASR fragment accumulation for commands
+QUARANTINE_LOG_SIZE = 200  # WS-10 segment-sanity quarantine (full payloads)
 
 # ---------------------------------------------------------------------------
 # Prior states (WO-LILY-ADDRESSEE-H1-001 Task 2) — scorekeeper-owned game
@@ -666,6 +667,10 @@ class LilyScorekeeper:
         # reverberant copy) and folds instead of scoring.
         self._recent_bound_answers: list[tuple[float, str, str]] = []
 
+        # Segment sanity quarantine (WO-LILY-OMNIBUS-003 WS-10): insane
+        # finals land here in full — logged, never discarded, game-inert.
+        self.quarantined_segments: list[dict] = []
+
     # -- roster ------------------------------------------------------------
 
     def bind_speaker(
@@ -858,6 +863,30 @@ class LilyScorekeeper:
             return False
         t = now if now is not None else time.time()
         if self.answer_window_deadline is not None and t > self.answer_window_deadline:
+            return False
+        return True
+
+    def window_contains(
+        self, spoken_ts: Optional[float], now: Optional[float] = None
+    ) -> bool:
+        """Window membership by SPOKEN time (WS-10): a final belongs to
+        the window its speech occurred in, never the window it FINALIZED
+        in — the stale-utterance bug scored speech into a window opened
+        minutes after it was spoken. Falls back to arrival-time membership
+        when no spoken timestamp exists (arrival_time-source finals)."""
+        if spoken_ts is None:
+            return self.is_window_open(now=now)
+        if not self.answer_window_open:
+            return False
+        if (
+            self.answer_window_opened_at is not None
+            and spoken_ts < self.answer_window_opened_at
+        ):
+            return False
+        if (
+            self.answer_window_deadline is not None
+            and spoken_ts > self.answer_window_deadline
+        ):
             return False
         return True
 
@@ -1152,6 +1181,7 @@ class LilyScorekeeper:
         timestamp: Optional[str] = None,
         addressee_confidence: Optional[float] = None,
         echo_copy_signal: Optional[bool] = None,
+        assume_in_window: bool = False,
     ) -> dict:
         """
         Process one transcript segment. Called on every STT event.
@@ -1191,6 +1221,8 @@ class LilyScorekeeper:
             "addressee_fused_confidence": None,
             "attribution_demoted": False,
             "ghost_folded": False,
+            "quarantined": False,
+            "quarantine_reason": None,
         }
 
         if not text or not text.strip():
@@ -1201,6 +1233,65 @@ class LilyScorekeeper:
             return result
 
         clean = text.strip()
+
+        # Segment sanity gate (WO-LILY-OMNIBUS-003 WS-10): corrupted STT
+        # finals — spans of minutes, or finals landing minutes after the
+        # speech ended — poisoned windows and talk-time (104s/206s spans,
+        # a stale utterance scoring 3.5 minutes late). Quarantine them:
+        # logged in full, excluded from windows and talk-time, game-inert.
+        # Thresholds are config; WS-13's segmentation audit binds tuned
+        # values via LILY_SEGMENT_MAX_SPAN_SECONDS /
+        # LILY_SEGMENT_MAX_FINALIZATION_LAG_SECONDS.
+        # assume_in_window marks the early-buzz REPLAY path: the segment
+        # already passed this gate at original ingestion, and the buffered
+        # wait for window open inflates its apparent finalization lag —
+        # re-running the gate would false-positive legit early answers.
+        span_s = None
+        if segment_start_time is not None and segment_end_time is not None:
+            span_s = abs(segment_end_time - segment_start_time)
+        lag_s = None
+        if segment_end_time is not None:
+            lag_s = t - segment_end_time
+        reasons = []
+        if not assume_in_window:
+            if (
+                span_s is not None
+                and span_s > lily_config.segment_max_span_seconds()
+            ):
+                reasons.append("span")
+            if (
+                lag_s is not None
+                and lag_s > lily_config.segment_max_finalization_lag_seconds()
+            ):
+                reasons.append("lag")
+        if reasons:
+            reason = "+".join(reasons)
+            result["quarantined"] = True
+            result["quarantine_reason"] = reason
+            self.quarantined_segments.append({
+                "text": clean,
+                "speaker_label": speaker_label,
+                "segment_start_time": segment_start_time,
+                "segment_end_time": segment_end_time,
+                "span_seconds": round(span_s, 3) if span_s is not None else None,
+                "finalization_lag_seconds": (
+                    round(lag_s, 3) if lag_s is not None else None
+                ),
+                "reason": reason,
+                "timestamp": ts,
+                "timestamp_source": timestamp_source,
+                "timing_drift_seconds": timing_drift_seconds,
+            })
+            if len(self.quarantined_segments) > QUARANTINE_LOG_SIZE:
+                del self.quarantined_segments[:-QUARANTINE_LOG_SIZE]
+            logger.warning(
+                "LILY_SEGMENT | QUARANTINED | session=%s q=%d speaker=%s "
+                "reason=%s span_s=%s lag_s=%s text=%r",
+                self.session_id, self.question_number, speaker_label,
+                reason, span_s, lag_s, clean[:80],
+            )
+            return result
+
         player, method = self.resolve_speaker(
             speaker_id, speaker_label, speaker_name, clean
         )
@@ -1211,8 +1302,10 @@ class LilyScorekeeper:
         # window, record this final's [segment_start, end≈now] span per
         # speaker and flip OVERLAP on cross-speaker timestamp overlap.
         # Runs BEFORE the prior is stamped so this very segment is
-        # classified under the state it just created.
-        if self.is_window_open(now=t):
+        # classified under the state it just created. Membership keys on
+        # SPOKEN time (WS-10), so a late final lands in the window its
+        # speech belongs to.
+        if assume_in_window or self.window_contains(segment_start_time, now=t):
             span_key = player or speaker_label
             if span_key:
                 seg_start = segment_start_time if segment_start_time is not None else t
@@ -1366,7 +1459,10 @@ class LilyScorekeeper:
         # open window are game-inert — they reach Lily conversationally but
         # never the scoring path.
         if (
-            self.is_window_open(now=t)
+            (
+                assume_in_window
+                or self.window_contains(segment_start_time, now=t)
+            )
             and not is_sys
             and not command
             and not result.get("media_choice")

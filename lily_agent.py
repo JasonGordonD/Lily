@@ -1102,8 +1102,13 @@ class LilyGame:
         last_text = ""
         for seg in buffered:
             try:
+                # assume_in_window: buffered early answers were spoken
+                # BEFORE the window opened by design — spoken-time
+                # membership (WS-10) would reject them; the buffering
+                # already gated on the armed question's claimed delivery.
                 last_result = self.sk.on_transcript_segment(
-                    is_final=True, now=replay_ts, **seg
+                    is_final=True, now=replay_ts, assume_in_window=True,
+                    **seg
                 )
                 last_text = seg.get("text") or ""
                 logger.info(
@@ -6711,7 +6716,6 @@ async def entrypoint(ctx: JobContext) -> None:
         arrival_ts = (
             created.timestamp() if hasattr(created, "timestamp") else time.time()
         )
-        game.fragments.add(speaker_label or "UU", text)
         # n-best (WO-ADDRESSEE-H1 Task 1): drain the per-word alternatives
         # buffered off raw AddTranscript for this speaker's finalized
         # utterance. None when the patch isn't armed or nothing buffered —
@@ -6764,6 +6768,22 @@ async def entrypoint(ctx: JobContext) -> None:
             now=arrival_ts,
             addressee_confidence=fused_conf,
         )
+        if result.get("quarantined"):
+            # WS-10: an insane final (span/lag beyond the sanity gate) is
+            # game-inert past this point — the scorekeeper logged it in
+            # full; it must not buffer for replay, feed intake ordering,
+            # or reach the enforcement layer. The raw text stays in the
+            # session transcript store.
+            transcripts.add(
+                text,
+                speaker_label=speaker_label,
+                segment_start=seg_start_ts,
+                segment_end=seg_end_ts,
+            )
+            return
+        # Fragment accumulator (name extraction) sits BELOW the gate —
+        # quarantined stale text never feeds intake name guesses.
+        game.fragments.add(speaker_label or "UU", text)
         # Intake choreography (self-knowledge WO Task 4): pre-game only,
         # a timestamp overlap between two different voices feeds the
         # ordering-repair note — diarization binding degrades exactly
