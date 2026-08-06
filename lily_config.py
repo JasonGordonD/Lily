@@ -375,6 +375,13 @@ def hold_timeout_seconds() -> float:
     return _get_float("LILY_HOLD_TIMEOUT_SECONDS", 90.0)
 
 
+def responsiveness_budget_seconds() -> float:
+    """PATCH-003 P9: a direct address gets a response within this budget;
+    past it, unanswered silence trips the ADDRESS_UNANSWERED warn (the
+    'Hey... Hello?' -> 34s silence fixture). ~3s target."""
+    return _get_float("LILY_RESPONSIVENESS_BUDGET_SECONDS", 3.0)
+
+
 def paraphrase_repeat_threshold() -> float:
     """PATCH-002 A4: cosine-ish token-overlap ratio above which a
     consecutive agent turn counts as a semantic repeat of a recent one

@@ -92,6 +92,8 @@ LILY_LOCAL_ONLY_ENV = {
     # PATCH-002 A4 solo-vamping hold tunables — ship on in-code defaults.
     "LILY_HOLD_TIMEOUT_SECONDS",
     "LILY_PARAPHRASE_REPEAT_THRESHOLD",
+    # PATCH-003 P9 responsiveness floor — ships on its in-code default (3s).
+    "LILY_RESPONSIVENESS_BUDGET_SECONDS",
     # WS-3 cut-recovery grace (WO-LILY-STREAM-INTEGRITY-002): the dead-air
     # window before an auto-resume fires. Default-backed threshold (3.5s);
     # ships on its in-code default, tune via deploy.yml `vars.` if needed.

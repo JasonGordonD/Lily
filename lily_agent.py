@@ -552,6 +552,9 @@ class LilyGame:
         self._question_pending = False
         self._question_pending_since = 0.0
         self._question_pending_reoffered = False
+        # PATCH-003 P9: responsiveness-floor clock (0 = nothing awaiting).
+        self._awaiting_address_since = 0.0
+        self._address_unanswered_warned = False
         self._enroll_started = False
         self._last_enroll_retry_ts = 0.0  # WS-8 under-threshold retry cooldown
         self._armed_speech_misses = 0  # agent turns finished w/o performing q
@@ -1051,6 +1054,8 @@ class LilyGame:
             "LILY_SAY | act=%s | key=%s | source=%s", act, key or "-", source
         )
         handle = self.instructed_reply(instructions)
+        # PATCH-003 P9: she's responding — the direct-address clock is met.
+        self._awaiting_address_since = 0.0
         speech_id = getattr(handle, "id", None)
         if speech_id:
             self.say_registry.reassign_owner(reservation, speech_id)
@@ -2824,6 +2829,22 @@ class LilyGame:
                         self.release_hold(reason="timeout")
                     else:
                         continue
+                # PATCH-003 P9: a direct address unanswered past the budget
+                # trips the ADDRESS_UNANSWERED warn once (the '34s silence'
+                # fixture is now a log query on live sessions).
+                if self.address_unanswered() and not getattr(
+                    self, "_address_unanswered_warned", False
+                ):
+                    self._address_unanswered_warned = True
+                    logger.warning(
+                        "LILY_RESPONSIVENESS | ADDRESS_UNANSWERED | "
+                        "session=%s — a direct address went unanswered past "
+                        "the %.1fs budget",
+                        self.sk.session_id,
+                        lily_config.responsiveness_budget_seconds(),
+                    )
+                elif not getattr(self, "_awaiting_address_since", 0.0):
+                    self._address_unanswered_warned = False
                 # PATCH-003 P10: a pending conversational question that goes
                 # unanswered past the timeout gets ONE gentle re-offer, then
                 # holds. The re-offer is exempt from the pending block.
@@ -3329,6 +3350,19 @@ class LilyGame:
             self.sk.session_id, reason,
         )
         return True
+
+    def address_unanswered(self, now: float | None = None) -> bool:
+        """PATCH-003 P9: True when a direct address has gone unanswered
+        past the responsiveness budget. The watchdog WARNs once
+        (ADDRESS_UNANSWERED) — the verifiable floor; the grounded holding
+        beat ('One sec — checking [the real thing]') is a state-block
+        template so any beat she takes names the actual check, never a
+        vamp."""
+        since = getattr(self, "_awaiting_address_since", 0.0)
+        if not since:
+            return False
+        ref = now if now is not None else time.time()
+        return (ref - since) >= lily_config.responsiveness_budget_seconds()
 
     def _question_pending_timed_out(self, now: float | None = None) -> bool:
         if not getattr(self, "_question_pending", False):
@@ -4378,6 +4412,14 @@ class LilyGame:
             )
         )
         self.last_addressee_judgment = judgment
+        # PATCH-003 P9: a host-directed final IS a direct address — start
+        # the responsiveness clock. Cleared when she next dispatches a turn
+        # (note_response_dispatched); the watchdog WARNs if it goes unmet
+        # past the budget (the "Hey... Hello?" -> 34s silence fixture).
+        if judgment.classification == (
+            lily_addressee_classifier.CLASS_HOST_DIRECTED
+        ):
+            self._awaiting_address_since = time.time()
         logger.info(
             "LILY_ADDRESSEE | CLASSIFIED | session=%s %s",
             self.sk.session_id, judgment.log_json(),
@@ -6776,6 +6818,17 @@ class LilyGame:
                 "delivery pace: SLOW (the table asked) — keep sentences "
                 "short and add a beat more pause between them; unhurried, "
                 "never clipped"
+            )
+        # PATCH-003 P9: if a real state check will make an answer slow,
+        # air a GROUNDED holding beat inside the budget — name the actual
+        # thing being checked, never a vamp.
+        if getattr(self, "_awaiting_address_since", 0.0):
+            extra.append(
+                "responsiveness: someone addressed you directly — answer "
+                "promptly. If the true answer needs a moment (a real check "
+                "is running), say one grounded holding line naming exactly "
+                "what you're checking ('one sec — checking the picture "
+                "lane'), never filler"
             )
         # Room-temperature read (WO-LILY-AUDEERING-001 Task 3): NL descriptor
         # lines only — zero scalars; neutral room injects NOTHING. The [env:]
