@@ -111,7 +111,7 @@ LILY_CAPABILITIES: list = [
     {
         "key": "adult_deck",
         "code_ref": "lily_agent:LilyAgent.lily_enter_adult_mode",
-        "tools": ["lily_enter_adult_mode"],
+        "tools": ["lily_enter_adult_mode", "lily_set_adult_image_intensity"],
         "since": 1,
         "description": "the grown-up deck, every player 18+ and opted in aloud",
         "prompt_marker": "grown-up deck",

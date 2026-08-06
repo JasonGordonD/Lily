@@ -116,7 +116,10 @@ def test_adult_mode_routes_image_gen_to_xai(monkeypatch):
     data, mime, mdl = asyncio.new_event_loop().run_until_complete(
         lily_imagegen.lily_generate_image_bytes("a scene", mode="adult")
     )
-    assert called["xai"][0] == "a scene"
+    # The adult style/intensity chokepoint (7be4fef) prepends the base
+    # scene with the register-tagged art direction — the routing is what
+    # this test pins, so assert the base prompt rides through, not equality.
+    assert called["xai"][0].startswith("a scene")
     assert mdl == "grok-imagine-image"
     assert data == b"xai-bytes"
 
