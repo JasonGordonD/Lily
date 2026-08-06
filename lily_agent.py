@@ -467,6 +467,24 @@ class LilyGame:
         # tts_node replaces it with the deterministic question sheet
         # before any claim opens.
         self._strict_delivery_qnum: int | None = None
+        # WS-5 (MC answer-aborts-read): the in-flight multiple-choice
+        # delivery. Stem+options are ONE SpeechHandle turn (WS-1), so a
+        # correct answer during the OPTIONS read truncates the remaining
+        # options and jumps to adjudication rather than waiting out the
+        # full playout. None = no MC delivery in flight. started_at models
+        # the stem-completion boundary (1.6.6 exposes no per-sentence
+        # playout signal — see _note_mc_delivery_start): the stem stays
+        # protected until stem_words / mc_stem_protect_words_per_second()
+        # has elapsed, so an early answer can never cut the question before
+        # the table has heard it.
+        self._mc_delivery_qnum: int | None = None
+        self._mc_delivery_started_at: float | None = None
+        self._mc_delivery_stem_words: int = 0
+        # WS-5 buzz-buffer widening: rolling (ts, seg) of recent finals so
+        # a final that landed up to buzz_prewindow_seconds() BEFORE the
+        # delivery claim is back-filled into the pre-window buffer and
+        # scored at window open, not left inert.
+        self._recent_finals: list[tuple[float, dict]] = []
         # WS-1 intake gate: wall-clock of the most recent speaker bind.
         # While a bind is fresher than lily_config.intake_settle_seconds()
         # the round-robin is still growing and start_game defers.
@@ -1102,6 +1120,13 @@ class LilyGame:
             # celebration mid-playout while the question hit the glass).
             # open_window's publish is now the one screen-sync source; MC
             # choices and picture images ride it (seam unchanged).
+            #
+            # WS-5: this delivery is now registered. Mark an MC delivery in
+            # flight (answer-aborts-read) and fold any finals that landed
+            # in the buzz window just BEFORE this claim into the pre-window
+            # buffer, so an early buzzer is scored at open, not left inert.
+            self._note_mc_delivery_start(qnum)
+            self._backfill_prewindow_from_recent()
             return f"claimed_{trigger}"
         if textual:
             logger.warning(
@@ -1294,6 +1319,177 @@ class LilyGame:
             logger.warning(
                 "LILY_ANSWER | PRE_WINDOW_TIER1_FAILED: %s", e
             )
+
+    # -- WS-5: MC answer-aborts-read + buzz-buffer widening -------------------
+
+    def note_recent_final(self, seg: dict, ts: float) -> None:
+        """WS-5 buzz-buffer widening: remember recent finals so one that
+        landed just BEFORE the delivery claim can be back-filled into the
+        pre-window buffer at claim time. Trimmed to buzz_prewindow_seconds()
+        (and a hard 12-item cap) so it never grows without bound."""
+        buf = getattr(self, "_recent_finals", None)
+        if buf is None:
+            buf = []
+            self._recent_finals = buf
+        buf.append((ts, dict(seg)))
+        horizon = lily_config.buzz_prewindow_seconds()
+        cutoff = ts - max(horizon, 0.0)
+        self._recent_finals = [(t, s) for (t, s) in buf if t >= cutoff][-12:]
+
+    def _backfill_prewindow_from_recent(self, now: float | None = None) -> None:
+        """WS-5: at the delivery claim, fold finals from the last
+        buzz_prewindow_seconds() into the pre-window buffer. They land under
+        the SAME buffering condition as in-read finals (armed + delivery
+        claimed), so they replay and score at window open instead of being
+        inert. Consumed once — the rolling store clears."""
+        recent = getattr(self, "_recent_finals", None)
+        if not recent:
+            return
+        horizon = lily_config.buzz_prewindow_seconds()
+        if horizon <= 0:
+            self._recent_finals = []
+            return
+        ref = now if now is not None else time.time()
+        cutoff = ref - horizon
+        for ts, seg in recent:
+            if ts >= cutoff:
+                self.buffer_pre_window_answer(seg)
+        self._recent_finals = []
+
+    def _note_mc_delivery_start(self, qnum: int) -> None:
+        """WS-5: mark a multiple-choice delivery (stem+options, one turn)
+        in flight so a correct answer during the options read can truncate
+        it. Records the playout-start clock and the stem word count for the
+        stem-protection model. No-op (and clears any prior MC flag) for a
+        freeform delivery — nothing to truncate there.
+
+        started_at is taken at claim/dispatch, which is the playout head for
+        a delivery turn (a reveal/celebration ahead of it has its own claim
+        and playout). This is the one boundary the 1.6.6 stack cannot signal
+        mid-stream — the diagnosis-named live-leg boundary."""
+        armed = self.armed_question or {}
+        choices = armed.get("choices")
+        if not isinstance(choices, list) or len(choices) != 4:
+            self._mc_delivery_qnum = None
+            return
+        self._mc_delivery_qnum = qnum
+        self._mc_delivery_started_at = time.time()
+        self._mc_delivery_stem_words = len(
+            str(armed.get("prompt") or "").split()
+        )
+
+    def _mc_stem_protected(self, now: float) -> bool:
+        """WS-5: True while the MC stem is still (estimated to be) reading —
+        the protected span. An early answer cannot truncate the question
+        until the whole table has heard it."""
+        started = getattr(self, "_mc_delivery_started_at", None)
+        if started is None:
+            return False
+        wps = lily_config.mc_stem_protect_words_per_second()
+        if wps <= 0:
+            return False
+        stem_words = getattr(self, "_mc_delivery_stem_words", 0)
+        return now < started + (stem_words / wps)
+
+    def _interrupt_current_speech(self) -> None:
+        """WS-5: halt the agent's current speech (the in-flight MC delivery),
+        truncating whatever options remain. AgentSession.interrupt() at
+        1.6.6 interrupts the active agent speech and returns a Future we do
+        not await. Guarded: a race where nothing is speaking is a no-op."""
+        session = getattr(self, "session", None)
+        if session is None:
+            return
+        try:
+            session.interrupt()
+        except Exception as e:
+            logger.warning("LILY_MC | interrupt failed: %s", e)
+
+    def mc_early_answer_check(
+        self,
+        seg: dict,
+        *,
+        now: float | None = None,
+        nbest: dict | None = None,
+    ) -> bool:
+        """WS-5 answer-aborts-read. A final landing DURING an in-flight MC
+        options read that Tier-1-matches a read option (letters, positions,
+        option text) or the canonical set TRUNCATES the remaining options
+        and jumps to adjudication — the point goes to the answerer and
+        options 3-4 never air. Returns True if it aborted the read.
+
+        The STEM stays protected (_mc_stem_protected): an early answer
+        cannot cut the question before the table has heard it. A protected
+        or non-matching final does NOT abort — it still buffers via
+        buffer_pre_window_answer and scores at the normal window open.
+
+        Diagnosis (recorded in ws5-report): barge-in is NOT structurally
+        disabled on MC deliveries — interruptions are enabled globally
+        (min_words=1, min_duration=0.8) and the delivery is one interruptible
+        SpeechHandle. What made barge-in look dead was (a) an interrupted
+        delivery released its q_{N}_delivery claim and re-armed, so a
+        resolution path re-dispatched the SAME read verbatim (the "aired
+        twice" evidence — WS-3 owns the no-verbatim-replay gate), and (b)
+        the window opened only at FULL playout, so the answer that caused
+        the barge landed in a closed window. This path halts the read AND
+        adjudicates the answer, so it neither replays nor goes inert."""
+        if not lily_config.mc_answer_aborts_read():
+            return False
+        qnum = getattr(self, "_mc_delivery_qnum", None)
+        if qnum is None:
+            return False
+        if self.armed_question is None or self.sk.answer_window_open:
+            return False
+        if getattr(self, "_adjudicating", False):
+            return False
+        ref = now if now is not None else time.time()
+        if self._mc_stem_protected(ref):
+            return False
+        text = seg.get("text") or ""
+        question = self.armed_question
+        try:
+            hyps = (nbest or {}).get("hypotheses") or []
+            if nbest is not None and len(hyps) > 1:
+                verdict = lily_evaluation.lily_tier1_evaluate_nbest(
+                    text, question, hypotheses=hyps
+                )["verdict"]
+            else:
+                verdict = lily_evaluation.lily_tier1_evaluate_question(
+                    text, question
+                )["verdict"]
+        except Exception as e:
+            logger.warning("LILY_MC | early-answer eval failed: %s", e)
+            return False
+        if verdict != "correct":
+            return False
+        logger.info(
+            "LILY_MC | ANSWER_ABORTS_READ | session=%s q=%d speaker=%s — "
+            "correct answer during options read; truncating options and "
+            "adjudicating",
+            self.sk.session_id, qnum, seg.get("speaker_label"),
+        )
+        # Clear the flag first so a second final in the same turn cannot
+        # re-enter, then halt the read and open the window early. Seeding
+        # this answer as a pre-window segment + open replays it as the first
+        # candidate and runs the same instant Tier-1 fast path a live
+        # in-window final gets — adjudicate (steal_allowed=False). The
+        # truncation's on_agent_speech_finished (interrupted=True) then
+        # no-ops: expect_delivery skips (window open) and the window-open
+        # block skips (window open).
+        #
+        # Seed DIRECTLY (not via buffer_pre_window_answer): if a framework
+        # barge already fired and released the q_{N}_delivery claim before
+        # this final arrived, the buffer's claim-present guard would drop a
+        # confirmed-correct answer. We have already validated it here.
+        self._mc_delivery_qnum = None
+        self._interrupt_current_speech()
+        buf = self._pre_window_segments
+        if buf is None:
+            buf = []
+            self._pre_window_segments = buf
+        buf.append(dict(seg))
+        del buf[:-6]
+        self.open_window()
+        return True
 
     def maybe_fire_late_recognition(self) -> None:
         """WO-LILY-RECOGNITION-VARIETY-001 Task 1 — the catch-up path.
@@ -3083,6 +3279,9 @@ class LilyGame:
         # claim is stuck for this question anymore.
         self._undelivered_ticks = 0
         self._undelivered_refires = 0
+        # WS-5: the window is open — no MC options read is still in flight
+        # to truncate (whether it played out fully or was answer-aborted).
+        self._mc_delivery_qnum = None
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
         # THE screen-sync publish (voice/glass sync fix): the question
@@ -7393,7 +7592,7 @@ async def entrypoint(ctx: JobContext) -> None:
             # Early-buzz capture (fixture Q5): a final landing while the
             # delivery turn is still playing buffers for replay at window
             # open — no-op unless a delivery is actually in flight.
-            game.buffer_pre_window_answer({
+            seg = {
                 "text": text,
                 "speaker_label": speaker_label,
                 "segment_start_time": seg_start_ts,
@@ -7403,7 +7602,18 @@ async def entrypoint(ctx: JobContext) -> None:
                 "timestamp_source": timing.get("source"),
                 "timing_drift_seconds": timing.get("drift_seconds"),
                 "addressee_confidence": fused_conf,
-            })
+            }
+            # WS-5 buzz-buffer widening: remember this final so it can be
+            # back-filled if the delivery claim lands within T seconds.
+            game.note_recent_final(seg, seg_start_ts)
+            # WS-5 answer-aborts-read: a correct answer during the MC
+            # options read truncates the remaining options and adjudicates
+            # early (buffers this seg + opens the window itself). Otherwise
+            # buffer for the normal replay-at-open path.
+            if not game.mc_early_answer_check(
+                seg, now=arrival_ts, nbest=nbest
+            ):
+                game.buffer_pre_window_answer(seg)
         player = result.get("player")
         transcripts.add(
             text,
