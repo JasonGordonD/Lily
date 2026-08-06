@@ -211,6 +211,17 @@ def false_interruption_timeout() -> float:
     return _get_float("LILY_FALSE_INTERRUPTION_TIMEOUT", 2.0)
 
 
+def cut_recovery_grace() -> float:
+    """Seconds a cut/failed organic turn waits for a natural follow-up
+    before Lily auto-resumes it herself (WO-LILY-STREAM-INTEGRITY-002
+    WS-3). Must sit ABOVE false_interruption_timeout so the framework's own
+    pause-and-resume gets first crack, and above healthy user-turn latency
+    so a real barge-in's reply supersedes the auto-resume (no double-speak).
+    Below it, a cut that leaves dead air self-heals without an operator
+    poke."""
+    return _get_float("LILY_CUT_RECOVERY_GRACE", 3.5)
+
+
 def noise_cancellation_mode() -> str:
     """Krisp noise cancellation on the room input: "off" (DEFAULT) or
     "nc" (ambient model, opt-in via slot secret).

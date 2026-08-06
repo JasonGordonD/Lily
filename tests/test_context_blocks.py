@@ -48,6 +48,11 @@ class _FakeGame:
     def build_state_block(self) -> str:
         return f"{_STATE_BLOCK_MARKER}\n{self.state_text}"
 
+    def note_user_turn(self) -> None:
+        # WS-3 cut-recovery: on_user_turn_completed stamps user-turn recency
+        # here so a real barge stands the auto-resume watchdog down.
+        pass
+
 
 def _make_agent() -> tuple[LilyAgent, _FakeGame]:
     agent = LilyAgent.__new__(LilyAgent)  # sidestep heavy livekit init

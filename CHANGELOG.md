@@ -5,6 +5,70 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+
+## 2026-08-06 — WO-LILY-STREAM-INTEGRITY-002: mid-sentence cut recovery
+
+**WS-1 root cause (from real runtime logs + transcripts, session
+`lily-0BD414-ba80eb97`, retrieved via `lk agent logs --log-type deploy`).**
+All three reported cutoffs = **genuine player barge-ins mid-playout**, not
+a stream/chunk bug. Each cut coincides within ~40ms with a player STT
+final answering the exact word she died on:
+
+- 18:19:36 "…how does that sound to you? If" [dead] → player 18:19:41.154
+  "If what?" (they heard her cut on "If" and re-poked). `handle.interrupted`
+  true; recorded `chat_items` ends at "If".
+- 18:21:12 "…but I can't" [dead] → player 18:21:12.235 "What? So like what
+  if we want to play a lot…".
+- 18:21:20 "…so we won't" [dead] → player 18:21:20.545 "How big is your
+  library?".
+
+The 1.6.6 speaking-state-no-audio ghost bug is **ruled OUT**: TTS
+synthesis completed normally and repeatedly through every window; the only
+two false-interruptions in the session both logged `resumed=True` at
+18:17:04, nowhere near a cut; zero `GENERATION_FAILED`. The character-cap
+theory is also ruled out — the framework's `StreamAdapter` sentence-splits
+every reply first, so the 1,306-char capabilities reply was many small
+per-sentence syntheses cut by the barge, not a >4,200 tail-chunk failure.
+The real defect: **organic (keyless) conversational turns had no
+cut-recovery path** — keyed game acts recover via the game loop, but an
+organic turn's resumption depended on a player re-prompting.
+
+**WS-2 — chunk-safe TTS dispatch (`lily_tts.py`).**
+- `MAX_CHUNK_SIZE` lowered 5000 → **3800**, comfortably under the new
+  named `ELEVENLABS_REQUEST_CHAR_CAP = 4200` (a chunk over the cap 4xx's
+  mid-turn and kills the turn mid-sentence after earlier chunks aired).
+- `_split_text` now breaks a boundary-less long sentence at the last
+  whitespace instead of slicing mid-word; every chunk `<= MAX_CHUNK_SIZE`.
+- **Tail-chunk delivery tracking** (claim-vs-delivery, maya_jrvs model): a
+  chunk counts delivered only once its audio flushed; on a mid-stream
+  failure the `undelivered_remainder` is recorded and logged
+  (`LILY_TTS | TAIL_CHUNK_UNDELIVERED | delivered=X/Y`) so the tail is a
+  visible partial-delivery gap, not silent death.
+
+**WS-3 — cut-recovery contract (`lily_agent.py`, `lily_config.py`).**
+- A cut or mid-stream-**failed** organic turn arms an auto-resume watchdog
+  (`arm_cut_recovery`); after `LILY_CUT_RECOVERY_GRACE` (default 3.5s,
+  above `false_interruption_timeout`) it composes a **fresh** resume from
+  where meaning broke, in her honest "sorry, looks like I cut out there"
+  voice (`_CUT_RECOVERY_DIRECTIVE`), within one turn, no operator poke
+  (`LILY_CUT_RECOVERY | RESUMED`). WS-2's failed-tail and WS-3's barge/cut
+  resolve through this one recovery path.
+- **One-emission preserved**: the watchdog fires ONLY into dead air. A
+  real barge carries a user turn → the normal reply path answers it
+  (re-air-gated fresh) and the watchdog stands down. `note_user_turn`
+  (stamped from `on_user_turn_completed`) suppresses via a user-turn
+  recency guard; `note_playout_started` cancels on any new speech; a newer
+  cut supersedes via a monotonic token. No double-speak over an in-flight
+  reply.
+
+**Tests:** `tests/test_tts_chunk_safety.py` (7: split correctness under
+cap, no mid-word cut, tail-chunk delivery tracking) and
+`tests/test_cut_recovery.py` (16: arm/fire decision matrix, one-emission
+guards, async watchdog fires-into-silence / stands-down-on-user-turn).
+Full suite **1172 passed** on the pinned livekit-agents 1.6.6 venv; ruff
+clean (source at pre-existing baseline; no new error classes). Model and
+voices untouched — chunking/dispatch/recovery mechanics only.
+
 ## 2026-08-06 — WO-LILY-CAPABILITY-RESTORE-001: on-the-fly categories + capability truth test
 
 **Restored on-the-fly category creation and pinned a three-way capability
@@ -458,7 +522,6 @@ Tests: `tests/test_recognition_variety.py` (15 — turn persistence,
 ledger, repeat lint, late recognition one-shot + silences, claimed-
 returner prompt contracts, Tier-1-matches-the-pun, buffer/replay/
 adjudication, buffer hygiene). Suite 847.
-
 
 
 ## 2026-07-31 — Image ingestion: the Zuna vision port (12:48 live fixture, manifest v3)

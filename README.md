@@ -450,6 +450,61 @@ Tests: `tests/test_say_gate.py` (registry + leak filter, pure) and
 `tests/test_say_gate_dispatch.py` (dispatch dedupe, BUG-2 contract,
 need-to-know, burn, clarify gate).
 
+## Mid-sentence cut integrity (WO-LILY-STREAM-INTEGRITY-002)
+
+The 08-06 session `lily-0BD414-ba80eb97` cut off mid-sentence three times
+in six minutes ("…how does that sound to you? If" [dead]; "…but I can't"
+[dead]; "…so we won't" [dead]). **Root cause (WS-1), from the runtime
+logs + transcripts: genuine player barge-ins mid-playout, not a stream
+bug.** Each cut coincides within ~40ms with a player STT final that
+answers the exact word she died on — the tell is instance 1, where she
+cut on "If" and the player immediately said "If what?". The 1.6.6
+speaking-state-no-audio ghost bug was ruled OUT (TTS completed normally
+through every window; the only false-interruptions logged both
+`resumed=True`, nowhere near a cut), as was the character-cap theory (the
+framework's `StreamAdapter` sentence-splits every reply first). The real
+defect: keyed game acts recover through the game loop, but **organic
+conversational turns had no cut-recovery path** — resumption depended on a
+player re-prompting.
+
+**WS-2 — chunk-safe TTS dispatch (`lily_tts.py`).** `MAX_CHUNK_SIZE` sits
+at 3,800, comfortably below the ElevenLabs per-request cap
+(`ELEVENLABS_REQUEST_CHAR_CAP = 4200`) — a chunk over the cap 4xx's
+mid-turn and, since earlier chunks already aired, kills the turn
+mid-sentence. `_split_text` prefers a sentence boundary and, for a
+boundary-less long sentence, breaks at the last whitespace (never
+mid-word); every emitted chunk is `<= MAX_CHUNK_SIZE`. Dispatch is now
+**claim-vs-delivery tracked** (the maya_jrvs model): a chunk counts
+delivered only once its audio flushed, and if synthesis dies after the
+first chunk aired, `undelivered_remainder` is recorded and logged
+(`LILY_TTS | TAIL_CHUNK_UNDELIVERED | delivered=X/Y`) so the tail surfaces
+as a partial-delivery gap the cut-recovery path regenerates — never silent
+mid-sentence death.
+
+**WS-3 — the cut-recovery contract (`lily_agent.py`).** A cut or
+mid-stream-failed **organic** turn (no keyed claim to drive a game-loop
+re-dispatch) arms an auto-resume watchdog (`arm_cut_recovery`). After a
+grace window (`LILY_CUT_RECOVERY_GRACE`, default 3.5s — above
+`false_interruption_timeout` so the framework's own pause/resume gets
+first crack, and above healthy user-turn latency) it composes a **fresh**
+resume from where meaning broke, in her honest "sorry, looks like I cut
+out there" voice (`_CUT_RECOVERY_DIRECTIVE`), within one turn and with no
+operator poke (`LILY_CUT_RECOVERY | RESUMED`). WS-2's failed-tail and
+WS-3's barge/cut resolve through this **one** recovery path.
+
+The **one-emission mandate is preserved**: the watchdog fires ONLY into
+dead air. A real barge-in carries a user turn — the normal reply path
+answers it (re-air-gated fresh, `arm_reair_gate`) and the watchdog stands
+down. `on_user_turn_completed` stamps user-turn recency
+(`note_user_turn`), any new speech starting cancels the pending resume
+(`note_playout_started` → `cancel_cut_recovery`), and a newer cut
+supersedes the older via a monotonic token. So the auto-resume never
+double-speaks over a reply already in flight — it targets exactly the
+false-interruption / provider-hiccup / dead-air case. Tests:
+`tests/test_tts_chunk_safety.py` (split correctness, tail-chunk delivery
+tracking) and `tests/test_cut_recovery.py` (arm/fire decision matrix,
+one-emission guards, async watchdog).
+
 ## Multiple-choice rounds (WO-LILY-OMNIBUS-002, sub-agent G)
 
 Two round formats: `freeform` (the classic open ask) and `multiple_choice`

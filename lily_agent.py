@@ -300,6 +300,25 @@ _REGEN_DELIVERY_DIRECTIVE = (
     "straight to the read with no restart preamble."
 )
 
+# Cut-recovery directive (WO-LILY-STREAM-INTEGRITY-002 WS-3). Rides the
+# AUTO-resume that fires when a cut/failed organic turn left dead air with
+# no natural follow-up. Her honest "my line cut off" voice, made automatic:
+# a brief acknowledgement, then finish the thought FRESH from where meaning
+# broke, and hand the floor back. Fresh phrasing (not a verbatim replay) is
+# also enforced structurally by the re-air gate this dispatch consumes.
+_CUT_RECOVERY_DIRECTIVE = (
+    "\n\nYour last line cut off before you finished it, and the room's gone "
+    "quiet waiting on you. Pick it straight back up in your own voice: a "
+    "quick, warm 'sorry, looks like I cut out there' beat, then finish the "
+    "point you were making — lead with the part that matters, keep it to one "
+    "crisp beat in fresh words rather than repeating your earlier phrasing, "
+    "and hand the floor back."
+)
+# A user turn within this many seconds of a cut is treated as the barge
+# that caused it (or the room re-engaging): the normal reply path owns the
+# recovery, so the auto-resume watchdog stands down.
+_CUT_RECOVERY_USER_TURN_LOOKBACK = 2.0
+
 # ---------------------------------------------------------------------------
 # Stale-claim recovery (WO-LILY-HOTFIX-001).
 #
@@ -1048,6 +1067,9 @@ class LilyGame:
         actually started, per the 1.6.6 state machine): the current
         speech is ON THE AIR, so its pending claims are in-flight, never
         stale. One id per spoken turn; discarded at playout completion."""
+        # New audio is on the air — any earlier cut's dead-air window is
+        # void, so a pending auto-resume watchdog stands down (WS-3).
+        self.cancel_cut_recovery()
         if not speech_id:
             return
         started = getattr(self, "_playout_started_ids", None)
@@ -1181,6 +1203,112 @@ class LilyGame:
         if not reair_turn or not repeat_kind:
             return False
         return not self.is_question_delivery_turn(spoken_text)
+
+    # -- cut-recovery contract (WS-3, WO-LILY-STREAM-INTEGRITY-002) ----------
+    #
+    # A genuine barge-in or a mid-stream TTS failure ends an organic turn
+    # partway through a sentence (the 08-06 live cutoffs: "...how does that
+    # sound to you? If" [dead]). Keyed game acts (question delivery, reveal,
+    # scores) already recover through the game loop's re-dispatch; ORGANIC
+    # conversational turns have no such path, so resumption used to depend
+    # on a player re-prompting ("If what?"). This contract makes the resume
+    # automatic: when a cut leaves DEAD AIR with no natural follow-up, Lily
+    # composes fresh from where meaning broke within one turn.
+    #
+    # One-emission mandate (omnibus delivery-gate invariant): the resume is
+    # a WATCHDOG that fires ONLY into silence. A real barge-in carries a
+    # user turn — the normal reply path handles that (with the re-air gate
+    # making it fresh), and the user-turn recency guard below suppresses the
+    # watchdog so it never double-speaks over a reply already in flight.
+
+    def _cut_recovery_should_arm(
+        self, released: "list | None", interrupted: bool, failed: bool
+    ) -> bool:
+        """Arm the auto-resume only for a cut/failed ORGANIC turn. A keyed
+        game act (released non-empty) recovers through the game loop; the
+        answer window / adjudication own their own timing; a finished game
+        has nothing to resume."""
+        if not (interrupted or failed):
+            return False
+        if released:  # a keyed game act — the game loop owns its re-dispatch
+            return False
+        if getattr(self, "game_over", False):
+            return False
+        if getattr(self.sk, "answer_window_open", False):
+            return False
+        return not getattr(self, "_adjudicating", False)
+
+    def arm_cut_recovery(self, tail_text: str) -> None:
+        """Schedule the auto-resume watchdog for a cut organic turn. Bumps
+        the recovery token so any earlier watchdog is superseded and stamps
+        the arm time (the user-turn recency guard keys off it). No-op
+        without a running loop — offline tests drive _cut_recovery_should_fire
+        / trigger_cut_recovery directly."""
+        self._cut_recovery_token = getattr(self, "_cut_recovery_token", 0) + 1
+        self._cut_recovery_tail = tail_text or ""
+        self._cut_recovery_armed_at = time.monotonic()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.ensure_future(self._cut_recovery_watch(self._cut_recovery_token))
+
+    def cancel_cut_recovery(self) -> None:
+        """Supersede any pending auto-resume (new speech started airing —
+        one of the one-emission cancel points)."""
+        self._cut_recovery_token = getattr(self, "_cut_recovery_token", 0) + 1
+
+    def note_user_turn(self) -> None:
+        """Stamp the last user-turn time. A user turn near a cut means the
+        room re-engaged on its own — the normal reply path owns the
+        recovery, so the auto-resume watchdog stands down (no double-speak)."""
+        self._last_user_turn_at = time.monotonic()
+        self.cancel_cut_recovery()
+
+    def _cut_recovery_should_fire(self, token: int) -> bool:
+        """True only if this token's watchdog is still live AND the cut left
+        genuine dead air: not superseded, nobody speaking, no user turn in
+        the lookback window (a real barge-in carried content the normal path
+        answers), game still live and out of a scoring window."""
+        if getattr(self, "_cut_recovery_token", 0) != token:
+            return False  # superseded by a newer cut or an explicit cancel
+        if getattr(self.sk, "host_speaking", False):
+            return False  # audio already resumed / a new turn is airing
+        armed_at = getattr(self, "_cut_recovery_armed_at", 0.0)
+        last_user = getattr(self, "_last_user_turn_at", 0.0)
+        if last_user >= armed_at - _CUT_RECOVERY_USER_TURN_LOOKBACK:
+            # A user turn landed around/after the cut — a genuine barge with
+            # content; the normal reply path (re-air-gated fresh) owns it.
+            return False
+        if getattr(self, "game_over", False):
+            return False
+        if getattr(self.sk, "answer_window_open", False):
+            return False
+        return not getattr(self, "_adjudicating", False)
+
+    def trigger_cut_recovery(self) -> bool:
+        """Dispatch the fresh auto-resume. Arms the re-air gate first so the
+        resume regenerates rather than replays (the shared WS-3 gate), then
+        fires the cut-recovery directive through the between-turns speech
+        path. Returns True if a resume was dispatched."""
+        self.arm_reair_gate()
+        logger.warning(
+            "LILY_CUT_RECOVERY | RESUMED | session=%s — cut turn left dead "
+            "air, auto-resuming fresh (no operator poke)",
+            self.sk.session_id,
+        )
+        handle = self.instructed_reply(_CUT_RECOVERY_DIRECTIVE)
+        return handle is not None
+
+    async def _cut_recovery_watch(self, token: int) -> None:
+        """Wait out the grace window, then auto-resume iff the cut still
+        left dead air. Grace sits above false_interruption_timeout (the
+        framework's own pause/resume gets first crack) and above healthy
+        user-turn latency, so the watchdog only ever fires into silence."""
+        await asyncio.sleep(lily_config.cut_recovery_grace())
+        if not self._cut_recovery_should_fire(token):
+            return
+        self.trigger_cut_recovery()
 
     def dispatch_armed_question(self, *, source: str) -> bool:
         """Dispatch one question-only turn after a completed reveal.
@@ -3246,6 +3374,7 @@ class LilyGame:
         speech_id: str | None = None,
         interrupted: bool = False,
         suppressed: bool = False,
+        failed: bool = False,
     ) -> None:
         """Called on TTS playback completion (agent stops speaking). If the
         armed question's delivery is REGISTERED (the q_{N}_delivery claim —
@@ -3293,6 +3422,14 @@ class LilyGame:
             # coming); a suppressed turn only re-airs if a claim was freed.
             if interrupted or released:
                 self.arm_reair_gate()
+            # Cut-recovery contract (WS-3, STREAM-INTEGRITY-002): a cut or
+            # mid-stream-FAILED organic turn (no keyed claim to drive a
+            # game-loop re-dispatch) arms the auto-resume watchdog. It fires
+            # only if the cut leaves dead air with no follow-up — a real
+            # barge-in carrying a user turn is answered by the normal path
+            # and the watchdog stands down (one-emission preserved).
+            if self._cut_recovery_should_arm(released, interrupted, failed):
+                self.arm_cut_recovery(spoken_text)
             # Task 0 (RECOGNITION-VARIETY): an INTERRUPTED turn partially
             # played — it belongs in the record, marked. A suppressed turn
             # never reached air and is not recorded as said.
@@ -7024,6 +7161,11 @@ class LilyAgent(Agent):
         # the preemptive equivalence check compares its snapshot against
         # turn_ctx AFTER this hook, so this is where the context must
         # reach its final shape.
+        #
+        # Cut-recovery cancel (WS-3): the room re-engaged on its own, so any
+        # pending auto-resume watchdog stands down — the reply this user
+        # turn produces owns the recovery (no double-speak).
+        self._game.note_user_turn()
         try:
             self._apply_context_blocks(turn_ctx)   # this turn sees FINAL context
             self._apply_context_blocks(self._chat_ctx)  # next preemptive snapshot too
@@ -7994,6 +8136,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 speech_id=handle.id,
                 interrupted=handle.interrupted,
                 suppressed=suppressed or failed,
+                failed=failed,
             )
 
         asyncio.ensure_future(_watch())

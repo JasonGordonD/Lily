@@ -89,6 +89,10 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_RELAXED_WINDOW_MULTIPLIER",
     "LILY_SUPPLY_FALLBACK_SECONDS",
     "LILY_UNDELIVERED_RECONCILE_SECONDS",
+    # WS-3 cut-recovery grace (WO-LILY-STREAM-INTEGRITY-002): the dead-air
+    # window before an auto-resume fires. Default-backed threshold (3.5s);
+    # ships on its in-code default, tune via deploy.yml `vars.` if needed.
+    "LILY_CUT_RECOVERY_GRACE",
     # WS-5 MC answer-aborts-read tunables (default-backed; ship on
     # in-code defaults). Feature toggle + buzz-buffer pre-claim horizon +
     # stem-protection words/second model.

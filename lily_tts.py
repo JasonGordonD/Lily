@@ -44,7 +44,15 @@ MODEL_ID = "eleven_v3"
 OUTPUT_FORMAT = "pcm_24000"
 SAMPLE_RATE = 24000
 NUM_CHANNELS = 1
-MAX_CHUNK_SIZE = 5000
+# ElevenLabs rejects a /stream request whose text exceeds the per-request
+# character cap (eleven_v3: 4,200). A chunk over the cap 4xx's mid-turn,
+# and because earlier chunks already pushed audio the turn dies
+# mid-sentence (WO-LILY-STREAM-INTEGRITY-002 WS-2). The framework's
+# StreamAdapter sentence-splits first, so this cap is the last-resort
+# guard for a single sentence longer than the cap — split with comfortable
+# margin BELOW 4,200 so a boundary-less long sentence never rides the edge.
+ELEVENLABS_REQUEST_CHAR_CAP = 4200
+MAX_CHUNK_SIZE = 3800
 
 VOICE_SETTINGS = {
     "stability": 0.4,
@@ -178,10 +186,24 @@ class LilyChunkedStream(tts.ChunkedStream):
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._opts = opts
         self._skip_empty = skip_empty
+        # Tail-chunk delivery accounting (WO-LILY-STREAM-INTEGRITY-002 WS-2,
+        # claim-vs-delivery model): a chunk counts DELIVERED only once its
+        # audio actually flushed. If synthesis dies after the first chunk
+        # aired, undelivered_remainder holds the text that never reached the
+        # air so the failure surfaces as a partial cut (→ cut-recovery
+        # regenerates it) rather than silent mid-sentence death.
+        self.chunks_total = 0
+        self.chunks_delivered = 0
+        self.undelivered_remainder = ""
 
     @staticmethod
     def _split_text(text: str) -> list[str]:
-        """Split text at sentence boundaries if it exceeds MAX_CHUNK_SIZE."""
+        """Split text so every chunk stays under MAX_CHUNK_SIZE (comfortably
+        below the ElevenLabs per-request cap). Prefer a sentence boundary;
+        fall back to the last whitespace before the cap so a boundary-less
+        long sentence never splits mid-WORD (a mid-word cut drops the word
+        and can leave a phantom that the tokenizer re-glues). Every emitted
+        chunk is guaranteed <= MAX_CHUNK_SIZE."""
         if len(text) <= MAX_CHUNK_SIZE:
             return [text]
         chunks = []
@@ -191,14 +213,17 @@ class LilyChunkedStream(tts.ChunkedStream):
             for m in re.finditer(r'[.!?]\s', remaining[:MAX_CHUNK_SIZE]):
                 boundary = m.end()
             if boundary == -1:
-                boundary = MAX_CHUNK_SIZE
+                # No sentence boundary under the cap — break at the last
+                # whitespace instead of slicing through a word.
+                ws = remaining.rfind(" ", 0, MAX_CHUNK_SIZE)
+                boundary = ws + 1 if ws > 0 else MAX_CHUNK_SIZE
             chunks.append(remaining[:boundary])
             remaining = remaining[boundary:]
         if remaining:
             chunks.append(remaining)
         logger.info(
-            "TTS | splitting text: %d chars into %d chunks",
-            len(text), len(chunks),
+            "TTS | splitting text: %d chars into %d chunks (cap=%d)",
+            len(text), len(chunks), MAX_CHUNK_SIZE,
         )
         return chunks
 
@@ -208,6 +233,7 @@ class LilyChunkedStream(tts.ChunkedStream):
             return
 
         text_chunks = self._split_text(self._input_text)
+        self.chunks_total = len(text_chunks)
 
         url = (
             f"{ELEVENLABS_API_BASE}/text-to-speech/{self._opts.voice_id}"
@@ -219,7 +245,7 @@ class LilyChunkedStream(tts.ChunkedStream):
             total_bytes = 0
             chunk_count = 0
 
-            for text_chunk in text_chunks:
+            for chunk_index, text_chunk in enumerate(text_chunks):
                 body = {
                     "text": text_chunk,
                     "model_id": self._opts.model_id,
@@ -272,6 +298,9 @@ class LilyChunkedStream(tts.ChunkedStream):
                         total_bytes += usable
                         chunk_count += 1
 
+                # This chunk's audio has flushed to the emitter — delivered.
+                self.chunks_delivered = chunk_index + 1
+
             logger.info(
                 "TTS stream complete, bytes=%d chunks=%d duration=%.2fs",
                 total_bytes, chunk_count, total_bytes / (SAMPLE_RATE * 2),
@@ -291,6 +320,24 @@ class LilyChunkedStream(tts.ChunkedStream):
             raise
         except Exception as e:
             raise APIConnectionError() from e
+        finally:
+            # Tail-chunk accounting (WS-2, claim-vs-delivery): if synthesis
+            # ended before every chunk flushed, the tail never reached the
+            # air. Record it and log the partial cut so a mid-turn TTS
+            # failure surfaces as a delivery gap the cut-recovery path
+            # regenerates — never silent mid-sentence death. No-op on the
+            # clean all-delivered path.
+            if self.chunks_delivered < self.chunks_total:
+                self.undelivered_remainder = "".join(
+                    text_chunks[self.chunks_delivered:]
+                )
+                logger.warning(
+                    "LILY_TTS | TAIL_CHUNK_UNDELIVERED | delivered=%d/%d | "
+                    "remainder=%d chars — partial cut, cut-recovery "
+                    "regenerates the tail",
+                    self.chunks_delivered, self.chunks_total,
+                    len(self.undelivered_remainder),
+                )
 
 
 async def lily_prewarm_tts_connection() -> None:
