@@ -5,6 +5,72 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-06 — WO-LILY-HOTFIX-001 + WO-LILY-NC-BENCH-001: the deaf-mute wedge
+
+**P0 (04:21–04:30 UTC): four consecutive sessions opened deaf and mute**
+(`lily-813B86`, `lily-F70BF5`, `lily-90DAE0`, `lily-A7DAD8` — all
+round 0, zero transcript rows, `tts_first_frame_ms` null). Root cause:
+WS-14 re-enabled Krisp NC on the join path at 1.6.6 against a documented
+in-repo kill history; NC wedged RoomIO audio setup, so the greet never
+reached TTS playout and zero mic frames reached Speechmatics
+(`stt_stream_disconnected_and_no_captured_speakers`). Service restored
+operator-side (`LILY_NOISE_CANCELLATION=off` slot secret, no redeploy) —
+the 1.6.6 omnibus build itself is healthy and stays.
+
+Close-out findings (WO-LILY-HOTFIX-001):
+
+- **Discriminating check:** the say-gate registry is per-session
+  in-memory state (`LilyGame.__init__`), no consumed-keys ledger is
+  persisted, and each dead session was its own throwaway group
+  (`group_id == session_id`) — a cross-session consumed-key leak is
+  structurally impossible. The observed `session_greet` dup was
+  dispatch-then-suppressed-retry INSIDE each session: wedge chain alone.
+- **Second defect, fixed (the P0's enforcement arm):** a claim frozen
+  `pending` (dispatched, never played, never failed — the wedge created
+  this state; nothing in the lifecycle could exit it) dup-suppressed its
+  own retry. `gated_say` now supersedes a stale never-aired pending
+  claim on retry (`STALE_CLAIM_SUPERSEDED`) and arms a per-dispatch
+  watchdog that releases-and-retries a claim whose speech never started
+  airing (`STALE_CLAIM_RELEASED`, bounded, `STALE_CLAIM_EXHAUSTED` with
+  the key left free). Playout-start truth rides
+  `agent_state_changed → "speaking"` + `session.current_speech`;
+  confirmed acts stay final forever; the double-greet race protection is
+  untouched. Pinned by `tests/test_wedge_recovery.py` (13 regressions:
+  wedge recovery, consecutive-session double-greet, greet-barge
+  regenerate-not-replay, join-path NC branches).
+- **Persistence verdict:** zero transcript rows in the mute sessions is
+  "nothing aired" (correct behaviour — `record_agent_turn` writes at
+  playout), not a persistence break. Session-count discrepancy resolved:
+  the DB holds all four dead sessions; the earlier 2-row read was a
+  too-narrow query window.
+
+WO-LILY-NC-BENCH-001 (codebase side):
+
+- **NC default flipped nc→off** in `lily_config.noise_cancellation_mode`
+  — a safety default fails to silence-of-the-feature, never
+  silence-of-the-agent. Unknown values (including `bvc`) now coerce to
+  `off`. NC returns only by passing the cold-join bench gate
+  (`eval/nc_bench/` — harness, runbook, pass criteria: 10/10 accepts,
+  greet playout every join, mic→STT every join, join latency ≤2×
+  NC-off baseline), then explicit `LILY_NOISE_CANCELLATION=nc`.
+- **Deprecated `RoomInputOptions` shim swapped** for 1.6.6-native
+  `RoomOptions`/`AudioInputOptions` on `session.start` (the mute
+  sessions logged the shim's deprecation warning on the join path;
+  `_create_from_legacy` maps identically — hygiene, landed regardless
+  of the bench outcome).
+- **Task 4 rider:** `eval/nc_bench/baseline_rider.sql` computes the
+  NC-off quality numbers (dropped answers, phantom labels, attribution
+  spread, span sanity) from the next live session for comparison with
+  the Aug 5 audit; verdict slot lives in the README WS-14 memo.
+- **Task 5, permanent process gate:** README WO checklist now requires,
+  for ANY audio-pipeline enable/re-enable, a repo kill-history search
+  quoted in the WO plus a bench join-path test before production
+  contact — no "believed fixed by upstream" exception.
+
+WS-14 memo addendum recorded in README: NC stays `off` until the
+Krisp/1.6.6 join-path interaction passes the bench; BVC remains
+prohibited in shared-mic mode permanently. Full suite green (1140).
+
 ## 2026-08-05 — WS-11 telemetry restoration (WO-LILY-OMNIBUS-003)
 
 Session lily-81BCB0-583a0f16 landed 14 addressee rows but zero

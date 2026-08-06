@@ -32,7 +32,6 @@ from livekit.agents import (
     AutoSubscribe,
     InterruptionOptions,
     JobContext,
-    RoomInputOptions,
     RunContext,
     TurnHandlingOptions,
     WorkerOptions,
@@ -42,6 +41,7 @@ from livekit.agents import (
 )
 from livekit.agents.llm import ChatMessage
 from livekit.agents.voice import Agent, AgentSession
+from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions
 from livekit.agents.voice.agent_activity import _SpeechHandleContextVar
 from livekit.agents.voice.background_audio import (
     AudioConfig,
@@ -300,6 +300,27 @@ _REGEN_DELIVERY_DIRECTIVE = (
     "straight to the read with no restart preamble."
 )
 
+# ---------------------------------------------------------------------------
+# Stale-claim recovery (WO-LILY-HOTFIX-001).
+#
+# The 08-06 wedge: Krisp NC hung RoomIO audio setup, so the greet's
+# dispatched speech never reached playout AND never failed — no confirm,
+# no release, claim frozen PENDING. The entrypoint's belt-and-braces
+# retry was then dup-suppressed against that frozen claim: permanent
+# silence, exactly M1's failure mode. Dup suppression is only legitimate
+# against an act that actually PLAYED within the session (CLAIM_CONFIRMED)
+# or is genuinely in flight; a keyed dispatch therefore arms a watchdog
+# that releases-and-retries a claim whose speech never started airing
+# inside the deadline. Deadline sits far above healthy dispatch→playout
+# latency (LLM first token + TTS first frame, seconds at p99) and far
+# below the observed wedge; a long turn MID-playout is protected twice —
+# by the playout-started ledger and by the host_speaking recheck.
+# ---------------------------------------------------------------------------
+
+_STALE_CLAIM_SECONDS = 12.0
+_STALE_CLAIM_MAX_RETRIES = 2   # re-dispatches per key before declaring the audio path down
+_STALE_CLAIM_MAX_RECHECKS = 20  # bounded host_speaking re-check loop (no task leak)
+
 
 # ---------------------------------------------------------------------------
 # Game director — the non-LLM surface: window timer, adjudication commit,
@@ -378,6 +399,13 @@ class LilyGame:
         # completion, and released on playback failure so a retry can
         # redeliver (the 19:27:52 swallowed-delivery class).
         self.say_registry = lily_say_gate.SpeechActRegistry()
+        # Stale-claim recovery (WO-LILY-HOTFIX-001): speech ids whose TTS
+        # playout actually STARTED (agent_state -> "speaking"), and the
+        # per-key re-dispatch budget. A pending claim whose owner never
+        # appears here inside the watchdog deadline was wedged before the
+        # air — its retry must not be dup-suppressed.
+        self._playout_started_ids: set = set()
+        self._stale_retry_counts: dict = {}
         # Set by the entrypoint BEFORE session.start so on_enter knows
         # whether to greet (session_greet) or rejoin (session_rejoin).
         self.reconnected = False
@@ -876,11 +904,26 @@ class LilyGame:
         reveal's dispatch) without gating it."""
         reservation = f"dispatch_{uuid.uuid4().hex}"
         if key is not None and not self.say_registry.claim(key, owner=reservation):
-            logger.warning(
-                "LILY_SAY_SUPPRESSED | reason=dup | key=%s | act=%s | source=%s",
-                key, act, source,
-            )
-            return False
+            # WO-LILY-HOTFIX-001: dup suppression is only legitimate against
+            # an act that actually played (CONFIRMED) or is genuinely in
+            # flight. A STALE pending claim — dispatched long ago, playout
+            # never started, nothing airing now — is a wedged speech, and
+            # this retry is the recovery: supersede it and speak.
+            if self._supersede_stale_claim(key) and self.say_registry.claim(
+                key, owner=reservation
+            ):
+                logger.warning(
+                    "LILY_SAY | STALE_CLAIM_SUPERSEDED | key=%s | act=%s | "
+                    "source=%s — prior dispatch never reached playout; "
+                    "retry speaks", key, act, source,
+                )
+            else:
+                logger.warning(
+                    "LILY_SAY_SUPPRESSED | reason=dup | key=%s | act=%s | "
+                    "source=%s | state=%s",
+                    key, act, source, self.say_registry.state(key),
+                )
+                return False
         for k in extra_keys:
             self.say_registry.claim(k, owner=reservation)
         # Regeneration gate (WS-3): a re-air (this act's prior airing was
@@ -900,7 +943,111 @@ class LilyGame:
         speech_id = getattr(handle, "id", None)
         if speech_id:
             self.say_registry.reassign_owner(reservation, speech_id)
+        # WO-LILY-HOTFIX-001: every keyed act gets a playout watchdog. If
+        # this claim is still PENDING past the deadline with its speech
+        # never having started airing (the Krisp RoomIO wedge: no playout,
+        # no failure event, no confirm, no release), the watchdog releases
+        # the claim and re-dispatches — silence is her failure mode and a
+        # frozen claim must never enforce it.
+        if key is not None:
+            self._arm_stale_claim_watchdog(key, act, instructions, source)
         return True
+
+    def _supersede_stale_claim(self, key: str) -> bool:
+        """Release a PENDING claim that is provably wedged: older than the
+        playout deadline, its owning speech never started airing, and no
+        agent audio is playing right now. Confirmed acts are final forever;
+        young or airing claims are genuine in-flight dispatches and stay.
+        True = released (the caller may re-claim and speak)."""
+        age = self.say_registry.pending_age(key)
+        if age is None or age < _STALE_CLAIM_SECONDS:
+            return False
+        owner = self.say_registry.owner_of(key)
+        started = getattr(self, "_playout_started_ids", set())
+        if owner is not None and owner in started:
+            return False  # airing (long turn mid-playout) — leave it alone
+        if getattr(self.sk, "host_speaking", False):
+            return False  # something IS on the air — not the deaf case
+        return self.say_registry.release(key)
+
+    def _arm_stale_claim_watchdog(
+        self, key: str, act: str, instructions: str, source: str
+    ) -> None:
+        """Arm the never-reached-playout watchdog for one keyed dispatch.
+        No-op without a running loop (offline tests drive the registry
+        directly)."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        owner = self.say_registry.owner_of(key)
+        if owner is None:
+            return
+        asyncio.ensure_future(
+            self._stale_claim_watch(key, owner, act, instructions, source)
+        )
+
+    async def _stale_claim_watch(
+        self, key: str, owner: str, act: str, instructions: str, source: str
+    ) -> None:
+        """Release-and-retry a claim whose speech never started playout.
+
+        Exits silently when the act confirmed (played), released (the
+        failure paths worked), changed owner (a newer dispatch took over),
+        or started airing (wait_for_playout owns its lifecycle). While
+        OTHER audio is airing the check re-arms — a queued act behind a
+        long monologue is late, not wedged. Retries are bounded per key:
+        past the budget the audio path itself is down (the NC wedge class)
+        and re-dispatching would only queue more silence."""
+        for _ in range(_STALE_CLAIM_MAX_RECHECKS):
+            await asyncio.sleep(_STALE_CLAIM_SECONDS)
+            if self.say_registry.state(key) != lily_say_gate.CLAIM_PENDING:
+                return
+            if self.say_registry.owner_of(key) != owner:
+                return
+            if owner in getattr(self, "_playout_started_ids", set()):
+                return
+            if getattr(self.sk, "host_speaking", False):
+                continue
+            age = self.say_registry.pending_age(key) or 0.0
+            counts = getattr(self, "_stale_retry_counts", None)
+            if counts is None:
+                counts = self._stale_retry_counts = {}
+            attempts = counts.get(key, 0)
+            if not self.say_registry.release(key):
+                return
+            logger.warning(
+                "LILY_SAY | STALE_CLAIM_RELEASED | key=%s | act=%s | "
+                "age=%.1fs | attempt=%d — playout never started; claim "
+                "freed for retry", key, act, age, attempts + 1,
+            )
+            if key == f"q_{self.sk.question_number}_delivery":
+                self.expect_delivery()
+            if attempts >= _STALE_CLAIM_MAX_RETRIES:
+                logger.error(
+                    "LILY_SAY | STALE_CLAIM_EXHAUSTED | key=%s | act=%s — "
+                    "%d dispatches never reached playout; audio path is "
+                    "down (NC-wedge class), not re-dispatching",
+                    key, act, attempts + 1,
+                )
+                return
+            counts[key] = attempts + 1
+            self.gated_say(
+                key, act, instructions, source=f"{source}+stale_retry"
+            )
+            return
+
+    def note_playout_started(self, speech_id: str | None) -> None:
+        """Wired from agent_state_changed -> "speaking" (TTS playout
+        actually started, per the 1.6.6 state machine): the current
+        speech is ON THE AIR, so its pending claims are in-flight, never
+        stale. One id per spoken turn; discarded at playout completion."""
+        if not speech_id:
+            return
+        started = getattr(self, "_playout_started_ids", None)
+        if started is None:
+            started = self._playout_started_ids = set()
+        started.add(speech_id)
 
     # -- structural delivery claims (desync WO Sub-agent B) -------------------
     #
@@ -3073,6 +3220,10 @@ class LilyGame:
         # genuinely spoken. Confirmed acts never release (a confirmed act
         # can never be redelivered); only a claimed-but-never-played act
         # releases, on the tts_node playback-failure path.
+        # Stale-claim recovery bookkeeping: this speech's playout lifecycle
+        # is over either way — its airing marker is spent.
+        if speech_id:
+            getattr(self, "_playout_started_ids", set()).discard(speech_id)
         if interrupted or suppressed:
             released = (
                 self.say_registry.release_owner(speech_id)
@@ -3111,6 +3262,11 @@ class LilyGame:
             logger.info(
                 "LILY_SAY | CONFIRMED | keys=%s", ",".join(sorted(confirmed))
             )
+            # A confirmed act played — its stale-retry budget is spent
+            # state, never carried into a later same-key claim cycle.
+            retry_counts = getattr(self, "_stale_retry_counts", {})
+            for k in confirmed:
+                retry_counts.pop(k, None)
         # Task 0 (RECOGNITION-VARIETY): BOTH sides of the call persist.
         # Recording at playout completion means the record holds what the
         # room actually heard — never a dispatched-but-swallowed turn.
@@ -7014,17 +7170,24 @@ class LilyAgent(Agent):
 # ---------------------------------------------------------------------------
 
 def lily_noise_cancellation_options():
-    """Resolve the Krisp model for the room input (WS-14). Returns the
-    ambient-NC options, or None when LILY_NOISE_CANCELLATION=off (the
-    kill switch for the historical NcSession sample-rate SIGABRT).
+    """Resolve the Krisp model for the room input (WS-14). Returns None
+    unless LILY_NOISE_CANCELLATION=nc is explicitly set — off is the
+    DEFAULT since WO-LILY-HOTFIX-001: the 08-06 P0 (RoomIO audio setup
+    wedged with NC on the join path; sessions opened deaf and mute) is
+    NC's second documented kill after the 1.6.4 NcSession sample-rate
+    SIGABRT. Re-enable path: pass the NC-BENCH-001 cold-join gate on an
+    isolated slot first.
 
     BVC can NEVER come out of this function. BVC isolates the primary
     speaker and suppresses "background voices" — in Lily's one-mic
     multiplayer room those are the other players, so BVC would erase the
     table. lily_config coerces every unknown value (including "bvc") to
-    "nc"; this resolver only ever constructs noise_cancellation.NC()."""
+    "off"; this resolver only ever constructs noise_cancellation.NC()."""
     if lily_config.noise_cancellation_mode() == "off":
-        logger.info("LILY_NOISE | NC=off (LILY_NOISE_CANCELLATION kill switch)")
+        logger.info(
+            "LILY_NOISE | NC=off (default since HOTFIX-001; "
+            "LILY_NOISE_CANCELLATION=nc opts in after the bench gate)"
+        )
         return None
     logger.info("LILY_NOISE | Krisp ambient NC enabled (BVC excluded by design)")
     return noise_cancellation.NC()
@@ -7710,6 +7873,11 @@ async def entrypoint(ctx: JobContext) -> None:
         # listening/thinking when playout ends or is interrupted. The pure
         # scorekeeper only holds the flag; this is the one wiring point.
         scorekeeper.host_speaking = ev.new_state == "speaking"
+        if ev.new_state == "speaking":
+            # Stale-claim recovery (WO-LILY-HOTFIX-001): mark the airing
+            # speech so its pending claims read as in-flight, not wedged.
+            current = getattr(session, "current_speech", None)
+            game.note_playout_started(getattr(current, "id", None))
         if ev.new_state == "speaking" and game._pending_reveal_event is not None:
             # Reveal packet keyed to TTS PLAYBACK start of the reveal turn
             # (visuals may lead audio; never keyed to LLM generation).
@@ -7958,11 +8126,21 @@ async def entrypoint(ctx: JobContext) -> None:
     # exists: LILY_NOISE_CANCELLATION=off drops NC via slot secret with no
     # redeploy if the abort recurs at 1.6.6. Metering: Krisp models bill
     # ~$0.002–0.004/min on Cloud from May 2026.
+    #
+    # WO-LILY-NC-BENCH-001 Task 2: 1.6.6-NATIVE RoomOptions, replacing the
+    # deprecated RoomInputOptions shim (the 08-06 mute sessions logged the
+    # shim's deprecation warning on the join path). _create_from_legacy
+    # mapped the old form to AudioInputOptions with identical defaults —
+    # this is the same configuration minus the legacy conversion layer.
+    # NC itself stays behind the LILY_NOISE_CANCELLATION slot secret
+    # (default off until the bench gate passes).
     await session.start(
         room=ctx.room,
         agent=agent,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=lily_noise_cancellation_options(),
+        room_options=RoomOptions(
+            audio_input=AudioInputOptions(
+                noise_cancellation=lily_noise_cancellation_options(),
+            ),
         ),
     )
 

@@ -195,6 +195,17 @@ machine ran clean; the defects were experiential:
   `LILY_INTERNAL_TOOLS` flag, enforced by CI both directions
   (`tests/test_capability_lint.py` — every registered tool accounted
   for; every manifest `code_ref` resolves to living code).
+- **Audio-pipeline enable gate (WO-LILY-NC-BENCH-001 Task 5, permanent):**
+  any WO that enables or re-enables an audio-pipeline component (noise
+  cancellation, dereverb, VAD/interruption machinery, STT/TTS transport
+  changes) MUST (a) search the repo history for prior removal/kill
+  records of that exact component (`git log -S`, README/CHANGELOG grep)
+  and quote the findings in the WO, and (b) pass a bench join-path test
+  on an isolated slot before production contact. **No exceptions for
+  components believed fixed by upstream version changes** — "believed
+  fixed" is precisely the case the gate exists for; WS-14 re-enabled
+  Krisp NC at 1.6.6 against a documented in-repo kill history, and it
+  cost four production sessions.
 
 ## The say gate (speech-boundary bug class, 2026-07-14 WO)
 
@@ -235,6 +246,36 @@ so the loser of the race is silent; a reconnect uses its own
 `session_rejoin` key and never trips `session_greet`. Keyless dispatches
 (steal window, skip, mode reverts, the prefetch nudge, game start) still
 log `LILY_SAY` for the audit trail.
+
+**Stale-claim recovery (WO-LILY-HOTFIX-001).** The 08-06 P0 exposed a
+third lifecycle state with no exit: claimed, never played, never failed.
+Krisp NC wedged RoomIO audio setup, so the greet's dispatched speech
+never reached playout AND produced no failure event — no confirm, no
+release, `session_greet` frozen `pending` — and the entrypoint's
+belt-and-braces retry was dup-suppressed against that frozen claim.
+Four consecutive sessions opened permanently deaf and mute, the silence
+enforced by the say gate itself. The rule now enforced: **dup
+suppression applies only to re-air of an utterance that actually played
+within the same session (`confirmed`), or one genuinely in flight.**
+Two mechanisms, both in `gated_say`:
+
+- **Supersede on retry:** a retry that hits a pending claim older than
+  the playout deadline (12s), whose speech never started airing
+  (`agent_state → "speaking"` tracking) while nothing else is on the
+  air, releases the wedged claim and speaks
+  (`LILY_SAY | STALE_CLAIM_SUPERSEDED`).
+- **Watchdog:** every keyed dispatch arms a watcher; if the claim is
+  still pending past the deadline with playout never started, it
+  releases and re-dispatches (`LILY_SAY | STALE_CLAIM_RELEASED`),
+  bounded to 2 retries per key before declaring the audio path down
+  (`LILY_SAY | STALE_CLAIM_EXHAUSTED`) — exhaustion leaves the key FREE,
+  never poisoned. A long monologue mid-playout is protected twice: by
+  the playout-started ledger and by the `host_speaking` re-check.
+
+The registry remains **per-session in-memory state** — no persisted
+consumed-keys ledger exists, so a cross-session claim leak is
+structurally impossible (regression-pinned in
+`tests/test_wedge_recovery.py` along with the whole recovery contract).
 
 ### BUG-2: one authoritative question delivery
 
@@ -985,6 +1026,58 @@ hypotheses → null. Both the hypothesis set (`asr_n_best`) and the
 dispersion land on the `lily_addressee_log` row when available (absent →
 SQL NULL; columns from schema amendment 5a).
 
+## Noise cancellation — WS-14 memo (status: OFF, bench-gated return)
+
+**Status (2026-08-06, WO-LILY-HOTFIX-001 / WO-LILY-NC-BENCH-001):**
+`LILY_NOISE_CANCELLATION=off` is BOTH the slot-secret state and the code
+default (`lily_config.noise_cancellation_mode`). NC's production record
+is two documented kills in two deployments:
+
+1. **1.6.4 — NcSession sample-rate SIGABRT** (`Input and output sample
+   rates must be equal`): every job accept dead in ~2s. Origin of the
+   kill switch.
+2. **2026-08-06, 04:21–04:30 UTC — the RoomIO wedge at 1.6.6:** four
+   consecutive sessions (`lily-813B86`, `lily-F70BF5`, `lily-90DAE0`,
+   `lily-A7DAD8`) opened deaf and mute — NC on the join path wedged room
+   audio setup; the greet never reached TTS playout
+   (`tts_first_frame_ms` null on every row), zero mic frames reached
+   Speechmatics (`stt_stream_disconnected_and_no_captured_speakers`,
+   zero transcript rows — verified "nothing aired", not a persistence
+   break), ~45s join delay, and the frozen `session_greet` claim
+   dup-suppressed the greet retry (fixed — see stale-claim recovery in
+   the say-gate section). The deprecated-`RoomInputOptions` shim warning
+   fired on the same join path; the shim is now swapped for 1.6.6-native
+   `RoomOptions`/`AudioInputOptions` as hygiene regardless of NC's fate.
+
+**Return path (NC-BENCH-001 Task 1) — NC does not get another production
+attempt on belief.** Isolated test slot, `LILY_NOISE_CANCELLATION=nc`,
+prod pins (`livekit-agents==1.6.6`, `noise-cancellation==0.2.6`), ≥10
+cold joins via `eval/nc_bench/` (see its README for the runbook). Pass
+criteria, explicit: **10/10 job accepts · greet reaches playout on every
+join (LILY transcript row present) · mic frames reach Speechmatics ·
+join-to-ready within 2× the NC-off baseline.** Pass → re-enable in
+production behind `tests/test_wedge_recovery.py`'s join-path regression,
+one session watched live. Fail → NC stays off and the plugin is
+convicted: file the upstream issue with the wedge evidence; a newer
+plugin release claiming the fix re-benches first, never straight to
+prod.
+
+**Open empirical question (Task 4 rider):** whether NC is needed at all.
+The Aug 5 baseline session ran NC-off, and every improvement since was
+built against an NC-off world. The next live session's numbers
+(dropped-answer rate, phantom-label count, attribution accuracy,
+segment-span sanity — `eval/nc_bench/baseline_rider.sql`) get compared
+against the Aug 5 audited numbers; if the non-NC stack carries the room,
+NC's return becomes optional rather than pending. Record the verdict
+here.
+
+**Permanent, independent of the bench outcome:** BVC is prohibited in
+shared-mic mode — in a one-mic multiplayer room the "background voices"
+are the other players; `lily_config` coerces every unknown value
+(including `bvc`) to `off`, and `lily_noise_cancellation_options()` can
+only ever construct the ambient `NC()` model
+(`tests/test_interruption_layer.py::test_bvc_is_unreachable`).
+
 ## STT tuning — echo-room study close-out (WO-LILY-OMNIBUS-003 WS-13)
 
 Evidence session `lily-81BCB0-583a0f16` (2026-08-05, 4 players, reverberant
@@ -1640,6 +1733,9 @@ thresholds section),
 `LILY_THINKING_BED_PATH`, `LILY_STINGER_CORRECT_PATH`, `LILY_STINGER_INCORRECT_PATH`,
 `LILY_STT_MAX_ALTERNATIVES` (default 3; 1 = n-best injection kill switch) /
 `LILY_NBEST_DISPERSION_THRESHOLD` (default 0.02 — deliberation escalation),
+`LILY_NOISE_CANCELLATION` (**default `off`** since WO-LILY-HOTFIX-001;
+`nc` opts back in only after the NC-BENCH-001 bench gate — see the WS-14
+memo section; `bvc` and every unknown value coerce to `off`),
 `LILY_JOB_MEMORY_LIMIT_MB`, `LILY_REASONING_MAX_OUTPUT_TOKENS` (default 4096) /
 `LILY_JUDGE_MAX_OUTPUT_TOKENS` (default 1024) — dedicated reasoning/judge budgets
 (thinking tokens count toward `max_output_tokens` on Gemini 3.x) · web tools

@@ -13,9 +13,11 @@ Covers, against the INSTALLED livekit-agents 1.6.6 in the venv:
   - the #3418 ghost signature (registered speech that never airs):
     failure surfaces as suppressed -> claims release, the turn is never
     recorded as heard, no ghost window opens, redelivery is permitted;
-  - Krisp resolver: ambient NC by default, LILY_NOISE_CANCELLATION=off
-    kill switch, and BVC structurally unreachable (the multiplayer trap:
-    in a one-mic room the "background voices" are the other players);
+  - Krisp resolver: OFF by default since WO-LILY-HOTFIX-001 (the 08-06
+    deaf-mute wedge — NC's second documented kill), ambient NC only by
+    explicit bench-gated opt-in, and BVC structurally unreachable (the
+    multiplayer trap: in a one-mic room the "background voices" are the
+    other players);
   - room-discharge pacing (AMENDMENT-002): the gap delays the window's
     mic-sensitive phase, a racing open wins, gap=0 is the pre-WS-14
     synchronous open (the suite-wide conftest baseline).
@@ -230,8 +232,18 @@ def test_ghost_delivery_suppressed_releases_and_never_records():
 # -- Krisp: NC on, BVC provably off -------------------------------------------
 
 
-def test_nc_default_is_ambient_model(monkeypatch):
+def test_nc_default_is_off(monkeypatch):
+    """WO-LILY-HOTFIX-001/NC-BENCH-001: after NC's second documented kill
+    (the 08-06 deaf-mute wedge), the DEFAULT is off — NC returns only by
+    explicit LILY_NOISE_CANCELLATION=nc after passing the bench gate. A
+    safety default fails to silence-of-the-feature, never silence-of-the-
+    agent."""
     monkeypatch.delenv("LILY_NOISE_CANCELLATION", raising=False)
+    assert lily_agent.lily_noise_cancellation_options() is None
+
+
+def test_nc_explicit_opt_in_is_ambient_model(monkeypatch):
+    monkeypatch.setenv("LILY_NOISE_CANCELLATION", "nc")
     opts = lily_agent.lily_noise_cancellation_options()
     assert opts is not None
     model = os.path.basename(opts.options["modelPath"]).lower()
@@ -245,8 +257,10 @@ def test_nc_kill_switch(monkeypatch):
 
 def test_bvc_is_unreachable(monkeypatch):
     """No env value can produce BVC: the config coerces unknown values
-    (including "bvc") to "nc", and the resolver never constructs the BVC
-    model — enforced here by making BVC() explode if touched."""
+    (including "bvc") to "off" — since HOTFIX-001 an unknown value drops
+    NC entirely rather than enabling anything — and the resolver never
+    constructs the BVC model, enforced here by making BVC() explode if
+    touched."""
 
     def _boom(*args, **kwargs):
         raise AssertionError("BVC constructed — the table just got erased")
@@ -255,10 +269,7 @@ def test_bvc_is_unreachable(monkeypatch):
     monkeypatch.setattr(lily_agent.noise_cancellation, "BVCTelephony", _boom)
     for value in ("bvc", "BVC", "bvct", "background_voice", "garbage"):
         monkeypatch.setenv("LILY_NOISE_CANCELLATION", value)
-        opts = lily_agent.lily_noise_cancellation_options()
-        assert opts is not None
-        model = os.path.basename(opts.options["modelPath"]).lower()
-        assert "bvc" not in model
+        assert lily_agent.lily_noise_cancellation_options() is None
 
 
 # -- room-discharge pacing (AMENDMENT-002) ------------------------------------

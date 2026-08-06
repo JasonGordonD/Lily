@@ -33,6 +33,7 @@ runtime.
 """
 
 import re
+import time
 from typing import Optional
 
 # Emoji / pictograph blocks — structural reference: the Rafiq
@@ -297,6 +298,15 @@ def lily_mirror_flag(text: str) -> Optional[str]:
 # hygiene, swallowed turn) so a retry can legitimately redeliver a
 # claimed-but-never-played act. Pure stdlib; single-threaded asyncio makes
 # the dict check-and-set atomic (no awaits inside).
+#
+# WO-LILY-HOTFIX-001: dup suppression is only legitimate against an act
+# that actually PLAYED (CLAIM_CONFIRMED) or is genuinely in flight. The
+# 08-06 wedge (Krisp NC hung RoomIO audio setup) produced a third state
+# the lifecycle had no exit from: claimed, never played, never failed —
+# the greet's claim froze PENDING forever and dup-suppressed its own
+# retry (permanent silence, M1's exact failure mode). Claims now carry
+# their claim time so the agent layer can supersede a STALE pending claim
+# whose speech never reached playout; confirmed acts remain final forever.
 # ---------------------------------------------------------------------------
 
 CLAIM_PENDING = "pending"
@@ -309,6 +319,7 @@ class SpeechActRegistry:
     def __init__(self) -> None:
         self._acts: dict[str, str] = {}  # key -> pending | confirmed
         self._owners: dict[str, str] = {}  # pending key -> speech/reservation id
+        self._claimed_at: dict[str, float] = {}  # pending key -> monotonic claim time
 
     def claim(self, key: str, owner: str | None = None) -> bool:
         """Atomic check-and-set at dispatch time. True = caller may speak;
@@ -316,6 +327,7 @@ class SpeechActRegistry:
         if key in self._acts:
             return False
         self._acts[key] = CLAIM_PENDING
+        self._claimed_at[key] = time.monotonic()
         if owner:
             self._owners[key] = owner
         return True
@@ -324,11 +336,28 @@ class SpeechActRegistry:
         """CLAIM_PENDING, CLAIM_CONFIRMED, or None (unclaimed)."""
         return self._acts.get(key)
 
+    def owner_of(self, key: str) -> Optional[str]:
+        """Speech/reservation id holding a PENDING claim, else None."""
+        return self._owners.get(key)
+
+    def pending_age(self, key: str) -> Optional[float]:
+        """Seconds since a PENDING claim was made; None unless pending.
+        The staleness input for WO-LILY-HOTFIX-001: a pending claim whose
+        speech never reached playout inside the deadline is a wedge, not
+        an in-flight dispatch."""
+        if self._acts.get(key) != CLAIM_PENDING:
+            return None
+        claimed = self._claimed_at.get(key)
+        if claimed is None:
+            return None
+        return max(0.0, time.monotonic() - claimed)
+
     def confirm(self, key: str) -> None:
         """Playout completed — the act was genuinely spoken."""
         if key in self._acts:
             self._acts[key] = CLAIM_CONFIRMED
             self._owners.pop(key, None)
+            self._claimed_at.pop(key, None)
 
     def reassign_owner(self, old_owner: str, new_owner: str) -> list[str]:
         """Move pending claims from a dispatch reservation to its concrete
@@ -350,6 +379,7 @@ class SpeechActRegistry:
         for key in confirmed:
             self._acts[key] = CLAIM_CONFIRMED
             self._owners.pop(key, None)
+            self._claimed_at.pop(key, None)
         return confirmed
 
     def release_owner(self, owner: str) -> list[str]:
@@ -361,6 +391,7 @@ class SpeechActRegistry:
         for key in released:
             self._acts.pop(key, None)
             self._owners.pop(key, None)
+            self._claimed_at.pop(key, None)
         return released
 
     def confirm_pending(self) -> list[str]:
@@ -370,6 +401,7 @@ class SpeechActRegistry:
         for k in confirmed:
             self._acts[k] = CLAIM_CONFIRMED
             self._owners.pop(k, None)
+            self._claimed_at.pop(k, None)
         return confirmed
 
     def release(self, key: str) -> bool:
@@ -379,6 +411,7 @@ class SpeechActRegistry:
         if self._acts.get(key) == CLAIM_PENDING:
             del self._acts[key]
             self._owners.pop(key, None)
+            self._claimed_at.pop(key, None)
             return True
         return False
 
@@ -390,4 +423,5 @@ class SpeechActRegistry:
         for k in released:
             del self._acts[k]
             self._owners.pop(k, None)
+            self._claimed_at.pop(k, None)
         return released

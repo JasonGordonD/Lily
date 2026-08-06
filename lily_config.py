@@ -212,15 +212,22 @@ def false_interruption_timeout() -> float:
 
 
 def noise_cancellation_mode() -> str:
-    """Krisp noise cancellation on the room input: "nc" (ambient model,
-    default) or "off" (kill switch — the 1.6.4 NcSession sample-rate
-    SIGABRT killed every job accept; if that recurs at 1.6.6 this disables
-    NC via slot secret, no redeploy). BVC is NOT a value: in a one-mic
-    multiplayer room the "background voices" are the other players — BVC
-    would erase the table. Any unknown value (including "bvc") coerces to
-    "nc"."""
-    mode = _get("LILY_NOISE_CANCELLATION", "nc")
-    return mode if mode in ("nc", "off") else "nc"
+    """Krisp noise cancellation on the room input: "off" (DEFAULT) or
+    "nc" (ambient model, opt-in via slot secret).
+
+    Default flipped nc->off by WO-LILY-HOTFIX-001/WO-LILY-NC-BENCH-001:
+    the 08-06 P0 (four consecutive sessions opened deaf and mute — RoomIO
+    audio setup wedged, greet never reached playout, zero mic frames)
+    joined the 1.6.4 NcSession sample-rate SIGABRT as NC's second
+    documented kill. NC's entire production record is failed sessions; it
+    returns ONLY by passing the NC-BENCH-001 cold-join gate on an
+    isolated slot, then explicit LILY_NOISE_CANCELLATION=nc. A safety
+    default must fail to silence-of-the-feature, never silence-of-the-
+    agent. BVC is NOT a value: in a one-mic multiplayer room the
+    "background voices" are the other players — BVC would erase the
+    table. Any unknown value (including "bvc") coerces to "off"."""
+    mode = _get("LILY_NOISE_CANCELLATION", "off")
+    return mode if mode in ("nc", "off") else "off"
 
 
 def room_discharge_seconds() -> float:
