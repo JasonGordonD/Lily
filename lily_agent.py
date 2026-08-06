@@ -537,6 +537,10 @@ class LilyGame:
         # question never re-airs).
         self._speech_handles: dict = {}
         self._answered_questions: set = set()
+        # PATCH-002 M4: question numbers whose delivery stem reached the
+        # air but whose window has not yet opened — an abandonment while a
+        # number is in this set emits a stem-cancellation event.
+        self._aired_stems: set = set()
         # PATCH-002 A4/A5 (RETIRE_WITH_WS6): the hold state binds EVERY
         # dispatch lane. A decline/wait/STOP puts the session in hold —
         # no unsolicited conversational turns AND no question deliveries
@@ -1133,6 +1137,12 @@ class LilyGame:
         if started is None:
             started = self._playout_started_ids = set()
         started.add(speech_id)
+        # M4: if the speech now airing owns this question's delivery claim,
+        # its STEM has reached the air — record it so an abandonment before
+        # the window opens is flagged as cancelled, never a silent vanish.
+        delivery_key = f"q_{self.sk.question_number}_delivery"
+        if self.say_registry.owner_of(delivery_key) == speech_id:
+            self.mark_stem_aired(self.sk.question_number)
 
     # -- structural delivery claims (desync WO Sub-agent B) -------------------
     #
@@ -3239,6 +3249,46 @@ class LilyGame:
             source="stop_primitive",
         )
 
+    # -- PATCH-002 M4: no orphan stems (RETIRE_WITH_WS6: 004's journal
+    # makes completion|cancellation a reducer invariant) ------------------
+
+    def mark_stem_aired(self, qnum: int) -> None:
+        """A delivery stem for question `qnum` reached the air (its
+        delivery playout started). Recorded so an abandonment before the
+        window opens can be flagged as a cancelled stem rather than a
+        silent vanish."""
+        aired = getattr(self, "_aired_stems", None)
+        if aired is None:
+            aired = self._aired_stems = set()
+        aired.add(qnum)
+
+    def mark_stem_completed(self, qnum: int) -> None:
+        """The window opened — the stem completed its promise. Terminal;
+        clears the aired marker so it can't later read as abandoned."""
+        (getattr(self, "_aired_stems", None) or set()).discard(qnum)
+
+    def _terminate_aired_stem(self, reason: str) -> None:
+        """If the CURRENT question's stem aired but never completed
+        (window never opened), emit a cancellation event so the dispatch
+        record terminates. Idempotent — the marker clears here."""
+        qnum = self.sk.question_number
+        aired = getattr(self, "_aired_stems", None) or set()
+        if qnum not in aired:
+            return
+        if self.sk.answer_window_open:
+            # It did complete — the window is open; not an orphan.
+            aired.discard(qnum)
+            return
+        aired.discard(qnum)
+        logger.warning(
+            "LILY_STEM | CANCELLED | session=%s q=%d reason=%s — aired stem "
+            "closed off without completing (no orphan)",
+            self.sk.session_id, qnum, reason,
+        )
+        self.send_event_nowait("stem_cancelled", {
+            "question_number": qnum, "reason": reason,
+        })
+
     def note_speech_handle(self, handle) -> None:
         """Track live SpeechHandles by id (bounded) so cancel_speech can
         reach them. Wired from the speech_created watcher."""
@@ -3466,6 +3516,12 @@ class LilyGame:
         one-beat gap via a status note the next successful draw clears.
 
         Call AFTER sk.set_mode(...) — the flush reads the NEW mode."""
+        # PATCH-002 M4: an aired stem is a promise. If the question being
+        # flushed already put its stem on the air but never opened a
+        # window (completed), that is an abandoned stem — terminate its
+        # dispatch record with a cancellation event so it never vanishes
+        # silently (the "name three of the—" orphan).
+        self._terminate_aired_stem(reason=f"mode_flush:{source}")
         mode = self.sk.mode
         logger.info(
             "LILY_STATE | MODE_FLUSH | session=%s mode_now=%s source=%s "
@@ -3987,6 +4043,9 @@ class LilyGame:
         dur = duration if duration is not None else self._answer_window_duration()
         self.sk.open_answer_window(duration=dur, reset_candidates=not steal)
         self._steal_window = steal
+        # M4: the window opening IS the stem's completion — terminal.
+        if not steal:
+            self.mark_stem_completed(self.sk.question_number)
         # WS-2: the delivery aired — its window is open, so no undelivered
         # claim is stuck for this question anymore.
         self._undelivered_ticks = 0
@@ -4968,6 +5027,9 @@ class LilyGame:
         try:
             logger.info("LILY_STATE | SKIP | session=%s source=%s q=%d",
                         self.sk.session_id, source, self.sk.question_number)
+            # M4: a skip that abandons a stem which aired but never opened
+            # a window terminates its dispatch record (cancellation).
+            self._terminate_aired_stem(reason=f"skip:{source}")
             if self._window_timer and not self._window_timer.done():
                 self._window_timer.cancel()
             self.sk.close_answer_window()
