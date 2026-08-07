@@ -1946,6 +1946,203 @@ module for any web/image-stack reference. Missing `EXA_API_KEY` /
 `TAVILY_API_KEY` simply disables the tool — text-only behavior, never a
 boot failure.
 
+## The standing picture arsenal (WO-LILY-PATCH-003 A/B/C; stocked by WO-LILY-ARSENAL-SEED-001)
+
+A player says "picture trivia" and the first question airs **instantly** —
+from a cold start, on the first session, in all three registers. That only
+works if the bank is already stocked, which is the part that did not happen
+between PATCH-003 P2 and 2026-08-07: the supply logic was specified and the
+shelf was built, but nothing was ever put on it. An empty arsenal degrades
+*silently* to live generation, which is exactly the dead air it exists to
+prevent — the operator hit **67 seconds of silence** waiting for a picture
+question.
+
+Three register partitions, each tracking consumption independently:
+`general` · `adult_suggestive` · `adult_explicit`.
+
+### What an arsenal entry is (A1)
+
+Not "a picture". A complete, self-contained picture question that can be
+reconstructed and served from its stored fields alone — no re-derivation, no
+regeneration. `lily_arsenal._row_to_question` is the round trip.
+
+| field | what it carries |
+| --- | --- |
+| `question_text` / `canonical_answer` / `acceptable_answers` | the question and what counts as right |
+| `options` | four phonetically distinct spoken options (multiple-choice formats), else null |
+| `generation_prompt` / `generation_model` / `intensity` | how the image was made, at what heat |
+| `image_storage_path` / `image_source` / `is_real_image` | the image and its provenance |
+| `format` | its SHAPE (A2) — what lets a round mix deliberately |
+| `binding_direction` | `image_first` or `question_first` (A1) |
+| `subject_area` / `difficulty_tier` / `reveal_color` | the spread (A3) and the spoken reveal |
+| `question_text_hash` | the exact-dup key |
+| `status` / `gate_mode` / `classifier_verdict` / `reviewed_by` | the quality gate (A5) |
+| `generation_cost_usd` / `generation_attempts` / `run_id` | cost and provenance (A10) |
+
+**Binding direction changes the generation order**, and it is recorded per
+entry because correspondence failures cluster by direction — a cluster you
+cannot see if nobody wrote down which way each entry went:
+
+- **image-first** — generate the image, then write the question about what
+  is actually in it. Correspondence is nearly free; the image drives.
+- **question-first** — write the question, then generate an image to
+  complete it. Riskier: the image has to show what the stem *claims*, so
+  this path verifies correspondence at the classifier before banking.
+
+The picture contract holds either way: **the image is the question's own
+image**, generated from the question's content, never decoration attached
+afterward.
+
+### Format taxonomy (A2) — `lily_arsenal_formats.py`
+
+"Picture trivia" is not one shape. Every entry is format-tagged so a round
+can mix shapes instead of serving one forever. Each format carries a spoken
+template, an image-introduction line, its answer style and its binding
+direction. Multiple-choice options are **spoken words, never bare letters** —
+"A/B/C/D" is unusable in a noisy room, and options must be phonetically
+distinct from one another.
+
+`real_or_imagined` requires **both** real and generated images in the bank.
+The real half is web-sourced through Exa, never generated, so the format is
+excluded from the seeding plan unless `LILY_ARSENAL_REAL_IMAGES` /
+`EXA_API_KEY` make it honestly buildable — half-building it is how Lily
+ended up improvising a format live on 2026-08-07 that she could not explain
+when asked.
+
+### Partition content briefs (A3) — `lily_arsenal_content.py`
+
+Per partition: a subject-area list broad enough that the bank does not feel
+repetitive, a difficulty spread (not every question a gimme), and a house
+visual style so the rail looks coherent rather than like a stock-photo grab
+bag. `lily_plan_entries` walks the spread **deterministically** (index
+arithmetic, no `random`, no time seed — fleet rule) and takes a
+`start_index` so a top-up run continues the spread instead of re-clustering
+on the same subjects.
+
+Adult art direction is **not** duplicated here: the comic-book house look
+lives in `lily_imagegen.LILY_ADULT_IMAGE_STYLE` and is applied at the wire.
+The briefs carry composition and legibility direction only.
+
+### Generation (A4) — `lily_arsenal_gen.py`
+
+Every image goes through `lily_imagegen.lily_generate_image_bytes` with the
+same `mode` and `intensity` live generation uses. **The arsenal must not
+become a second, looser path to image generation** — it has no
+image-provider code of its own, so it inherits the same provider routing,
+art direction, aspect clamp and structural floor.
+
+Answer sets are built at **generation** time, not serve time: canonical plus
+article- and possessive-stripped forms plus author-supplied near-misses. The
+acoustic manglings are handled downstream by `lily_evaluation`'s phonetic
+tier, which already collapses homophonic initials.
+
+> **Deliberate divergence from the work order.** A4 asks that answer sets
+> ride `additional_vocab`. They do not. That slot is pinned by
+> WO-LILY-STT-001 to the assistant name and player names — *"never answer
+> nouns (expectation-primed matching is the generalizing mechanism;
+> preloading answers does not generalize)"* — with
+> `tests/test_stt_tuning.py` asserting it. The answer set does its work in
+> `acceptable_answers`, which the Tier-1 evaluator already matches exactly,
+> by containment, fuzzily and phonetically.
+
+The outbound classifier is **register-aware**, and had to be:
+`lily_reasoning.approve_entity_image` is hardcoded family-friendly ("no
+nudity, gore, violence"), which is right for a web-sourced general
+photograph and would have refused *every* adult entry — leaving those two
+partitions permanently empty in a new costume. What does not vary by
+register is the structural floor: **nothing involving minors, nothing
+non-consensual, nothing outside legal hard limits**, hardcoded into every
+brief at every heat. The gate judges register *and* correspondence, and
+**fails closed** — a missing classifier is a configuration state, not a
+pass.
+
+### Dedup and the quality gate (A5)
+
+Exact hash blocks repeats; a difflib similarity pass (ratio `0.82`, tighter
+than the text bank's `0.87` — ten entries cannot afford two questions that
+rhyme) blocks near-duplicates, checked against both the arsenal *and*
+`lily_questions`, since an arsenal question duplicating a KB question is a
+repeat waiting to happen at the table.
+
+Entries land `generating` and are **promoted** to `ready`. Two modes, per
+partition, configurable without a deploy:
+
+- `auto` — the classifier plus automated checks promote. Default for `general`.
+- `review` — nothing serves until the operator passes it. **Default for both
+  adult partitions**: the first batch sets the bar, and a bad explicit image
+  reaching a table is expensive in a way a bad picture of a lighthouse is not.
+
+### The seeding job (A6) — `python3 -m lily_arsenal_seed`
+
+```
+python3 -m lily_arsenal_seed --status                     # bank health readout
+python3 -m lily_arsenal_seed --partition all              # top every shelf up
+python3 -m lily_arsenal_seed --partition general --depth 10
+python3 -m lily_arsenal_seed --dry-run                    # plan, cost nothing
+python3 -m lily_arsenal_seed --review adult_explicit      # list pending entries
+python3 -m lily_arsenal_seed --promote <entry-id>
+```
+
+- **Idempotent** — tops up to target, sized off `ready + pending-review`, so
+  a re-run under a review gate creates nothing rather than piling a second
+  batch on top of the one awaiting review.
+- **Concurrency-safe, structurally** — a partial unique index on
+  `lily_picture_arsenal_runs(partition) WHERE status='running'` means the
+  second concurrent run cannot insert its row and stands down. Same class of
+  guarantee as `UNIQUE(arsenal_id, group_id)`.
+- **Resumable** — an interrupted run leaves its entries banked and its row
+  stale-hearted; the next run reclaims the dead row (heartbeat older than
+  15 min — a *live* run is left alone) and generates only the shortfall.
+- **Reports** what it created per partition and **why anything was skipped**
+  — printed, not counted-and-forgotten.
+
+### Draw, burn and replenishment (A7 / A8)
+
+The draw takes `partition + status='ready' + NOT EXISTS` a usage row for
+this group. A repeat to the same table is **structurally impossible**:
+`UNIQUE(arsenal_id, group_id)` makes a second serve a database error, not an
+unlikely event. Entries **retire, never delete**, so provenance survives.
+
+The arsenal bucket is **private** — `adult_explicit` images live in it, and a
+public content-addressed URL is unprotected by anything once the path leaks.
+Rows store a *path*; it is signed for one serve inside a gate-cleared
+session.
+
+Replenishment fires at **40% consumed** (`LILY_ARSENAL_REPLENISH_RATIO`),
+per partition independently, in the background, **never on the delivery
+path**. It is expressed as a ratio rather than a count on purpose: a
+hardcoded "fire at 4" silently becomes "fire when the shelf is 80% gone" the
+moment depth drops from 10 to 5.
+
+### Moderation is an expected outcome (A9)
+
+On record: `xAI image HTTP 400: Generated image rejected by content
+moderation` (2026-08-07 18:47:48). Seeding is exactly where that friction
+belongs — offline, where a refusal costs a retry, rather than live at a
+table where it costs silence. A refusal is reworked a bounded number of
+times down a heat ladder that **keeps the slot's subject**, then skipped and
+**counted**. A transport failure is *not* mistaken for a refusal: reworking
+a prompt does not fix a missing key.
+
+If a partition's rejection rate crosses 40% the run reports it as a
+**finding**, not a shrug: it means the configured heat exceeds what the
+provider will paint, and the operator needs the number to decide between a
+lower heat and a shallower depth.
+
+### Observability and cost (A10)
+
+`--status` prints per-partition counts by status, pending-review depth,
+rejection rate, format spread, oldest ready entry and standing spend.
+`ARSENAL_LOW` is raised when a partition falls below its watermark, when a
+refill banks nothing, and at the exact moment a draw finds every candidate
+partition empty — **an empty shelf is never again discovered by a player.**
+
+Cost counts **attempts, not entries**: a refused generation still bills, and
+a summary that only prices what it kept understates the shelf. The bank is a
+standing spend against the xAI account rather than a per-game cost, which is
+why depth is a config knob (`LILY_ARSENAL_TARGET_DEPTH`, per-partition
+overrides) rather than a redeploy.
+
 ## Environment
 
 `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` · `GOOGLE_API_KEY` ·

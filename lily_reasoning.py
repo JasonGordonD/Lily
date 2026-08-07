@@ -1088,3 +1088,91 @@ class LilyReasoning:
             ),
             timeout=12.0,
         )
+
+    # -- standing picture arsenal (WO-LILY-ARSENAL-SEED-001) -----------------
+
+    async def generate_arsenal_entry(
+        self,
+        supabase,
+        *,
+        partition: str,
+        start_index: int = 0,
+    ) -> Optional[dict]:
+        """Generate ONE complete arsenal entry for `partition`, or None.
+
+        This lives on the REASONING node because the vocal node may never
+        touch the image stack — the hard guardrail (`no web tool on the
+        vocal path, ever`) is enforced by inspection in
+        tests/test_web_guardrails.py, and `lily_agent` must reach image
+        generation only through this seam. The agent's background
+        replenishment calls this; the standalone seeding job builds the
+        same callables itself.
+
+        Runs at replenishment time only, never on a delivery path: the
+        arsenal's whole promise is that the question a player hears was
+        generated long before they asked for it."""
+        import lily_arsenal
+        import lily_arsenal_content
+        import lily_arsenal_formats
+        import lily_arsenal_gen
+        import lily_images
+
+        try:
+            formats = lily_arsenal_formats.lily_formats_for_partition(
+                partition,
+                real_images_available=lily_config.arsenal_real_images_enabled(),
+            )
+            plan = lily_arsenal_content.lily_plan_entries(
+                partition, 1, formats=formats, start_index=start_index
+            )
+            if not plan:
+                return None
+
+            async def _imagegen(prompt, part, heat):
+                # THE chokepoint — same call, same mode, same intensity the
+                # live picture path uses. The arsenal gets no looser route
+                # to a provider than a question asked at the table does.
+                return await lily_imagegen.lily_generate_image_bytes(
+                    prompt,
+                    aspect_ratio="16:9",
+                    mode="adult"
+                    if part in lily_arsenal.ADULT_PARTITIONS
+                    else "general",
+                    intensity=heat or "suggestive",
+                )
+
+            async def _upload(data, mime, part):
+                return await lily_images.lily_upload_arsenal_image(
+                    supabase, data, partition=part, content_type=mime
+                )
+
+            async def _author(part, slot, description):
+                return await lily_arsenal_gen.lily_author_question(
+                    self, partition=part, plan=slot,
+                    image_description=description,
+                )
+
+            async def _classify(data, mime, claim, brief):
+                return await lily_arsenal_gen.lily_classify_image(
+                    self, image_bytes=data, content_type=mime,
+                    claim=claim, brief=brief,
+                )
+
+            result = await lily_arsenal_gen.lily_generate_entry(
+                partition=partition, plan=plan[0], author=_author,
+                imagegen=_imagegen, upload=_upload, classify=_classify,
+            )
+        except Exception as e:
+            logger.warning(
+                "LILY_REASONING | ARSENAL_GEN_FAILED | partition=%s "
+                "error_class=%s error=%s", partition, type(e).__name__, e,
+            )
+            return None
+        if result.get("outcome") != lily_arsenal_gen.OUTCOME_CREATED:
+            logger.info(
+                "LILY_REASONING | ARSENAL_GEN_SKIPPED | partition=%s "
+                "outcome=%s reason=%s",
+                partition, result.get("outcome"), str(result.get("reason"))[:160],
+            )
+            return None
+        return result["entry"]
