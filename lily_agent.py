@@ -547,6 +547,15 @@ class LilyGame:
         # air but whose window has not yet opened — an abandonment while a
         # number is in this set emits a stem-cancellation event.
         self._aired_stems: set = set()
+        # HOTFIX-005 X3: question numbers whose delivery actually REACHED
+        # PLAYOUT — recorded the instant the answer window opens (the
+        # delivery turn's playout completion, open_window). Durable and
+        # append-only, unlike _aired_stems which clears at completion: it
+        # is the reveal-side mirror of the delivery-registration guard. A
+        # reveal/verdict is dispatchable ONLY for a question in this set;
+        # the 14:53:34 fixture aired a verdict for a question whose stem
+        # never played, so nothing here ever contained it.
+        self._delivered_to_playout: set = set()
         # PATCH-002 A4/A5 (RETIRE_WITH_WS6): the hold state binds EVERY
         # dispatch lane. A decline/wait/STOP puts the session in hold —
         # no unsolicited conversational turns AND no question deliveries
@@ -4530,6 +4539,14 @@ class LilyGame:
         # M4: the window opening IS the stem's completion — terminal.
         if not steal:
             self.mark_stem_completed(self.sk.question_number)
+            # HOTFIX-005 X3: the window opens exactly when the delivery
+            # turn's playout completes — so THIS is the durable "delivery
+            # reached playout" record the reveal side gates on. A steal
+            # window rides an already-delivered question, so it never adds.
+            delivered = getattr(self, "_delivered_to_playout", None)
+            if delivered is None:
+                delivered = self._delivered_to_playout = set()
+            delivered.add(self.sk.question_number)
         # WS-2: the delivery aired — its window is open, so no undelivered
         # claim is stuck for this question anymore.
         self._undelivered_ticks = 0
@@ -5713,6 +5730,41 @@ class LilyGame:
             or getattr(self, "_question_transitioning", False)
             or self.armed_question is None
         ):
+            return
+        # HOTFIX-005 X3: no reveal without delivery. Adjudication ends in a
+        # verdict/reveal act; a question whose delivery never reached
+        # playout has nothing to reveal and no answer anyone could have
+        # given (the 14:53:34 fixture aired "on the question: false" for a
+        # question never spoken). Three independent proofs the stem reached
+        # playout, ANY of which clears the guard:
+        #   (a) the answer window is open right now (open_window only fires
+        #       at the delivery turn's playout completion) — also covers
+        #       reconnect, where the durable set is a fresh-process empty;
+        #   (b) the q_{N}_delivery claim is CONFIRMED — the same signal the
+        #       ARMED_LIMBO watchdog trusts to force a legitimate recovery
+        #       adjudication on a played-out question whose post-delivery
+        #       chain died;
+        #   (c) a durable delivered-to-playout record from earlier this
+        #       session (steal windows ride an already-recorded question).
+        # None of the three means the stem never played: refuse and log —
+        # the reveal-side mirror of the delivery-registration guard.
+        _delivery_key = f"q_{self.sk.question_number}_delivery"
+        _delivery_confirmed = (
+            self.say_registry.state(_delivery_key)
+            == lily_say_gate.CLAIM_CONFIRMED
+        )
+        if (
+            not self.sk.answer_window_open
+            and not _delivery_confirmed
+            and self.sk.question_number
+            not in getattr(self, "_delivered_to_playout", set())
+        ):
+            logger.error(
+                "LILY_REVEAL | REFUSED_NO_DELIVERY | session=%s q=%d — "
+                "adjudication requested for a question whose delivery never "
+                "reached playout; refusing the reveal (X3)",
+                self.sk.session_id, self.sk.question_number,
+            )
             return
         self._adjudicating = True
         # T2 (PATCH-001): answer_heard — adjudication starting means this
@@ -7501,6 +7553,51 @@ class LilyGame:
             return "unavailable_pipeline"
         return "on"
 
+    def note_image_rendered(self, url: str) -> None:
+        """HOTFIX-005 X4: the frontend confirmed a picture actually LOADED
+        on the glass (its <img> onLoad fired), reported over the
+        lily_control.image_shown RPC. Records the confirmed URL + timestamp
+        so 'the picture is up' becomes a READABLE state rather than an
+        assumption — grounding her picture claims and giving the DB→glass
+        break (four generated images that never surfaced) an observable
+        endpoint. Idempotent; a repeat confirm of the same URL just
+        refreshes the timestamp."""
+        if not url:
+            return
+        self._glass_image_url = url
+        self._glass_image_at = time.monotonic()
+        logger.info(
+            "LILY_IMAGE | RENDER_CONFIRMED | session=%s url=%s",
+            self.sk.session_id, url[:120],
+        )
+
+    def _glass_image_state_line(self) -> str | None:
+        """HOTFIX-005 X4: grounded readout of what is CONFIRMED on the glass
+        right now. The armed question's intended image vs the last image the
+        frontend confirmed loading — so a 'here's a picture' claim is true
+        only when the two agree, and a generated-but-unrendered image is
+        visible as a divergence instead of a silent stale rail."""
+        intended = None
+        armed = getattr(self, "armed_question", None)
+        if isinstance(armed, dict):
+            intended = armed.get("image_url") or None
+        confirmed = getattr(self, "_glass_image_url", None)
+        if not intended and not confirmed:
+            return None
+        if intended and confirmed == intended:
+            return (
+                "PICTURE ON GLASS: CONFIRMED up (the frontend reported it "
+                "loaded). Safe to reference the picture."
+            )
+        if intended and confirmed != intended:
+            return (
+                "PICTURE ON GLASS: this question HAS an image but the glass "
+                "has NOT confirmed it loaded yet — do NOT claim the picture "
+                "is up; if asked, say it's coming up rather than assert it's "
+                "there."
+            )
+        return None
+
     def _score_authority_line(self) -> str | None:
         """HOTFIX-005 X1 (LEAD): the authoritative per-player score straight
         off the committed ledger, as a hard read-only state field. The live
@@ -7545,6 +7642,15 @@ class LilyGame:
             cam_line = self.camera_lane_state_line()
             if cam_line:
                 extra.append(cam_line)
+        except Exception:
+            pass
+        # HOTFIX-005 X4: grounded glass-render readout — a picture claim is
+        # true only when the frontend confirmed the image loaded. Same
+        # never-break, context-only, leak-filtered contract.
+        try:
+            glass_line = self._glass_image_state_line()
+            if glass_line:
+                extra.append(glass_line)
         except Exception:
             pass
         # PATCH-003 P7: a slow delivery pace shapes the TEXT on both voices
@@ -10555,9 +10661,23 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         return json.dumps(outcome)
 
+    async def _rpc_image_shown(data: rtc.RpcInvocationData) -> str:
+        # HOTFIX-005 X4: render confirmation — the frontend's <img> onLoad
+        # fired, so a generated picture is CONFIRMED on the glass. Records
+        # the URL so 'the picture is up' is a readable, grounded state.
+        try:
+            payload = json.loads(data.payload or "{}")
+        except Exception:
+            return json.dumps({"ok": False, "reason": "bad_payload"})
+        game.note_image_rendered(str(payload.get("url", "")))
+        return json.dumps({"ok": True})
+
     ctx.room.local_participant.register_rpc_method("lily_control.start", _rpc_start)
     ctx.room.local_participant.register_rpc_method("lily_control.skip", _rpc_skip)
     ctx.room.local_participant.register_rpc_method("lily_control.merge", _rpc_merge)
+    ctx.room.local_participant.register_rpc_method(
+        "lily_control.image_shown", _rpc_image_shown
+    )
 
     # --- Player photo ingest (vision, Zuna port — the 12:48 "you don't
     # have image ingestion" fix). Topic `lily.image.upload` carries the

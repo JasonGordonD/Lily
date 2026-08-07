@@ -5,6 +5,60 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-07 — WO-LILY-HOTFIX-005: score integrity, reasoning model, delivery & display
+
+Session `lily-FFDEAE-ba016154` (~14:31–14:56): the spoken score was
+fabricated, the reasoning model string was wrong (67s dead-air), a verdict
+aired for a question never spoken, and four generated pictures never
+reached the glass. Tiered fix; T1 shipped first.
+
+**T1 (Tier 1)**
+
+- **X1 — score integrity (lead defect).** The spoken score is now read from
+  the committed ledger at generation time and injected as a hard read-only
+  state field (`SCORES — AUTHORITATIVE, READ-ONLY`); the model may never
+  compute, infer, or carry a score forward. The glass already projects the
+  same `ledger_scores()`, so state-block and glass agree by construction. A
+  narrated-divergence detector (`lily_narrated_score_divergence`) raises
+  `SCORE_DIVERGENCE` at ERROR when a spoken score matches no ledger total.
+- **X2 — reasoning model string.** `grok-4.2` (truncated, nonexistent → 400
+  "Model not found" → dead air) corrected to `grok-4.20-multi-agent`, routed
+  to the xAI Responses API (`/v1/responses`) that the multi-agent tier
+  requires.
+- **X3 — no reveal without delivery.** Adjudication (the verdict/reveal act)
+  is refused and logged (`LILY_REVEAL | REFUSED_NO_DELIVERY`) for a question
+  whose delivery never reached playout — the reveal-side mirror of the
+  delivery-registration guard. Proof of playout is any of: the answer window
+  open now, the `q_N_delivery` claim CONFIRMED (the ARMED_LIMBO recovery
+  signal), or a durable `_delivered_to_playout` record (`open_window`
+  populates it). The 14:53:34 "on the question: false" fixture is
+  unreproducible.
+- **X4 — generated images reaching the glass.** A per-`(session, question)`
+  generation memo stops the double-spend for slots without a bank row
+  (roi_0009 generated twice, 19s apart). A render-confirmation channel
+  (`lily_control.image_shown` RPC, fired from the frontend `<img>` onLoad)
+  records the confirmed URL so "the picture is up" is a readable, grounded
+  state (`PICTURE ON GLASS: CONFIRMED / NOT confirmed`) instead of an
+  assumption.
+
+**T3**
+
+- **X11 — assessment JSON parse.** Lenient extraction via `raw_decode` from
+  the first `{` (trailing prose no longer poisons the parse), one repair
+  retry, then a terminal `report_status='failed'` so the reconciliation
+  sweep stops re-running a permanent parse error forever.
+- **X13 (partial) — reasoning effort per lane.** On `grok-4.20-multi-agent`,
+  `reasoning.effort` is an agent-count dial (low=4-agent, high=16-agent), so
+  effort is matched to task, not lane importance: the front-facing vocal
+  lane defaults to `medium` and routine question generation to `low`
+  (latency-critical; deep multi-agent effort is reserved for genuinely hard
+  work). (xhigh mapping + measured per-lane latency/cost documentation
+  pending.)
+
+Regression fixtures: `test_hotfix005_score.py`, `test_hotfix005_x3_reveal.py`,
+`test_hotfix005_x4_images.py`, `test_hotfix005_x11_assess.py`,
+`test_adult_grok.py`.
+
 ## 2026-08-07 — Current-deploy follow-up: pre-generation answer ownership
 
 Post-deploy session `lily-F7E113-90b61665` proved the transcript event and
