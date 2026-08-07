@@ -243,12 +243,11 @@ def test_stop_idle_watchdog_cancels_and_flags():
         loop.close()
 
 
-def test_nudge_near_miss_logs_spoken_vs_armed(caplog):
+def test_near_miss_rewrites_before_nudge_or_playout(caplog):
     """Session 05AAC9 q=2 fixture: a near-verbatim performance (ratio 1.00)
-    that the strict claim matcher rejects (MC options unread) must log the
-    NUDGE_NEAR_MISS diagnostic carrying spoken vs armed text."""
+    with unread MC options is replaced before first playout, so the old
+    question-then-nudge double read cannot occur."""
     from test_desync_fixture import _make_game as _desync_game
-    from lily_agent import WINDOW_FALLBACK_AGENT_TURNS
 
     game = _desync_game()
     game.armed_question = {
@@ -261,15 +260,14 @@ def test_nudge_near_miss_logs_spoken_vs_armed(caplog):
     game._armed_speech_misses = 0
     game._pending_delivery_qnum = None
     game.ui_phase = "question"
-    # She performs the question sentence verbatim — but never the options,
-    # so the strict matcher refuses the claim while the ratio reads ~1.0.
+    # She performs the question sentence verbatim — but never the options.
     spoken = "Which planet in our solar system has the most moons?"
     with caplog.at_level(logging.WARNING):
-        for _ in range(WINDOW_FALLBACK_AGENT_TURNS):
-            assert game.register_delivery_claim(spoken) is None
-            game.on_agent_speech_finished(spoken)
-    near_miss = [r for r in caplog.records if "NUDGE_NEAR_MISS" in r.message]
-    assert near_miss, "high-ratio unclaimed delivery must log the diagnostic"
-    msg = near_miss[0].getMessage()
-    assert "most moons" in msg  # spoken text captured
-    assert game.sk.answer_window_open is False  # still no ghost window
+        assert game.register_delivery_claim(spoken) == "rewrite_strict"
+    rewrites = [
+        r for r in caplog.records
+        if "near_verbatim_unregistered" in r.getMessage()
+    ]
+    assert rewrites
+    assert game.session.instructions == []  # caller replaces this first turn
+    assert game.sk.answer_window_open is False
