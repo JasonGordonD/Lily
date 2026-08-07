@@ -9023,9 +9023,13 @@ class LilyAgent(Agent):
         event_owned = (
             callable(consume_reply) and consume_reply(message_text)
         )
-        prehook_owned = (
+        prehook_check = getattr(
+            self._game, "correct_answer_owns_user_turn", None
+        )
+        prehook_owned = bool(
             not event_owned
-            and self._game.correct_answer_owns_user_turn(message_text)
+            and callable(prehook_check)
+            and prehook_check(message_text)
         )
         if event_owned or prehook_owned:
             logger.info(
