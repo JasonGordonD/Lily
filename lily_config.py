@@ -762,6 +762,32 @@ def stt_max_alternatives() -> int:
     return max(1, min(_get_int("LILY_STT_MAX_ALTERNATIVES", 1), 8))
 
 
+def google_grounding_enabled() -> bool:
+    """Additive Google Search grounding (Gemini's built-in google_search
+    tool) alongside Exa/Tavily — an EXTRA reasoning-node source, never a
+    replacement. On by default when a Google key is present; set
+    LILY_GOOGLE_GROUNDING=off to disable. Reasoning-node only (same web
+    guardrail as Exa/Tavily — never the vocal path)."""
+    return _get_bool("LILY_GOOGLE_GROUNDING", True) and bool(_get("GOOGLE_API_KEY"))
+
+
+def google_grounding_model() -> str:
+    """Model for the Google Search grounding call. Gemini 3.x supports the
+    google_search tool; defaults to the flash vocal model (fast + cheap for
+    the reasoning node's grounding calls). Grounding runs OFF the vocal
+    path — this is just the model id it targets."""
+    return _get("LILY_GOOGLE_GROUNDING_MODEL", vocal_model())
+
+
+def url_context_enabled() -> bool:
+    """Additive URL-context reading (Gemini's built-in url_context tool) —
+    the model fetches and reasons over URLs embedded in a prompt (up to 20
+    public URLs). Another EXTRA reasoning-node capability, never a
+    replacement. On by default when a Google key is present; set
+    LILY_URL_CONTEXT=off to disable."""
+    return _get_bool("LILY_URL_CONTEXT", True) and bool(_get("GOOGLE_API_KEY"))
+
+
 def stt_focus_mode() -> str:
     """WO-LILY-STT-001 Q0 — Speechmatics speaker focus. "off" (DEFAULT) keeps
     every voice transcribed; "ignore" wires the enrolled players into

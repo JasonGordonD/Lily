@@ -122,6 +122,12 @@ LILY_LOCAL_ONLY_ENV = {
     # WO-LILY-STT-001 Q0 speaker focus — default OFF (focus_mode=IGNORE ships
     # inert until the shouted-utterance acceptance risk is measured).
     "LILY_STT_FOCUS_MODE",
+    # Additive Gemini grounding sources (google_search + url_context) — extra
+    # reasoning-node capabilities alongside Exa/Tavily; on when a Google key
+    # is present, ship on in-code defaults (toggle via deploy.yml vars).
+    "LILY_GOOGLE_GROUNDING",
+    "LILY_GOOGLE_GROUNDING_MODEL",
+    "LILY_URL_CONTEXT",
     # Segment sanity gate S/L (WO-LILY-OMNIBUS-003 WS-10) — provisional
     # defaults in lily_config; WS-13's segmentation audit binds tuned
     # values (edit the defaults, or promote to deploy.yml vars).

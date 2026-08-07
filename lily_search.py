@@ -270,6 +270,172 @@ async def lily_current_events_brief(
 
 
 # ---------------------------------------------------------------------------
+# Google Search grounding (Gemini built-in google_search tool) — an ADDITIONAL
+# reasoning-node source ALONGSIDE Exa/Tavily, never a replacement. Gemini 3.x
+# runs the whole search->synthesize->cite loop server-side and returns text
+# plus grounding_metadata (queries + source chunks). Same reasoning-node-only
+# guardrail as the rest of this module. Additive by design: a failure returns
+# None and the existing Exa/Tavily paths are untouched.
+# ---------------------------------------------------------------------------
+
+GOOGLE_GROUNDING_TIMEOUT_SECONDS = 20.0
+
+_GENAI_GROUNDING_CLIENT = None
+
+
+def _genai_grounding_client():
+    """Lazily build the reasoning-node genai client for grounding. Separate
+    from lily_reasoning's vocal/reasoning clients (its own instance, same
+    key), so grounding never contends with generation."""
+    global _GENAI_GROUNDING_CLIENT
+    if _GENAI_GROUNDING_CLIENT is None:
+        from google import genai as google_genai
+        _GENAI_GROUNDING_CLIENT = google_genai.Client(
+            api_key=lily_config.google_api_key()
+        )
+    return _GENAI_GROUNDING_CLIENT
+
+
+def lily_parse_google_grounding(resp) -> Optional[dict]:
+    """Pull {text, citations, queries, retrieved_urls} out of a grounded
+    generate_content response. citations = [{url, title}] from
+    grounding_chunks (google_search); queries = executed web_search_queries;
+    retrieved_urls = [{url, status}] from url_context_metadata. None when
+    there is no usable text. Defensive against shape drift — a missing field
+    is skipped, never raised."""
+    text = (getattr(resp, "text", None) or "").strip()
+    citations: list = []
+    queries: list = []
+    retrieved_urls: list = []
+    try:
+        candidates = getattr(resp, "candidates", None) or []
+        cand = candidates[0] if candidates else None
+        gm = getattr(cand, "grounding_metadata", None) if cand else None
+        if gm is not None:
+            queries = list(getattr(gm, "web_search_queries", None) or [])
+            for chunk in (getattr(gm, "grounding_chunks", None) or []):
+                web = getattr(chunk, "web", None)
+                uri = getattr(web, "uri", None) if web else None
+                if uri:
+                    citations.append(
+                        {"url": uri, "title": getattr(web, "title", "") or ""}
+                    )
+        ucm = getattr(cand, "url_context_metadata", None) if cand else None
+        if ucm is not None:
+            for meta in (getattr(ucm, "url_metadata", None) or []):
+                url = getattr(meta, "retrieved_url", None)
+                if url:
+                    retrieved_urls.append({
+                        "url": url,
+                        "status": str(getattr(meta, "url_retrieval_status", "") or ""),
+                    })
+    except Exception as e:
+        logger.warning("LILY_SEARCH | GROUNDING | parse warn: %s", e)
+    if not text:
+        return None
+    return {
+        "text": text, "citations": citations, "queries": queries,
+        "retrieved_urls": retrieved_urls,
+    }
+
+
+async def _lily_grounded_generate(
+    prompt: str, *, use_search: bool, use_url_context: bool, timeout: float,
+) -> Optional[dict]:
+    """Shared grounded generate_content call: enable google_search and/or
+    url_context built-in tools (Gemini runs the whole loop server-side).
+    Returns the parsed grounding dict or None. Reasoning-node only."""
+    lily_forbid_vocal_import(lily_direct_importer(None))
+    if not (prompt or "").strip() or not lily_config.google_api_key_present():
+        return None
+    try:
+        import asyncio
+        from google.genai import types as gt
+
+        tools = []
+        if use_search:
+            tools.append(gt.Tool(google_search=gt.GoogleSearch()))
+        if use_url_context:
+            tools.append(gt.Tool(url_context=gt.UrlContext()))
+        if not tools:
+            return None
+        client = _genai_grounding_client()
+
+        def _call():
+            return client.models.generate_content(
+                model=lily_config.google_grounding_model(),
+                contents=prompt,
+                config=gt.GenerateContentConfig(tools=tools),
+            )
+
+        resp = await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout)
+        result = lily_parse_google_grounding(resp)
+        if result:
+            logger.info(
+                "LILY_SEARCH | GROUNDING | search=%s url_context=%s queries=%d "
+                "citations=%d urls=%d",
+                use_search, use_url_context, len(result["queries"]),
+                len(result["citations"]), len(result["retrieved_urls"]),
+            )
+        return result
+    except Exception as e:
+        logger.error("LILY_SEARCH | GROUNDING | error: %s", e)
+        return None
+
+
+async def lily_google_grounded_search(
+    query: str, *, timeout: float = GOOGLE_GROUNDING_TIMEOUT_SECONDS,
+) -> Optional[dict]:
+    """Grounded answer for `query` via Gemini's built-in google_search tool —
+    an ADDITIONAL source alongside Exa/Tavily. Returns {text, citations,
+    queries, retrieved_urls} or None (caller falls back). Reasoning-node
+    only; gated on lily_config.google_grounding_enabled()."""
+    if not lily_config.google_grounding_enabled():
+        return None
+    return await _lily_grounded_generate(
+        query, use_search=True, use_url_context=False, timeout=timeout,
+    )
+
+
+async def lily_url_context_read(
+    prompt: str,
+    *,
+    with_search: bool = False,
+    timeout: float = GOOGLE_GROUNDING_TIMEOUT_SECONDS,
+) -> Optional[dict]:
+    """Read/compare/extract from the URL(s) embedded in `prompt` via Gemini's
+    built-in url_context tool (up to 20 public URLs; the model fetches them
+    itself). Optionally combine with google_search (with_search=True) so the
+    model can search AND deep-read specific pages. Returns the grounding dict
+    (retrieved_urls carries per-URL fetch status) or None. Reasoning-node
+    only; gated on lily_config.url_context_enabled()."""
+    if not lily_config.url_context_enabled():
+        return None
+    return await _lily_grounded_generate(
+        prompt, use_search=with_search, use_url_context=True, timeout=timeout,
+    )
+
+
+def lily_format_google_grounding(result: Optional[dict], max_chars: int = 1500) -> str:
+    """One bounded text block from a grounding result — the answer plus its
+    sources, same shape as lily_format_tavily_results so a consumer can use
+    either interchangeably."""
+    if not result or not result.get("text"):
+        return "No results found."
+    parts = [result["text"]]
+    cites = result.get("citations") or []
+    if cites:
+        parts.append(
+            "Sources: "
+            + "; ".join(
+                f"{c.get('title') or c.get('url')} ({c.get('url')})"
+                for c in cites[:5]
+            )
+        )
+    return "\n".join(parts)[:max_chars]
+
+
+# ---------------------------------------------------------------------------
 # Real-entity image sourcing (sub-agent I) — conservative, reject-on-doubt
 # ---------------------------------------------------------------------------
 
