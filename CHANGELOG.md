@@ -19,6 +19,9 @@ production path. Three independent activation gaps are closed:
 - The voice-probe audio fork is registered independently of the optional
   audEERING pipeline. Capture and matching no longer disappear whenever
   acoustic analytics is unavailable.
+- CI now applies migrations against a pgvector-enabled PostgreSQL 17 image
+  and builds the full production container on pull requests, including the
+  ECAPA preload assertion.
 
 The first finalized utterance also no longer consumes the session's only
 biometric match attempt before enough PCM exists. Matching remains

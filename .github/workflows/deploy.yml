@@ -16,7 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        # Migration 021 uses vector(192); mirror Supabase's pgvector-enabled
+        # PostgreSQL instead of failing only when production applies it.
+        image: pgvector/pgvector:pg17
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -83,6 +85,9 @@ jobs:
           end
           $$;
           SQL
+
+      - name: Build production image
+        run: docker build --tag lily-ci .
 
   deploy:
     needs: test
