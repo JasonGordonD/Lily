@@ -4544,10 +4544,18 @@ class LilyGame:
                 expectation = False
 
         window_open = self.sk.is_window_open(now=segment_ts)
+        delivery_key = f"q_{self.sk.question_number}_delivery"
+        delivery_in_flight = (
+            getattr(self, "_active_delivery_qnum", None)
+            == self.sk.question_number
+            or self.say_registry.state(delivery_key) is not None
+        )
         if getattr(self, "ui_phase", None) == "lobby":
             phase = "lobby"
         elif window_open or (
-            getattr(self, "ui_phase", None) == "question" and expectation
+            getattr(self, "ui_phase", None) == "question"
+            and expectation
+            and delivery_in_flight
         ):
             phase = "question"
         elif self.sk.phase == "wrapup":
