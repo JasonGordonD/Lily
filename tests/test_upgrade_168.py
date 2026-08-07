@@ -35,22 +35,29 @@ def test_installed_agents_is_1_6_8():
     assert a.__version__ == "1.6.8", a.__version__
 
 
-def test_metrics_events_exist_on_pinned_framework():
-    """The migration subscribes to metrics_collected + session_usage_updated
-    and reads MetricsCollectedEvent.metrics / SessionUsageUpdatedEvent.usage.
-    If a bump renames either, this fails instead of the report silently
-    losing the metrics block."""
-    from livekit.agents.voice.events import (
-        MetricsCollectedEvent,
-        SessionUsageUpdatedEvent,
-    )
-    assert "metrics" in MetricsCollectedEvent.__annotations__
+def test_blessed_metrics_surface_exists_on_pinned_framework():
+    """The migration reads the NON-deprecated surface: session_usage_updated
+    (-> AgentSessionUsage.model_usage) and per-turn ChatMessage.metrics
+    (MetricsReport). If a bump renames either, this fails instead of the
+    report silently losing the metrics block. metrics_collected is
+    deliberately NOT subscribed (deprecated since 1.6.0, warns per event)."""
+    from livekit.agents.voice.events import SessionUsageUpdatedEvent, EventTypes
     assert "usage" in SessionUsageUpdatedEvent.__annotations__
-    # And the event-name literals our @session.on(...) handlers use.
-    from livekit.agents.voice.events import EventTypes
     literals = getattr(EventTypes, "__args__", ())
-    assert "metrics_collected" in literals
     assert "session_usage_updated" in literals
+    # The per-turn latency report and its fields the collector reads.
+    from livekit.agents.llm.chat_context import MetricsReport
+    keys = MetricsReport.__annotations__
+    for f in ("llm_node_ttft", "tts_node_ttfb", "e2e_latency",
+              "transcription_delay", "end_of_turn_delay",
+              "on_user_turn_completed_delay"):
+        assert f in keys, f
+    # The usage rollup type literals the collector dispatches on (annotations
+    # are stringized under `from __future__ import annotations`).
+    from livekit.agents.metrics import LLMModelUsage, TTSModelUsage, STTModelUsage
+    assert "llm_usage" in str(LLMModelUsage.__annotations__["type"])
+    assert "tts_usage" in str(TTSModelUsage.__annotations__["type"])
+    assert "stt_usage" in str(STTModelUsage.__annotations__["type"])
 
 
 def test_noise_cancellation_stays_off_post_upgrade():
@@ -59,21 +66,21 @@ def test_noise_cancellation_stays_off_post_upgrade():
     assert lily_agent.lily_noise_cancellation_options() is None
 
 
-def test_metrics_collector_consumes_real_framework_metric_shape():
-    """A real 1.6.8 TTSMetrics folds through our collector — proves the
-    duck-typed .type dispatch matches the framework's actual literals."""
+def test_metrics_collector_consumes_real_framework_usage_shape():
+    """A real 1.6.8 TTSModelUsage folds through the usage rollup — proves the
+    .type dispatch matches the framework's actual literals."""
     import lily_metrics
-    from livekit.agents.metrics import TTSMetrics
-    m = TTSMetrics(
-        type="tts_metrics", label="eleven", request_id="r1", timestamp=0.0,
-        ttfb=0.12, duration=1.0, audio_duration=4.0, cancelled=False,
-        characters_count=90, input_tokens=0, output_tokens=0, streamed=True,
-        acquire_time=0.0, connection_reused=True, segment_id=None,
-        speech_id=None, metadata=None,
+    from livekit.agents.metrics import TTSModelUsage
+
+    class _U:
+        def __init__(self, entries): self.model_usage = entries
+
+    u = TTSModelUsage(
+        type="tts_usage", provider="elevenlabs", model="eleven_v3",
+        input_tokens=0, output_tokens=0, characters_count=90, audio_duration=4.0,
     )
     c = lily_metrics.LilyMetricsCollector()
-    c.collect(m)
+    c.collect_session_usage(_U([u]))
     s = c.summary()
-    assert s["tts"]["calls"] == 1
-    assert s["tts"]["characters"] == 90
-    assert s["tts"]["ttfb_ms_p50"] == 120.0
+    assert s["usage"]["tts_characters"] == 90
+    assert s["usage"]["tts_audio_duration_s"] == 4.0

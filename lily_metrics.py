@@ -2,23 +2,27 @@
 lily_metrics.py — full session metrics accumulation (WO-LILY-UPGRADE-168
 U3(b) + operator directive "she must use all the metrics she can").
 
-1.6.8 replaces the fragile `conversation_item_added` -> `item.metrics`
-latency read with the first-class `metrics_collected` event (typed
-LLM/STT/TTS/EOU/VAD metrics) plus the new `session_usage_updated` rollup.
-This module consumes ALL of it: every typed metric the framework emits is
-folded into one comprehensive per-session summary written into the session
-report — token usage (incl. cached), TTS characters, STT audio duration,
-and the full latency family (LLM ttft, TTS ttfb, EOU / transcription
-delays, VAD inference).
+Uses the framework's BLESSED, non-deprecated metrics surface (the coupling
+audit confirmed `metrics_collected` is deprecated since 1.6.0 and logs a
+warning on every event). Two sources, both still first-class at 1.6.8:
 
-Deliberately duck-typed on each metric's `.type` string rather than
-coupled to the plugin classes, so it is fully unit-testable with light
-fakes and can't break a session on an unexpected shape — every collect is
-defensive and a bad metric is skipped, never raised.
+  1. `ChatMessage.metrics` — a per-turn `MetricsReport` (TypedDict) attached
+     to every conversation item. Latency + turn-taking:
+       user turns: transcription_delay, end_of_turn_delay,
+                   on_user_turn_completed_delay
+       agent turns: llm_node_ttft, tts_node_ttfb, playback_latency,
+                    e2e_latency
+  2. `session_usage_updated` -> `AgentSessionUsage.model_usage` — the
+     cumulative token / character / audio-duration rollup per (provider,
+     model). Emitted as a running total, so the latest snapshot wins.
 
-The EOU / transcription-delay and STT-audio-duration lines here are also
-the incoming-quality signals WO-LILY-STT-001 Q2 asks the session report to
-carry, so the two WOs share this one summary.
+Everything is folded into ONE comprehensive per-session summary written
+into the session report metadata AND the mid-game heartbeat. The
+turn-taking (transcription / end-of-turn) delays double as
+WO-LILY-STT-001 Q2's incoming-quality signals.
+
+Duck-typed and fully defensive — a missing key or unexpected shape is
+skipped, never raised, so a metrics hiccup can't touch a live session.
 """
 
 import logging
@@ -27,8 +31,8 @@ logger = logging.getLogger("lily_metrics")
 
 
 def _pct(values, q):
-    """The q-percentile (0..100) of a numeric list, nearest-rank. Returns
-    None for an empty list. Stdlib only — no numpy on the hot path."""
+    """The q-percentile (0..100) of a numeric list, nearest-rank. None for
+    an empty list. Stdlib only — no numpy on the hot path."""
     xs = sorted(v for v in values if isinstance(v, (int, float)))
     if not xs:
         return None
@@ -38,168 +42,125 @@ def _pct(values, q):
     return round(float(xs[k]), 4)
 
 
-def _avg(values):
-    xs = [v for v in values if isinstance(v, (int, float))]
-    return round(sum(xs) / len(xs), 4) if xs else None
+def _ms(seconds):
+    """Framework latency fields are seconds; the report reads in ms."""
+    return None if seconds is None else round(seconds * 1000, 1)
 
 
 class LilyMetricsCollector:
-    """Folds every `metrics_collected` metric (and the `session_usage_updated`
-    rollup) into one summary. One instance per session."""
+    """Folds every per-turn MetricsReport and the latest session-usage
+    rollup into one summary. One instance per session."""
 
     def __init__(self):
-        # LLM
+        # Per-turn latency (agent turns)
         self._llm_ttft = []
-        self._llm_tps = []
-        self._llm_prompt_tokens = 0
-        self._llm_cached_tokens = 0
-        self._llm_completion_tokens = 0
-        self._llm_total_tokens = 0
-        self._llm_count = 0
-        self._llm_cancelled = 0
-        # STT
-        self._stt_count = 0
-        self._stt_audio_duration = 0.0
-        self._stt_reused = 0
-        # TTS
         self._tts_ttfb = []
-        self._tts_count = 0
-        self._tts_characters = 0
-        self._tts_audio_duration = 0.0
-        self._tts_cancelled = 0
-        # EOU (turn-taking / incoming-quality signals)
-        self._eou_delay = []
+        self._playback_latency = []
+        self._e2e_latency = []
+        # Per-turn turn-taking (user turns) — also STT-001 Q2 quality signals
         self._transcription_delay = []
+        self._end_of_turn_delay = []
         self._on_user_turn_delay = []
-        # VAD
-        self._vad_inference_count = 0
-        self._vad_inference_duration = 0.0
-        self._vad_idle_time = None
-        # session_usage_updated rollup (latest snapshot)
-        self._session_usage = None
-        self._total_metrics = 0
+        self._turns = 0
+        # Cumulative usage (latest session_usage_updated snapshot)
+        self._usage = None
 
-    def collect(self, metric) -> None:
-        """Fold one metric object from a `metrics_collected` event. Duck-typed
-        on `.type`; never raises."""
-        if metric is None:
+    def collect_turn(self, report) -> None:
+        """Fold one ChatMessage.metrics (a MetricsReport dict; total=False so
+        every key is optional). Both agent-turn and user-turn reports pass
+        through the same call — each contributes whichever fields it has."""
+        if not report:
             return
         try:
-            mtype = getattr(metric, "type", None)
-            g = lambda k, d=None: getattr(metric, k, d)
-            if mtype == "llm_metrics":
-                self._llm_count += 1
-                if g("ttft", 0) and g("ttft") > 0:
-                    self._llm_ttft.append(g("ttft"))
-                if g("tokens_per_second", 0) and g("tokens_per_second") > 0:
-                    self._llm_tps.append(g("tokens_per_second"))
-                self._llm_prompt_tokens += int(g("prompt_tokens", 0) or 0)
-                self._llm_cached_tokens += int(g("prompt_cached_tokens", 0) or 0)
-                self._llm_completion_tokens += int(g("completion_tokens", 0) or 0)
-                self._llm_total_tokens += int(g("total_tokens", 0) or 0)
-                if g("cancelled"):
-                    self._llm_cancelled += 1
-            elif mtype == "stt_metrics":
-                self._stt_count += 1
-                self._stt_audio_duration += float(g("audio_duration", 0) or 0)
-                if g("connection_reused"):
-                    self._stt_reused += 1
-            elif mtype == "tts_metrics":
-                self._tts_count += 1
-                if g("ttfb", 0) and g("ttfb") > 0:
-                    self._tts_ttfb.append(g("ttfb"))
-                self._tts_characters += int(g("characters_count", 0) or 0)
-                self._tts_audio_duration += float(g("audio_duration", 0) or 0)
-                if g("cancelled"):
-                    self._tts_cancelled += 1
-            elif mtype == "eou_metrics":
-                if g("end_of_utterance_delay") is not None:
-                    self._eou_delay.append(g("end_of_utterance_delay"))
-                if g("transcription_delay") is not None:
-                    self._transcription_delay.append(g("transcription_delay"))
-                if g("on_user_turn_completed_delay") is not None:
-                    self._on_user_turn_delay.append(g("on_user_turn_completed_delay"))
-            elif mtype == "vad_metrics":
-                self._vad_inference_count += int(g("inference_count", 0) or 0)
-                self._vad_inference_duration += float(g("inference_duration_total", 0) or 0)
-                self._vad_idle_time = g("idle_time", self._vad_idle_time)
-            else:
-                # Unknown/realtime metric — counted but not decomposed.
-                pass
-            self._total_metrics += 1
+            g = report.get if isinstance(report, dict) else (
+                lambda k, d=None: getattr(report, k, d)
+            )
+
+            def _pos(key, bucket):
+                v = g(key)
+                if isinstance(v, (int, float)) and v > 0:
+                    bucket.append(v)
+
+            _pos("llm_node_ttft", self._llm_ttft)
+            _pos("tts_node_ttfb", self._tts_ttfb)
+            _pos("playback_latency", self._playback_latency)
+            _pos("e2e_latency", self._e2e_latency)
+            # Turn-taking delays can legitimately be ~0, so accept >= 0.
+            for key, bucket in (
+                ("transcription_delay", self._transcription_delay),
+                ("end_of_turn_delay", self._end_of_turn_delay),
+                ("on_user_turn_completed_delay", self._on_user_turn_delay),
+            ):
+                v = g(key)
+                if isinstance(v, (int, float)) and v >= 0:
+                    bucket.append(v)
+            self._turns += 1
         except Exception as e:
-            logger.warning("LILY_METRICS | COLLECT_SKIPPED | %s", e)
+            logger.warning("LILY_METRICS | TURN_SKIPPED | %s", e)
 
     def collect_session_usage(self, usage) -> None:
-        """Store the latest `session_usage_updated` rollup (AgentSessionUsage
-        — the framework's authoritative token/audio aggregate). Kept as the
-        blessed cross-check against our per-metric sums."""
+        """Store the latest `session_usage_updated` rollup. `usage` is an
+        AgentSessionUsage with `.model_usage: list[ModelUsage]`, each keyed
+        by type literal ('llm_usage' / 'tts_usage' / 'stt_usage' / ...). The
+        payload is a running total, so we rebuild from the latest snapshot
+        (summing across models of the same type)."""
         if usage is None:
             return
         try:
-            model_usage = getattr(usage, "model_usage", None)
-            self._session_usage = {
-                "model_usage_entries": len(model_usage) if model_usage else 0,
+            entries = getattr(usage, "model_usage", None) or []
+            roll = {
+                "llm_input_tokens": 0, "llm_input_cached_tokens": 0,
+                "llm_output_tokens": 0,
+                "tts_characters": 0, "tts_audio_duration_s": 0.0,
+                "stt_audio_duration_s": 0.0,
+                "models": 0,
             }
+            for e in entries:
+                t = getattr(e, "type", "")
+                gi = lambda k: int(getattr(e, k, 0) or 0)
+                gf = lambda k: float(getattr(e, k, 0) or 0.0)
+                if t == "llm_usage":
+                    roll["llm_input_tokens"] += gi("input_tokens")
+                    roll["llm_input_cached_tokens"] += gi("input_cached_tokens")
+                    roll["llm_output_tokens"] += gi("output_tokens")
+                elif t == "tts_usage":
+                    roll["tts_characters"] += gi("characters_count")
+                    roll["tts_audio_duration_s"] += gf("audio_duration")
+                elif t == "stt_usage":
+                    roll["stt_audio_duration_s"] += gf("audio_duration")
+                roll["models"] += 1
+            roll["tts_audio_duration_s"] = round(roll["tts_audio_duration_s"], 2)
+            roll["stt_audio_duration_s"] = round(roll["stt_audio_duration_s"], 2)
+            self._usage = roll
         except Exception as e:
-            logger.warning("LILY_METRICS | SESSION_USAGE_SKIPPED | %s", e)
+            logger.warning("LILY_METRICS | USAGE_SKIPPED | %s", e)
 
     def summary(self) -> dict:
         """The comprehensive block written into the session report metadata.
-        Only non-empty sections appear, so a voice-only or short session
+        Only non-empty sections appear, so a short/voice-only session
         doesn't pad the report with nulls."""
-        out: dict = {"metrics_events": self._total_metrics}
-        if self._llm_count:
-            out["llm"] = {
-                "calls": self._llm_count,
-                "ttft_ms_p50": _ms(_pct(self._llm_ttft, 50)),
-                "ttft_ms_p95": _ms(_pct(self._llm_ttft, 95)),
-                "tokens_per_second_avg": _avg(self._llm_tps),
-                "prompt_tokens": self._llm_prompt_tokens,
-                "prompt_cached_tokens": self._llm_cached_tokens,
-                "completion_tokens": self._llm_completion_tokens,
-                "total_tokens": self._llm_total_tokens,
-                "cancelled": self._llm_cancelled,
-            }
-        if self._stt_count:
-            out["stt"] = {
-                "calls": self._stt_count,
-                "audio_duration_s": round(self._stt_audio_duration, 2),
-                "connection_reused": self._stt_reused,
-            }
-        if self._tts_count:
-            out["tts"] = {
-                "calls": self._tts_count,
-                "ttfb_ms_p50": _ms(_pct(self._tts_ttfb, 50)),
-                "ttfb_ms_p95": _ms(_pct(self._tts_ttfb, 95)),
-                "characters": self._tts_characters,
-                "audio_duration_s": round(self._tts_audio_duration, 2),
-                "cancelled": self._tts_cancelled,
-            }
-        if self._eou_delay or self._transcription_delay or self._on_user_turn_delay:
+        out: dict = {"turns_measured": self._turns}
+        latency = {}
+        if self._llm_ttft:
+            latency["llm_ttft_ms_p50"] = _ms(_pct(self._llm_ttft, 50))
+            latency["llm_ttft_ms_p95"] = _ms(_pct(self._llm_ttft, 95))
+        if self._tts_ttfb:
+            latency["tts_ttfb_ms_p50"] = _ms(_pct(self._tts_ttfb, 50))
+            latency["tts_ttfb_ms_p95"] = _ms(_pct(self._tts_ttfb, 95))
+        if self._playback_latency:
+            latency["playback_latency_ms_p50"] = _ms(_pct(self._playback_latency, 50))
+        if self._e2e_latency:
+            latency["e2e_latency_ms_p50"] = _ms(_pct(self._e2e_latency, 50))
+            latency["e2e_latency_ms_p95"] = _ms(_pct(self._e2e_latency, 95))
+        if latency:
+            out["latency"] = latency
+        if self._transcription_delay or self._end_of_turn_delay or self._on_user_turn_delay:
             out["turn_taking"] = {
-                "end_of_utterance_delay_ms_p50": _ms(_pct(self._eou_delay, 50)),
-                "end_of_utterance_delay_ms_p95": _ms(_pct(self._eou_delay, 95)),
                 "transcription_delay_ms_p50": _ms(_pct(self._transcription_delay, 50)),
                 "transcription_delay_ms_p95": _ms(_pct(self._transcription_delay, 95)),
+                "end_of_turn_delay_ms_p50": _ms(_pct(self._end_of_turn_delay, 50)),
                 "on_user_turn_completed_delay_ms_p50": _ms(_pct(self._on_user_turn_delay, 50)),
             }
-        if self._vad_inference_count:
-            out["vad"] = {
-                "inference_count": self._vad_inference_count,
-                "inference_duration_total_s": round(self._vad_inference_duration, 3),
-                "idle_time_s": (
-                    round(self._vad_idle_time, 2)
-                    if isinstance(self._vad_idle_time, (int, float)) else None
-                ),
-            }
-        if self._session_usage is not None:
-            out["session_usage"] = self._session_usage
+        if self._usage is not None:
+            out["usage"] = self._usage
         return out
-
-
-def _ms(seconds):
-    """Framework latency fields are seconds; the report reads in ms."""
-    if seconds is None:
-        return None
-    return round(seconds * 1000, 1)

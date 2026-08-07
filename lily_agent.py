@@ -9303,18 +9303,15 @@ async def entrypoint(ctx: JobContext) -> None:
     _METRICS_CAP = 500
 
     # WO-LILY-UPGRADE-168 U3(b) + "use all the metrics she can": the 1.6.8
-    # first-class metrics surface. `metrics_collected` emits typed
-    # LLM/STT/TTS/EOU/VAD metrics per turn; `session_usage_updated` emits the
-    # token/audio rollup. Every one is folded into the session report — far
-    # richer than the legacy conversation-item latency read (kept below for
-    # the e2e_latency field the typed metrics don't carry). The turn-taking
-    # (EOU / transcription) delays double as WO-LILY-STT-001 Q2's
-    # incoming-quality signals.
+    # BLESSED metrics surface (the coupling audit confirmed `metrics_collected`
+    # is deprecated since 1.6.0 and warns on every event — so we do NOT
+    # subscribe to it). Two first-class sources: per-turn `ChatMessage.metrics`
+    # (read below off conversation_item_added) for latency + turn-taking, and
+    # `session_usage_updated` for the token/character/audio rollup. Both fold
+    # into one session-report block; the turn-taking (transcription /
+    # end-of-turn) delays double as WO-LILY-STT-001 Q2's incoming-quality
+    # signals.
     session_metrics = lily_metrics.LilyMetricsCollector()
-
-    @session.on("metrics_collected")
-    def _on_metrics_collected(ev) -> None:
-        session_metrics.collect(getattr(ev, "metrics", None))
 
     @session.on("session_usage_updated")
     def _on_session_usage(ev) -> None:
@@ -9324,12 +9321,19 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_item_added(ev) -> None:
         msg = ev.item
         role = getattr(msg, "role", None)
+        # Every item (user AND assistant) carries a MetricsReport; feed the
+        # WHOLE report so agent-turn latency and user-turn turn-taking both
+        # land — "all the metrics she can".
+        report = getattr(msg, "metrics", None)
+        session_metrics.collect_turn(report)
         if role == "assistant":
             game._last_assistant_text = _message_text(msg)
-            m = getattr(msg, "metrics", None) or {}
+            m = report or {}
             get = (lambda k: m.get(k)) if isinstance(m, dict) else (
                 lambda k: getattr(m, k, None)
             )
+            # Legacy rolling averages kept for the mid-game heartbeat's
+            # pipeline_latency line (bounded ring buffer).
             for key, field in (
                 ("llm_node_ttft", "first_token_latency_ms"),
                 ("tts_node_ttfb", "tts_first_frame_ms"),
