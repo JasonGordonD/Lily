@@ -72,6 +72,7 @@ import lily_dereverb
 import lily_evaluation
 import lily_forget
 import lily_memory
+import lily_metrics
 import lily_nbest
 import lily_persistence
 import lily_reasoning
@@ -9301,6 +9302,24 @@ async def entrypoint(ctx: JobContext) -> None:
     }
     _METRICS_CAP = 500
 
+    # WO-LILY-UPGRADE-168 U3(b) + "use all the metrics she can": the 1.6.8
+    # first-class metrics surface. `metrics_collected` emits typed
+    # LLM/STT/TTS/EOU/VAD metrics per turn; `session_usage_updated` emits the
+    # token/audio rollup. Every one is folded into the session report — far
+    # richer than the legacy conversation-item latency read (kept below for
+    # the e2e_latency field the typed metrics don't carry). The turn-taking
+    # (EOU / transcription) delays double as WO-LILY-STT-001 Q2's
+    # incoming-quality signals.
+    session_metrics = lily_metrics.LilyMetricsCollector()
+
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev) -> None:
+        session_metrics.collect(getattr(ev, "metrics", None))
+
+    @session.on("session_usage_updated")
+    def _on_session_usage(ev) -> None:
+        session_metrics.collect_session_usage(getattr(ev, "usage", None))
+
     @session.on("conversation_item_added")
     def _on_item_added(ev) -> None:
         msg = ev.item
@@ -9604,7 +9623,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     "pipeline_latency": {
                         k: (round(sum(v) / len(v), 1) if v else None)
                         for k, v in metrics_raw.items()
-                    }
+                    },
+                    # WO-LILY-UPGRADE-168: the full 1.6.8 metrics block —
+                    # tokens (incl. cached), TTS characters, STT audio
+                    # duration, and the whole latency/turn-taking family.
+                    "session_metrics": session_metrics.summary(),
                 }
                 await lily_persistence.lily_session_end(
                     supabase, scorekeeper,
@@ -9909,7 +9932,10 @@ async def entrypoint(ctx: JobContext) -> None:
             "pipeline_latency": {
                 k: (round(sum(v) / len(v), 1) if v else None)
                 for k, v in metrics_raw.items()
-            }
+            },
+            # Full 1.6.8 metrics ride the heartbeat too, so "is she lagging /
+            # burning tokens" is a live SQL query mid-game, not a post-mortem.
+            "session_metrics": session_metrics.summary(),
         }
 
     # Heartbeat checkpoint loop (60s) — carries rolling latency averages so
