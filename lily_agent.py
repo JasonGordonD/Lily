@@ -9067,6 +9067,49 @@ async def _resolve_initial_group_id(ctx: JobContext, room_name: str) -> tuple[st
     return room_name, "room_name"
 
 
+async def _lily_voice_probe_fork(track, game) -> None:
+    """Background frame sink for durable voice identity: read a participant's
+    audio track, resample to 16 kHz mono, and keep a rolling PCM probe on the
+    game for the embedder (match-at-start / enroll-at-close read it). Never
+    on the vocal path, never raises into the session — a failure just leaves
+    the probe empty and the feature stays inert. The one live-infra seam the
+    unit tests can't exercise (no live audio); the buffer/gate it feeds is
+    tested via LilyVoiceProbe."""
+    try:
+        probe = lily_voice_embedder.LilyVoiceProbe(
+            target_seconds=lily_config.voice_identity_enroll_min_speech_seconds()
+        )
+        resampler = None
+        stream = rtc.AudioStream(track)
+        async for ev in stream:
+            frame = getattr(ev, "frame", None) or ev
+            in_rate = getattr(frame, "sample_rate", lily_voice_embedder.ECAPA_SAMPLE_RATE)
+            if in_rate != lily_voice_embedder.ECAPA_SAMPLE_RATE:
+                if resampler is None:
+                    resampler = rtc.AudioResampler(
+                        input_rate=in_rate,
+                        output_rate=lily_voice_embedder.ECAPA_SAMPLE_RATE,
+                        num_channels=1,
+                    )
+                for out in resampler.push(frame):
+                    probe.add_samples(_frame_int16(out))
+            else:
+                probe.add_samples(_frame_int16(frame))
+            if probe.ready():
+                game._voice_identity_pcm = probe.pcm()
+    except Exception as e:
+        logger.warning("LILY_VOICE_ID | PROBE_FORK_ENDED | %s", e)
+
+
+def _frame_int16(frame):
+    """int16 samples from an rtc.AudioFrame's raw buffer (mono)."""
+    try:
+        import array
+        return array.array("h", bytes(frame.data))
+    except Exception:
+        return []
+
+
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     room_name = ctx.room.name or "unknown"
@@ -10022,6 +10065,15 @@ async def entrypoint(ctx: JobContext) -> None:
                         track, audeering_pipeline
                     )
                 )
+                # Voice-identity probe fork (device-independent recognition):
+                # buffer this speaker's 16 kHz PCM for the embedder. Only when
+                # the feature is ready (flag + model), and only the first mic
+                # track, so it stays inert and single otherwise.
+                if game._voice_identity_ready() and not getattr(
+                    game, "_voice_probe_forked", False
+                ):
+                    game._voice_probe_forked = True
+                    asyncio.ensure_future(_lily_voice_probe_fork(track, game))
             except Exception as e:
                 logger.warning("LILY_AUDEERING | track hook failed: %s", e)
 

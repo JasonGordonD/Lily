@@ -1,0 +1,19 @@
+# WO-LILY-VOICE-IDENTITY-001 — durable voice-identity activation deps.
+#
+# Install ON TOP of requirements.txt to ACTIVATE device-independent voice
+# recognition (the ECAPA-TDNN embedder). Kept separate because torch is a
+# heavy (~1-2GB) image cost and activation is a deliberate step:
+#
+#   1. Doc applies migrations/021_lily_voice_identity.sql (pgvector table).
+#   2. The deploy image runs `pip install -r requirements-voice-identity.txt`.
+#   3. LILY_VOICE_IDENTITY_ENABLED stays true (default); the embedder loads
+#      and enroll/match/probe go live.
+#
+# Without this file installed, lily_voice_embedder.lily_voice_embedder_available()
+# returns False and every voice-identity path no-ops — recognition stays
+# device-linked (the localStorage/cookie group_id). CPU-only torch is
+# sufficient: enrollment is post-session and the start-of-session probe is a
+# single bounded forward pass, both off the vocal path.
+
+speechbrain>=1.0.0
+torch>=2.2.0

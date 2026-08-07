@@ -11,3 +11,8 @@ httpx>=0.27.0
 aiohttp>=3.10.0
 python-dotenv>=1.2.1
 livekit-plugins-openai==1.6.8
+# NOTE: durable voice-identity deps (ECAPA-TDNN) are intentionally NOT here —
+# they live in requirements-voice-identity.txt so the heavy ~1-2GB torch
+# pull is a DELIBERATE deploy opt-in (after Doc applies migrations/021), not
+# forced into every image. The embedder lazy-loads and no-ops without them,
+# so the feature stays inert until that file is installed.

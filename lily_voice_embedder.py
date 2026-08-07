@@ -22,6 +22,7 @@ exactly as before this module existed — recognition simply stays device-
 linked. Nothing here ever raises into a session.
 """
 
+import collections
 import logging
 import threading
 from typing import Optional
@@ -32,6 +33,52 @@ logger = logging.getLogger("lily_voice_embedder")
 # returning another dim is rejected so a misconfigured image can't poison
 # the centroid pool with mismatched vectors.
 ECAPA_DIM = 192
+
+# ECAPA operates on 16 kHz mono; the track frame sink resamples to this.
+ECAPA_SAMPLE_RATE = 16000
+
+
+class LilyVoiceProbe:
+    """Bounded accumulator for a session's captured speech, fed 16 kHz mono
+    int16 samples by the track frame sink and read as normalized float PCM
+    for embedding. Rate-agnostic (assumes the sink already resampled to
+    ECAPA_SAMPLE_RATE); keeps at most `target_seconds` of the MOST RECENT
+    audio (a ring buffer) so a long session doesn't grow unbounded and the
+    probe reflects current, in-room voice.
+
+    Pure/stdlib — the livekit AudioStream iteration and resampling live in
+    the agent wiring; this is the fully-testable buffer + gate."""
+
+    def __init__(self, target_seconds: float = 8.0,
+                 sample_rate: int = ECAPA_SAMPLE_RATE):
+        self._target = max(1, int(target_seconds * sample_rate))
+        # A floor below which an embedding is too noisy to enroll/match.
+        self._floor = max(1, int(0.5 * self._target))
+        self._buf = collections.deque(maxlen=self._target)
+
+    def add_samples(self, samples) -> None:
+        """Append 16 kHz mono int16 samples (any iterable of ints)."""
+        if samples is None:
+            return
+        try:
+            for s in samples:
+                self._buf.append(int(s))
+        except TypeError:
+            return
+
+    def __len__(self) -> int:
+        return len(self._buf)
+
+    def ready(self) -> bool:
+        """Enough speech accrued for a usable embedding."""
+        return len(self._buf) >= self._floor
+
+    def pcm(self) -> Optional[list]:
+        """Normalized float PCM in [-1, 1], or None below the floor. int16
+        is scaled by 1/32768."""
+        if len(self._buf) < self._floor:
+            return None
+        return [s / 32768.0 for s in self._buf]
 
 _model = None
 _load_attempted = False
