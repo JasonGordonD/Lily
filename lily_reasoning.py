@@ -74,6 +74,66 @@ REASONING_THINKING_LEVEL = "high"  # spec §4.4: thinking_level, never thinking_
 JUDGE_THINKING_LEVEL = "high"
 PREFETCH_TIMEOUT_SECONDS = 30.0
 
+# xAI multi-agent transport (Engineering Note 2026-08-07): the
+# grok-*-multi-agent tier rejects the Chat Completions endpoint (HTTP 400
+# "Multi Agent requests are not allowed on chat completions") and speaks the
+# Responses API only, where it also does not accept `response_format`, so
+# the JSON contract is prompt-enforced. Beta model — interface may change.
+_MULTI_AGENT_JSON_DIRECTIVE = (
+    "\n\nRespond with ONLY a single valid JSON object and nothing else — no "
+    "prose, no explanation, no markdown code fences."
+)
+
+
+def _lily_is_multi_agent_model(model) -> bool:
+    """True for xAI's multi-agent tier ids (e.g. grok-4.20-multi-agent),
+    which must use the Responses API instead of Chat Completions."""
+    m = str(model or "").lower()
+    return "multi-agent" in m or "multi_agent" in m
+
+
+def _lily_strip_json_fences(text: str) -> str:
+    """Strip a leading/trailing markdown code fence if the model wrapped its
+    JSON (the multi-agent path has no response_format to guarantee raw JSON)."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[1] if "\n" in t else t[3:]
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+    return t.strip()
+
+
+def _lily_extract_chat_text(data) -> str:
+    """Chat Completions: choices[0].message.content."""
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(f"xAI adult generation malformed response: {e}")
+
+
+def _lily_extract_responses_text(data) -> str:
+    """Responses API: the leader agent's message text. Prefer the SDK-style
+    `output_text` convenience if present; otherwise walk `output[]` for
+    message items and concatenate their output_text parts (reasoning/tool
+    items are skipped). Fences stripped so the caller's json.loads sees raw
+    JSON."""
+    if isinstance(data, dict):
+        direct = data.get("output_text")
+        if isinstance(direct, str) and direct.strip():
+            return _lily_strip_json_fences(direct)
+        parts = []
+        for item in (data.get("output") or []):
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            for chunk in (item.get("content") or []):
+                if isinstance(chunk, dict) and chunk.get("type") in (
+                    "output_text", "text"
+                ):
+                    parts.append(chunk.get("text") or "")
+        if parts:
+            return _lily_strip_json_fences("".join(parts))
+    raise RuntimeError("xAI adult generation malformed Responses payload")
+
 # Adult-product context (§11.1): explicit safety settings on every call —
 # an unconfigured node goes mute mid-innuendo-round with zero diagnostics.
 _SAFETY_SETTINGS = [
@@ -435,22 +495,46 @@ class LilyReasoning:
             raise RuntimeError(
                 "XAI_API_KEY missing — adult-deck generation unavailable"
             )
-        messages = []
-        if system_instruction:
-            messages.append({"role": "system", "content": system_instruction})
-        messages.append({"role": "user", "content": prompt})
-        body = {
-            "model": lily_config.adult_reasoning_model(),
-            "messages": messages,
-            "response_format": {"type": "json_object"},
-            "max_tokens": max_tokens,
-        }
+        model = lily_config.adult_reasoning_model()
         effort = lily_config.adult_reasoning_effort()
-        if effort:
-            body["reasoning_effort"] = effort
+        # xAI's multi-agent tier (grok-*-multi-agent) does NOT support the
+        # Chat Completions endpoint (HTTP 400 "Multi Agent requests are not
+        # allowed on chat completions") and rejects `max_tokens`; it speaks
+        # the Responses API only. Route by model id so a slot-secret swap to
+        # the heavy tier works instead of 400ing. Everything else keeps the
+        # chat-completions path (grok-4.2 / grok-4.5 base tiers).
+        if _lily_is_multi_agent_model(model):
+            endpoint = "https://api.x.ai/v1/responses"
+            # System instruction rides `input` as a system-role turn; the
+            # multi-agent model has no response_format, so the JSON contract
+            # is prompt-enforced (fences stripped on the way out).
+            supply = []
+            if system_instruction:
+                supply.append({"role": "system", "content": system_instruction})
+            supply.append({
+                "role": "user",
+                "content": prompt + _MULTI_AGENT_JSON_DIRECTIVE,
+            })
+            body = {"model": model, "input": supply}
+            if effort:
+                body["reasoning"] = {"effort": effort}
+        else:
+            endpoint = "https://api.x.ai/v1/chat/completions"
+            messages = []
+            if system_instruction:
+                messages.append({"role": "system", "content": system_instruction})
+            messages.append({"role": "user", "content": prompt})
+            body = {
+                "model": model,
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+                "max_tokens": max_tokens,
+            }
+            if effort:
+                body["reasoning_effort"] = effort
         async with aiohttp.ClientSession() as http:
             async with http.post(
-                "https://api.x.ai/v1/chat/completions",
+                endpoint,
                 json=body,
                 headers={"Authorization": f"Bearer {key}"},
                 timeout=aiohttp.ClientTimeout(total=PREFETCH_TIMEOUT_SECONDS),
@@ -461,18 +545,19 @@ class LilyReasoning:
                         f"xAI adult generation {resp.status}: {err[:300]}"
                     )
                 data = await resp.json()
-        try:
-            text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as e:
-            raise RuntimeError(f"xAI adult generation malformed response: {e}")
+        text = (
+            _lily_extract_responses_text(data)
+            if _lily_is_multi_agent_model(model)
+            else _lily_extract_chat_text(data)
+        )
         if not (text or "").strip():
-            raise RuntimeError(
-                f"empty candidate from {lily_config.adult_reasoning_model()}"
-            )
+            raise RuntimeError(f"empty candidate from {model}")
         logger.info(
             "LILY_REASONING | ADULT_GROK_GENERATION | model=%s effort=%s "
-            "chars=%d",
-            lily_config.adult_reasoning_model(), effort or "-", len(text),
+            "transport=%s chars=%d",
+            model, effort or "-",
+            "responses" if _lily_is_multi_agent_model(model) else "chat",
+            len(text),
         )
         return text
 
