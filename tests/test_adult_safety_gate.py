@@ -48,6 +48,11 @@ class _FakeGame:
         self.publish_nowait_calls = 0
         self.said: list[dict] = []
         self.flush_calls: list[str] = []
+        # HOTFIX-004 Defect 1: these tests exercise the gate's OTHER
+        # conditions (sensor readiness, child veto, persistence). A real
+        # spoken 18+ consent is assumed heard — the deterministic floor
+        # itself is covered in test_hotfix004.py.
+        self._age_consent_confirmed = True
 
     def flush_for_mode_switch(self, source: str) -> None:
         self.flush_calls.append(source)

@@ -621,6 +621,11 @@ class LilyGame:
         # Its own slot so it can coexist with a state-contradiction note on
         # the same turn; cleared per-turn like _state_note.
         self._returner_honesty_note: str | None = None
+        # HOTFIX-004 Defect 1: deterministic 18+ consent floor. Set only by
+        # the age-consent detector on a real user final; the adult-mode gate
+        # requires it IN ADDITION to the model's confirmed_all_18_plus flag,
+        # so a question ("Should I verify?") can never unlock the deck.
+        self._age_consent_confirmed: bool = False
         self._group_facts_written: set = set()  # per-session fact dedupe
 
         # Persistent cross-session memory (rematch): the [RETURNING TABLE]
@@ -3425,6 +3430,14 @@ class LilyGame:
             )
         self._armed_speech_misses = 0
         self._undelivered_ticks = 0
+        # HOTFIX-004 Defect 2: in the adult deck, a STOP means "that content
+        # is not okay" — so the objected-to material must never re-air. Burn
+        # the armed AND queued questions (adding them to the dead set), the
+        # exact gap behind "a queued adult question re-aired after an apology
+        # and commitment not to." General-deck STOP is a pause, not a
+        # content objection, so it leaves the queue intact.
+        if self.sk.mode == "adult":
+            self._burn_pending_adult_questions(reason="stop_in_adult")
         # 3. Interrupt the live session speech if the framework holds one.
         session = getattr(self, "session", None)
         interrupt = getattr(session, "interrupt", None)
@@ -4898,6 +4911,21 @@ class LilyGame:
             self.release_question_pending(reason="user_answered")
 
         self.request_device_verification("final_transcript")
+
+        # HOTFIX-004 Defect 1: latch an explicit spoken 18+ consent. Once a
+        # real affirmative is heard it stays latched for the session (a
+        # table doesn't un-consent by chatting on); the adult-mode gate
+        # reads this deterministic floor, so "Should I verify?" — a question,
+        # not consent — can never unlock the deck even if the model sets its
+        # flag.
+        if not getattr(
+            self, "_age_consent_confirmed", False
+        ) and lily_scorekeeper.lily_detect_age_consent(text):
+            self._age_consent_confirmed = True
+            logger.info(
+                "LILY_ADULT_GATE | AGE_CONSENT_DETECTED | session=%s text=%r",
+                self.sk.session_id, str(text)[:80],
+            )
 
         # Durable voice-identity probe — one attempt per session, fired once a
         # real utterance exists (audio to embed). Inert unless the embedder +
@@ -7318,6 +7346,35 @@ class LilyGame:
         )
         return ids, hashes
 
+    def _burn_pending_adult_questions(self, reason: str) -> bool:
+        """HOTFIX-004 Defect 2: burn the armed + queued questions so
+        objected-to adult material can never re-air. Adds each to the dead
+        set (id + text hash) via _burn_question, closes any open window, and
+        clears the slots — the same one-way retirement on_answer_leak uses.
+        Returns True if anything was burned."""
+        burned = False
+        if self.armed_question is not None:
+            self._burn_question(self.armed_question, reason=reason)
+            timer = getattr(self, "_window_timer", None)
+            if timer is not None and not timer.done():
+                timer.cancel()
+            self.sk.close_answer_window()
+            self.armed_question = None
+            self.sk.current_question = None
+            burned = True
+        if self.next_question is not None:
+            self._burn_question(self.next_question, reason=reason)
+            self.next_question = None
+            burned = True
+        if burned:
+            logger.warning(
+                "LILY_ADULT_GATE | PENDING_BURNED | session=%s reason=%s — "
+                "objected-to adult question retired, cannot re-air",
+                self.sk.session_id, reason,
+            )
+            self.publish_attributes_nowait()
+        return burned
+
     def on_answer_leak(self) -> None:
         """Leak-filter hit while a question is armed/prefetched: its
         answer may have gone out on air, so the question is dead. Burn
@@ -7856,18 +7913,28 @@ class LilyAgent(Agent):
                 "not retry this tool tonight."
             )
         architect = lily_config.architect_mode()
-        if not architect and not confirmed_all_18_plus:
+        # HOTFIX-004 Defect 1: the model's flag is NOT sufficient on its own
+        # — the live failure entered on "Should I verify?" because the model
+        # set confirmed_all_18_plus=true for a question. Entry now also
+        # requires a DETERMINISTIC explicit-consent utterance actually heard
+        # this session (lily_detect_age_consent, latched in on_transcript_event).
+        # Both must hold; architect (deployment-authenticated) still overrides.
+        age_consent_heard = getattr(self._game, "_age_consent_confirmed", False)
+        if not architect and not (confirmed_all_18_plus and age_consent_heard):
             logger.warning(
                 "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
-                "reason=age_confirmation_required | session=%s",
+                "reason=age_confirmation_required | model_flag=%s "
+                "consent_heard=%s | session=%s",
+                confirmed_all_18_plus, age_consent_heard,
                 self._game.sk.session_id,
             )
             return (
                 "Adult mode is NOT enabled yet. Ask every player directly: "
-                "'Please confirm that you are 18 or older and want the "
-                "grown-up deck.' Call this tool again with "
-                "confirmed_all_18_plus=true only after every player gives "
-                "an explicit verbal yes."
+                "'Please confirm out loud that you are 18 or older and want "
+                "the grown-up deck.' Wait for an explicit spoken YES from the "
+                "table — a question like 'should I verify?' is NOT consent. "
+                "Call this tool again with confirmed_all_18_plus=true only "
+                "after every player gives an explicit verbal yes."
             )
         if architect:
             logger.warning(

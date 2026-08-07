@@ -385,6 +385,55 @@ def lily_detect_stop(text: str, *, solo: bool = False) -> bool:
     return bool(solo and _STOP_CORE_RE.search(normalized))
 
 
+# ---------------------------------------------------------------------------
+# Age-consent detector (WO-LILY-HOTFIX-004 Defect 1) — the 18+ ceremony's
+# DETERMINISTIC floor. The adult-mode tool trusted the model's boolean and
+# entered on "Should I verify?" (a question, not consent). This is the
+# affirmative the tool now also requires: an explicit spoken YES tied to an
+# age/adult anchor. Questions ("should I verify?", "are we all 18?"),
+# verification talk, and negations ("under 18", "not all 18") never fire.
+# ---------------------------------------------------------------------------
+
+# Reject: interrogatives, verification talk, and negations — none is consent.
+_AGE_CONSENT_NEGATION_RE = _re.compile(
+    r"\b(?:"
+    r"should (?:i|we|you)"          # "should I verify"
+    r"|do (?:you|we|i) (?:need|want|have|got)"  # "do you need to verify"
+    r"|how (?:do|should|can|would) (?:we|i|you)"
+    r"|need(?:s)? to verify|verify|verif|checking|check (?:their|our|your) age"
+    r"|are (?:we|you|they)(?: all)?"  # "are we all 18" (a question)
+    r"|is everyone|is everybody"
+    r"|not (?:all )?(?:18|eighteen|adults?|of age|over)"
+    r"|under (?:18|eighteen|age)"
+    r"|isn t|aren t|we re not|not sure|don t know"
+    r")\b"
+)
+
+# Accept: an affirmation anchored to an age/adult token, or a plain
+# declarative "(we're / everyone's / all of us) 18 / adults / over 18".
+_AGE_CONSENT_RE = _re.compile(
+    r"\b(?:"
+    r"(?:yes|yeah|yep|yup|yup|confirmed|confirm|correct|absolutely|"
+    r"definitely|for sure|we do|i do)\b[a-z0-9 ]*?\b"
+    r"(?:18|eighteen|adults?|older|of age|grown|over 18|legal)"
+    r"|(?:we re|we are|i m|i am|everyone s|everybody s|all of us(?: are)?)\s+"
+    r"(?:all\s+)?(?:18|eighteen|adults?|over 18|of age|grown|legal)"
+    r"|all (?:of us )?(?:are )?(?:18|eighteen|adults|over 18)"
+    r"|(?:18|eighteen) (?:plus|or older|or over|and older|and up)"
+    r")\b"
+)
+
+
+def lily_detect_age_consent(text: str) -> bool:
+    """True only for an explicit, affirmative 18+ consent utterance. The
+    deterministic floor the adult-mode gate requires IN ADDITION to the
+    model's flag — a question or verification prompt can never satisfy it."""
+    normalized = _normalize_command_text(text)
+    if not normalized or _AGE_CONSENT_NEGATION_RE.search(normalized):
+        return False
+    return bool(_AGE_CONSENT_RE.search(normalized))
+
+
 def lily_detect_control_command(text: str) -> Optional[str]:
     """
     Detect a sticky player command in an utterance.
