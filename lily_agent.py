@@ -10349,11 +10349,20 @@ async def entrypoint(ctx: JobContext) -> None:
                     == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
                 ):
                     return
-                # VIDEOIN-001: a published camera track feeds the sparse
-                # frame sink — it only holds a frame while the lane is open
-                # (user-initiated), so a track that appears is harmless until
-                # the player opens the lane. One sink per camera track.
+                # VIDEOIN-001: a published camera track IS an explicit
+                # user-initiated open (the UI-control path; the spoken
+                # "look at this" path opens the lane before the track lands).
+                # Open the lane only when AVAILABLE — in the adult deck it
+                # stays refused and the frame fork drops every frame. One sink
+                # per camera track.
                 if getattr(track, "kind", None) == rtc.TrackKind.KIND_VIDEO:
+                    if game.camera_lane_status()["available"]:
+                        game.sk.set_camera_lane("open")
+                    else:
+                        logger.info(
+                            "LILY_CAMERA | TRACK_IGNORED | session=%s "
+                            "reason=unavailable_adult", game.sk.session_id,
+                        )
                     if not getattr(game, "_camera_fork_started", False):
                         game._camera_fork_started = True
                         asyncio.ensure_future(_lily_camera_frame_fork(track, game))
