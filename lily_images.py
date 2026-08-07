@@ -316,3 +316,125 @@ async def lily_record_image_attempt(
             "LILY_IMAGE_ATTEMPT | ROW_INSERT_FAILED | status=%s error_class=%s error=%s",
             status, type(e).__name__, e,
         )
+
+
+# ---------------------------------------------------------------------------
+# Arsenal storage (WO-LILY-ARSENAL-SEED-001)
+#
+# The standing picture arsenal keeps its images in its OWN bucket, and that
+# bucket is PRIVATE. This is not tidiness — the arsenal holds adult_explicit
+# entries, and a public content-addressed URL is guessable-by-nobody but
+# unprotected-by-anything: once the path leaks it is served to the world,
+# forever, with no session and no adult gate in front of it. So arsenal rows
+# store a PATH, not a URL, and the path is resolved to a short-lived signed
+# URL at serve time — inside a session that has already cleared the gate.
+# ---------------------------------------------------------------------------
+
+LILY_ARSENAL_BUCKET = "lily-arsenal"
+
+# Signed-URL lifetime for a served arsenal image. Long enough to cover a
+# question being posed, answered and revealed at a slow table; short enough
+# that a leaked link is worthless by the time it travels.
+ARSENAL_SIGNED_URL_TTL_SECONDS = 3600
+
+
+async def lily_upload_arsenal_image(
+    supabase,
+    data: bytes,
+    *,
+    partition: str,
+    content_type: str = "image/jpeg",
+) -> Optional[str]:
+    """Upload arsenal image bytes to the PRIVATE `lily-arsenal` bucket and
+    return the storage PATH (never a public URL — the bucket is private).
+    None on any failure, logged, never raises.
+
+    Partition-prefixed and content-addressed: {partition}/{sha1}.{ext}. The
+    content address means a regenerated identical image is a free dedup hit
+    instead of a second stored copy, and the partition prefix means a
+    bucket listing is readable by register."""
+    if supabase is None:
+        logger.warning("LILY_ARSENAL_IMG | UPLOAD_SKIPPED | reason=no_supabase_client")
+        return None
+    if not data:
+        logger.warning("LILY_ARSENAL_IMG | UPLOAD_SKIPPED | reason=empty_bytes")
+        return None
+    if len(data) > MAX_IMAGE_BYTES:
+        logger.warning(
+            "LILY_ARSENAL_IMG | UPLOAD_SKIPPED | reason=too_large bytes=%d cap=%d",
+            len(data), MAX_IMAGE_BYTES,
+        )
+        return None
+    ext = lily_image_ext(content_type) or "jpg"
+    path = f"{partition}/{hashlib.sha1(data).hexdigest()}.{ext}"
+    try:
+        storage = supabase.storage.from_(LILY_ARSENAL_BUCKET)
+        try:
+            await asyncio.to_thread(
+                lambda: storage.upload(
+                    path, data,
+                    {"content-type": content_type, "upsert": "true"},
+                )
+            )
+        except Exception as e:
+            # Content-addressed path: an already-exists conflict IS a cache
+            # hit — the exact bytes are already in the bucket.
+            if "exist" not in str(e).lower() and "duplicate" not in str(e).lower():
+                raise
+            logger.info(
+                "LILY_ARSENAL_IMG | UPLOAD_DEDUP | path=%s already stored", path
+            )
+        logger.info(
+            "LILY_ARSENAL_IMG | UPLOADED | path=%s bytes=%d", path, len(data)
+        )
+        return path
+    except Exception as e:
+        logger.error(
+            "LILY_ARSENAL_IMG | UPLOAD_FAILED | path=%s error_class=%s error=%s",
+            path, type(e).__name__, e,
+        )
+        return None
+
+
+async def lily_arsenal_image_url(
+    supabase,
+    path: Optional[str],
+    *,
+    ttl_seconds: int = ARSENAL_SIGNED_URL_TTL_SECONDS,
+) -> Optional[str]:
+    """Resolve a stored arsenal path to a short-lived signed URL for one
+    serve. None on any failure — the caller degrades to the truthful
+    pictureless line rather than showing a broken frame.
+
+    Called on the DELIVERY path, so it does exactly one storage call and no
+    generation: signing is cheap, and it is the only thing standing between
+    a private bucket and a screen."""
+    if supabase is None or not path:
+        return None
+    # Already a full URL (legacy rows banked before the private bucket, or a
+    # web-sourced real photograph living in the public images bucket).
+    if str(path).startswith("http://") or str(path).startswith("https://"):
+        return str(path)
+    try:
+        signed = await asyncio.to_thread(
+            lambda: supabase.storage.from_(LILY_ARSENAL_BUCKET)
+            .create_signed_url(path, ttl_seconds)
+        )
+        url = ""
+        if isinstance(signed, dict):
+            url = signed.get("signedURL") or signed.get("signedUrl") or ""
+        else:
+            url = str(signed or "")
+        url = str(url).strip()
+        if not url:
+            logger.warning(
+                "LILY_ARSENAL_IMG | SIGN_FAILED | reason=empty_url path=%s", path
+            )
+            return None
+        return url
+    except Exception as e:
+        logger.warning(
+            "LILY_ARSENAL_IMG | SIGN_FAILED | path=%s error_class=%s error=%s",
+            path, type(e).__name__, e,
+        )
+        return None

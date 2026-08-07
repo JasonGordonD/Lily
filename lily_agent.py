@@ -7367,8 +7367,27 @@ class LilyGame:
                 exclude_answers=excl,
             )
             if q is not None:
+                # The arsenal bucket is PRIVATE (adult_explicit entries live
+                # in it), so the row carries a storage path, not a URL. Sign
+                # it for this serve. A signing failure degrades to the
+                # truthful pictureless line rather than a broken frame.
+                signed = await lily_images.lily_arsenal_image_url(
+                    self.supabase, q.get("image_storage_path")
+                )
+                if signed:
+                    q["image_url"] = signed
                 self._kick_arsenal_replenish(partition, supply_mode, intensity)
                 return q
+        # Every candidate partition came up empty. This is the exact moment
+        # the 2026-08-07 session hit — a player asking for picture trivia
+        # against a shelf with nothing on it — and it must never again pass
+        # in silence. WARN here, then fall to the next supply rung.
+        logger.warning(
+            "ARSENAL_LOW | partitions=%s group=%s — no ready entry for this "
+            "group; falling through to live generation. Seed the bank: "
+            "python3 -m lily_arsenal_seed --partition all",
+            ",".join(partitions), group_id,
+        )
         return None
 
     def _kick_arsenal_replenish(
@@ -7390,7 +7409,19 @@ class LilyGame:
                 ready = await lily_arsenal.lily_arsenal_ready_count(
                     self.supabase, partition=partition
                 )
-                if not lily_arsenal.lily_should_replenish(served, ready):
+                # Availability to THIS group is the number that actually
+                # runs out at a table: entries stay 'ready' after a serve
+                # because they are still new to every other group, so the
+                # global count alone would read full while this table
+                # exhausted what it had not already seen.
+                available = await lily_arsenal.lily_arsenal_available_to_group(
+                    self.supabase, partition=partition,
+                    group_id=getattr(self, "group_id", "") or "",
+                )
+                if not lily_arsenal.lily_should_replenish(
+                    served, ready, partition=partition,
+                    available_to_group=available,
+                ):
                     return
                 await lily_arsenal.lily_arsenal_replenish(
                     self.supabase,
@@ -7412,36 +7443,55 @@ class LilyGame:
 
     def _arsenal_generate_one(self, supply_mode: str, intensity: str):
         """Build the generate_one callable the replenisher pumps: one
-        fresh picture pair per call via the reasoning node's picture
-        builder (the SAME generator the live prefetch rung uses), or None
-        when generation is unavailable so the replenisher stops cleanly.
-        Each partition banks at its OWN fixed heat — adult_explicit rows
-        are explicit, adult_suggestive rows are suggestive — so a 'mix'
-        session draws true-to-partition pairs from either pool."""
+        fresh picture pair per call, or None when generation is
+        unavailable so the replenisher stops cleanly. Each partition banks
+        at its OWN fixed heat — adult_explicit rows are explicit,
+        adult_suggestive rows are suggestive — so a 'mix' session draws
+        true-to-partition pairs from either pool.
+
+        WO-LILY-ARSENAL-SEED-001: this used to pump
+        prefetch_picture_question(kind='real_or_imagined'), and that could
+        never have filled the bank. Every real-or-imagined question carries
+        the SAME spoken stem ('Eyes on the screen. One photograph, one
+        question — is it real, or imagined?'), so every generated pair
+        hashed to the same question_text_hash and lily_arsenal_insert's
+        dedup rejected all but the FIRST row in each partition. The shelf
+        was not merely unstocked; the code that was supposed to stock it
+        was capped at one entry per partition. It now runs the same
+        format-and-subject-aware pipeline the seeding job runs, so in-
+        session replenishment produces varied shapes and actually
+        accumulates."""
 
         async def _one(partition: str) -> dict | None:
-            # 'real_or_imagined' is the only fully generated picture kind
-            # (real_entity is web-sourced, not bankable as a standing
-            # generated pair). Arsenal rows are generated pairs.
-            try:
-                idx = int(time.time() * 1000) % 100000
-            except Exception:
-                idx = 0
             part_intensity = self._ARSENAL_PARTITION_INTENSITY.get(
                 partition, intensity
             )
-            q = await self.reasoning.prefetch_picture_question(
-                self.supabase,
-                kind="real_or_imagined",
-                question_index=idx,
-                session_id=self.sk.session_id,
-                mode=supply_mode,
-                intensity=part_intensity,
-            )
-            if q is None or not q.get("image_url"):
+            try:
+                # Generation lives on the REASONING node — the vocal path
+                # never touches the image stack (hard guardrail, enforced by
+                # inspection in tests/test_web_guardrails.py). This seam,
+                # lily_agent -> lily_reasoning, is the only legal route.
+                depth = await lily_arsenal.lily_arsenal_bank_depth(
+                    self.supabase, partition=partition
+                )
+                entry = await self.reasoning.generate_arsenal_entry(
+                    self.supabase,
+                    partition=partition,
+                    start_index=depth["depth"],
+                )
+            except Exception as e:
+                logger.warning(
+                    "LILY_ARSENAL | REPLENISH_ONE_FAILED | partition=%s: %s",
+                    partition, e,
+                )
                 return None
-            q["_arsenal_intensity"] = part_intensity
-            return q
+            if entry is None:
+                # None stops the replenish loop — correct for an
+                # unavailable provider, and cheap for a one-off rejection
+                # (the next watermark crossing tries again).
+                return None
+            entry["_arsenal_intensity"] = part_intensity
+            return entry
 
         return _one
 

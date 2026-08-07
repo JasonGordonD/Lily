@@ -1051,3 +1051,122 @@ def dereverb_node_mode() -> str:
     sign-off. Unknown values resolve to "off"."""
     raw = (_get("LILY_DEREVERB_NODE") or "off").strip().lower()
     return raw if raw in ("off", "wpe", "aic") else "off"
+
+
+# ---------------------------------------------------------------------------
+# Standing picture arsenal (WO-LILY-ARSENAL-SEED-001)
+#
+# Depth is CONFIGURATION, never a redeploy. The bank is a standing spend
+# against the xAI account rather than a per-game cost, so the operator sets
+# how deep it runs with the cost figure in front of him — and changes it
+# from the environment when a game night calls for more.
+# ---------------------------------------------------------------------------
+
+def arsenal_target_depth(partition: Optional[str] = None) -> int:
+    """Ready entries the bank holds per partition.
+
+    Default 10 — the earlier standing ruling. The operator has since
+    floated 5; either is one env var away, which is the whole point of
+    this being a knob. A per-partition override wins over the global one,
+    so `general` can run deep (it plays at every table) while an expensive
+    or moderation-heavy adult partition runs shallower:
+
+      LILY_ARSENAL_TARGET_DEPTH=10
+      LILY_ARSENAL_TARGET_DEPTH_ADULT_EXPLICIT=5
+
+    Floors at 1: a zero-depth arsenal is just the empty shelf again."""
+    if partition:
+        specific = _get_int(
+            f"LILY_ARSENAL_TARGET_DEPTH_{partition.strip().upper()}", -1
+        )
+        if specific > 0:
+            return specific
+    return max(1, _get_int("LILY_ARSENAL_TARGET_DEPTH", 10))
+
+
+def arsenal_replenish_ratio() -> float:
+    """Fraction of a partition's target that must be CONSUMED before
+    background replenishment fires — 0.40 (40%) per the work order,
+    tracked per partition independently.
+
+    At depth 10 that is the 4th entry served; at depth 5, the 2nd. Stating
+    it as a ratio rather than a count is what keeps the watermark correct
+    when the operator changes depth: a hardcoded "fire at 4" silently
+    becomes "fire after the bank is already 80% gone" at depth 5.
+    Clamped to (0, 1] — 0 or negative would fire the refill forever."""
+    raw = _get_float("LILY_ARSENAL_REPLENISH_RATIO", 0.40)
+    if raw <= 0.0 or raw > 1.0:
+        return 0.40
+    return raw
+
+
+def arsenal_gate_mode(partition: Optional[str] = None) -> str:
+    """Quality gate for entries landing in a partition: 'auto' or 'review'.
+
+    'auto'   — the outbound classifier plus the automated checks promote
+               an entry from 'generating' to 'ready'.
+    'review' — nothing serves until the operator passes it. Entries sit at
+               'generating' and the draw cannot see them.
+
+    ADULT PARTITIONS DEFAULT TO 'review'. The first batch sets the bar for
+    the whole bank, and a bad explicit image reaching a table is expensive
+    in a way a bad picture of a lighthouse is not. `general` defaults to
+    'auto'. Override per partition without a deploy:
+
+      LILY_ARSENAL_GATE_MODE_ADULT_EXPLICIT=auto
+      LILY_ARSENAL_GATE_MODE=review          # everything, including general
+    """
+    if partition:
+        specific = (
+            _get(f"LILY_ARSENAL_GATE_MODE_{partition.strip().upper()}") or ""
+        ).strip().lower()
+        if specific in ("auto", "review"):
+            return specific
+    blanket = (_get("LILY_ARSENAL_GATE_MODE") or "").strip().lower()
+    if blanket in ("auto", "review"):
+        return blanket
+    return "auto" if (partition or "general") == "general" else "review"
+
+
+def arsenal_image_cost_usd() -> float:
+    """Billed cost of ONE generated arsenal image, in USD, used to price a
+    seeding run before the operator commits to a depth (A10).
+
+    This is a PRICE SHEET value, not a measurement — the provider does not
+    return per-image cost on the images endpoint, so the run summary
+    multiplies attempts by this. Keep it in step with the xAI price sheet:
+
+      LILY_ARSENAL_IMAGE_COST_USD=0.02
+
+    A rejected generation still bills, so the run's cost counts ATTEMPTS,
+    not banked entries."""
+    return max(0.0, _get_float("LILY_ARSENAL_IMAGE_COST_USD", 0.02))
+
+
+def arsenal_moderation_retries() -> int:
+    """How many times a moderation-rejected prompt is REWORKED and retried
+    before the seeding job skips that slot and moves on (A9).
+
+    Provider moderation refusing an explicit prompt is an EXPECTED outcome
+    at seeding time, not an error — on record:
+    `xAI image HTTP 400: Generated image rejected by content moderation`.
+    Bounded because an unbounded retry against a prompt the provider will
+    never paint just burns the account. 0 disables reworking entirely."""
+    return max(0, _get_int("LILY_ARSENAL_MODERATION_RETRIES", 2))
+
+
+def arsenal_real_images_enabled() -> bool:
+    """Whether the 'real or imagined' format may be seeded.
+
+    That format needs BOTH halves in the bank — a real photograph and a
+    generated one — and the real half is web-sourced through Exa, not
+    generated. With no Exa key the format cannot be honestly built, so it
+    is excluded from the seeding plan rather than half-built. Defaults on
+    only when a key exists; force it off with
+    LILY_ARSENAL_REAL_IMAGES=0."""
+    raw = (_get("LILY_ARSENAL_REAL_IMAGES") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return bool(exa_api_key())

@@ -275,12 +275,27 @@ def test_replenish_fills_toward_target():
     sb = _FakeSupabase()
     sb.seed_ready("general", 6)  # 6 ready, target 10 -> shortfall 4
     made = {"n": 0}
+    # WO-LILY-ARSENAL-SEED-001 A5: the insert now runs a SIMILARITY check,
+    # not just an exact-hash one, so the old fixture's questions ("fresh
+    # general 1", "fresh general 2", ...) are correctly rejected as
+    # near-duplicates of each other — they differ by one character. A bank
+    # of ten cannot afford two questions that rhyme. Distinct subjects here
+    # so this test measures what it means to measure: the replenisher fills
+    # the shortfall and stops at target.
+    subjects = [
+        ("what breed of dog is shown here", "a beagle"),
+        ("which planet is this", "saturn"),
+        ("name the instrument in this picture", "a cello"),
+        ("what sport is being played", "cricket"),
+        ("which fruit is this", "a pomegranate"),
+    ]
 
     async def gen_one(partition):
+        prompt, answer = subjects[made["n"] % len(subjects)]
         made["n"] += 1
         return {
-            "prompt": f"fresh {partition} {made['n']}",
-            "canonical_answer": f"a{made['n']}",
+            "prompt": prompt,
+            "canonical_answer": answer,
             "image_storage_path": f"lily-arsenal/fresh_{made['n']}.png",
         }
 

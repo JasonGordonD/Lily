@@ -5,6 +5,92 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-07 — WO-LILY-ARSENAL-SEED-001: stock the picture bank
+
+`lily_picture_arsenal` had the applied schema, the private `lily-arsenal`
+bucket existed, and every partition was empty — zero rows, zero usage. The
+supply logic was specified in PATCH-003 P2 and the shelf was built; nothing
+was ever put on it. An empty arsenal degrades *silently* to live
+generation, which is exactly the dead air it exists to prevent: the
+operator hit **67 seconds of silence on 2026-08-07** waiting for a picture
+question.
+
+**Root cause found during the work — the shelf could not have been stocked.**
+The in-session replenisher pumped
+`prefetch_picture_question(kind='real_or_imagined')`, and every
+real-or-imagined question carries the *same* spoken stem ("Eyes on the
+screen. One photograph, one question — is it real, or imagined?"). Every
+generated pair therefore hashed to the same `question_text_hash`, and
+`lily_arsenal_insert`'s dedup rejected all but the **first row per
+partition**. The bank was not merely unstocked; the code meant to stock it
+was structurally capped at one entry per partition, forever.
+
+**A1 — entry anatomy.** Migration `022_lily_picture_arsenal_entry.sql`
+completes the row: `format`, `options`, `is_real_image`, `image_source`,
+`binding_direction`, `subject_area`, `difficulty_tier`, `reveal_color`,
+classifier/gate/review columns, cost and attempt counters, `run_id`.
+`difficulty_tier` and `reveal_color` were already *read* by
+`_row_to_question` against columns that did not exist — silently defaulting
+on every row. `binding_direction` (image-first vs question-first) is
+recorded per entry because correspondence failures cluster by direction.
+
+**A2/A3 — content design** (`lily_arsenal_formats.py`,
+`lily_arsenal_content.py`). Six formats, five in scope, 15 authored
+exemplars across three partitions; 18 subject areas per partition, weighted
+difficulty spreads, and a deterministic spread planner
+(`lily_plan_entries`) that continues rather than restarts on a top-up run.
+`odd_one_out` is out of scope — single-shot models do not reliably produce
+a legible multi-panel grid with exactly one rule-breaker, and the failure is
+*silent*. `real_or_imagined` is excluded from the adult partitions because
+`LILY_ADULT_IMAGE_STYLE` pins them to comic-book illustration, which gives
+away the answer to "is this a real photograph?".
+
+**A4 — generation** (`lily_arsenal_gen.py`). Every image goes through
+`lily_imagegen.lily_generate_image_bytes` at the same mode and intensity
+live generation uses — the arsenal gets no looser route to a provider. The
+outbound classifier is **register-aware**: the existing web-image gate is
+hardcoded family-friendly and would have refused every adult entry, leaving
+those partitions permanently empty in a new costume. The structural floor
+(no minors, nothing non-consensual, nothing outside legal hard limits) is
+hardcoded into every register at every heat, and the gate fails closed.
+
+**A5 — dedup and the quality gate.** Exact hash plus a similarity pass
+(ratio 0.82) against both the arsenal and `lily_questions`. Entries land
+`generating` and are **promoted**; adult partitions default to operator
+review.
+
+**A6/A9 — the seeding job** (`lily_arsenal_seed.py`). Standalone,
+operator-runnable, idempotent (sized off ready + pending-review, so a
+re-run under a review gate creates nothing), concurrency-safe via a partial
+unique index on `lily_picture_arsenal_runs`, resumable via heartbeat
+staleness, with a run summary that names **why** anything was skipped.
+Provider moderation is an expected outcome: bounded prompt reworks down a
+heat ladder that keeps the slot's subject, then skip-and-count, with the
+rejection rate reported as a finding when it crosses 40%.
+
+**A7/A8/A10 — draw, refill, observability.** The arsenal bucket is private,
+so rows store a path and it is signed per serve inside a gate-cleared
+session. The watermark is a **ratio** (40% consumed), not a count — a
+hardcoded "fire at 4" becomes "fire at 80% empty" the moment depth drops to
+5 — and it now also fires on *availability to the playing group*, since
+entries never deplete globally and the old rule would read 10/10 while the
+table in front of you ran out. `ARSENAL_LOW` is raised at the exact moment
+a draw finds every candidate partition empty.
+
+**Guardrail preserved.** Arsenal generation lives on the reasoning node
+(`LilyReasoning.generate_arsenal_entry`); the vocal path still references
+neither `lily_search` nor the image stack.
+
+**Known divergence from the work order.** A4 asks that answer sets ride
+`additional_vocab`. They do not — that slot is pinned by WO-LILY-STT-001 to
+the assistant name and player names ("never answer nouns"), with a test
+asserting it. Answer sets do their work in `acceptable_answers`, which the
+Tier-1 evaluator already matches phonetically.
+
+Depth, watermark ratio, gate mode, per-image cost, moderation retries and
+real-image availability are all env knobs (`LILY_ARSENAL_*`), forwarded in
+`deploy.yml`. Full suite green: 1537 passed.
+
 ## 2026-08-07 — WO-LILY-HOTFIX-005: score integrity, reasoning model, delivery & display
 
 Session `lily-FFDEAE-ba016154` (~14:31–14:56): the spoken score was
