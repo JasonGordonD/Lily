@@ -13,13 +13,18 @@ commit returns success; a failed commit produces an in-character hold
 plus an ERROR, never a celebration.
 """
 
+import asyncio
 import logging
 import re
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from livekit.agents import StopResponse
+from lily_agent import LilyAgent
 from test_desync_fixture import (  # noqa: E402
     FEMUR_QUESTION, _adjudicate_and_drain, _arm_question, _make_game, _run,
 )
@@ -38,16 +43,15 @@ def _answered_game():
     return game
 
 
-def test_verdict_beat_airs_first_and_flourish_never_restates(caplog):
+def test_normal_question_airs_exactly_one_acknowledgment(caplog):
     game = _answered_game()
     with caplog.at_level(logging.INFO):
         _run(_adjudicate_and_drain(game), game)
-    assert len(game.session.instructions) >= 2
-    verdict, flourish = game.session.instructions[:2]
+    assert len(game.session.instructions) == 1
+    verdict = game.session.instructions[0]
     assert "VERDICT BEAT" in verdict
     assert "femur" in verdict.lower()
     assert "Rami" in verdict
-    assert "do NOT restate" in flourish
     # Budget telemetry present and inside the ~1.5s dispatch budget
     # (offline sim: effectively instant — the assertion pins the LOG
     # CONTRACT; live telemetry reads the same line).
@@ -55,6 +59,21 @@ def test_verdict_beat_airs_first_and_flourish_never_restates(caplog):
     assert lat, "verdict latency telemetry must be logged"
     ms = float(re.search(r"ms=(\d+)", lat[0].getMessage()).group(1))
     assert ms < 1500
+
+
+def test_deterministic_verdict_suppresses_organic_llm_reply():
+    game = _answered_game()
+    game.mark_deterministic_reply("femur")
+    agent = LilyAgent.__new__(LilyAgent)
+    agent._game = game
+    message = type("Message", (), {"content": ["femur"]})()
+
+    async def scenario():
+        with pytest.raises(StopResponse):
+            await agent.on_user_turn_completed(None, message)
+
+    asyncio.run(scenario())
+    assert game.consume_deterministic_reply("femur") is False
 
 
 def test_failed_commit_holds_in_character_and_never_celebrates(caplog):

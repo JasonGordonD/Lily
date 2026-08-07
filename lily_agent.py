@@ -36,6 +36,7 @@ from livekit.agents import (
     TurnHandlingOptions,
     WorkerOptions,
     WorkerType,
+    StopResponse,
     cli,
     function_tool,
 )
@@ -595,6 +596,17 @@ class LilyGame:
         self._mc_delivery_qnum: int | None = None
         self._mc_delivery_started_at: float | None = None
         self._mc_delivery_stem_words: int = 0
+        # Any registered delivery, including freeform. This survives the
+        # framework interruption callback long enough for the final STT
+        # transcript to turn a shouted correct answer into an immediate
+        # window open instead of a question re-read.
+        self._active_delivery_qnum: int | None = None
+        self._active_delivery_started_at: float | None = None
+        # Exact user turns whose response is already owned by deterministic
+        # game speech. on_user_turn_completed consumes these and raises
+        # StopResponse so LiveKit does not also generate a conversational
+        # "Correct!" over the committed verdict.
+        self._deterministic_reply_texts: list[str] = []
         # WS-5 buzz-buffer widening: rolling (ts, seg) of recent finals so
         # a final that landed up to buzz_prewindow_seconds() BEFORE the
         # delivery claim is back-filled into the pre-window buffer and
@@ -1377,6 +1389,28 @@ class LilyGame:
         self._last_user_turn_at = time.monotonic()
         self.cancel_cut_recovery()
 
+    def mark_deterministic_reply(self, text: str) -> None:
+        """Mark one user turn as fully handled by deterministic game speech."""
+        normalized = lily_evaluation.lily_normalize_answer(text or "")
+        if not normalized:
+            return
+        pending = getattr(self, "_deterministic_reply_texts", None)
+        if pending is None:
+            pending = self._deterministic_reply_texts = []
+        pending.append(normalized)
+        del pending[:-6]
+
+    def consume_deterministic_reply(self, text: str) -> bool:
+        """Consume an exact handled-turn marker; never suppress a later turn."""
+        normalized = lily_evaluation.lily_normalize_answer(text or "")
+        pending = getattr(self, "_deterministic_reply_texts", None) or []
+        try:
+            index = pending.index(normalized)
+        except ValueError:
+            return False
+        del pending[index]
+        return True
+
     def _cut_recovery_should_fire(self, token: int) -> bool:
         """True only if this token's watchdog is still live AND the cut left
         genuine dead air: not superseded, nobody speaking, no user turn in
@@ -1517,6 +1551,8 @@ class LilyGame:
             # in the buzz window just BEFORE this claim into the pre-window
             # buffer, so an early buzzer is scored at open, not left inert.
             self._note_mc_delivery_start(qnum)
+            self._active_delivery_qnum = qnum
+            self._active_delivery_started_at = time.time()
             # PATCH-001 T5(a) / OMNIBUS-004 WS-2: the pre-window buffer
             # covers CLAIM-TO-OPEN ONLY. The old backfill folded finals
             # from BEFORE the delivery claim into the buffer — speech
@@ -1885,6 +1921,62 @@ class LilyGame:
         if buf is None:
             buf = []
             self._pre_window_segments = buf
+        buf.append(dict(seg))
+        del buf[:-6]
+        self.open_window()
+        return True
+
+    def early_answer_check(
+        self,
+        seg: dict,
+        *,
+        now: float | None = None,
+        nbest: dict | None = None,
+    ) -> bool:
+        """Let a shouted correct answer end any in-flight question read.
+
+        Multiple choice keeps its existing stem-protection rule. Freeform
+        questions intentionally allow experts to jump on an early clue; only
+        a deterministic Tier-1 correct match truncates the read, so table
+        chatter and wrong guesses do not prematurely end the question.
+        """
+        armed = self.armed_question or {}
+        choices = armed.get("choices")
+        if isinstance(choices, list) and len(choices) == 4:
+            aborted = self.mc_early_answer_check(seg, now=now, nbest=nbest)
+            if aborted:
+                self.mark_deterministic_reply(seg.get("text") or "")
+            return aborted
+        qnum = getattr(self, "_active_delivery_qnum", None)
+        if qnum is None or qnum != self.sk.question_number:
+            return False
+        if self.sk.answer_window_open or getattr(self, "_adjudicating", False):
+            return False
+        try:
+            hyps = (nbest or {}).get("hypotheses") or []
+            if nbest is not None and len(hyps) > 1:
+                verdict = lily_evaluation.lily_tier1_evaluate_nbest(
+                    seg.get("text") or "", armed, hypotheses=hyps
+                )["verdict"]
+            else:
+                verdict = lily_evaluation.lily_tier1_evaluate_question(
+                    seg.get("text") or "", armed
+                )["verdict"]
+        except Exception as e:
+            logger.warning("LILY_BARGE | early-answer eval failed: %s", e)
+            return False
+        if verdict != "correct":
+            return False
+        logger.info(
+            "LILY_BARGE | ANSWER_ABORTS_READ | session=%s q=%d speaker=%s",
+            self.sk.session_id, qnum, seg.get("speaker_label"),
+        )
+        self.mark_deterministic_reply(seg.get("text") or "")
+        self._active_delivery_qnum = None
+        self._interrupt_current_speech()
+        buf = self._pre_window_segments
+        if buf is None:
+            buf = self._pre_window_segments = []
         buf.append(dict(seg))
         del buf[:-6]
         self.open_window()
@@ -2747,6 +2839,17 @@ class LilyGame:
                     "drawn_for=%s mode_now=%s id=%s",
                     self.sk.session_id, supply_mode, self.sk.mode,
                     question.get("id"),
+                )
+                question = None
+            # A custom-category request can cancel a draw after its final
+            # await has already completed. Task cancellation alone cannot
+            # stop that stale coroutine from committing the old category.
+            if question is not None and self._category_for_round(rnd) != category:
+                logger.info(
+                    "LILY_PREFETCH | CATEGORY_SWITCH_DISCARD | session=%s "
+                    "round=%d drawn_for=%r category_now=%r id=%s",
+                    self.sk.session_id, rnd, category,
+                    self._category_for_round(rnd), question.get("id"),
                 )
                 question = None
             if question is not None and self.sk.media_mode != "pictures":
@@ -3906,6 +4009,8 @@ class LilyGame:
             ))
         self._armed_speech_misses = 0
         self._pending_delivery_qnum = None  # stale delivery intent dies at arm
+        self._active_delivery_qnum = None
+        self._active_delivery_started_at = None
         self._undelivered_ticks = 0  # WS-2: reconcile counters are per-question
         self._undelivered_refires = 0
         self._supply_stall_ticks = 0  # WS-6: a question is in hand now
@@ -4282,6 +4387,8 @@ class LilyGame:
         # WS-5: the window is open — no MC options read is still in flight
         # to truncate (whether it played out fully or was answer-aborted).
         self._mc_delivery_qnum = None
+        self._active_delivery_qnum = None
+        self._active_delivery_started_at = None
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
         # THE screen-sync publish (voice/glass sync fix): the question
@@ -5305,6 +5412,7 @@ class LilyGame:
                         threshold=tier1_threshold,
                     )
                     if t1["verdict"] == "correct":
+                        self.mark_deterministic_reply(text)
                         asyncio.ensure_future(self.adjudicate(steal_allowed=False))
                         return
                     # WS-11 garble gate — checked BEFORE the band trigger and
@@ -5935,7 +6043,10 @@ class LilyGame:
             # by the verdict beat (or confirmed by the organic preempt);
             # round-closing and finale beats keep their own keys. A plain
             # reveal whose verdict aired organically owes nothing more.
-            act: str | None = "reveal_flourish"
+            # The verdict beat already contains the one allowed reaction.
+            # A normal mid-round question needs no second acknowledgment;
+            # only round standings and the finale require another turn.
+            act: str | None = None
             flourish_key: str | None = None
             if was_final:
                 flourish_key, act = "finale", "reveal_finale"
@@ -8725,6 +8836,13 @@ class LilyAgent(Agent):
         # pending auto-resume watchdog stands down — the reply this user
         # turn produces owns the recovery (no double-speak).
         self._game.note_user_turn()
+        if self._game.consume_deterministic_reply(_message_text(new_message)):
+            logger.info(
+                "LILY_REPLY | ORGANIC_SUPPRESSED | session=%s "
+                "reason=deterministic_game_reply",
+                self._game.sk.session_id,
+            )
+            raise StopResponse()
         # VIDEOIN-001: if the camera lane is open and a frame is buffered,
         # attach the MOST-RECENT frame to THIS user turn as native
         # ImageContent (the multimodal vocal LLM sees it directly — no bucket,
@@ -8869,6 +8987,23 @@ class LilyAgent(Agent):
                 len(raw) - len(full),
             )
 
+        # Asking obligates listening. This used to be telemetry-only, so the
+        # model could ask two questions or ask one and keep explaining over
+        # the players. Physically end conversational turns at the first
+        # completed question. Authoritative game deliveries are exempt:
+        # multiple-choice options legitimately follow their stem.
+        n_questions = lily_say_gate.lily_stacked_question_flag(full)
+        if not self._game.is_question_delivery_turn(full):
+            clipped, yielded = lily_say_gate.lily_yield_after_first_question(full)
+            if yielded:
+                logger.warning(
+                    "LILY_SAY_GATE | YIELD_AFTER_QUESTION | session=%s "
+                    "questions=%d removed_chars=%d",
+                    self._game.sk.session_id, n_questions,
+                    len(full) - len(clipped),
+                )
+                full = clipped
+
         # Mirror lint (self-knowledge WO Task 2a) — LOG-ONLY: the ban is
         # prompt-enforced; this makes drift measurable in telemetry.
         # Never mutates or suppresses the turn.
@@ -8878,9 +9013,8 @@ class LilyAgent(Agent):
                 "LILY_SAY | MIRROR_FLAG | session=%s pattern=%r",
                 self._game.sk.session_id, mirror_pattern,
             )
-        # PATCH-003 P10 lint (LOG-ONLY): stacked questions in one turn —
-        # one question per turn is the rule (asking obligates listening).
-        n_questions = lily_say_gate.lily_stacked_question_flag(full)
+        # PATCH-003 P10 lint: the enforcement above clips conversational
+        # turns; this remains telemetry for exempt game deliveries.
         if n_questions > 1:
             logger.info(
                 "LILY_SAY | STACKED_QUESTION_FLAG | session=%s count=%d",
@@ -9700,7 +9834,7 @@ async def entrypoint(ctx: JobContext) -> None:
         turn_handling=TurnHandlingOptions(
             interruption=InterruptionOptions(
                 min_words=1,
-                min_duration=0.8,
+                min_duration=lily_config.interruption_min_duration(),
                 # WS-14: pinned explicitly (they match 1.6.6 defaults) —
                 # a noise burst that produces NO transcript pauses playout
                 # and resumes from the pause point after the timeout,
@@ -9902,11 +10036,11 @@ async def entrypoint(ctx: JobContext) -> None:
             # WS-5 buzz-buffer widening: remember this final so it can be
             # back-filled if the delivery claim lands within T seconds.
             game.note_recent_final(seg, seg_start_ts)
-            # WS-5 answer-aborts-read: a correct answer during the MC
-            # options read truncates the remaining options and adjudicates
-            # early (buffers this seg + opens the window itself). Otherwise
-            # buffer for the normal replay-at-open path.
-            if not game.mc_early_answer_check(
+            # A correct answer during an MC options read or a freeform
+            # question truncates the remaining read and adjudicates early
+            # (buffers this seg + opens the window itself). Otherwise buffer
+            # for the normal replay-at-open path.
+            if not game.early_answer_check(
                 seg, now=arrival_ts, nbest=nbest
             ):
                 game.buffer_pre_window_answer(seg)

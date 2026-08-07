@@ -95,3 +95,24 @@ def test_conversational_question_turn_opens_pending():
     # a non-game turn with a question — exercised here at the unit level)
     game.enter_question_pending("First time playing?")
     assert game._question_pending is True
+
+
+def test_conversational_turn_is_physically_clipped_after_first_question():
+    clipped, changed = lily_say_gate.lily_yield_after_first_question(
+        "Want the science category? Or should I keep going with history?"
+    )
+    assert changed is True
+    assert clipped == "Want the science category?"
+
+
+def test_explanation_after_question_is_removed():
+    clipped, changed = lily_say_gate.lily_yield_after_first_question(
+        "What is element number one? It is the most abundant element."
+    )
+    assert changed is True
+    assert clipped == "What is element number one?"
+
+
+def test_non_question_turn_is_unchanged():
+    text = "Round one starts now."
+    assert lily_say_gate.lily_yield_after_first_question(text) == (text, False)

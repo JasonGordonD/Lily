@@ -335,6 +335,28 @@ def lily_stacked_question_flag(text: str) -> int:
     return len(re.findall(r"\?(?=\s|$|[\"'’”)])", cleaned.strip()))
 
 
+def lily_yield_after_first_question(text: str) -> tuple[str, bool]:
+    """End a conversational turn at its first completed question.
+
+    Prompt instructions alone did not stop turns such as "Want a
+    refresher? Or straight in?" or a question followed by more explanation.
+    Once Lily asks, the room owns the floor. Game-question deliveries are
+    exempted by the caller because multiple-choice options legitimately
+    follow their stem.
+    """
+    if not text:
+        return text, False
+    match = re.search(r"\?(?=\s|$|[\"'’”)])", text)
+    if match is None:
+        return text, False
+    end = match.end()
+    # Preserve quote/parenthesis punctuation that closes the question.
+    while end < len(text) and text[end] in "\"'’”)":
+        end += 1
+    clipped = text[:end].rstrip()
+    return clipped, bool(text[end:].strip())
+
+
 def lily_mirror_flag(text: str) -> Optional[str]:
     """Return the matched mirror pattern when the turn OPENS with a
     flattery/agreement-echo reflex, else None. Only the first ~120 chars
