@@ -107,6 +107,9 @@ LILY_LOCAL_ONLY_ENV = {
     # window before an auto-resume fires. Default-backed threshold (3.5s);
     # ships on its in-code default, tune via deploy.yml `vars.` if needed.
     "LILY_CUT_RECOVERY_GRACE",
+    # Short-answer barge-in floor: default 0.25s is production-safe; keep
+    # override local until live interruption telemetry calls for tuning.
+    "LILY_INTERRUPTION_MIN_DURATION",
     # WS-5 MC answer-aborts-read tunables (default-backed; ship on
     # in-code defaults). Feature toggle + buzz-buffer pre-claim horizon +
     # stem-protection words/second model.

@@ -5,6 +5,45 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-07 — Voice-game turn-taking: barge-in, single acknowledgments, and ordered rounds
+
+Player feedback exposed a shared root class behind several “bizarre”
+hosting habits: framework interruption thresholds, the quiz engine's
+closed pre-window, and parallel organic/deterministic speech paths each
+owned part of the same turn. The repair makes the ownership structural:
+
+- **Short answers can barge in.** The interruption floor moved from 0.8s
+  to 0.25s (`LILY_INTERRUPTION_MIN_DURATION`, clamped to at least 0.1s),
+  so “B”, “Mars”, and “Hydrogen” are not excluded before LiveKit's
+  adaptive detector runs. False triggers retain the existing
+  pause-and-resume protection.
+- **Freeform answers abort the read.** The MC answer-aborts-read path now
+  covers Tier-1-correct freeform shouts too: interrupt the active speech,
+  seed the pre-window buffer even if the framework released the delivery
+  claim first, open the answer window, and adjudicate without re-reading
+  the question.
+- **One answer, one acknowledgment.** A correct-answer transcript marks
+  its turn as deterministically owned; `on_user_turn_completed` raises
+  LiveKit `StopResponse` for that exact turn, preventing the parallel
+  organic “Correct!” response. Normal mid-round questions emit only the
+  short committed verdict beat—no redundant reveal flourish.
+- **Asking yields the floor.** The outbound speech gate physically ends
+  conversational turns at the first completed question. Stacked asks and
+  question-then-explanation monologues no longer talk over the table.
+  Authoritative game deliveries are exempt so MC options remain intact.
+- **Round transitions are ordered by playout.** Normal verdicts use
+  `q_N_reveal`; round/final verdicts use `q_N_verdict`, while
+  `round_N_scores` owns the transition. The next round's first question
+  cannot queue until the standings flourish actually finishes.
+- **Category switches cannot resurrect stale supply.** A cancelled
+  prefetch that returns after its final await is discarded when its
+  captured category no longer matches the round's authoritative category.
+
+Regression coverage spans interruption configuration, freeform mid-read
+answers, exact-turn organic-reply suppression, physical yield after a
+question, stale category coroutine completion, one normal verdict beat,
+and per-SpeechHandle round ordering. Full suite: **1450 passed**.
+
 ## 2026-08-06 — WO-LILY-PATCH-001: evening-defect pack (sessions 89A97A/48630B/05AAC9/105865)
 
 Ten tactical fixes on the current architecture (each marked

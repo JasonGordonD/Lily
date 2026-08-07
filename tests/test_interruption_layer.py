@@ -2,7 +2,8 @@
 
 Covers, against the INSTALLED livekit-agents 1.6.6 in the venv:
   - the false-interruption contract the session actually resolves:
-    resume_false_interruption ON, timeout 2.0s, adaptive interruption
+    resume_false_interruption ON, timeout 2.0s, 0.25s one-word-answer
+    interruption floor, adaptive interruption
     requested (Speechmatics qualifies: aligned_transcript + streaming) —
     this is the #3418 pause/resume machinery Lily now pins explicitly;
   - regenerate-not-replay: an interrupted (real barge-in) delivery
@@ -140,7 +141,7 @@ def test_session_resolves_false_interruption_contract():
             turn_handling=TurnHandlingOptions(
                 interruption=InterruptionOptions(
                     min_words=1,
-                    min_duration=0.8,
+                    min_duration=lily_config.interruption_min_duration(),
                     resume_false_interruption=True,
                     false_interruption_timeout=(
                         lily_config.false_interruption_timeout()
@@ -155,8 +156,15 @@ def test_session_resolves_false_interruption_contract():
     assert opts["resume_false_interruption"] is True
     assert opts["false_interruption_timeout"] == 2.0
     assert opts["min_words"] == 1
-    assert opts["min_duration"] == 0.8
+    assert opts["min_duration"] == 0.25
     assert session.interruption_detection == "adaptive"
+
+
+def test_short_quiz_answers_can_interrupt(monkeypatch):
+    monkeypatch.delenv("LILY_INTERRUPTION_MIN_DURATION", raising=False)
+    assert lily_config.interruption_min_duration() == 0.25
+    monkeypatch.setenv("LILY_INTERRUPTION_MIN_DURATION", "0.05")
+    assert lily_config.interruption_min_duration() == 0.1
 
 
 def test_speechmatics_qualifies_for_adaptive_interruption(monkeypatch):

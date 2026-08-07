@@ -323,6 +323,40 @@ def test_freeform_delivery_never_arms_mc_abort():
     assert game.session.interrupts == 0
 
 
+def test_correct_freeform_answer_aborts_read_and_adjudicates():
+    """A one-word answer can barge into a freeform clue immediately."""
+    game = _make_game()
+    game.sk.bind_speaker("S1", "Rami")
+    assert _arm_and_claim(game, FREEFORM_QUESTION) in (
+        "claimed_structural",
+        "claimed_core_sentence",
+    )
+
+    async def scenario():
+        aborted = game.early_answer_check(
+            _seg("Canberra", 205.0), now=205.0
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return aborted
+
+    assert _run(scenario(), game) is True
+    assert game.session.interrupts == 1
+    assert game.sk.answer_window_open is True
+    assert game.sk.ordered_candidates()[0]["text"] == "Canberra"
+    assert game.adjudications == [False]
+
+
+def test_freeform_chatter_does_not_abort_read():
+    game = _make_game()
+    _arm_and_claim(game, FREEFORM_QUESTION)
+    assert game.early_answer_check(
+        _seg("wait what was the category", 205.0), now=205.0
+    ) is False
+    assert game.session.interrupts == 0
+    assert game.sk.answer_window_open is False
+
+
 # -- Layer 2: buzz-buffer widening (T seconds pre-claim) ----------------------
 
 def test_pre_claim_final_within_T_is_captured_and_scored_at_open():

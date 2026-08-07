@@ -269,6 +269,18 @@ def interruption_mode() -> str:
     return mode if mode in ("adaptive", "vad") else "adaptive"
 
 
+def interruption_min_duration() -> float:
+    """Minimum player-speech duration that can barge into Lily.
+
+    Quiz answers are often a single short word ("B", "Mars", "Hydrogen").
+    The previous 0.8s threshold excluded many of them before the adaptive
+    detector could make its interruption decision. Keep a small acoustic
+    floor for clicks/coughs; false triggers still use the framework's
+    pause-and-resume path below.
+    """
+    return max(0.1, _get_float("LILY_INTERRUPTION_MIN_DURATION", 0.25))
+
+
 def false_interruption_timeout() -> float:
     """Seconds of post-trigger silence before an interruption with no
     transcript is classified FALSE and the paused speech resumes from its

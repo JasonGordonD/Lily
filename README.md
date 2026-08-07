@@ -325,8 +325,9 @@ BEFORE its question) — is closed by one gateway: `lily_say_gate.py`
 ### Idempotent speech acts
 
 Game-critical speech acts carry state keys — `session_greet`,
-`session_rejoin`, `q_{N}_delivery`, `q_{N}_reveal`, `round_{N}_scores`,
-`finale` — in a per-session `SpeechActRegistry` on `LilyGame`. Keys are
+`session_rejoin`, `q_{N}_delivery`, `q_{N}_reveal`, `q_{N}_verdict`,
+`round_{N}_scores`, `finale` — in a per-session `SpeechActRegistry` on
+`LilyGame`. Keys are
 claimed with an atomic check-and-set **at dispatch time** — never at
 playback completion, which is exactly the race window that produced the
 live duplicates. Every claim is then bound to its concrete `SpeechHandle`.
@@ -391,6 +392,35 @@ suppressed, not swallowed). Banter after a registered delivery is never
 suppressed — only textual re-asks are. See "Loop engagement" in
 [CHANGELOG.md](CHANGELOG.md) for the full claim-trigger table
 (`LilyGame.register_delivery_claim`).
+
+### Voice-game turn ownership (2026-08-07)
+
+One user turn has one speech owner. During a live answer window, an exact
+Tier-1-correct transcript is marked for deterministic adjudication; the
+matching `on_user_turn_completed` hook raises LiveKit `StopResponse`, so
+the ordinary conversational LLM cannot race the committed verdict with
+its own “correct” or congratulation. A normal question has one short
+verdict/reveal beat and then advances. At round boundaries the short
+verdict uses `q_{N}_verdict`, while the separately keyed
+`round_{N}_scores` flourish owns the transition to the next question.
+Per-handle confirmation therefore cannot start the new category while
+the previous round's standings are still playing.
+
+Asking also transfers the floor physically, not just by prompt. For
+non-game-delivery speech, `tts_node` clips everything after the first
+completed question (`lily_yield_after_first_question`): “Want science?
+Or history?” becomes one question, and a question followed by unsolicited
+explanation ends at the question. Game deliveries are exempt because MC
+options legitimately follow the stem.
+
+The input path is tuned for quiz answers: `InterruptionOptions.min_duration`
+comes from `LILY_INTERRUPTION_MIN_DURATION` (default 0.25s, minimum 0.1s)
+instead of the former 0.8s floor. A Tier-1-correct freeform answer heard
+during delivery follows the same answer-aborts-read contract as MC:
+interrupt the active handle, seed the pre-window answer even if the claim
+was already released, open the window, and adjudicate without re-reading.
+Adaptive false-interruption pause/resume remains enabled, so lowering the
+floor does not turn every noise burst into a permanent cut.
 
 ### Leak filter
 

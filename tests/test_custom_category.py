@@ -132,3 +132,64 @@ def test_before_game_start_sets_override_without_prefetching():
     assert game._category_override[1] == "Ancient Rome"
     # No live supply line before the game engine is running.
     assert game.prefetch_calls == 0
+
+
+def test_cancelled_old_category_draw_cannot_commit_after_switch():
+    """A coroutine past its last await cannot resurrect the prior category."""
+    game = _make_game(question_number=0)
+    game.start_prefetch = LilyGame.start_prefetch.__get__(game, LilyGame)
+    game.next_question = None
+    game.supabase = None
+    game.session = None
+    game.group_id = "category-race"
+    game.used_prompts = []
+    game.asked_history = []
+    game._drawn_ids = set()
+    game._drawn_hashes = set()
+    game._burned_question_ids = set()
+    game._burned_question_hashes = set()
+    game.promoted_categories = []
+    game.publish_attributes_nowait = lambda: None
+
+    class _Reasoning:
+        def __init__(self):
+            self.calls = 0
+
+        async def prefetch_question(self, sk, *, category, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # Simulate a provider call that completed at cancellation.
+                    return {
+                        "id": "stale-academic",
+                        "prompt": "Old category question?",
+                        "canonical_answer": "old",
+                        "acceptable_answers": ["old"],
+                        "category": category,
+                    }
+            return {
+                "id": "fresh-japan",
+                "prompt": "New category question?",
+                "canonical_answer": "new",
+                "acceptable_answers": ["new"],
+                "category": category,
+            }
+
+    game.reasoning = _Reasoning()
+    agent = LilyAgent.__new__(LilyAgent)
+    agent._game = game
+
+    async def scenario():
+        game.start_prefetch()
+        await asyncio.sleep(0)
+        await LilyAgent.lily_set_category.__wrapped__(agent, None, "Japan")
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    landed = game.armed_question or game.next_question
+    assert landed is not None
+    assert landed["id"] == "fresh-japan"
+    assert landed["category"] == "Japan"
