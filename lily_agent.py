@@ -5954,7 +5954,8 @@ class LilyGame:
                 # verdict word first, then at most one short flourish.
                 if winner_candidate is not None:
                     verdict_instr = (
-                        "VERDICT BEAT. REGISTER GUIDANCE (vary freely "
+                        "VERDICT BEAT. The ruling is COMMITTED. "
+                        "REGISTER GUIDANCE (vary freely "
                         "within this length and temperature, never "
                         "longer): the verdict word FIRST, then at most one "
                         f"short flourish — 'Correct — {answer_text}!', "
@@ -5964,7 +5965,8 @@ class LilyGame:
                     )
                 else:
                     verdict_instr = (
-                        "VERDICT BEAT. REGISTER GUIDANCE (vary freely "
+                        "VERDICT BEAT. The ruling is COMMITTED. "
+                        "REGISTER GUIDANCE (vary freely "
                         "within this length and temperature, never "
                         "longer): the verdict first, then at most one "
                         f"short line — nobody landed it, it was "
@@ -8836,7 +8838,8 @@ class LilyAgent(Agent):
         # pending auto-resume watchdog stands down — the reply this user
         # turn produces owns the recovery (no double-speak).
         self._game.note_user_turn()
-        if self._game.consume_deterministic_reply(_message_text(new_message)):
+        consume_reply = getattr(self._game, "consume_deterministic_reply", None)
+        if callable(consume_reply) and consume_reply(_message_text(new_message)):
             logger.info(
                 "LILY_REPLY | ORGANIC_SUPPRESSED | session=%s "
                 "reason=deterministic_game_reply",
