@@ -119,6 +119,9 @@ LILY_LOCAL_ONLY_ENV = {
     # n-best ASR recovery tunables (default OFF — see lily_config.stt_*).
     "LILY_NBEST_DISPERSION_THRESHOLD",
     "LILY_STT_MAX_ALTERNATIVES",
+    # WO-LILY-STT-001 Q0 speaker focus — default OFF (focus_mode=IGNORE ships
+    # inert until the shouted-utterance acceptance risk is measured).
+    "LILY_STT_FOCUS_MODE",
     # Segment sanity gate S/L (WO-LILY-OMNIBUS-003 WS-10) — provisional
     # defaults in lily_config; WS-13's segmentation audit binds tuned
     # values (edit the defaults, or promote to deploy.yml vars).

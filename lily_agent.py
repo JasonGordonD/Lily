@@ -54,6 +54,7 @@ from livekit.plugins.speechmatics import (
     STT as SpeechmaticsSTT,
     AdditionalVocabEntry,
     OperatingPoint,
+    SpeakerFocusMode,
     SpeakerIdentifier,
     TurnDetectionMode,
 )
@@ -6379,10 +6380,19 @@ class LilyGame:
                 opts = getattr(self.stt, "_stt_options", None)
                 if opts is not None:
                     opts.known_speakers = known_speakers
+                    # Q0: keep the focus set in lockstep with the enrolled set
+                    # (mid-game enrollment / reconnect) so a newly-enrolled
+                    # player is heard on the next StartRecognition and the set
+                    # never goes empty under IGNORE.
+                    _fk = lily_stt_focus_kwargs(known_speakers)
+                    if _fk:
+                        opts.focus_speakers = _fk["focus_speakers"]
+                        opts.focus_mode = _fk["focus_mode"]
                     logger.info(
-                        "VOICEPRINT | refreshed known_speakers=%d group=%s",
-                        len(known_speakers),
-                        new_group_id,
+                        "VOICEPRINT | refreshed known_speakers=%d group=%s "
+                        "focus=%s",
+                        len(known_speakers), new_group_id,
+                        "ignore" if _fk else "off",
                     )
             except Exception as e:
                 logger.warning(
@@ -9177,6 +9187,55 @@ def _frame_int16(frame):
         return []
 
 
+def lily_stt_focus_kwargs(known_speakers) -> dict:
+    """WO-LILY-STT-001 Q0: the Speechmatics focus kwargs. Returns
+    focus_speakers + focus_mode=IGNORE ONLY when focus is enabled AND the
+    enrolled set has usable labels; {} otherwise. The non-empty guard is the
+    safety invariant — focus_mode=IGNORE with no focus set drops every voice,
+    muting the whole table, so it is withheld (loudly) rather than risked."""
+    if lily_config.stt_focus_mode() != "ignore":
+        return {}
+    labels = [s.label for s in (known_speakers or []) if getattr(s, "label", None)]
+    if not labels:
+        logger.warning(
+            "LILY_STT_FOCUS | WITHHELD | reason=no_enrolled_speakers — "
+            "focus_mode=IGNORE never enabled on an empty set (would mute the "
+            "table)"
+        )
+        return {}
+    return {"focus_speakers": labels, "focus_mode": SpeakerFocusMode.IGNORE}
+
+
+def lily_stt_config_applied(stt) -> dict:
+    """WO-LILY-STT-001 Q3: the EFFECTIVE Speechmatics config, read off the
+    constructed STT's _stt_options (what the wire will actually carry) — not
+    what we intended to set. Logged at session start and asserted
+    intended==applied by test, so the audit's claimed-but-unwired class (the
+    max_speakers=7 ghost that was never wired to roster) reads red at build
+    time instead of hiding live. Defensive: returns {} if the options object
+    isn't present (test stubs)."""
+    opts = getattr(stt, "_stt_options", None)
+    if opts is None:
+        return {}
+
+    def _name(v):
+        return getattr(v, "value", None) or getattr(v, "name", None) or str(v)
+
+    return {
+        "operating_point": _name(getattr(opts, "operating_point", None)),
+        "turn_detection_mode": _name(getattr(opts, "turn_detection_mode", None)),
+        "max_delay": getattr(opts, "max_delay", None),
+        "speaker_sensitivity": getattr(opts, "speaker_sensitivity", None),
+        "max_speakers": getattr(opts, "max_speakers", None),
+        "prefer_current_speaker": getattr(opts, "prefer_current_speaker", None),
+        "enable_diarization": getattr(opts, "enable_diarization", None),
+        "focus_mode": _name(getattr(opts, "focus_mode", None)),
+        "focus_speakers": len(getattr(opts, "focus_speakers", None) or []),
+        "known_speakers": len(getattr(opts, "known_speakers", None) or []),
+        "additional_vocab": len(getattr(opts, "additional_vocab", None) or []),
+    }
+
+
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     room_name = ctx.room.name or "unknown"
@@ -9429,6 +9488,13 @@ async def entrypoint(ctx: JobContext) -> None:
         for name in [str(row.get("label") or "").strip()]
         if name and not re.fullmatch(r"S\d+|UU", name)
     })
+    # WO-LILY-STT-001 Q0: speaker focus — enrolled players are the game,
+    # every other voice is room. focus_mode=IGNORE drops unenrolled speech at
+    # the engine. HARD-GUARDED: only when explicitly enabled AND the enrolled
+    # set is non-empty (an empty/absent focus set under IGNORE would silently
+    # delete the WHOLE table), so it can never mute a session by
+    # misconfiguration. Default off (see lily_config.stt_focus_mode).
+    _focus_kwargs = lily_stt_focus_kwargs(known_speakers)
     stt = SpeechmaticsSTT(
         operating_point=OperatingPoint.ENHANCED,
         prefer_current_speaker=True,  # [VERIFY live] rapid answer collisions
@@ -9438,11 +9504,26 @@ async def entrypoint(ctx: JobContext) -> None:
             *(AdditionalVocabEntry(content=name) for name in _vocab_names),
         ],
         known_speakers=known_speakers,
+        **_focus_kwargs,
         **{k: v for k, v in _tuned.items() if k != "prefer_current_speaker"},
     )
     game.stt = stt
+    # Q3 attestation: log the EFFECTIVE config as-applied (intended==applied
+    # is asserted by test) and stash it for the session report — every knob
+    # the build believes it set, proven at the wire.
+    game.stt_config_applied = lily_stt_config_applied(stt)
+    logger.info(
+        "LILY_STT | CONFIG_APPLIED | %s",
+        " ".join(f"{k}={v}" for k, v in game.stt_config_applied.items()),
+    )
     if known_speakers:
         logger.info("VOICEPRINT | injected %d known speakers", len(known_speakers))
+    if _focus_kwargs:
+        logger.warning(
+            "LILY_STT_FOCUS | ENABLED | focus_speakers=%d mode=IGNORE — "
+            "unenrolled voices dropped at the engine",
+            len(_focus_kwargs.get("focus_speakers") or []),
+        )
 
     # --- Session: vocal node gemini-3.5-flash, explicit safety settings ---
     # The general-deck vocal LLM is held on the game so the adult-mode

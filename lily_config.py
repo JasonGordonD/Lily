@@ -762,6 +762,25 @@ def stt_max_alternatives() -> int:
     return max(1, min(_get_int("LILY_STT_MAX_ALTERNATIVES", 1), 8))
 
 
+def stt_focus_mode() -> str:
+    """WO-LILY-STT-001 Q0 — Speechmatics speaker focus. "off" (DEFAULT) keeps
+    every voice transcribed; "ignore" wires the enrolled players into
+    focus_speakers with focus_mode=IGNORE, so speech from UNENROLLED voices
+    is dropped at the engine (never transcribed, never triggers
+    end-of-utterance, never reaches context) — enrolled = players, everything
+    else = room.
+
+    DEFAULT OFF, deliberately: focus_mode=IGNORE can SILENTLY DELETE a valid
+    player whose live voice drifts from their calm enrollment print (Lombard
+    effect / shouting / intoxication push the embedding away, so a real
+    player reads as a bystander). It ships inert until that shouted-utterance
+    acceptance risk is measured on the captured fixtures, and it NEVER
+    activates with an empty enrolled set (that would delete the whole
+    table) — both guards enforced at the construction site."""
+    v = (_get("LILY_STT_FOCUS_MODE", "off") or "").strip().lower()
+    return v if v in ("off", "ignore") else "off"
+
+
 def garble_clarify_min_confidence() -> float:
     """WS-11 garble gate: a finalized answer whose MEAN per-word recognizer
     confidence falls below this over a multi-word utterance fires the light
