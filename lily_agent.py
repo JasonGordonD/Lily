@@ -7501,9 +7501,32 @@ class LilyGame:
             return "unavailable_pipeline"
         return "on"
 
+    def _score_authority_line(self) -> str | None:
+        """HOTFIX-005 X1 (LEAD): the authoritative per-player score straight
+        off the committed ledger, as a hard read-only state field. The live
+        defect narrated 7->6->9->12->13 against a true 9 — the model carried a
+        score forward from conversation. The glass already projects the same
+        ledger_scores(), so state-block and glass agree by construction."""
+        try:
+            scores = self.sk.ledger_scores()
+        except Exception:
+            return None
+        if not scores:
+            return None
+        pairs = ", ".join(f"{n} {v}" for n, v in scores.items())
+        return (
+            "SCORES — AUTHORITATIVE, READ-ONLY (committed ledger, the ONLY "
+            f"score truth): {pairs}. NEVER compute, add up, infer, or carry a "
+            "score forward from the conversation; any score you speak must be "
+            "EXACTLY the number here. Unsure? Read this field — do not guess."
+        )
+
     def build_state_block(self) -> str:
         block = self.sk.build_state_block()
         extra = []
+        score_line = self._score_authority_line()
+        if score_line:
+            extra.append(score_line)
         # PATCH-003 P4: field-granular picture-lane truth — claims and
         # refusals about pictures take their verb from THIS read, never
         # from conversational momentum (the dual fabrication: 'pictures
@@ -10136,6 +10159,22 @@ async def entrypoint(ctx: JobContext) -> None:
         session_metrics.collect_turn(report)
         if role == "assistant":
             game._last_assistant_text = _message_text(msg)
+            # HOTFIX-005 X1: SCORE_DIVERGENCE — if her spoken turn narrates a
+            # score matching no committed-ledger total, the number is
+            # fabricated. Log at ERROR (the state block feeds her the truth;
+            # this is the safety net that makes a divergence loud).
+            try:
+                div = lily_scorekeeper.lily_narrated_score_divergence(
+                    game._last_assistant_text, game.sk.ledger_scores()
+                )
+                if div is not None:
+                    logger.error(
+                        "LILY_SCORE | SCORE_DIVERGENCE | session=%s spoken=%s "
+                        "ledger=%s — narrated score off-ledger",
+                        game.sk.session_id, div["spoken"], div["ledger_values"],
+                    )
+            except Exception:
+                pass
             m = report or {}
             get = (lambda k: m.get(k)) if isinstance(m, dict) else (
                 lambda k: getattr(m, k, None)

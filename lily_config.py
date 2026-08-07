@@ -215,33 +215,48 @@ def adult_vocal_model() -> str:
 
 
 def adult_vocal_effort() -> str:
-    """Grok reasoning effort for the adult VOCAL swap: "high" (owner
-    lean, richer banter) or "low" (snappier turn-taking) — grok-4.5
-    exposes exactly this two-way toggle (owner-verified against the
-    console; anything else coerces to high, the model default). Flip via
-    slot secret if high-effort latency drags the room."""
-    effort = _get("LILY_ADULT_VOCAL_EFFORT", "high")
-    return effort if effort in ("low", "high") else "high"
+    """Grok reasoning effort for the front-facing adult VOCAL swap
+    (grok-4.5). On grok-4.5 this is a thinking-DEPTH dial (low/medium/high).
+
+    HOTFIX-005 X13 + operator directive 2026-08-07: the vocal lane is
+    latency-critical — a player waits through every token — and running it
+    at "high" cost ~5s to first token (session lily-FFDEAE: llm_ttft p50
+    4,999ms, p95 8,254ms; "I've been a half-beat behind you tonight").
+    Default lowered to "medium" for snappier turns while holding character
+    quality; set LILY_ADULT_VOCAL_EFFORT=low for maximum speed, or =high to
+    restore deep banter. Anything else coerces to medium."""
+    effort = (_get("LILY_ADULT_VOCAL_EFFORT", "medium") or "").lower()
+    return effort if effort in ("low", "medium", "high") else "medium"
 
 
 def adult_reasoning_model() -> str:
-    """Question/verification generation model for the ADULT deck (owner
-    directive 2026-08-06: Grok 4.2's multi-agent high tier — "16
-    agents"). Pinned to the base id + high reasoning effort; if the
-    console's heavy tier carries its own model id, set it here via slot
-    secret (generation failures are visible and fall back to the bank,
-    never silent)."""
-    return _get("LILY_ADULT_REASONING_MODEL", "grok-4.2")
+    """Question/verification generation model for the ADULT deck.
+
+    HOTFIX-005 X2: the id is `grok-4.20-multi-agent` (operator-supplied).
+    The former default `grok-4.2` was TRUNCATED and does not exist — it
+    400'd 'Model not found: grok-4.2' every prefetch (the 67s dead-air at
+    14:33). This model speaks the xAI Responses API only (lily_reasoning
+    routes `*-multi-agent` there); Chat Completions returns 400. Generation
+    failures stay visible and fall back to the bank, never silent."""
+    return _get("LILY_ADULT_REASONING_MODEL", "grok-4.20-multi-agent")
 
 
 def adult_reasoning_effort() -> Optional[str]:
-    """Reasoning effort for adult question generation (default high —
-    the multi-agent tier's lever). "off" disables sending the parameter
-    entirely (for model ids that reject it)."""
-    effort = (_get("LILY_ADULT_REASONING_EFFORT", "high") or "").lower()
+    """Reasoning effort for adult question generation. On
+    grok-4.20-multi-agent this is an AGENT-COUNT dial, not thinking depth:
+    low/medium = 4 agents, high/xhigh = 16 agents (operator docs) — a 4x
+    fan-out on latency AND spend.
+
+    HOTFIX-005 X13: routine question generation is a TCP-vs-UDP-class task
+    — one trivia line — so the default is `low` (4-agent). 16 agents to
+    write one question is disproportionate; reserve high/xhigh for
+    tool-enabled current-events / corpus building where the arsenal absorbs
+    the wait. Override per lane via LILY_ADULT_REASONING_EFFORT. "off"
+    disables the parameter entirely (for ids that reject it)."""
+    effort = (_get("LILY_ADULT_REASONING_EFFORT", "low") or "").lower()
     if effort in ("off", "none", "0"):
         return None
-    return effort if effort in ("low", "high") else "high"
+    return effort if effort in ("low", "medium", "high", "xhigh") else "low"
 
 
 def adult_imagegen_model() -> str:

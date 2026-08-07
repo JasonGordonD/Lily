@@ -697,6 +697,46 @@ def _extract_claimed_score(normalized: str) -> Optional[int]:
     return _SCORE_NUMBER_WORDS.get(token)
 
 
+# How LILY narrates a player's score (distinct from the player-claim regex
+# above): "you're at 13", "you've got 13", "you have 13 points", "that puts
+# you at 13", "you're up to 13", "sitting at 13", "score is 13", "now on 13".
+_NARRATED_SCORE_RE = _re.compile(
+    r"\b(?:"
+    r"you\s+(?:re|are|ve|have|had)\s+(?:(?:got|now|up\s+to|at|on)\s+)?"
+    r"|puts?\s+you\s+(?:at|on|up\s+to)\s+"
+    r"|(?:sitting|standing|now)\s+(?:at|on)\s+"
+    r"|score\s+is\s+(?:now\s+)?"
+    r")(?:a\s+|an\s+)?" + _SCORE_NUMBER_PATTERN + r"(?:\s+points?)?\b"
+)
+
+
+def lily_narrated_score_divergence(
+    text: str, ledger_scores: dict
+) -> Optional[dict]:
+    """HOTFIX-005 X1: SCORE_DIVERGENCE detector. If Lily's OWN outbound line
+    NARRATES a score that matches NO player's committed ledger total, the
+    number is fabricated — return {spoken, ledger_values} for an ERROR log.
+    None when no score is narrated or the number is a real ledger total. The
+    ledger (and the state block + glass that project it) is the only truth;
+    this is the safety net catching the model speaking a number off-ledger."""
+    if not ledger_scores:
+        return None
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return None
+    m = _NARRATED_SCORE_RE.search(normalized)
+    if not m:
+        return None
+    token = m.group(1)
+    spoken = int(token) if token.isdigit() else _SCORE_NUMBER_WORDS.get(token)
+    if spoken is None:
+        return None
+    values = set(int(v) for v in ledger_scores.values())
+    if spoken in values:
+        return None
+    return {"spoken": spoken, "ledger_values": sorted(values)}
+
+
 def lily_detect_state_contradiction(
     text: str,
     player_name: Optional[str],

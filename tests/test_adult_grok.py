@@ -49,13 +49,20 @@ def test_adult_model_pins_and_coercions(monkeypatch):
                 "LILY_ADULT_REASONING_MODEL", "LILY_ADULT_REASONING_EFFORT"):
         monkeypatch.delenv(var, raising=False)
     assert lily_config.adult_vocal_model() == "grok-4.5"
-    assert lily_config.adult_vocal_effort() == "high"
-    assert lily_config.adult_reasoning_model() == "grok-4.2"
-    assert lily_config.adult_reasoning_effort() == "high"
+    # HOTFIX-005 X13: front-facing vocal effort lowered high -> medium
+    # (latency-critical lane; high cost ~5s TTFT).
+    assert lily_config.adult_vocal_effort() == "medium"
+    # HOTFIX-005 X2: grok-4.2 was truncated/nonexistent (400 dead-air) ->
+    # grok-4.20-multi-agent. X13: routine question generation defaults to
+    # low (4-agent), not high (16-agent).
+    assert lily_config.adult_reasoning_model() == "grok-4.20-multi-agent"
+    assert lily_config.adult_reasoning_effort() == "low"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "low")
     assert lily_config.adult_vocal_effort() == "low"
+    monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "medium")
+    assert lily_config.adult_vocal_effort() == "medium"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "garbage")
-    assert lily_config.adult_vocal_effort() == "high"
+    assert lily_config.adult_vocal_effort() == "medium"
     # "off" disables sending the parameter (models that reject it).
     monkeypatch.setenv("LILY_ADULT_REASONING_EFFORT", "off")
     assert lily_config.adult_reasoning_effort() is None
