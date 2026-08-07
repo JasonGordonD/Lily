@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from livekit.agents import StopResponse
+import lily_evaluation
 from lily_agent import LilyAgent
 from test_desync_fixture import (  # noqa: E402
     FEMUR_QUESTION, _adjudicate_and_drain, _arm_question, _make_game, _run,
@@ -90,7 +91,10 @@ def test_pre_generation_hook_suppresses_correct_answer_before_event_callback():
             await agent.on_user_turn_completed(None, message)
 
     asyncio.run(scenario())
-    token = (game.sk.question_number, "no i said the femur")
+    token = (
+        game.sk.question_number,
+        lily_evaluation.lily_normalize_answer("No, I said the femur."),
+    )
     assert token in game._prehook_answer_suppressions
     # The later transcript callback consumes the reservation instead of
     # leaving a stale suppression for a future same-word turn.
