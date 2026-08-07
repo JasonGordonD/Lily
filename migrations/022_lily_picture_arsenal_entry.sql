@@ -30,6 +30,59 @@
 -- Idempotent: every statement is if-not-exists / add-column-if-not-exists,
 -- so re-running against a partially-migrated database is safe.
 
+-- -- base tables, back-filled into version control --------------------------
+--
+-- lily_picture_arsenal and lily_picture_arsenal_usage were applied DIRECT TO
+-- PROD as `lily_picture_arsenal_001` and that file never landed in this
+-- repo. Prod therefore had the tables and a fresh database did not, so the
+-- ALTERs below found nothing to alter and CI died replaying the migration
+-- set from scratch:
+--
+--   ERROR: relation "public.lily_picture_arsenal" does not exist
+--
+-- Reproduced verbatim from the live schema, as `create table if not exists`:
+-- a no-op against prod, and the missing rung of the ladder for every fresh
+-- database from here on. An un-checked-in migration is a schema that only
+-- exists where someone happened to run it once.
+
+create table if not exists public.lily_picture_arsenal (
+  id                 uuid        primary key default gen_random_uuid(),
+  partition          text        not null
+                       check (partition in ('general', 'adult_suggestive',
+                                            'adult_explicit')),
+  question_text      text        not null,
+  question_text_hash text        not null,
+  canonical_answer   text        not null,
+  acceptable_answers jsonb       not null default '[]'::jsonb,
+  generation_prompt  text        not null,
+  generation_model   text        not null default 'grok-imagine-image',
+  intensity          text,
+  image_storage_path text        not null,
+  status             text        not null default 'ready',
+  created_at         timestamptz not null default now(),
+  retired_at         timestamptz
+);
+
+create table if not exists public.lily_picture_arsenal_usage (
+  id          uuid        primary key default gen_random_uuid(),
+  arsenal_id  uuid        not null references public.lily_picture_arsenal(id),
+  group_id    text        not null,
+  session_id  text        not null,
+  partition   text        not null,
+  served_at   timestamptz not null default now(),
+  -- THE no-repeat guarantee: a second serve of one entry to the same group
+  -- is a constraint violation, not an unlikely event.
+  unique (arsenal_id, group_id)
+);
+
+alter table public.lily_picture_arsenal enable row level security;
+alter table public.lily_picture_arsenal_usage enable row level security;
+
+create index if not exists lily_picture_arsenal_usage_group_idx
+  on public.lily_picture_arsenal_usage (group_id);
+create index if not exists lily_picture_arsenal_usage_session_idx
+  on public.lily_picture_arsenal_usage (session_id, partition);
+
 -- -- entry anatomy ----------------------------------------------------------
 
 alter table public.lily_picture_arsenal
