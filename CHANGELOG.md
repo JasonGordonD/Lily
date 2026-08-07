@@ -41,23 +41,80 @@ reached the glass. Tiered fix; T1 shipped first.
   state (`PICTURE ON GLASS: CONFIRMED / NOT confirmed`) instead of an
   assumption.
 
-**T3**
+**T2 — delivery and display integrity**
 
+- **X5 — dropped TTS tail chunks.** Each chunk is a separate ElevenLabs
+  POST; a pooled-connection teardown mid-chunk dropped the tail to the
+  cut-recovery backstop as the routine path (`TAIL_CHUNK_UNDELIVERED
+  delivered=0/1`, 3× in the session). A chunk whose stream is torn having
+  pushed ZERO bytes is now re-fetched once in-place — a clean re-fetch with
+  no audio-duplication risk — keeping the tail on the primary path. A
+  partial push or a second failure still falls to cut-recovery; a genuine
+  barge (CancelledError) still drops the tail as intended.
+- **X6 — stale glass.** Published room metadata now stamps the
+  `question_number` it projects; the frontend logs a stale-render warning
+  when that diverges from the active attribute question number (displayed id
+  ≠ active id). The glass already renders the same agent-pushed projection
+  as the spoken lane with no independent client state, so this makes the
+  desync readable rather than silent.
+- **X7 — explicit-heat moderation is a first-class outcome.** A provider
+  content rejection ("Generated image rejected by content moderation",
+  safety block, PROHIBITED_CONTENT) is classified as REJECTED, not
+  ATTEMPT_ERROR — the classifier only matched "safety" before, so a routine
+  top-of-dial refusal read as a system fault. Rejections fall back
+  pictureless (the existing None path) and log per partition, so the
+  explicit-tier rejection rate is a readable tuning signal.
+
+**T3 — recognition, telemetry, infrastructure**
+
+- **X8 — phantom speaker in a solo session.** The roster-aware max_speakers
+  cap (`roster + 1`; solo ⇒ 2) is wired to a game-start live STT swap that
+  shrinks the construction fallback (7) to the real table size, killing the
+  phantom [S2]. Behind `LILY_STT_ROSTER_RETUNE` (DEFAULT OFF — the reconnect
+  is STT-001 Q4's to validate); the cap math is proven by fixture regardless.
+- **X9 — split-utterance remedy.** The runtime named it live ("consider
+  raising min_delay in the endpointing options to accommodate a slow stt").
+  `min_endpointing_delay` raised to 0.6 (from the 0.5 framework default) so
+  the enhanced-point STT (max_delay 1.5) delivers its final transcript
+  before the turn commits; the ceiling stays at the framework default. Set
+  with the Speechmatics max_delay, not against it.
 - **X11 — assessment JSON parse.** Lenient extraction via `raw_decode` from
   the first `{` (trailing prose no longer poisons the parse), one repair
   retry, then a terminal `report_status='failed'` so the reconciliation
   sweep stops re-running a permanent parse error forever.
-- **X13 (partial) — reasoning effort per lane.** On `grok-4.20-multi-agent`,
-  `reasoning.effort` is an agent-count dial (low=4-agent, high=16-agent), so
-  effort is matched to task, not lane importance: the front-facing vocal
-  lane defaults to `medium` and routine question generation to `low`
-  (latency-critical; deep multi-agent effort is reserved for genuinely hard
-  work). (xhigh mapping + measured per-lane latency/cost documentation
-  pending.)
+- **X12 — two conversational gaps.** Detectors for explain-on-request (a
+  player asking for the ACTIVE question in plain words) and verdict-contest
+  (asserting they were misheard / were right) arm one-shot state-block
+  directives: the reply restates the question before proceeding, or gives
+  one grounded re-check against the committed record (correct via the
+  scoring tool or state why it stands) instead of "we're past that".
+- **X10 — VAD slower than realtime (report).** `silero: inference is slower
+  than realtime, delay 0.367` (14:33:21) coincides with the two frame sinks
+  added since (voice-identity probe, camera video-in) competing for the same
+  CPU slot as the adult vocal lane's ~5s-TTFT reasoning. Recommendation
+  recorded for ops: size the deploy slot with headroom for the VAD forward
+  pass plus the optional frame sinks, or gate the sinks off on a starved
+  slot; no code change lands here — it is a provisioning decision.
+
+**X13 — reasoning effort per lane (agent-count dial on `grok-4.20-multi-agent`).**
+`reasoning.effort` is an agent-count dial, not thinking depth: `low`=4-agent,
+`high`=16-agent — a 4× fan-out on latency AND spend. Effort is matched to
+task, not lane importance:
+
+| Lane | Model | Effort | Why |
+| --- | --- | --- | --- |
+| Adult vocal (front-facing) | grok-4.5 | `medium` | Latency-critical; `high` cost ~5s TTFT (p50 4,999ms / p95 8,254ms in lily-FFDEAE). Non-adult vocal TTFT ~1,102ms for reference. |
+| Adult question generation | grok-4.20-multi-agent | `low` (4-agent) | Writing one trivia line is a TCP-vs-UDP-class task; 16 agents is disproportionate in time and spend. |
+| Hard synthesis (future) | grok-4.20-multi-agent | `high` (16-agent) | Reserved for tool-enabled current-events / corpus building where the arsenal absorbs the wait. |
+
+`xhigh` is accepted but its exact agent-count/cost mapping is unconfirmed —
+treat as ≥16-agent, not for use until measured. Effort is a spend multiplier;
+record measured cost per question when the multi-agent lane is exercised.
 
 Regression fixtures: `test_hotfix005_score.py`, `test_hotfix005_x3_reveal.py`,
 `test_hotfix005_x4_images.py`, `test_hotfix005_x11_assess.py`,
-`test_adult_grok.py`.
+`test_hotfix005_x8_x9_stt.py`, `test_hotfix005_x12_convo.py`,
+`test_hotfix005_x5_x6_x7.py`, `test_adult_grok.py`.
 
 ## 2026-08-07 — Current-deploy follow-up: pre-generation answer ownership
 

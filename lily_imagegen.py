@@ -337,6 +337,28 @@ async def _generate_image_bytes_xai(
     return raw, mime, mdl
 
 
+def lily_is_content_rejection(err: object) -> bool:
+    """HOTFIX-005 X7: True when a generation failure is a provider CONTENT
+    rejection (a first-class, expected outcome at the top of the heat dial —
+    xAI: "Generated image rejected by content moderation"; Gemini: safety
+    block / no image in response) rather than a transport ERROR. Moderation
+    rejections were miscategorized as ATTEMPT_ERROR because the classifier
+    only matched "safety" — so a routine explicit-tier refusal read as a
+    system fault. Match the moderation vocabulary too."""
+    s = str(err).lower()
+    return any(
+        needle in s
+        for needle in (
+            "safety",
+            "moderation",
+            "rejected",
+            "no image in response",
+            "prohibited",
+            "blocklist",
+        )
+    )
+
+
 async def lily_generate_image_bytes(
     prompt: str,
     *,
@@ -465,15 +487,27 @@ async def lily_generate_question_image(
             intensity=intensity,
         )
     except Exception as e:
+        rejected = lily_is_content_rejection(e)
         await lily_images.lily_record_image_attempt(
             supabase, session_id=session_id, question_id=question_id,
             source="generated", prompt=prompt,
-            status=lily_images.ATTEMPT_REJECTED
-            if "safety" in str(e).lower() or "no image in response" in str(e)
-            else lily_images.ATTEMPT_ERROR,
+            status=(
+                lily_images.ATTEMPT_REJECTED if rejected
+                else lily_images.ATTEMPT_ERROR
+            ),
             failure_reason=f"{type(e).__name__}: {e}",
             model=attempt_model,
         )
+        # HOTFIX-005 X7: a moderation rejection is an EXPECTED first-class
+        # outcome at the top of the heat dial, not a fault — log it as such
+        # (per-partition rate is readable off REJECTED rows) so a high
+        # explicit-tier rejection rate reads as tuning signal, not breakage.
+        if rejected:
+            logger.info(
+                "LILY_IMAGEGEN | CONTENT_REJECTED | mode=%s intensity=%s "
+                "model=%s q=%s — falling back pictureless (honest line)",
+                mode, intensity, attempt_model, question_id,
+            )
         return None
     url = await lily_images.lily_upload_image_bytes(
         supabase, data, source="generated", content_type=mime

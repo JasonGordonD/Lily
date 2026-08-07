@@ -125,6 +125,12 @@ LILY_LOCAL_ONLY_ENV = {
     # WO-LILY-STT-001 Q0 speaker focus — default OFF (focus_mode=IGNORE ships
     # inert until the shouted-utterance acceptance risk is measured).
     "LILY_STT_FOCUS_MODE",
+    # HOTFIX-005 X9 endpointing floor + X8 roster retune. The delays ship on
+    # in-code defaults (0.6 / 6.0); the roster retune is default OFF (a live
+    # STT reconnect, STT-001 Q4's to validate). Tune via deploy.yml vars.
+    "LILY_STT_MIN_ENDPOINTING_DELAY",
+    "LILY_STT_MAX_ENDPOINTING_DELAY",
+    "LILY_STT_ROSTER_RETUNE",
     # Additive Gemini grounding sources (google_search + url_context) — extra
     # reasoning-node capabilities alongside Exa/Tavily; on when a Google key
     # is present, ship on in-code defaults (toggle via deploy.yml vars).

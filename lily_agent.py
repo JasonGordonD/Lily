@@ -649,6 +649,11 @@ class LilyGame:
         # Its own slot so it can coexist with a state-contradiction note on
         # the same turn; cleared per-turn like _state_note.
         self._returner_honesty_note: str | None = None
+        # HOTFIX-005 X12: explain-on-request + verdict-contest conditioning —
+        # same one-shot lifecycle as the notes above (context only, leak-
+        # filtered, consumed at the turn's playout).
+        self._explain_request_note: str | None = None
+        self._contest_note: str | None = None
         # HOTFIX-004 Defect 1: deterministic 18+ consent floor. Set only by
         # the age-consent detector on a real user final; the adult-mode gate
         # requires it IN ADDITION to the model's confirmed_all_18_plus flag,
@@ -880,6 +885,12 @@ class LilyGame:
                 # Drives the frontend's high-contrast wager palette shift.
                 "wager": self.sk.phase == "final",
                 "image_url": image_url or "",
+                # HOTFIX-005 X6: stamp the question number this metadata
+                # projects, so the glass can detect a stale render (displayed
+                # question id ≠ active question id) against the attribute
+                # question number and log it. Same ledger/journal source as
+                # the spoken lane — no independent client state.
+                "question_number": int(self.sk.question_number),
             }
             if category:
                 payload["category"] = category
@@ -4360,6 +4371,11 @@ class LilyGame:
         # RECOGNITION-HONESTY: same one-shot lifecycle — the returner-claim
         # conditioning serviced this turn; a fresh claim re-sets it.
         self._returner_honesty_note = None
+        # HOTFIX-005 X12: the explain restatement and the contest re-check
+        # each serviced this turn — one-shot, consumed here. A fresh explain
+        # or contest utterance next turn re-arms.
+        self._explain_request_note = None
+        self._contest_note = None
         # Self-knowledge Task 3: the what's-new delta rode the greeting —
         # once the greet has genuinely played out, the stamp moves forward
         # (never before: an interrupted greet keeps the delta for a retry).
@@ -5329,6 +5345,59 @@ class LilyGame:
             logger.info(
                 "LILY_HONESTY | RETURNER_CLAIM | session=%s player=%s "
                 "text=%r — ungrounded, honesty gate armed",
+                self.sk.session_id, player, str(text)[:120],
+            )
+
+        # HOTFIX-005 X12(1): explain-on-request. A player asking for the
+        # ACTIVE question to be restated in plain words (operator asked twice
+        # at 14:40 and got nothing) arms a one-shot directive: restate THIS
+        # question plainly before anything else. Only meaningful with a
+        # question on the table; the answer is never leaked.
+        if (
+            command is None
+            and not result.get("media_choice")
+            and self.armed_question is not None
+            and lily_scorekeeper.lily_detect_explain_request(text)
+        ):
+            prompt_text = str(self.armed_question.get("prompt", "")).strip()
+            self._explain_request_note = (
+                "[explain request — a player asked you to explain the CURRENT "
+                "question. Before anything else, restate THIS question in "
+                "plainer, simpler words (same meaning, do NOT leak or hint the "
+                "answer), then let them answer. Do not skip it, do not move "
+                "on, do not reveal. The question on the table is: "
+                f"\"{prompt_text}\".]"
+            )
+            logger.info(
+                "LILY_EXPLAIN | REQUEST | session=%s q=%d — restate armed",
+                self.sk.session_id, self.sk.question_number,
+            )
+
+        # HOTFIX-005 X12(2): verdict contest. A player asserting they were
+        # misheard / were right (operator said "the correct answer is A"
+        # three times and was brushed off with "we're past that") earns ONE
+        # grounded re-check against the committed record. One-shot per
+        # contest; the directive names the committed truth so the reply
+        # corrects or explains, never dismisses.
+        if (
+            command is None
+            and not result.get("media_choice")
+            and not getattr(self, "_contest_note", None)
+            and lily_scorekeeper.lily_detect_verdict_contest(text)
+        ):
+            self._contest_note = (
+                "[verdict contest — a player says they were misheard or that "
+                "their answer was right. Give them ONE honest re-check against "
+                "the committed record (the SCORES field and the last ruling): "
+                "if what they actually said matches the canonical answer and "
+                "they were not credited, say so plainly and make it right via "
+                "your scoring tool (never invent the score — the ledger is "
+                "the only truth); if the ruling stands, tell them exactly why "
+                "in one line. Never brush it off with 'we're past that'. One "
+                "re-check only.]"
+            )
+            logger.info(
+                "LILY_CONTEST | REQUEST | session=%s player=%s text=%r",
                 self.sk.session_id, player, str(text)[:120],
             )
 
@@ -7796,6 +7865,14 @@ class LilyGame:
         returner_note = getattr(self, "_returner_honesty_note", None)
         if returner_note:
             extra.append(returner_note)
+        # HOTFIX-005 X12: explain-on-request and verdict-contest conditioning
+        # — context only, leak-filtered like every note above.
+        explain_note = getattr(self, "_explain_request_note", None)
+        if explain_note:
+            extra.append(explain_note)
+        contest_note = getattr(self, "_contest_note", None)
+        if contest_note:
+            extra.append(contest_note)
         if not self.game_started:
             extra.append(
                 "game not started: you are in the lobby — bind names, fish "
@@ -8140,16 +8217,17 @@ class LilyGame:
                     self.supabase, self.sk.session_id, entry,
                 ))
             note = f" Their held point ({pending['points']}) is now committed."
-        # NOTE (supersedes the spec's dynamic max_speakers idea): the 1.6.6
-        # Speechmatics plugin has NO in-flight update path for max_speakers
-        # (only update_speakers(focus/ignore/focus_mode)). The cap is set at
-        # construction to product max (6 players + 1). 1.6.6 does add
-        # Agent.update_options(stt=...) — a full live STT swap (fresh
-        # StartRecognition) that COULD carry a new max_speakers; not wired
-        # here (ghost-speaker WS decision).
+        # HOTFIX-005 X8: the Speechmatics plugin has NO in-flight setter for
+        # max_speakers (only update_speakers(focus/ignore)). The cap is set
+        # at StartRecognition; shrinking it to the real table size requires a
+        # full live STT swap via Agent.update_options(stt=...). Wired now but
+        # DEFAULT OFF (LILY_STT_ROSTER_RETUNE) — the reconnect is STT-001
+        # Q4's to validate. Fires at most once, only to shrink the cap.
+        self._maybe_retune_stt_for_roster()
         logger.info(
-            "LILY_STT | roster=%d (max_speakers fixed at construction)",
+            "LILY_STT | roster=%d max_speakers=%d",
             self.sk.roster_size(),
+            getattr(self, "_stt_max_speakers_applied", 7),
         )
         # Voiceprint enrollment fires on the first binding and every later
         # bind. The write is idempotent and this closes the late-binder gap:
@@ -8183,6 +8261,53 @@ class LilyGame:
         # freestyles bonus points forever.
         self._maybe_auto_start_after_lobby()
         return note
+
+    def _maybe_retune_stt_for_roster(self) -> None:
+        """HOTFIX-005 X8: shrink the STT max_speakers cap to the roster-aware
+        size (roster+1) at game start, killing the phantom generic labels a
+        too-wide cap mints in small/solo tables (the solo [S2] that spoke at
+        14:49:49). Fires at most once, only to SHRINK the cap, only when
+        explicitly enabled, and only if the rebuild+swap machinery is
+        present. Fail-safe: any error leaves the live STT untouched."""
+        if getattr(self, "_stt_roster_retuned", False):
+            return
+        if not lily_config.stt_roster_retune_enabled():
+            return
+        rebuild = getattr(self, "_stt_rebuild", None)
+        agent = getattr(self, "agent", None)
+        update = getattr(agent, "update_options", None) if agent else None
+        if rebuild is None or not callable(update):
+            return
+        try:
+            roster = int(self.sk.roster_size())
+        except Exception:
+            return
+        if roster < 1:
+            return
+        target = lily_stt_tuning.lily_max_speakers_for(roster)
+        current = int(getattr(self, "_stt_max_speakers_applied", 7))
+        if target >= current:
+            # The construction fallback already covers this table; a live
+            # swap that doesn't shrink the cap buys a reconnect for nothing.
+            self._stt_roster_retuned = True
+            return
+        try:
+            new_stt = rebuild(target)
+            update(stt=new_stt)
+            self.stt = new_stt
+            self._stt_max_speakers_applied = target
+            self._stt_roster_retuned = True
+            logger.warning(
+                "LILY_STT | ROSTER_RETUNE | session=%s roster=%d "
+                "max_speakers %d -> %d (live STT swap)",
+                self.sk.session_id, roster, current, target,
+            )
+        except Exception:
+            logger.exception(
+                "LILY_STT | ROSTER_RETUNE_FAILED | session=%s — keeping the "
+                "construction-time STT (max_speakers=%d)",
+                self.sk.session_id, current,
+            )
 
     # -- auto-start safety net --------------------------------------------------------
 
@@ -10141,6 +10266,31 @@ async def entrypoint(ctx: JobContext) -> None:
         **{k: v for k, v in _tuned.items() if k != "prefer_current_speaker"},
     )
     game.stt = stt
+    # HOTFIX-005 X8: capture a faithful STT rebuilder so a game-start,
+    # roster-aware max_speakers retune can produce an otherwise-identical STT
+    # with only the cap changed. Stored (not run) here; the game invokes it
+    # at start behind the default-off LILY_STT_ROSTER_RETUNE flag, and only
+    # ever to SHRINK the cap toward the real table size (fallback 7 already
+    # covers large tables — this only kills phantom labels on small ones).
+    def _rebuild_stt(max_speakers_override: int):
+        _retuned = lily_stt_tuning.lily_tuned_stt_kwargs()
+        _retuned["max_speakers"] = max_speakers_override
+        return SpeechmaticsSTT(
+            operating_point=OperatingPoint.ENHANCED,
+            prefer_current_speaker=True,
+            turn_detection_mode=TurnDetectionMode.FIXED,
+            additional_vocab=[
+                AdditionalVocabEntry(content="Lily"),
+                *(AdditionalVocabEntry(content=name) for name in _vocab_names),
+            ],
+            known_speakers=known_speakers,
+            **_focus_kwargs,
+            **{k: v for k, v in _retuned.items() if k != "prefer_current_speaker"},
+        )
+
+    game._stt_rebuild = _rebuild_stt
+    game._stt_max_speakers_applied = int(_tuned.get("max_speakers", 7))
+    game._stt_roster_retuned = False
     # Q3 attestation: log the EFFECTIVE config as-applied (intended==applied
     # is asserted by test) and stash it for the session report — every knob
     # the build believes it set, proven at the wire.
@@ -10187,6 +10337,14 @@ async def entrypoint(ctx: JobContext) -> None:
         llm=general_vocal_llm,
         tts=lily_tts_instance,  # voice1 (primary) via lily_config.lily_voice_id()
         vad=silero.VAD.load(),  # barge-in enabled; no STT gating during TTS
+        # HOTFIX-005 X9: raise the endpointing floor so a slow enhanced-point
+        # STT (max_delay 1.5s) delivers its final transcript BEFORE the turn
+        # commits — the runtime's own remedy for the split-utterance class
+        # ("consider raising min_delay in the endpointing options to
+        # accommodate a slow stt", 14:33:18). Ceiling pinned to the framework
+        # default; set together with the Speechmatics max_delay (STT-001).
+        min_endpointing_delay=lily_config.stt_min_endpointing_delay(),
+        max_endpointing_delay=lily_config.stt_max_endpointing_delay(),
         turn_handling=TurnHandlingOptions(
             interruption=InterruptionOptions(
                 min_words=1,

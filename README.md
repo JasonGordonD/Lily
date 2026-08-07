@@ -247,6 +247,23 @@ Every model ID below was verified live on the funded keys before wiring.
   multi-step) escalate to HIGH via `_thinking_level_for_turn` in `llm_node`,
   which overrides `_opts.thinking_config` for that turn and restores in
   `finally`. Gemini 3.x accepts only `low`/`high`.
+- **Adult-deck reasoning effort per lane (HOTFIX-005 X13).** On
+  `grok-4.20-multi-agent`, `reasoning.effort` is an **agent-count dial**, not
+  thinking depth: `low`=4-agent, `high`=16-agent — a 4× fan-out on latency
+  AND spend. Effort is matched to task complexity, not lane importance:
+
+  | Lane | Model | Effort | Rationale |
+  | --- | --- | --- | --- |
+  | Adult vocal (front-facing) | `grok-4.5` (`adult_vocal_effort`) | **`medium`** | Latency-critical — a player waits through every token. `high` cost ~5s TTFT in `lily-FFDEAE` (llm_ttft p50 4,999ms / p95 8,254ms; non-adult vocal ~1,102ms). `low` for max speed, `high` to restore deep banter. |
+  | Adult question generation | `grok-4.20-multi-agent` (`adult_reasoning_effort`) | **`low`** (4-agent) | One trivia line is a TCP-vs-UDP-class task; 16 agents is disproportionate in time and spend. |
+  | Hard synthesis (future) | `grok-4.20-multi-agent` | `high` (16-agent) | Reserved for tool-enabled current-events / corpus building where the arsenal absorbs the wait. |
+
+  `xhigh` is accepted but its exact agent-count/cost mapping is **unconfirmed**
+  against the vendor — treat as ≥16-agent, not for use until measured. Effort
+  is a spend multiplier; record measured cost per question when the
+  multi-agent lane is exercised. Overrides: `LILY_ADULT_VOCAL_EFFORT`,
+  `LILY_ADULT_REASONING_EFFORT` (`off` disables the param for ids that reject
+  it).
 
 ## Both-sides record, continuous recognition, variety (WO-LILY-RECOGNITION-VARIETY-001)
 
@@ -1350,7 +1367,8 @@ of the WS-15 diarization bake-off. Matrix axes for the acoustic sweep:
 | `additional_vocab` | `["Lily"]` | + player names at construction | constructor-only (StartRecognition; `update_speakers()` carries focus/ignore/focus_mode ONLY) so "names at bind" is impossible without a full STT swap; known-voiceprint names ARE available pre-construction and ride along. NEVER answer nouns — expectation-primed matching (n-best × `acceptable_answers`) is the generalizing mechanism |
 | `punctuation_overrides` | unset | keep unset | no failure mode implicates punctuation |
 | `speaker_sensitivity` | 0.5 (default) | **0.35** | validator bounds (0, 1). Higher mints more unique speakers; reverb reflections minted phantoms at 0.5. With enrolled speakers present, lower sensitivity biases toward matching enrolled voices over minting generic ones. 0.35 = matrix-center of the 0.3–0.5 band, pending WS-15 acoustic sweep |
-| `max_speakers` | 7 | keep 7 at construction | validator bounds 2–100; construction-fixed at this pin. S7-dumping-ground = the generic 7-cap exhausting (enrolled speakers do NOT consume the generic budget). Table size is unknowable pre-bind, so the roster-aware cap (`lily_max_speakers_for`: bound+1, clamp [2,7]) belongs to WS-8's post-bind `Agent.update_options(stt=...)` swap |
+| `max_speakers` | 7 at construction; roster-aware post-bind (HOTFIX-005 X8) | 7 pre-bind, then `roster + 1` (clamp [2,7]) at game start | validator bounds 2–100. S7-dumping-ground = the generic 7-cap exhausting (enrolled speakers do NOT consume the generic budget). Table size is unknowable pre-bind, so construction stays 7; at game start the roster-aware cap (`lily_max_speakers_for`: bound+1, clamp [2,7]) is applied via an `Agent.update_options(stt=...)` swap (solo ⇒ 2, killing the phantom [S2]). Wired behind `LILY_STT_ROSTER_RETUNE` (**DEFAULT OFF** — a live STT reconnect, STT-001 Q4's to validate); shrink-only |
+| `min_endpointing_delay` (session, not STT) | 0.5 (framework default) | **0.6** (HOTFIX-005 X9) | the runtime's own remedy for the split-utterance class ("consider raising min_delay in the endpointing options to accommodate a slow stt"): the 0.5 floor commits the turn before the enhanced point's 1.5s `max_delay` delivers the final transcript. `LILY_STT_MIN_ENDPOINTING_DELAY`; ceiling (`max_endpointing_delay`) pinned to the 6.0 framework default. Set WITH `max_delay`, not against it |
 | `prefer_current_speaker` | True | keep | echo copies arriving close behind the true speaker get folded into the current speaker instead of minting a phantom |
 | `speaker_active_format` | `[{speaker_id}] {text}` | keep | attribution rides the transcript |
 | `speaker_passive_format` | unset | keep unset | passive frames unused |

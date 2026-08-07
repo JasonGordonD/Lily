@@ -249,10 +249,13 @@ def adult_reasoning_effort() -> Optional[str]:
 
     HOTFIX-005 X13: routine question generation is a TCP-vs-UDP-class task
     — one trivia line — so the default is `low` (4-agent). 16 agents to
-    write one question is disproportionate; reserve high/xhigh for
-    tool-enabled current-events / corpus building where the arsenal absorbs
-    the wait. Override per lane via LILY_ADULT_REASONING_EFFORT. "off"
-    disables the parameter entirely (for ids that reject it)."""
+    write one question is disproportionate; reserve `high` for tool-enabled
+    current-events / corpus building where the arsenal absorbs the wait.
+    `xhigh` is ACCEPTED but its exact agent-count/cost mapping is
+    UNCONFIRMED against the vendor (X13 open item) — treat it as ≥16-agent
+    and do not enable it until measured. Override per lane via
+    LILY_ADULT_REASONING_EFFORT. "off" disables the parameter entirely (for
+    ids that reject it)."""
     effort = (_get("LILY_ADULT_REASONING_EFFORT", "low") or "").lower()
     if effort in ("off", "none", "0"):
         return None
@@ -302,6 +305,31 @@ def false_interruption_timeout() -> float:
     pause point (framework default 2.0). The 4-player echo room's noise
     bursts land here: pause-and-resume instead of a hard cut."""
     return _get_float("LILY_FALSE_INTERRUPTION_TIMEOUT", 2.0)
+
+
+def stt_min_endpointing_delay() -> float:
+    """HOTFIX-005 X9: minimum silence the session waits before committing a
+    user turn (LiveKit endpointing `min_endpointing_delay`, framework
+    default 0.5s).
+
+    The runtime named both the defect and its remedy live at 14:33:18:
+    `transcript arrives after turn has been committed. consider raising
+    min_delay in the endpointing options to accommodate a slow stt.` The
+    enhanced Speechmatics point runs a `max_delay` of 1.5s (STT-001), so a
+    0.5s endpointing floor commits the turn before the final transcript
+    lands — splitting one utterance across the boundary. Raise the floor to
+    0.6s so a slow-but-not-pathological STT delivers inside the window; the
+    max endpointing delay still bounds the wait. Set WITH the Speechmatics
+    max_delay, never against it (STT-001 coordination)."""
+    return max(0.1, _get_float("LILY_STT_MIN_ENDPOINTING_DELAY", 0.6))
+
+
+def stt_max_endpointing_delay() -> float:
+    """HOTFIX-005 X9: the ceiling on the endpointing wait (LiveKit
+    `max_endpointing_delay`, framework default 6.0s). Pinned explicitly so
+    the min-floor raise above can never be read as also loosening the
+    ceiling; the ceiling is unchanged from the framework default."""
+    return _get_float("LILY_STT_MAX_ENDPOINTING_DELAY", 6.0)
 
 
 def cut_recovery_grace() -> float:
@@ -832,6 +860,27 @@ def stt_focus_mode() -> str:
     table) — both guards enforced at the construction site."""
     v = (_get("LILY_STT_FOCUS_MODE", "off") or "").strip().lower()
     return v if v in ("off", "ignore") else "off"
+
+
+def stt_roster_retune_enabled() -> bool:
+    """HOTFIX-005 X8 — roster-aware max_speakers retune at game start.
+
+    The Speechmatics `max_speakers` cap is a StartRecognition-time value;
+    the plugin has no in-flight setter, so shrinking it to a small table's
+    size (solo ⇒ roster+1 = 2, killing the phantom [S2] that spoke in a
+    single-player session) requires a full live STT swap via
+    `Agent.update_options(stt=...)` — a fresh StartRecognition, i.e. a
+    reconnect.
+
+    DEFAULT OFF, deliberately: a live STT swap at game start reconnects the
+    recognition websocket, and the ghost-speaker WS previously chose NOT to
+    wire it for that reason. The mechanism ships inert here so STT-001 Q4
+    can activate it once the reconnect is validated on the captured
+    fixtures. The roster-aware cap math (`lily_max_speakers_for`) is proven
+    by fixture regardless of this flag."""
+    return (_get("LILY_STT_ROSTER_RETUNE", "off") or "").strip().lower() in (
+        "on", "true", "1", "yes"
+    )
 
 
 def garble_clarify_min_confidence() -> float:

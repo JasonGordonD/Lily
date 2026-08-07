@@ -54,6 +54,13 @@ NUM_CHANNELS = 1
 ELEVENLABS_REQUEST_CHAR_CAP = 4200
 MAX_CHUNK_SIZE = 3800
 
+# HOTFIX-005 X5: how many times a single chunk's synthesis is re-fetched
+# in-place when its stream is torn early having pushed ZERO bytes (a clean
+# pooled-connection teardown). Bounded at 1 — one clean retry catches the
+# transient disconnect without risking an unbounded stall on the delivery
+# path; a partial push or a second failure falls to cut-recovery.
+_MAX_CHUNK_RETRIES = 1
+
 VOICE_SETTINGS = {
     "stability": 0.4,
     "similarity_boost": 0.9,
@@ -281,50 +288,80 @@ class LilyChunkedStream(tts.ChunkedStream):
                     "apply_text_normalization": "auto",
                 }
 
-                async with self._tts._ensure_session().post(
-                    url,
-                    headers={
-                        "xi-api-key": self._opts.api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
-                    timeout=aiohttp.ClientTimeout(
-                        total=30,
-                        sock_connect=self._conn_options.timeout,
-                    ),
-                ) as resp:
-                    if resp.status != 200:
-                        err_body = await resp.text()
-                        raise APIStatusError(
-                            message=f"ElevenLabs error: {err_body[:200]}",
-                            status_code=resp.status,
-                            request_id=None,
-                            body=err_body,
-                        )
+                # HOTFIX-005 X5: a chunk's ElevenLabs stream can be torn
+                # early by a pooled-connection teardown (ServerDisconnected /
+                # incomplete-read), dropping the tail to the cut-recovery
+                # backstop as the ROUTINE path (delivered=0/1, 3× in the
+                # evidence session). Retry the chunk in-place ONLY when the
+                # stream died having pushed ZERO bytes for it — a clean
+                # re-fetch with no audio-duplication risk. A partial push
+                # (some audio already on air) or an exhausted retry falls
+                # through to the finally's remainder record + cut-recovery,
+                # never double-speaking. A genuine barge (CancelledError) is
+                # not an aiohttp error and propagates untouched — the tail is
+                # meant to drop there.
+                attempt = 0
+                while True:
+                    bytes_at_chunk_start = total_bytes
+                    try:
+                        async with self._tts._ensure_session().post(
+                            url,
+                            headers={
+                                "xi-api-key": self._opts.api_key,
+                                "Content-Type": "application/json",
+                            },
+                            json=body,
+                            timeout=aiohttp.ClientTimeout(
+                                total=30,
+                                sock_connect=self._conn_options.timeout,
+                            ),
+                        ) as resp:
+                            if resp.status != 200:
+                                err_body = await resp.text()
+                                raise APIStatusError(
+                                    message=f"ElevenLabs error: {err_body[:200]}",
+                                    status_code=resp.status,
+                                    request_id=None,
+                                    body=err_body,
+                                )
 
-                    if not initialized:
-                        output_emitter.initialize(
-                            request_id=utils.shortuuid(),
-                            sample_rate=SAMPLE_RATE,
-                            num_channels=NUM_CHANNELS,
-                            mime_type="audio/pcm",
-                        )
-                        initialized = True
+                            if not initialized:
+                                output_emitter.initialize(
+                                    request_id=utils.shortuuid(),
+                                    sample_rate=SAMPLE_RATE,
+                                    num_channels=NUM_CHANNELS,
+                                    mime_type="audio/pcm",
+                                )
+                                initialized = True
 
-                    carry = b""
-                    async for audio_chunk, _ in resp.content.iter_chunks():
-                        data = carry + audio_chunk
-                        usable = len(data) - (len(data) % 2)
-                        if usable > 0:
-                            output_emitter.push(data[:usable])
-                            total_bytes += usable
-                            chunk_count += 1
-                        carry = data[usable:]
-                    if len(carry) >= 2:
-                        usable = len(carry) - (len(carry) % 2)
-                        output_emitter.push(carry[:usable])
-                        total_bytes += usable
-                        chunk_count += 1
+                            carry = b""
+                            async for audio_chunk, _ in resp.content.iter_chunks():
+                                data = carry + audio_chunk
+                                usable = len(data) - (len(data) % 2)
+                                if usable > 0:
+                                    output_emitter.push(data[:usable])
+                                    total_bytes += usable
+                                    chunk_count += 1
+                                carry = data[usable:]
+                            if len(carry) >= 2:
+                                usable = len(carry) - (len(carry) % 2)
+                                output_emitter.push(carry[:usable])
+                                total_bytes += usable
+                                chunk_count += 1
+                        break  # chunk fully streamed
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                        pushed_this_chunk = total_bytes - bytes_at_chunk_start
+                        if pushed_this_chunk == 0 and attempt < _MAX_CHUNK_RETRIES:
+                            attempt += 1
+                            logger.warning(
+                                "LILY_TTS | CHUNK_RETRY | chunk=%d/%d attempt=%d "
+                                "reason=%s — clean re-fetch (0 bytes on air, no "
+                                "dup), keeping the tail off cut-recovery",
+                                chunk_index + 1, self.chunks_total, attempt,
+                                type(e).__name__,
+                            )
+                            continue
+                        raise
 
                 # This chunk's audio has flushed to the emitter — delivered.
                 self.chunks_delivered = chunk_index + 1

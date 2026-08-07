@@ -477,6 +477,78 @@ def lily_detect_camera_request(text: str) -> bool:
     return bool(_CAMERA_REQUEST_RE.search(normalized))
 
 
+# ---------------------------------------------------------------------------
+# Explain-on-request (WO-LILY-HOTFIX-005 X12) — a player asking for the
+# ACTIVE question to be restated in plain language. The live failure: the
+# operator asked twice (14:40:27, 14:40:44) and never got a restatement,
+# then Lily claimed she "can and will" explain. Anchored to an explain/
+# rephrase verb + a question/that/this/it reference, so "explain the rules"
+# and "what do you mean, we're tied?" don't fire.
+# ---------------------------------------------------------------------------
+
+_EXPLAIN_REQUEST_RE = _re.compile(
+    r"\b(?:"
+    r"explain (?:the |that |this |your )?question"
+    r"|(?:can|could|will|would) you explain (?:the |that |this |it)"
+    r"|what (?:does|do) (?:that|this|the question|it) mean"
+    r"|what do you mean by (?:the |that |this )?question"
+    r"|i (?:don t|do not|can t|cannot) (?:get|understand|follow) "
+    r"(?:the |that |this )?question"
+    r"|(?:re ?phrase|reword|clarify|break down|unpack) "
+    r"(?:the |that |this )?question"
+    r"|say (?:the question|that|it) (?:again|differently|another way)"
+    r"|(?:what s|what is) the question(?: again)?"
+    r"|in (?:plain|simple) (?:english|terms|words)"
+    r"|come again(?: on that)?"
+    r")\b"
+)
+
+
+def lily_detect_explain_request(text: str) -> bool:
+    """True when a player asks for the ACTIVE question to be restated in
+    plain language (X12). Anchored to an explain/rephrase verb + a question
+    reference so game-state and rules questions never fire."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    return bool(_EXPLAIN_REQUEST_RE.search(normalized))
+
+
+# ---------------------------------------------------------------------------
+# Verdict contest (WO-LILY-HOTFIX-005 X12) — a player asserting they were
+# misheard or that their answer was in fact correct, contesting a ruling.
+# The live failure: the operator said "the correct answer is A" three times
+# (14:39:27, 14:39:59) and was told "we're past that one either way." A
+# contest earns ONE re-check against the committed record. Anchored to a
+# self-reference + a mishear/correction cue so a fresh answer ("the answer
+# is Paris") to a LIVE question does not read as a contest.
+# ---------------------------------------------------------------------------
+
+_VERDICT_CONTEST_RE = _re.compile(
+    r"\b(?:"
+    r"you (?:misheard|didn t hear|mis heard|got me wrong)"
+    r"|i (?:did |actually |already )?(?:said|say|answered)\b[a-z0-9 ']*?"
+    r"(?:not|correct|right|it)"
+    r"|(?:that s|thats|that is) (?:wrong|not right|incorrect|not what i said)"
+    r"|i (?:was|am) (?:right|correct)"
+    r"|i (?:did |actually )?(?:get|got) (?:it|that) right"
+    r"|(?:the )?(?:correct )?answer (?:is|was) (?:a|b|c|d)\b"
+    r"|i (?:should have|shoulda) (?:got|gotten) (?:the|that|a) point"
+    r"|(?:check|go back to|review) (?:the|that|my) (?:answer|last one)"
+    r")\b"
+)
+
+
+def lily_detect_verdict_contest(text: str) -> bool:
+    """True when a player contests the last ruling — asserting they were
+    misheard or that their answer was correct (X12). Anchored so a fresh
+    answer to a live question is not mistaken for a contest."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    return bool(_VERDICT_CONTEST_RE.search(normalized))
+
+
 def lily_detect_control_command(text: str) -> Optional[str]:
     """
     Detect a sticky player command in an utterance.
