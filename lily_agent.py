@@ -4928,6 +4928,17 @@ class LilyGame:
                 self.sk.session_id, str(text)[:80],
             )
 
+        # VIDEOIN-001 V1: an explicit spoken "look at this" opens the sparse
+        # camera lane (and signals the frontend to publish) — but only when
+        # available (never in the adult deck) and not already open. The
+        # camera never publishes without this trigger or the UI control.
+        if (
+            self.camera_lane_status()["available"]
+            and self.sk.camera_lane != "open"
+            and lily_scorekeeper.lily_detect_camera_request(text)
+        ):
+            asyncio.ensure_future(self.open_camera_lane(source="spoken_request"))
+
         # Durable voice-identity probe — one attempt per session, fired once a
         # real utterance exists (audio to embed). Inert unless the embedder +
         # captured audio are present; on a confident cross-device match it
@@ -7078,6 +7089,88 @@ class LilyGame:
             )
         return None
 
+    # -- camera lane (WO-LILY-VIDEOIN-001 — sparse show-and-tell) ---------------
+
+    def camera_lane_status(self) -> dict:
+        """V2: field-granular camera-lane truth for the state block. The
+        anti-fabrication read behind every camera claim — she offers the
+        camera only when it is genuinely available, and says she sees
+        something only when a frame has actually been attached this turn."""
+        adult = self.sk.mode == "adult"
+        return {
+            # V3.2: structurally unavailable in the adult deck.
+            "available": not adult,
+            "open": getattr(self.sk, "camera_lane", "off") == "open",
+            "frame_pending": getattr(self, "_latest_video_frame", None) is not None,
+            "unavailable_reason": "adult_mode" if adult else None,
+        }
+
+    def camera_lane_state_line(self) -> str | None:
+        """V2 + V3: the grounded camera line + the hardcoded describe
+        constraints. Rides the state block whenever the lane is open or an
+        offer would be dishonest, so 'hold it up to the camera' is
+        unproducible while unavailable and 'I see it' is unproducible with no
+        attached frame."""
+        s = self.camera_lane_status()
+        if not s["available"]:
+            # In adult mode the camera is off the table — never offer it.
+            return (
+                "camera lane read — the camera is NOT available in the "
+                "grown-up deck; do not offer it, and if asked say plainly "
+                "it's off while the adult deck is on."
+            )
+        if s["open"] and s["frame_pending"]:
+            return (
+                "camera lane read — a live camera frame IS attached to THIS "
+                "turn: describe only the OBJECT or SCENE actually shown. "
+                "HARD RULES: never identify, name, or guess WHO a person is; "
+                "compute no facial match. If what's held up is a person "
+                "rather than an object, do NOT describe them — one warm line "
+                "and steer back to the game."
+            )
+        if s["open"]:
+            return (
+                "camera lane read — the camera is ON but no frame has come "
+                "through yet; if asked what you see, say honestly 'nothing's "
+                "come through yet', never pretend to see something."
+            )
+        # Closed + available: only worth grounding so 'I can see it' can't be
+        # fabricated before anyone opens the camera.
+        return (
+            "camera lane read — the camera is NOT on (nothing has been "
+            "shared); you may OFFER it ('want to hold it up to the camera?'), "
+            "but you cannot claim to see anything until a frame arrives."
+        )
+
+    def take_camera_frame(self):
+        """Consume the most-recent camera frame for attachment to ONE turn,
+        then clear it — a frame lives in its turn and is gone (no retention,
+        never re-attached to a later turn). None when nothing is buffered."""
+        frame = getattr(self, "_latest_video_frame", None)
+        self._latest_video_frame = None
+        if frame is not None:
+            self._camera_frame_shown = True
+        return frame
+
+    async def open_camera_lane(self, source: str) -> bool:
+        """Open the sparse lane on an explicit player trigger and signal the
+        frontend to publish the camera. Refused (False) in the adult deck."""
+        if not self.sk.set_camera_lane("open"):
+            return False
+        logger.info(
+            "LILY_CAMERA | LANE_OPEN | session=%s source=%s",
+            self.sk.session_id, source,
+        )
+        await self.send_event("camera_open", {"source": source})
+        return True
+
+    async def close_camera_lane(self, source: str) -> None:
+        """Auto-close after the exchange (or on request): stop the camera and
+        drop any buffered frame so nothing lingers."""
+        self.sk.set_camera_lane("off")
+        self._latest_video_frame = None
+        await self.send_event("camera_close", {"source": source})
+
     def set_delivery_pace(self, level: str) -> bool:
         """PATCH-003 P7: apply a delivery-rate request. Sets the session
         field, applies the TTS speed where the voice supports it, and
@@ -7129,6 +7222,15 @@ class LilyGame:
                 extra.append(lane_line)
         except Exception:
             pass  # grounding is enrichment; never breaks the state block
+        # VIDEOIN-001 V2/V3: the grounded camera read + the hardcoded describe
+        # constraints (objects only, no person ID, person->redirect). Context
+        # only; leak-filtered. Same never-break contract as the picture lane.
+        try:
+            cam_line = self.camera_lane_state_line()
+            if cam_line:
+                extra.append(cam_line)
+        except Exception:
+            pass
         # PATCH-003 P7: a slow delivery pace shapes the TEXT on both voices
         # (the voice speed change is best-effort; this always applies).
         if getattr(self.sk, "delivery_pace", "normal") == "slow":
@@ -8623,6 +8725,27 @@ class LilyAgent(Agent):
         # pending auto-resume watchdog stands down — the reply this user
         # turn produces owns the recovery (no double-speak).
         self._game.note_user_turn()
+        # VIDEOIN-001: if the camera lane is open and a frame is buffered,
+        # attach the MOST-RECENT frame to THIS user turn as native
+        # ImageContent (the multimodal vocal LLM sees it directly — no bucket,
+        # no upload). take_camera_frame clears it, so it rides exactly one
+        # turn and is never retained or re-attached. The describe constraints
+        # (objects only, no person ID, person->redirect) ride the state block
+        # via camera_lane_state_line.
+        try:
+            if getattr(self._game.sk, "camera_lane", "off") == "open":
+                frame = self._game.take_camera_frame()
+                if frame is not None:
+                    from livekit.agents.llm import ImageContent
+                    new_message.content.append(ImageContent(image=frame))
+                    logger.info(
+                        "LILY_CAMERA | FRAME_ATTACHED | session=%s — one turn, "
+                        "not retained", self._game.sk.session_id,
+                    )
+        except Exception:
+            logger.exception(
+                "LILY_CAMERA | frame attach failed — turn proceeds without it"
+            )
         try:
             self._apply_context_blocks(turn_ctx)   # this turn sees FINAL context
             self._apply_context_blocks(self._chat_ctx)  # next preemptive snapshot too
@@ -9185,6 +9308,26 @@ def _frame_int16(frame):
         return array.array("h", bytes(frame.data))
     except Exception:
         return []
+
+
+async def _lily_camera_frame_fork(track, game) -> None:
+    """VIDEOIN-001 frame sink: keep ONLY the most-recent video frame on the
+    game while the camera lane is open, so on_user_turn_completed can attach
+    it to one turn. No buffering of history, no storage — each frame
+    overwrites the last, and a closed lane drops frames on the floor. Never
+    on the vocal path, never raises into the session. The one live-video
+    seam the unit tests can't exercise; the state/grounding it feeds is
+    fully tested."""
+    try:
+        stream = rtc.VideoStream(track)
+        async for ev in stream:
+            if getattr(game.sk, "camera_lane", "off") != "open":
+                # Lane closed — hold nothing (transient, user-initiated only).
+                game._latest_video_frame = None
+                continue
+            game._latest_video_frame = getattr(ev, "frame", None) or ev
+    except Exception as e:
+        logger.warning("LILY_CAMERA | FRAME_FORK_ENDED | %s", e)
 
 
 def lily_stt_focus_kwargs(known_speakers) -> dict:
@@ -10205,6 +10348,15 @@ async def entrypoint(ctx: JobContext) -> None:
                     getattr(participant, "kind", None)
                     == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
                 ):
+                    return
+                # VIDEOIN-001: a published camera track feeds the sparse
+                # frame sink — it only holds a frame while the lane is open
+                # (user-initiated), so a track that appears is harmless until
+                # the player opens the lane. One sink per camera track.
+                if getattr(track, "kind", None) == rtc.TrackKind.KIND_VIDEO:
+                    if not getattr(game, "_camera_fork_started", False):
+                        game._camera_fork_started = True
+                        asyncio.ensure_future(_lily_camera_frame_fork(track, game))
                     return
                 if getattr(track, "kind", None) != rtc.TrackKind.KIND_AUDIO:
                     return

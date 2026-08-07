@@ -434,6 +434,49 @@ def lily_detect_age_consent(text: str) -> bool:
     return bool(_AGE_CONSENT_RE.search(normalized))
 
 
+# ---------------------------------------------------------------------------
+# Camera-lane request (WO-LILY-VIDEOIN-001 V1) — the explicit player action
+# that opens the sparse show-and-tell lane ("look at this", "can you see
+# this"). The camera NEVER publishes without this (or the UI control), so
+# the detector is the spoken half of the user-initiated gate. Anchored to a
+# SHOW/SEE verb + a deictic (this/here/it/my ...), so "look at the score" or
+# "can you see question three" never opens the camera.
+# ---------------------------------------------------------------------------
+
+_CAMERA_REQUEST_RE = _re.compile(
+    r"\b(?:"
+    r"look at (?:this|these|here|it|my |what)"
+    r"|(?:can|could|will) you (?:see|look at) (?:this|these|it|my |what)"
+    r"|(?:do|can) you see (?:this|these|it|my |what)"
+    r"|check (?:this|these) out"
+    r"|(?:let me|i(?:'| )?ll|i want to|wanna) show you"
+    r"|watch this|see this|look here"
+    r"|(?:turn|switch) (?:on )?(?:the )?camera"
+    r"|use (?:the |your )?camera"
+    r")\b"
+)
+
+# Not a camera request: asking her to look at GAME state, not a held object.
+_CAMERA_REQUEST_NEGATION_RE = _re.compile(
+    r"\b(?:"
+    r"look at (?:the )?(?:score|board|question|screen|time|clock|category)"
+    r"|see (?:the )?(?:score|board|question|answer)"
+    r"|turn off (?:the )?camera|camera off|no camera"
+    r")\b"
+)
+
+
+def lily_detect_camera_request(text: str) -> bool:
+    """True when a player explicitly asks Lily to look through the camera —
+    the spoken trigger that opens the sparse show-and-tell lane. Deictic-
+    anchored and negation-guarded (game-state 'look at the score' and
+    'camera off' never fire)."""
+    normalized = _normalize_command_text(text)
+    if not normalized or _CAMERA_REQUEST_NEGATION_RE.search(normalized):
+        return False
+    return bool(_CAMERA_REQUEST_RE.search(normalized))
+
+
 def lily_detect_control_command(text: str) -> Optional[str]:
     """
     Detect a sticky player command in an utterance.
@@ -764,6 +807,13 @@ class LilyScorekeeper:
         # flag, default voice_only. Picture questions exist ONLY when this
         # says pictures.
         self.media_mode: str = "voice_only"
+        # VIDEOIN-001: the sparse camera lane (show-and-tell). "off" (DEFAULT)
+        # — the camera never publishes until a player explicitly opens it;
+        # "open" while a look-at-this exchange is live. Transient: the lane
+        # auto-closes after the exchange, nothing is retained, and it is
+        # STRUCTURALLY unavailable in the adult deck (set_mode('adult')
+        # forces it off — an open camera and adult content never coexist).
+        self.camera_lane: str = "off"
         # Adult image intensity (player-chosen): suggestive | explicit.
         # Default suggestive until the table confirms explicit. Cleared to
         # suggestive on every adult exit so there is no residue.
@@ -2000,6 +2050,36 @@ class LilyScorekeeper:
         # No residue: leaving adult always resets image intensity.
         if mode == "general":
             self.adult_image_intensity = "suggestive"
+        # VIDEOIN-001 V3 constraint 2 (structural): entering the adult deck
+        # CLOSES and disables the camera lane for the session-mode — an open
+        # camera and adult content must never coexist. Not a setting.
+        if mode == "adult" and self.camera_lane != "off":
+            logger.info(
+                "LILY_STATE | CAMERA_LANE_CLOSED | session=%s reason=adult_mode",
+                self.session_id,
+            )
+            self.camera_lane = "off"
+
+    def set_camera_lane(self, state: str) -> bool:
+        """VIDEOIN-001: open/close the sparse camera lane. Structurally
+        REFUSED in the adult deck (open camera never coexists with adult
+        content). Returns True if the state was accepted."""
+        value = (state or "").strip().lower()
+        if value not in ("off", "open"):
+            return False
+        if value == "open" and self.mode == "adult":
+            logger.info(
+                "LILY_STATE | CAMERA_LANE_REFUSED | session=%s reason=adult_mode",
+                self.session_id,
+            )
+            return False
+        if value != self.camera_lane:
+            logger.info(
+                "LILY_STATE | CAMERA_LANE | session=%s from=%s to=%s",
+                self.session_id, self.camera_lane, value,
+            )
+        self.camera_lane = value
+        return True
 
     def set_adult_image_intensity(self, intensity: str) -> bool:
         """Sticky adult image heat: suggestive | explicit | mix (P3).
