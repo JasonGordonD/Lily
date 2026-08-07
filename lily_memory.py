@@ -418,14 +418,24 @@ def lily_build_memory_block(
     sessions = memory.get("sessions") or []
     facts = memory.get("facts") or []
     names = memory.get("player_names") or []
-    if not sessions and not facts:
+    usual = lily_prefs_summary(prefs)
+    if not sessions and not facts and not names and not usual:
         return ""
     total_games = memory.get("total_games") or len(sessions)
     lines = [MEMORY_BLOCK_MARKER]
-    lines.append(
-        f"This table has played with you {total_games} time(s) before — "
-        "rematch energy."
-    )
+    if sessions or facts:
+        lines.append(
+            f"This table has played with you {total_games} time(s) before — "
+            "rematch energy."
+        )
+    else:
+        # Voiceprint-only recognition can predate a qualifying game-memory
+        # row (short lobby/tune-up sessions). Preserve the known names without
+        # inventing a prior score, winner, or game count.
+        lines.append(
+            "Voice recognition matched people you have met before; no prior "
+            "game result is on the table card."
+        )
     if names:
         lines.append("Returning players: " + ", ".join(names[:6]) + ".")
     if sessions:
@@ -448,14 +458,19 @@ def lily_build_memory_block(
         fact_bits.append(f"{who}: {fact}" if who else fact)
     if fact_bits:
         lines.append("Running bits you remember: " + "; ".join(fact_bits) + ".")
-    usual = lily_prefs_summary(prefs)
     if usual:
         lines.append(f"usual: {usual}.")
-    lines.append(
-        "Greet returning players back BY NAME, reference who won last time, "
-        "and drop the running bits as callbacks — naturally, like a host who "
-        "remembers her regulars."
-    )
+    if sessions or facts:
+        lines.append(
+            "Greet returning players back BY NAME, reference who won last "
+            "time, and drop the running bits as callbacks — naturally, like "
+            "a host who remembers her regulars."
+        )
+    else:
+        lines.append(
+            "Recognize these returning players BY NAME, but do not invent a "
+            "past game, winner, score, fact, or preference."
+        )
     block = "\n".join(lines)
     if len(block) > max_chars:
         block = block[: max_chars - 1].rstrip() + "…"

@@ -88,6 +88,20 @@ def test_block_facts_only_group_still_renders():
     assert "owns 40 typewriters" in block
 
 
+def test_block_voiceprint_names_only_recognizes_without_inventing_history():
+    block = lily_build_memory_block({
+        "sessions": [],
+        "facts": [],
+        "player_names": ["Rami", "Sarah"],
+        "total_games": 0,
+    })
+    assert block.startswith(MEMORY_BLOCK_MARKER)
+    assert "Rami" in block and "Sarah" in block
+    assert "Voice recognition matched" in block
+    assert "no prior game result" in block
+    assert "won last time" not in block
+
+
 def test_block_last_game_tie_falls_back_to_summary():
     memory = make_memory(last_winner=None)
     memory["sessions"][0]["winner"] = None

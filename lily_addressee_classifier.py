@@ -600,14 +600,23 @@ class LilyAddresseeClassifier:
         # live side-cluster; a FLOOR-HOLD declaration ("Carry on, Lily.
         # We're not talking to you.") is host-directed speech that ASSERTS
         # the side conversation — it locks/sustains the cluster instead.
-        definitional = signals.window_open and signals.expectation_match
+        # A validated answer can arrive while Lily is still reading the
+        # question, before the formal answer window opens. In phase=question,
+        # that expectation match is just as definitionally host-directed as
+        # a post-read answer; treating it as idle side chatter made shouted
+        # barge-ins feel ignored even when the scorer accepted them.
+        definitional = signals.expectation_match and (
+            signals.window_open or signals.phase == "question"
+        )
         if definitional:
             if self._active_cluster is not None:
                 cluster_id = self._active_cluster["id"]
                 cluster_event = CLUSTER_BREAK
                 self._active_cluster = None
             score = max(score, 0.95)
-            reason = "window+match"
+            reason = (
+                "window+match" if signals.window_open else "delivery+match"
+            )
             classification = CLASS_HOST_DIRECTED
         elif floor_hold:
             score = max(score, self.host_threshold)

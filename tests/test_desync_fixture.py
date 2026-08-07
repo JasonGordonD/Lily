@@ -326,17 +326,18 @@ def test_organic_core_sentence_claims_delivery():
 
 
 
-def test_flourish_inside_the_core_sentence_does_not_claim():
+def test_flourish_inside_the_core_sentence_rewrites_before_playout():
     # The prompt contract is "flourish before and after, never inside":
-    # a sentence broken up mid-flight is not a clean performance and
-    # never registers organically (the nudge path recovers it).
+    # a sentence broken up mid-flight is not a clean performance. A
+    # near-verbatim turn is now rewritten before it airs, instead of making
+    # the table hear this drift and then a second nudge read.
     game = _make_game()
     _arm(game, Q3_PROMPT)
     spoken = (
         "Name the strait — Dave, wake up — that separates, and I mean "
         "REALLY separates, Europe from... you know, Asia. At Istanbul."
     )
-    assert game.register_delivery_claim(spoken) is None
+    assert game.register_delivery_claim(spoken) == "rewrite_strict"
     assert game.say_registry.state("q_1_delivery") is None
 
 
@@ -719,6 +720,21 @@ ROUND_TWO_MC = {
     "category": "academic",
     "difficulty_tier": 2,
 }
+
+
+def test_near_verbatim_missing_option_rewrites_before_first_playout():
+    """An exact MC stem with an incomplete option list is repaired in the
+    outbound gate, not aired and followed by a second delivery nudge."""
+    game = _make_game()
+    _arm_question(game, ROUND_TWO_MC)
+    malformed = (
+        f"{ROUND_TWO_MC['prompt']} "
+        "A) Jupiter B) Saturn C) Uranus"
+    )
+    assert game.register_delivery_claim(malformed, speech_id="first") == (
+        "rewrite_strict"
+    )
+    assert game.say_registry.state("q_1_delivery") is None
 
 
 def test_round_transition_reveal_and_question_use_separate_strict_turns():
