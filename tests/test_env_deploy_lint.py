@@ -94,6 +94,15 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_PARAPHRASE_REPEAT_THRESHOLD",
     # PATCH-003 P9 responsiveness floor — ships on its in-code default (3s).
     "LILY_RESPONSIVENESS_BUDGET_SECONDS",
+    # WO-LILY-VOICE-IDENTITY-001 — durable voice recognition tunables. The
+    # feature stays inert (no-op) until the embedder model + identity table
+    # are both present, so all five ship on in-code defaults and are tuned
+    # via deploy.yml `vars.` only at enablement.
+    "LILY_VOICE_IDENTITY_ENABLED",
+    "LILY_VOICE_IDENTITY_MODEL_TAG",
+    "LILY_VOICE_IDENTITY_MATCH_THRESHOLD",
+    "LILY_VOICE_IDENTITY_MATCH_MARGIN",
+    "LILY_VOICE_IDENTITY_ENROLL_MIN_SPEECH_SECONDS",
     # WS-3 cut-recovery grace (WO-LILY-STREAM-INTEGRITY-002): the dead-air
     # window before an auto-resume fires. Default-backed threshold (3.5s);
     # ships on its in-code default, tune via deploy.yml `vars.` if needed.

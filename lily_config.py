@@ -382,6 +382,50 @@ def responsiveness_budget_seconds() -> float:
     return _get_float("LILY_RESPONSIVENESS_BUDGET_SECONDS", 3.0)
 
 
+# -- device-independent voice identity (WO-LILY-VOICE-IDENTITY-001) -----------
+# The durable speaker-embedding recognizer that closes the "know my voice"
+# gap the device-linked group_id can't (Speechmatics refreshes its blobs per
+# session). Inert until BOTH the embedder dependency is present in the image
+# AND the lily_voice_identity table exists — every consumer checks
+# voice_identity_enabled() and the embedder's availability first, so a deploy
+# without the model or the DDL runs exactly as today.
+
+
+def voice_identity_enabled() -> bool:
+    """Master switch for durable voice recognition. Default ON (operator
+    decision: enroll-by-default, opt-out) — but the feature still no-ops
+    unless the embedder model is installed and the identity table exists,
+    so flipping this alone never risks a session."""
+    return _get_bool("LILY_VOICE_IDENTITY_ENABLED", True)
+
+
+def voice_identity_model_tag() -> str:
+    """Provenance tag pinned to the embedding space (model + dim). Matching
+    only ever compares centroids sharing this tag, so a model swap can never
+    compare across incompatible embedding spaces — it starts a fresh pool."""
+    return _get("LILY_VOICE_IDENTITY_MODEL_TAG", "ecapa-192-v1")
+
+
+def voice_identity_match_threshold() -> float:
+    """Absolute cosine floor for a confident voice match. Conservative: a
+    false merge (greeting a stranger by a housemate's name) is far costlier
+    than a miss, which degrades to 'ask who's playing'."""
+    return _get_float("LILY_VOICE_IDENTITY_MATCH_THRESHOLD", 0.75)
+
+
+def voice_identity_match_margin() -> float:
+    """The winning candidate must beat the runner-up by at least this, or
+    the match is withheld as ambiguous (multi-person household safety)."""
+    return _get_float("LILY_VOICE_IDENTITY_MATCH_MARGIN", 0.06)
+
+
+def voice_identity_enroll_min_speech_seconds() -> float:
+    """A player is enrolled at session close only above this much captured
+    speech — short utterances yield noisy embeddings that would blur the
+    centroid."""
+    return _get_float("LILY_VOICE_IDENTITY_ENROLL_MIN_SPEECH_SECONDS", 8.0)
+
+
 def paraphrase_repeat_threshold() -> float:
     """PATCH-002 A4: cosine-ish token-overlap ratio above which a
     consecutive agent turn counts as a semantic repeat of a recent one

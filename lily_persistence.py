@@ -1254,6 +1254,155 @@ async def lily_load_voiceprints_by_players(
 
 
 # ---------------------------------------------------------------------------
+# Durable voice identity (WO-LILY-VOICE-IDENTITY-001) — device-independent
+# recognition by our OWN speaker embedding, since Speechmatics refreshes its
+# blobs per session. The centroid is a running mean of a person's enrolled
+# unit embeddings; matching (cosine + margin) lives in lily_voice_identity.
+# Every function is defensive — a voice-lane failure never breaks a session,
+# and the whole feature no-ops until the lily_voice_identity table exists.
+# ---------------------------------------------------------------------------
+
+VOICE_IDENTITY_TABLE = "lily_voice_identity"
+
+
+def _parse_vector(value):
+    """pgvector round-trips as a '[0.1,0.2,...]' string via supabase-py (and
+    as a list from a fake/local client). Return a list[float] or None."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        try:
+            return [float(x) for x in value]
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, str):
+        try:
+            import json
+            parsed = json.loads(value)
+            return [float(x) for x in parsed] if isinstance(parsed, list) else None
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+async def lily_load_voice_identities(
+    supabase: SupabaseClient, model_tag: str
+) -> list:
+    """Active per-person centroids for THIS embedding space (model_tag), for
+    the start-of-session match. Returns [{group_id, centroid: list[float],
+    sample_count}]; [] on any failure or when the table is absent."""
+    if supabase is None or not model_tag:
+        return []
+    try:
+        rows = await asyncio.to_thread(
+            lambda: supabase.table(VOICE_IDENTITY_TABLE)
+            .select("group_id, centroid, sample_count")
+            .eq("model_tag", model_tag)
+            .eq("status", "active")
+            .execute()
+        )
+        out = []
+        for row in (rows.data or []):
+            centroid = _parse_vector(row.get("centroid"))
+            gid = row.get("group_id")
+            if gid and centroid:
+                out.append({
+                    "group_id": gid,
+                    "centroid": centroid,
+                    "sample_count": int(row.get("sample_count") or 1),
+                })
+        return out
+    except Exception as e:
+        logger.warning("lily_load_voice_identities error: %s", e)
+        return []
+
+
+async def lily_upsert_voice_identity(
+    supabase: SupabaseClient,
+    *,
+    group_id: str,
+    centroid: list,
+    sample_count: int,
+    model_tag: str,
+) -> bool:
+    """Store (or refresh) a person's centroid for this embedding space.
+    Select-then-update-or-insert on (group_id, model_tag) so it works
+    without relying on a server-side upsert conflict target. Returns True on
+    a committed write, False on any failure. Never raises."""
+    if supabase is None or not group_id or not centroid or not model_tag:
+        return False
+    try:
+        existing = await asyncio.to_thread(
+            lambda: supabase.table(VOICE_IDENTITY_TABLE)
+            .select("id")
+            .eq("group_id", group_id)
+            .eq("model_tag", model_tag)
+            .limit(1)
+            .execute()
+        )
+        payload = {
+            "group_id": group_id,
+            "centroid": list(centroid),
+            "sample_count": int(sample_count),
+            "model_tag": model_tag,
+            "status": "active",
+        }
+        if existing.data:
+            row_id = existing.data[0]["id"]
+            await asyncio.to_thread(
+                lambda: supabase.table(VOICE_IDENTITY_TABLE)
+                .update(payload)
+                .eq("id", row_id)
+                .execute()
+            )
+            logger.info(
+                "LILY_VOICE_ID | CENTROID_UPDATED | group=%s tag=%s n=%d",
+                group_id, model_tag, sample_count,
+            )
+        else:
+            await asyncio.to_thread(
+                lambda: supabase.table(VOICE_IDENTITY_TABLE)
+                .insert(payload)
+                .execute()
+            )
+            logger.info(
+                "LILY_VOICE_ID | CENTROID_ENROLLED | group=%s tag=%s",
+                group_id, model_tag,
+            )
+        return True
+    except Exception as e:
+        logger.warning(
+            "lily_upsert_voice_identity error (group=%s): %s", group_id, e
+        )
+        return False
+
+
+async def lily_retire_voice_identity(
+    supabase: SupabaseClient, group_id: str
+) -> bool:
+    """Retire (never delete) every voice-identity row for a group — the
+    forget_me cascade's biometric arm, so a durable voiceprint stops
+    matching the moment someone asks to be forgotten. Retire preserves
+    provenance; matching only ever reads status='active'."""
+    if supabase is None or not group_id:
+        return False
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(VOICE_IDENTITY_TABLE)
+            .update({"status": "retired"})
+            .eq("group_id", group_id)
+            .execute()
+        )
+        logger.info("LILY_VOICE_ID | RETIRED | group=%s", group_id)
+        return True
+    except Exception as e:
+        logger.warning(
+            "lily_retire_voice_identity error (group=%s): %s", group_id, e
+        )
+        return False
+
+
+# ---------------------------------------------------------------------------
 # WS-8 identity reconciliation — operator speaker merge (one transaction
 # across roster/voiceprints + retro-attribution of the merged label's prior
 # utterances). The scorekeeper side is LilyGame.merge_speakers; this is the
