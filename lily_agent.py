@@ -579,6 +579,11 @@ class LilyGame:
         # dispatch once it carries the question text (WS-1: drifted turns
         # are rewritten to the sheet first). None = no delivery in flight.
         self._pending_delivery_qnum: int | None = None
+        # SpeechHandle ids explicitly dispatched to carry a question. This
+        # prevents a racing recognition/preferences beat from consuming the
+        # global delivery intent, and lets question-only turns be rewritten to
+        # the deterministic sheet before any prior-answer commentary airs.
+        self._delivery_speech_acts: dict[str, str] = {}
         # Every structural delivery is strict (WS-1): if the generated
         # turn does not contain the armed prompt (and every MC option),
         # tts_node replaces it with the deterministic question sheet
@@ -607,6 +612,7 @@ class LilyGame:
         # StopResponse so LiveKit does not also generate a conversational
         # "Correct!" over the committed verdict.
         self._deterministic_reply_texts: list[str] = []
+        self._prehook_answer_suppressions: set[tuple[int, str]] = set()
         # WS-5 buzz-buffer widening: rolling (ts, seg) of recent finals so
         # a final that landed up to buzz_prewindow_seconds() BEFORE the
         # delivery claim is back-filled into the pre-window buffer and
@@ -1093,6 +1099,16 @@ class LilyGame:
         speech_id = getattr(handle, "id", None)
         if speech_id:
             self.say_registry.reassign_owner(reservation, speech_id)
+            if act in (
+                "question_delivery",
+                "question_nudge",
+                "game_start",
+                "skip",
+            ):
+                delivery_acts = getattr(self, "_delivery_speech_acts", None)
+                if delivery_acts is None:
+                    delivery_acts = self._delivery_speech_acts = {}
+                delivery_acts[speech_id] = act
         # WO-LILY-HOTFIX-001: every keyed act gets a playout watchdog. If
         # this claim is still PENDING past the deadline with its speech
         # never having started airing (the Krisp RoomIO wedge: no playout,
@@ -1401,6 +1417,14 @@ class LilyGame:
         normalized = lily_evaluation.lily_normalize_answer(text or "")
         if not normalized:
             return
+        token = (self.sk.question_number, normalized)
+        prehook = getattr(self, "_prehook_answer_suppressions", None)
+        if prehook is not None and token in prehook:
+            # on_user_turn_completed won the event-order race and already
+            # stopped the organic reply. Consume that reservation instead of
+            # leaving a stale marker that could suppress a later repeated word.
+            prehook.discard(token)
+            return
         pending = getattr(self, "_deterministic_reply_texts", None)
         if pending is None:
             pending = self._deterministic_reply_texts = []
@@ -1416,6 +1440,48 @@ class LilyGame:
         except ValueError:
             return False
         del pending[index]
+        return True
+
+    def correct_answer_owns_user_turn(self, text: str) -> bool:
+        """True when this finalized turn must be answered only by adjudication.
+
+        Runs in on_user_turn_completed, before LiveKit starts the default LLM
+        reply. It intentionally duplicates the cheap Tier-1 check because the
+        public transcript callback and this hook have no guaranteed ordering.
+        """
+        if (
+            not getattr(self, "game_started", False)
+            or getattr(self, "game_over", False)
+        ):
+            return False
+        question = self.sk.current_question or self.armed_question or {}
+        if not question:
+            return False
+        qnum = self.sk.question_number
+        delivery_key = f"q_{qnum}_delivery"
+        answer_live = (
+            self.sk.answer_window_open
+            or getattr(self, "_active_delivery_qnum", None) == qnum
+            or self.say_registry.state(delivery_key) is not None
+        )
+        if not answer_live:
+            return False
+        try:
+            verdict = lily_evaluation.lily_tier1_evaluate_question(
+                text or "", question
+            )["verdict"]
+        except Exception:
+            return False
+        if verdict != "correct":
+            return False
+        normalized = lily_evaluation.lily_normalize_answer(text or "")
+        if normalized:
+            reservations = getattr(
+                self, "_prehook_answer_suppressions", None
+            )
+            if reservations is None:
+                reservations = self._prehook_answer_suppressions = set()
+            reservations.add((qnum, normalized))
         return True
 
     def _cut_recovery_should_fire(self, token: int) -> bool:
@@ -1524,8 +1590,46 @@ class LilyGame:
             return None
         qnum = self.sk.question_number
         key = f"q_{qnum}_delivery"
-        structural = self.consume_pending_delivery(qnum)
+        delivery_acts = getattr(self, "_delivery_speech_acts", None) or {}
+        delivery_act = (
+            delivery_acts.pop(speech_id, None) if speech_id else None
+        )
         textual = self._delivery_text_matches_armed(spoken_text)
+        # Explicit post-reveal/nudge turns are question-only handles. Always
+        # replace their model prose with the deterministic sheet on the first
+        # pass, even when the model included the question after another
+        # celebration ("Gold is correct!" before Franklin).
+        if delivery_act in ("question_delivery", "question_nudge"):
+            logger.info(
+                "LILY_DELIVERY | EXACT_SHEET_REWRITE | session=%s q=%d "
+                "act=%s",
+                self.sk.session_id, qnum, delivery_act,
+            )
+            return "rewrite_strict"
+        pending_structural = self._pending_delivery_qnum == qnum
+        structural = False
+        if pending_structural and textual:
+            structural = self.consume_pending_delivery(qnum)
+        elif pending_structural and not textual:
+            if speech_id is None:
+                # Offline/direct callers predate handle-scoped intent; retain
+                # the strict structural contract on that compatibility seam.
+                structural = self.consume_pending_delivery(qnum)
+            else:
+                ratio = lily_evaluation.lily_question_spoken_ratio(
+                    armed.get("prompt", ""), spoken_text
+                )
+                if ratio >= 0.9:
+                    logger.warning(
+                        "LILY_DELIVERY | STRICT_REWRITE | session=%s q=%d "
+                        "reason=pending_near_verbatim ratio=%.2f",
+                        self.sk.session_id, qnum, ratio,
+                    )
+                    return "rewrite_strict"
+                # A racing recognition/preferences turn is not the question.
+                # Preserve the delivery intent for the real post-tool/delivery
+                # speech instead of consuming it and mislabeling this handle.
+                return None
         if structural and not textual:
             # WS-1: the strict text-sanity rewrite applies to EVERY
             # structural claim, not just the post-reveal turn — a delivery
@@ -4046,6 +4150,7 @@ class LilyGame:
         self._pending_delivery_qnum = None  # stale delivery intent dies at arm
         self._active_delivery_qnum = None
         self._active_delivery_started_at = None
+        getattr(self, "_prehook_answer_suppressions", set()).clear()
         self._undelivered_ticks = 0  # WS-2: reconcile counters are per-question
         self._undelivered_refires = 0
         self._supply_stall_ticks = 0  # WS-6: a question is in hand now
@@ -4160,6 +4265,9 @@ class LilyGame:
         if speech_id:
             getattr(self, "_playout_started_ids", set()).discard(speech_id)
             (getattr(self, "_speech_handles", None) or {}).pop(speech_id, None)
+            (getattr(self, "_delivery_speech_acts", None) or {}).pop(
+                speech_id, None
+            )
         if interrupted or suppressed:
             released = (
                 self.say_registry.release_owner(speech_id)
@@ -8911,11 +9019,24 @@ class LilyAgent(Agent):
         # turn produces owns the recovery (no double-speak).
         self._game.note_user_turn()
         consume_reply = getattr(self._game, "consume_deterministic_reply", None)
-        if callable(consume_reply) and consume_reply(_message_text(new_message)):
+        message_text = _message_text(new_message)
+        event_owned = (
+            callable(consume_reply) and consume_reply(message_text)
+        )
+        prehook_check = getattr(
+            self._game, "correct_answer_owns_user_turn", None
+        )
+        prehook_owned = bool(
+            not event_owned
+            and callable(prehook_check)
+            and prehook_check(message_text)
+        )
+        if event_owned or prehook_owned:
             logger.info(
                 "LILY_REPLY | ORGANIC_SUPPRESSED | session=%s "
-                "reason=deterministic_game_reply",
-                self._game.sk.session_id,
+                "reason=deterministic_game_reply event_owned=%s "
+                "prehook_owned=%s",
+                self._game.sk.session_id, event_owned, prehook_owned,
             )
             raise StopResponse()
         # VIDEOIN-001: if the camera lane is open and a frame is buffered,
@@ -9060,6 +9181,22 @@ class LilyAgent(Agent):
             logger.info(
                 "LILY_SAY_GATE | stripped %d chars of markdown/emoji/leaks",
                 len(raw) - len(full),
+            )
+
+        # A claimed returner with an unresolved card must never be told no
+        # recorded game exists. The old model did exactly that despite the
+        # context law. Rewrite the denial to the only grounded statement.
+        if (
+            getattr(self._game, "_returner_honesty_note", None)
+            and lily_say_gate.lily_false_clean_slate_claim(full)
+        ):
+            logger.warning(
+                "LILY_SAY_GATE | RETURNER_DENIAL_REWRITTEN | session=%s",
+                self._game.sk.session_id,
+            )
+            full = (
+                "I believe you. My table card hasn't connected yet, so I "
+                "won't pretend this is your first night. What's your name?"
             )
 
         # Asking obligates listening. This used to be telemetry-only, so the

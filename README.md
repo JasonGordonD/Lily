@@ -406,6 +406,15 @@ verdict uses `q_{N}_verdict`, while the separately keyed
 Per-handle confirmation therefore cannot start the new category while
 the previous round's standings are still playing.
 
+The ownership check exists on BOTH event-order paths. The public
+`user_input_transcribed` callback marks a committed answer when it arrives
+first; `on_user_turn_completed` independently performs the same cheap
+Tier-1 check when it wins the race, before default reply generation starts.
+Their one-shot reservations consume each other. Explicit question-only
+SpeechHandles are separately tagged and rewritten to
+`rendered_armed_question()` on first pass, so a recognition beat cannot take
+the delivery claim and prior-answer praise cannot ride into the next ask.
+
 Asking also transfers the floor physically, not just by prompt. For
 non-game-delivery speech, `tts_node` clips everything after the first
 completed question (`lily_yield_after_first_question`): “Want science?

@@ -737,6 +737,45 @@ def test_near_verbatim_missing_option_rewrites_before_first_playout():
     assert game.say_registry.state("q_1_delivery") is None
 
 
+def test_recognition_beat_cannot_consume_pending_question_delivery():
+    """The live q1 owner was attached to the late-recognition/preferences
+    turn. Unrelated speech must leave the structural intent armed."""
+    game = _make_game()
+    _arm_question(game, FEMUR_QUESTION)
+    game.expect_delivery()
+    qnum = game.sk.question_number
+    recognition = (
+        "Wait — Rami! NOW I've got you: reigning champion, four wins. "
+        "Do you want a refresher?"
+    )
+    assert game.register_delivery_claim(
+        recognition, speech_id="recognition"
+    ) is None
+    assert game._pending_delivery_qnum == qnum
+    assert game.say_registry.state(f"q_{qnum}_delivery") is None
+
+
+def test_question_only_handle_strips_prior_answer_celebration():
+    """The live Gold→Franklin transition carried another Gold celebration
+    inside q3_delivery. Explicit question handles always become the sheet."""
+    game = _make_game()
+    _arm_question(game, FEMUR_QUESTION)
+    game.expect_delivery()
+    game._delivery_speech_acts = {"delivery-3": "question_delivery"}
+    contaminated = (
+        "Gold is correct! That's three in a row! "
+        + FEMUR_QUESTION["prompt"]
+    )
+    assert game.register_delivery_claim(
+        contaminated, speech_id="delivery-3"
+    ) == "rewrite_strict"
+    sheet = game.rendered_armed_question()
+    assert "Gold is correct" not in sheet
+    assert game.register_delivery_claim(
+        sheet, speech_id="delivery-3"
+    ) == "claimed_structural"
+
+
 def test_round_transition_reveal_and_question_use_separate_strict_turns():
     """Regression for the 00:07 Jupiter-vs-Verona identity split.
 

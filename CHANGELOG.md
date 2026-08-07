@@ -5,6 +5,31 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-07 — Current-deploy follow-up: pre-generation answer ownership
+
+Post-deploy session `lily-F7E113-90b61665` proved the transcript event and
+LiveKit's `on_user_turn_completed` hook have no guaranteed ordering. The
+organic reply could start before the event callback marked a correct answer
+as adjudication-owned, producing organic praise + deterministic reveal and
+letting an invented next question leak between them.
+
+- `on_user_turn_completed` now runs its own cheap Tier-1 check against the
+  live question and raises `StopResponse` before default generation, whether
+  the transcript event landed first or not. Event/prehook reservations
+  consume each other so a repeated answer cannot inherit a stale suppression.
+- Delivery intent is bound to explicitly dispatched SpeechHandle ids.
+  Recognition/preferences speech can no longer consume `q_N_delivery`.
+- Post-reveal and nudge handles are physically rewritten to the exact
+  deterministic question sheet on first pass. Previous-answer celebrations
+  cannot prefix the next question.
+- While a claimed returner's card is still resolving, outbound claims that
+  deny recorded history or announce a clean slate are rewritten to the
+  grounded “I believe you; my card hasn't connected yet” line.
+
+Regression fixtures come directly from the deployed Freud/Uranus/Gold/
+Franklin trace: event-order inversion, correction turns, q1 ownership on a
+recognition beat, and Gold commentary contaminating the Franklin delivery.
+
 ## 2026-08-07 — Persistent voice memory activation and answer-routing cleanup
 
 The durable voice-identity design existed in code but was inert in the

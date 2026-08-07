@@ -96,3 +96,13 @@ def test_stacked_question_lint_counts_terminal_questions():
 def test_stacked_question_lint_ignores_audio_tags():
     tagged = "[excited] You got it! Ready for the next one?"
     assert lily_say_gate.lily_stacked_question_flag(tagged) == 1
+
+
+def test_false_clean_slate_claim_is_caught_for_pending_returner():
+    assert lily_say_gate.lily_false_clean_slate_claim(
+        "Since this table hasn't played a recorded game with me yet, "
+        "tonight is effectively a clean slate."
+    )
+    assert not lily_say_gate.lily_false_clean_slate_claim(
+        "My table card hasn't connected yet, but I believe you."
+    )
