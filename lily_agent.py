@@ -91,6 +91,8 @@ import lily_vision
 from lily_tts import LilyTTS, lily_prewarm_tts_connection
 from lily_vision import lily_analyze_image
 from lily_voice_switch import lily_list_voices, lily_switch_voice
+import lily_voice_embedder
+import lily_voice_identity
 
 logger = logging.getLogger("lily_agent")
 
@@ -4897,6 +4899,15 @@ class LilyGame:
 
         self.request_device_verification("final_transcript")
 
+        # Durable voice-identity probe — one attempt per session, fired once a
+        # real utterance exists (audio to embed). Inert unless the embedder +
+        # captured audio are present; on a confident cross-device match it
+        # promotes the recognized group's memory.
+        if not getattr(self, "_voice_identity_attempted", False):
+            self._voice_identity_attempted = True
+            if self._voice_identity_ready():
+                asyncio.ensure_future(self._voice_identity_match_at_start())
+
         # n-best telemetry (WO-ADDRESSEE-H1 Task 1): dispersion logged per
         # utterance — high dispersion is a deliberation signal.
         if nbest is not None:
@@ -6145,6 +6156,105 @@ class LilyGame:
             trigger=trigger,
         ))
 
+    # -- durable voice identity (WO-LILY-VOICE-IDENTITY-001) --------------------
+    #
+    # The device-independent recognizer: OUR OWN ECAPA embedding, matched by
+    # cosine + margin across devices, so "you should know my voice" works even
+    # on a new device / cleared browser (the vendor blobs can't bridge
+    # sessions). The whole feature stays INERT until three things are present —
+    # the flag, the embedder model in the image, and captured audio — so a
+    # deploy without them behaves exactly as today. The audio probe is the one
+    # remaining live-infra seam (a track frame sink populates
+    # `_voice_identity_pcm`); everything else is wired and tested.
+
+    def _voice_identity_ready(self) -> bool:
+        return (
+            lily_config.voice_identity_enabled()
+            and self.supabase is not None
+            and lily_voice_embedder.lily_voice_embedder_available()
+        )
+
+    def _voice_identity_audio_probe(self):
+        """Captured mono PCM for embedding, or None when unavailable. Reads a
+        buffer a track frame sink fills (`_voice_identity_pcm`); None keeps the
+        feature inert until that sink lands. Injected directly in tests."""
+        return getattr(self, "_voice_identity_pcm", None)
+
+    async def _voice_identity_match_at_start(self) -> bool:
+        """Probe the joining voice against stored centroids; on a confident
+        match, stage+promote that group's memory through the existing
+        candidate path (the biometric match IS the proof — no vendor-label
+        round-trip needed). Returns True on a promotion."""
+        if not self._voice_identity_ready() or getattr(
+            self, "device_identity_verified", False
+        ):
+            return False
+        probe = self._voice_identity_audio_probe()
+        if probe is None:
+            return False
+        try:
+            emb = lily_voice_embedder.lily_extract_embedding(probe)
+            if emb is None:
+                return False
+            tag = lily_config.voice_identity_model_tag()
+            identities = await lily_persistence.lily_load_voice_identities(
+                self.supabase, tag
+            )
+            match = lily_voice_identity.lily_match_voice(
+                emb, identities,
+                threshold=lily_config.voice_identity_match_threshold(),
+                margin=lily_config.voice_identity_match_margin(),
+            )
+            if match is None or match["group_id"] == self.group_id:
+                return False
+            logger.info(
+                "LILY_VOICE_ID | MATCH_AT_START | session=%s group=%s score=%.3f",
+                self.sk.session_id, match["group_id"], match["score"],
+            )
+            staged = await self.stage_device_candidate(
+                match["group_id"], "voice_identity_match"
+            )
+            if staged:
+                await self._promote_device_candidate("voice_identity_match")
+                return True
+            return False
+        except Exception as e:
+            logger.warning("LILY_VOICE_ID | MATCH_AT_START_FAILED | %s", e)
+            return False
+
+    async def _voice_identity_enroll_at_close(self) -> bool:
+        """Fold this session's captured voice into the group's stored centroid
+        so the next session (any device) recognizes it. Runs at close, off the
+        vocal path; skipped when identity persistence is disallowed (forget)."""
+        if not self._voice_identity_ready() or not self.identity_persistence_allowed():
+            return False
+        probe = self._voice_identity_audio_probe()
+        if probe is None:
+            return False
+        try:
+            emb = lily_voice_embedder.lily_extract_embedding(probe)
+            if emb is None:
+                return False
+            tag = lily_config.voice_identity_model_tag()
+            existing = await lily_persistence.lily_load_voice_identities(
+                self.supabase, tag
+            )
+            prior = next(
+                (r for r in existing if r["group_id"] == self.group_id), None
+            )
+            centroid, count = lily_voice_identity.lily_update_centroid(
+                prior["centroid"] if prior else None,
+                prior["sample_count"] if prior else 0,
+                emb,
+            )
+            return await lily_persistence.lily_upsert_voice_identity(
+                self.supabase, group_id=self.group_id, centroid=centroid,
+                sample_count=count, model_tag=tag,
+            )
+        except Exception as e:
+            logger.warning("LILY_VOICE_ID | ENROLL_AT_CLOSE_FAILED | %s", e)
+            return False
+
     async def merge_speakers(
         self, from_label: str, into_player: str, source: str = "operator"
     ) -> dict:
@@ -6472,6 +6582,9 @@ class LilyGame:
             result = await lily_persistence.lily_forget_group_data(
                 self.supabase, target, self.sk.session_id
             )
+            # Biometric arm of the cascade: retire the durable voiceprint so a
+            # forgotten voice stops matching (matching reads active only).
+            await lily_persistence.lily_retire_voice_identity(self.supabase, target)
         if first_attempt:
             self._teardown_group_identity()
         if result.get("ok"):
@@ -9672,6 +9785,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     stt, supabase, lambda: game.group_id, scorekeeper,
                     trigger="session_close",
                 )
+                # Durable voice-identity enrollment (device-independent
+                # recognition) — folds this session's voice into the group's
+                # centroid. Inert unless the embedder + captured audio are
+                # present; awaited on the same shutdown gate.
+                await game._voice_identity_enroll_at_close()
             except Exception as e:
                 logger.error("SESSION_CLOSE | persistence error: %s", e)
             finally:
