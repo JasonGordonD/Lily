@@ -193,3 +193,37 @@ def test_stage_device_candidate_never_activates_loaded_data(monkeypatch):
     assert game.memory_block == ""
     assert game.memory_player_names == []
     assert game.prefs == {}
+
+
+def test_verified_voiceprint_name_survives_without_game_memory_row(monkeypatch):
+    game = _game()
+
+    async def _memory(*_args):
+        return {}
+
+    async def _prefs(*_args):
+        return {}
+
+    async def _voices(*_args):
+        return [{
+            "label": "Rami",
+            "speaker_identifiers": ["voice-rami"],
+        }]
+
+    async def _upgrade(new_group_id, source):
+        game.group_id = new_group_id
+        game.group_id_source = source
+
+    monkeypatch.setattr(lily_agent.lily_memory, "lily_load_group_memory", _memory)
+    monkeypatch.setattr(lily_agent.lily_persistence, "lily_load_group_prefs", _prefs)
+    monkeypatch.setattr(lily_agent.lily_persistence, "lily_load_voiceprints", _voices)
+    game.upgrade_group_id = _upgrade
+
+    assert asyncio.run(
+        game.stage_device_candidate("device-old", "dispatch_metadata")
+    ) is True
+    asyncio.run(game._promote_device_candidate("voice_identity_match"))
+
+    assert game.memory_player_names == ["Rami"]
+    assert "Returning players: Rami" in game.memory_block
+    assert "no prior game result" in game.memory_block

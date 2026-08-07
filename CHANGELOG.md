@@ -24,6 +24,10 @@ The first finalized utterance also no longer consumes the session's only
 biometric match attempt before enough PCM exists. Matching remains
 retryable until the bounded probe is ready and starts immediately at that
 point; close-time centroid enrollment stays inside the shutdown gate.
+Verified vendor voiceprint names now seed a names-only returning-table
+block when a short prior session enrolled the player but did not cross the
+game-memory write threshold—recognize the name without inventing a prior
+winner, score, or game.
 
 Related surgical fixes: near-verbatim/incomplete question performances are
 rewritten to the authoritative sheet before first playout (no second nudge

@@ -883,6 +883,10 @@ the session embedding into the running centroid inside the shutdown gate.
 `forget me` disables further identity persistence for the session, deletes
 the ordinary voiceprints/memory rows, and retires the durable centroid so it
 cannot match again.
+If a short earlier session enrolled a named voiceprint but did not qualify
+for a game-memory row, verification still restores that name in a
+names-only `[RETURNING TABLE]` block; Lily may recognize the player but must
+not invent a prior game, winner, score, or fact.
 
 **What Lily remembers:** on a returning group, the last 3 games + group facts
 are compiled into a compact `[RETURNING TABLE]` system block (~600 chars max,

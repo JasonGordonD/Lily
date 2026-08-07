@@ -2282,6 +2282,20 @@ class LilyGame:
                 self.supabase, candidate_group_id
             ),
         )
+        memory = dict(memory or {})
+        voiceprint_names = sorted({
+            str(row.get("label") or "").strip()
+            for row in voiceprints or []
+            if str(row.get("label") or "").strip()
+            and not re.fullmatch(
+                r"S\d+|UU", str(row.get("label") or "").strip()
+            )
+        })
+        if voiceprint_names and not memory.get("player_names"):
+            # A short prior session may have enrolled names but not crossed
+            # the game-memory write threshold. Voice verification still earns
+            # those names; it does not earn invented scores/history.
+            memory["player_names"] = voiceprint_names
         block = lily_memory.lily_build_memory_block(memory, prefs=prefs)
         if not block and not prefs and not voiceprints:
             logger.info(
@@ -2291,7 +2305,7 @@ class LilyGame:
             return False
         self.device_candidate_group_id = candidate_group_id
         self.device_candidate_source = source
-        self._device_candidate_memory = memory or {}
+        self._device_candidate_memory = memory
         self._device_candidate_memory_block = block
         self._device_candidate_prefs = dict(prefs or {})
         self._device_candidate_voiceprints = [
