@@ -4223,9 +4223,16 @@ class LilyGame:
             # fired the packet (safety net) — emit now so the UI never hangs.
             ev, self._pending_reveal_event = self._pending_reveal_event, None
             self.send_event_nowait("reveal", ev)
-        if any(key.endswith("_reveal") for key in confirmed):
-            # The next armed question gets its own strict delivery handle.
-            # Do not let the reveal/score turn also freestyle N+1.
+        transition_complete = any(
+            key.endswith("_reveal")
+            or (key.startswith("round_") and key.endswith("_scores"))
+            for key in confirmed
+        )
+        if transition_complete:
+            # Normal questions advance after their single verdict/reveal
+            # beat. Round boundaries advance only after the separately keyed
+            # standings flourish; q_N_verdict deliberately does not satisfy
+            # this gate, so N+1 cannot queue over the previous round's scores.
             if self.dispatch_armed_question(source="post_reveal"):
                 return
         if (
@@ -5889,7 +5896,15 @@ class LilyGame:
             # the verdict makes the beat silently done.
             verdict_commit_ts = time.monotonic()
             verdict_qnum = self.sk.question_number
-            verdict_key = f"q_{verdict_qnum}_reveal"
+            verdict_ends_round = (
+                verdict_qnum % self.sk.questions_per_round == 0
+                or self.sk.round > self.rounds_total
+            )
+            verdict_key = (
+                f"q_{verdict_qnum}_verdict"
+                if verdict_ends_round
+                else f"q_{verdict_qnum}_reveal"
+            )
             verdict_spoken_organically = self._verdict_already_spoken(
                 question, winner_candidate
             )
@@ -6035,16 +6050,15 @@ class LilyGame:
                 asyncio.ensure_future(
                     lily_persistence.lily_checkpoint(self.supabase, self.sk)
                 )
-            # Gated reveal dispatch: the reveal claims q_{N}_reveal; a
-            # round-closing reveal also claims round_{N}_scores and the
-            # final reveal claims finale — one speech, every act it
-            # performs claimed, so no other path can re-deliver them.
+            # Gated reveal dispatch: a normal verdict claims q_{N}_reveal.
+            # At a round/final boundary the short ruling instead claims
+            # q_{N}_verdict, while the following transition owns
+            # round_{N}_scores/finale. This keeps their playout completion
+            # identities separate.
             # T4 (PATCH-001): the FLOURISH turn — reveal color, standings,
             # the bridge to N+1 — as a SEPARATE beat that never restates
-            # the just-announced verdict. The q_{N}_reveal key was claimed
-            # by the verdict beat (or confirmed by the organic preempt);
-            # round-closing and finale beats keep their own keys. A plain
-            # reveal whose verdict aired organically owes nothing more.
+            # the just-announced verdict. Round-closing and finale beats keep
+            # their own keys, and only the scores beat releases N+1.
             # The verdict beat already contains the one allowed reaction.
             # A normal mid-round question needs no second acknowledgment;
             # only round standings and the finale require another turn.

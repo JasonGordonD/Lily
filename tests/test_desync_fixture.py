@@ -754,15 +754,27 @@ def test_round_transition_reveal_and_question_use_separate_strict_turns():
     assert "VERDICT BEAT" in verdict
     assert "separate authoritative delivery turn follows" in reveal
     assert "do NOT restate" in reveal
+    verdict_owner = game.say_registry.owner_of("q_6_verdict")
+    scores_owner = game.say_registry.owner_of("round_1_scores")
+    assert verdict_owner is not None
+    assert scores_owner is not None
     assert ROUND_TWO_MC["prompt"] not in verdict
     assert ROUND_TWO_MC["prompt"] not in reveal
     assert game._pending_delivery_qnum is None
 
     async def delivery_scenario():
-        # Completing the reveal playout dispatches, but does not open, q7.
+        # Completing only the verdict must NOT dispatch q7 over the standings
+        # flourish. The two speech handles have distinct claim identities.
         game._pending_reveal_event = None  # UI plumbing is outside this test
         game.on_agent_speech_finished(
-            "The femur is correct. Round one is over."
+            "Correct — femur.", speech_id=verdict_owner
+        )
+        assert len(game.session.instructions) == 2
+        assert game._pending_delivery_qnum is None
+
+        # The round-scores flourish owns the transition to q7.
+        game.on_agent_speech_finished(
+            "Round one standings.", speech_id=scores_owner
         )
         assert len(game.session.instructions) == 3
         delivery = game.session.instructions[2]
