@@ -76,6 +76,28 @@ def test_deterministic_verdict_suppresses_organic_llm_reply():
     assert game.consume_deterministic_reply("femur") is False
 
 
+def test_pre_generation_hook_suppresses_correct_answer_before_event_callback():
+    """LiveKit does not guarantee whether the public transcript event or
+    on_user_turn_completed runs first. A clean answer must be engine-owned
+    even when the hook wins that race."""
+    game = _answered_game()
+    agent = LilyAgent.__new__(LilyAgent)
+    agent._game = game
+    message = type("Message", (), {"content": ["No, I said the femur."]})()
+
+    async def scenario():
+        with pytest.raises(StopResponse):
+            await agent.on_user_turn_completed(None, message)
+
+    asyncio.run(scenario())
+    token = (game.sk.question_number, "no i said the femur")
+    assert token in game._prehook_answer_suppressions
+    # The later transcript callback consumes the reservation instead of
+    # leaving a stale suppression for a future same-word turn.
+    game.mark_deterministic_reply("No, I said the femur.")
+    assert token not in game._prehook_answer_suppressions
+
+
 def test_failed_commit_holds_in_character_and_never_celebrates(caplog):
     game = _answered_game()
 

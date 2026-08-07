@@ -357,6 +357,20 @@ def lily_yield_after_first_question(text: str) -> tuple[str, bool]:
     return clipped, bool(text[end:].strip())
 
 
+_FALSE_CLEAN_SLATE_RE = re.compile(
+    r"\b(?:you|this table|we)\s+(?:have|has|haven't|hasn't|never)\b"
+    r".{0,45}\b(?:no\s+)?recorded\s+game\b"
+    r"|\b(?:first|clean[- ]slate)\s+(?:game|night|session)\b"
+    r"|\beffectively\s+a\s+clean\s+slate\b",
+    re.IGNORECASE,
+)
+
+
+def lily_false_clean_slate_claim(text: str) -> bool:
+    """True when Lily denies history while a returner claim is unresolved."""
+    return bool(_FALSE_CLEAN_SLATE_RE.search(text or ""))
+
+
 def lily_mirror_flag(text: str) -> Optional[str]:
     """Return the matched mirror pattern when the turn OPENS with a
     flattery/agreement-echo reflex, else None. Only the first ~120 chars
