@@ -251,6 +251,16 @@ def test_window_plus_match_is_host_by_definition_no_name():
     assert j.reason == "window+match"
 
 
+def test_mid_delivery_match_is_host_directed_before_window_opens():
+    j = LilyAddresseeClassifier().classify(_sig(
+        "hydrogen", window_open=False, expectation_match=True,
+        phase="question",
+    ))
+    assert j.classification == CLASS_HOST_DIRECTED
+    assert j.score >= 0.95
+    assert j.reason == "delivery+match"
+
+
 def test_idle_default_flips_to_side_chatter():
     j = LilyAddresseeClassifier().classify(_sig(
         "did you end up going on Saturday?", phase="idle",

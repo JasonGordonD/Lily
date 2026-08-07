@@ -721,6 +721,21 @@ ROUND_TWO_MC = {
 }
 
 
+def test_near_verbatim_missing_option_rewrites_before_first_playout():
+    """An exact MC stem with an incomplete option list is repaired in the
+    outbound gate, not aired and followed by a second delivery nudge."""
+    game = _make_game()
+    _arm_question(game, ROUND_TWO_MC)
+    malformed = (
+        f"{ROUND_TWO_MC['prompt']} "
+        "A) Jupiter B) Saturn C) Uranus"
+    )
+    assert game.register_delivery_claim(malformed, speech_id="first") == (
+        "rewrite_strict"
+    )
+    assert game.say_registry.state("q_1_delivery") is None
+
+
 def test_round_transition_reveal_and_question_use_separate_strict_turns():
     """Regression for the 00:07 Jupiter-vs-Verona identity split.
 

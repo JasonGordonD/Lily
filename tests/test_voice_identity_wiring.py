@@ -18,7 +18,7 @@ import lily_config
 import lily_persistence
 import lily_voice_embedder
 import lily_voice_identity
-from lily_agent import LilyGame
+from lily_agent import LilyGame, lily_claim_voice_probe
 from lily_scorekeeper import LilyScorekeeper
 
 
@@ -187,6 +187,50 @@ def test_match_noop_when_already_verified(monkeypatch):
     g = _game(sb)
     g.device_identity_verified = True  # already recognized this session
     assert _run(g._voice_identity_match_at_start()) is False
+
+
+def test_match_attempt_waits_for_probe_and_then_schedules(monkeypatch):
+    sb = _FakeSB()
+    _enable(monkeypatch, available=True, embedding=[1.0, 0.0, 0.0])
+    g = _game(sb)
+    g._voice_identity_pcm = None
+    g._voice_identity_attempted = False
+    calls = []
+
+    async def fake_match():
+        calls.append("match")
+        return False
+
+    g._voice_identity_match_at_start = fake_match
+
+    async def scenario():
+        # The early final must not consume the session's only attempt.
+        assert g.maybe_start_voice_identity_match() is False
+        assert g._voice_identity_attempted is False
+        g._voice_identity_pcm = [0.1, 0.2, 0.3]
+        assert g.maybe_start_voice_identity_match() is True
+        await asyncio.sleep(0)
+        assert g.maybe_start_voice_identity_match() is False
+
+    _run(scenario())
+    assert calls == ["match"]
+
+
+def test_production_image_activates_and_prewarms_voice_identity():
+    root = Path(__file__).resolve().parent.parent
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert "requirements-voice-identity.txt" in dockerfile
+    assert "download.pytorch.org/whl/cpu" in dockerfile
+    assert "lily_voice_embedder_available()" in dockerfile
+
+
+def test_voice_probe_claim_is_independent_and_single_shot():
+    game = type("Game", (), {
+        "_voice_identity_ready": lambda self: True,
+        "_voice_probe_forked": False,
+    })()
+    assert lily_claim_voice_probe(game) is True
+    assert lily_claim_voice_probe(game) is False
 
 
 # -- forget retires the voiceprint --------------------------------------------

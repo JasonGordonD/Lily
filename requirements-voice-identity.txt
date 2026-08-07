@@ -1,11 +1,11 @@
 # WO-LILY-VOICE-IDENTITY-001 — durable voice-identity activation deps.
 #
-# Install ON TOP of requirements.txt to ACTIVATE device-independent voice
-# recognition (the ECAPA-TDNN embedder). Kept separate because torch is a
-# heavy (~1-2GB) image cost and activation is a deliberate step:
+# Installed ON TOP of requirements.txt by the production Dockerfile to
+# activate device-independent voice recognition (the ECAPA-TDNN embedder).
+# Kept separate so CPU torch/torchaudio can come from PyTorch's CPU index:
 #
 #   1. Doc applies migrations/021_lily_voice_identity.sql (pgvector table).
-#   2. The deploy image runs `pip install -r requirements-voice-identity.txt`.
+#   2. The deploy image installs CPU torch/torchaudio, then this file.
 #   3. LILY_VOICE_IDENTITY_ENABLED stays true (default); the embedder loads
 #      and enroll/match/probe go live.
 #

@@ -5,6 +5,32 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-07 — Persistent voice memory activation and answer-routing cleanup
+
+The durable voice-identity design existed in code but was inert in the
+production path. Three independent activation gaps are closed:
+
+- Migration 021 (`lily_voice_identity`, pgvector centroid storage) is now
+  applied in production with RLS enabled; service-role code is the only
+  access path, and `forget me` retires the active centroid.
+- The production image installs CPU-only torch/torchaudio plus SpeechBrain
+  and prewarms ECAPA at build time. A missing model now fails the image
+  build instead of silently reducing recognition to device-only memory.
+- The voice-probe audio fork is registered independently of the optional
+  audEERING pipeline. Capture and matching no longer disappear whenever
+  acoustic analytics is unavailable.
+
+The first finalized utterance also no longer consumes the session's only
+biometric match attempt before enough PCM exists. Matching remains
+retryable until the bounded probe is ready and starts immediately at that
+point; close-time centroid enrollment stays inside the shutdown gate.
+
+Related surgical fixes: near-verbatim/incomplete question performances are
+rewritten to the authoritative sheet before first playout (no second nudge
+read); a validated answer shouted during delivery is definitionally
+host-directed even before the answer window opens; and synchronous test
+fixtures no longer leak an unawaited attribute-publish coroutine.
+
 ## 2026-08-07 — Voice-game turn-taking: barge-in, single acknowledgments, and ordered rounds
 
 Player feedback exposed a shared root class behind several “bizarre”

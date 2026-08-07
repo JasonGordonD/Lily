@@ -801,7 +801,14 @@ class LilyGame:
             logger.warning("LILY_STATE | attribute publish failed: %s", e)
 
     def publish_attributes_nowait(self) -> None:
-        asyncio.ensure_future(self.publish_attributes())
+        # Build the coroutine only when a loop exists. Several pure unit
+        # fixtures exercise state transitions synchronously; constructing it
+        # first and then failing in ensure_future leaked an unawaited coroutine.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.publish_attributes())
 
     def next_question_ready(self) -> bool:
         """WS-6 seam predicate (published as the `next_question_ready`
@@ -1532,6 +1539,20 @@ class LilyGame:
             )
             return "rewrite_strict"
         if not structural and not textual:
+            # A near-verbatim organic performance (most commonly the exact
+            # stem with one MC option missing) used to air first, fail the
+            # strict claim, then trigger a second sheet-read nudge. Rewrite
+            # BEFORE TTS instead: the table hears one authoritative question.
+            ratio = lily_evaluation.lily_question_spoken_ratio(
+                armed.get("prompt", ""), spoken_text
+            )
+            if ratio >= 0.9:
+                logger.warning(
+                    "LILY_DELIVERY | STRICT_REWRITE | session=%s q=%d "
+                    "reason=near_verbatim_unregistered ratio=%.2f",
+                    self.sk.session_id, qnum, ratio,
+                )
+                return "rewrite_strict"
             return None
         if self.say_registry.claim(key, owner=speech_id):
             trigger = "structural" if structural else "core_sentence"
@@ -4511,7 +4532,9 @@ class LilyGame:
         window_open = self.sk.is_window_open(now=segment_ts)
         if getattr(self, "ui_phase", None) == "lobby":
             phase = "lobby"
-        elif window_open:
+        elif window_open or (
+            getattr(self, "ui_phase", None) == "question" and expectation
+        ):
             phase = "question"
         elif self.sk.phase == "wrapup":
             phase = "wrapup"
@@ -5053,14 +5076,11 @@ class LilyGame:
         ):
             asyncio.ensure_future(self.open_camera_lane(source="spoken_request"))
 
-        # Durable voice-identity probe — one attempt per session, fired once a
-        # real utterance exists (audio to embed). Inert unless the embedder +
-        # captured audio are present; on a confident cross-device match it
-        # promotes the recognized group's memory.
-        if not getattr(self, "_voice_identity_attempted", False):
-            self._voice_identity_attempted = True
-            if self._voice_identity_ready():
-                asyncio.ensure_future(self._voice_identity_match_at_start())
+        # Durable voice-identity probe. Do not spend the session's one attempt
+        # until the bounded PCM probe is actually ready: the former first-final
+        # trigger usually fired after <4s of speech, saw no PCM, and permanently
+        # disabled matching for the rest of the session.
+        self.maybe_start_voice_identity_match()
 
         # n-best telemetry (WO-ADDRESSEE-H1 Task 1): dispersion logged per
         # utterance — high dispersion is a deliberation signal.
@@ -6346,6 +6366,22 @@ class LilyGame:
         buffer a track frame sink fills (`_voice_identity_pcm`); None keeps the
         feature inert until that sink lands. Injected directly in tests."""
         return getattr(self, "_voice_identity_pcm", None)
+
+    def maybe_start_voice_identity_match(self) -> bool:
+        """Start the one session match only after captured PCM is ready.
+
+        Returns True when scheduled. A pre-probe call remains retryable; this
+        is the key distinction from the former first-final one-shot.
+        """
+        if (
+            getattr(self, "_voice_identity_attempted", False)
+            or not self._voice_identity_ready()
+            or self._voice_identity_audio_probe() is None
+        ):
+            return False
+        self._voice_identity_attempted = True
+        asyncio.ensure_future(self._voice_identity_match_at_start())
+        return True
 
     async def _voice_identity_match_at_start(self) -> bool:
         """Probe the joining voice against stored centroids; on a confident
@@ -9448,6 +9484,7 @@ async def _lily_voice_probe_fork(track, game) -> None:
                 probe.add_samples(_frame_int16(frame))
             if probe.ready():
                 game._voice_identity_pcm = probe.pcm()
+                game.maybe_start_voice_identity_match()
     except Exception as e:
         logger.warning("LILY_VOICE_ID | PROBE_FORK_ENDED | %s", e)
 
@@ -9459,6 +9496,20 @@ def _frame_int16(frame):
         return array.array("h", bytes(frame.data))
     except Exception:
         return []
+
+
+def lily_claim_voice_probe(game) -> bool:
+    """Atomically reserve the session's one durable-identity audio fork.
+
+    Independent of audEERING by design: biometric capture is a memory input,
+    not an acoustic-analytics feature.
+    """
+    if not game._voice_identity_ready() or getattr(
+        game, "_voice_probe_forked", False
+    ):
+        return False
+    game._voice_probe_forked = True
+    return True
 
 
 async def _lily_camera_frame_fork(track, game) -> None:
@@ -10492,65 +10543,61 @@ async def entrypoint(ctx: JobContext) -> None:
         # Vision (Zuna port): player-shared photo analysis rides XAI_API_KEY.
         "vision": lily_vision.lily_vision_available(),
     }
-    if audeering_pipeline is not None:
-        def _on_track_subscribed(track, publication=None, participant=None) -> None:
-            try:
-                if (
-                    getattr(participant, "kind", None)
-                    == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
-                ):
-                    return
-                # VIDEOIN-001: a published camera track IS an explicit
-                # user-initiated open (the UI-control path; the spoken
-                # "look at this" path opens the lane before the track lands).
-                # Open the lane only when AVAILABLE — in the adult deck it
-                # stays refused and the frame fork drops every frame. One sink
-                # per camera track.
-                if getattr(track, "kind", None) == rtc.TrackKind.KIND_VIDEO:
-                    if game.camera_lane_status()["available"]:
-                        game.sk.set_camera_lane("open")
-                    else:
-                        logger.info(
-                            "LILY_CAMERA | TRACK_IGNORED | session=%s "
-                            "reason=unavailable_adult", game.sk.session_id,
-                        )
-                    if not getattr(game, "_camera_fork_started", False):
-                        game._camera_fork_started = True
-                        asyncio.ensure_future(_lily_camera_frame_fork(track, game))
-                    return
-                if getattr(track, "kind", None) != rtc.TrackKind.KIND_AUDIO:
-                    return
+    def _on_track_subscribed(track, publication=None, participant=None) -> None:
+        try:
+            if (
+                getattr(participant, "kind", None)
+                == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+            ):
+                return
+            # VIDEOIN-001: a published camera track IS an explicit
+            # user-initiated open (the UI-control path; the spoken
+            # "look at this" path opens the lane before the track lands).
+            # Open the lane only when AVAILABLE — in the adult deck it
+            # stays refused and the frame fork drops every frame. One sink
+            # per camera track.
+            if getattr(track, "kind", None) == rtc.TrackKind.KIND_VIDEO:
+                if game.camera_lane_status()["available"]:
+                    game.sk.set_camera_lane("open")
+                else:
+                    logger.info(
+                        "LILY_CAMERA | TRACK_IGNORED | session=%s "
+                        "reason=unavailable_adult", game.sk.session_id,
+                    )
+                if not getattr(game, "_camera_fork_started", False):
+                    game._camera_fork_started = True
+                    asyncio.ensure_future(_lily_camera_frame_fork(track, game))
+                return
+            if getattr(track, "kind", None) != rtc.TrackKind.KIND_AUDIO:
+                return
+            if audeering_pipeline is not None:
                 asyncio.ensure_future(
                     lily_audeering_client.lily_audeering_audio_fork(
                         track, audeering_pipeline
                     )
                 )
-                # Voice-identity probe fork (device-independent recognition):
-                # buffer this speaker's 16 kHz PCM for the embedder. Only when
-                # the feature is ready (flag + model), and only the first mic
-                # track, so it stays inert and single otherwise.
-                if game._voice_identity_ready() and not getattr(
-                    game, "_voice_probe_forked", False
-                ):
-                    game._voice_probe_forked = True
-                    asyncio.ensure_future(_lily_voice_probe_fork(track, game))
-            except Exception as e:
-                logger.warning("LILY_AUDEERING | track hook failed: %s", e)
-
-        # Tijoux wiring lesson (JRVS): register the handler AFTER
-        # session.start() returns — handlers registered earlier fire into a
-        # half-initialized session during the start window — AND run a
-        # safety-net scan over ALREADY-subscribed tracks, which the handler
-        # alone would miss.
-        ctx.room.on("track_subscribed", _on_track_subscribed)
-        try:
-            for _participant in ctx.room.remote_participants.values():
-                for _pub in _participant.track_publications.values():
-                    _track = getattr(_pub, "track", None)
-                    if _track is not None:
-                        _on_track_subscribed(_track, _pub, _participant)
+            # Voice-identity probe fork (device-independent recognition):
+            # buffer this speaker's 16 kHz PCM for the embedder. Only when
+            # the feature is ready (flag + model), and only the first mic
+            # track, so it stays inert and single otherwise.
+            if lily_claim_voice_probe(game):
+                asyncio.ensure_future(_lily_voice_probe_fork(track, game))
         except Exception as e:
-            logger.warning("LILY_AUDEERING | already-subscribed scan failed: %s", e)
+            logger.warning("LILY_MEDIA | track hook failed: %s", e)
+
+    # Register independently of audEERING. Durable voice identity and camera
+    # capture must still receive tracks when the optional acoustic provider is
+    # unavailable; coupling this whole hook to audEERING silently disabled
+    # biometric enrollment and matching on those deployments.
+    ctx.room.on("track_subscribed", _on_track_subscribed)
+    try:
+        for _participant in ctx.room.remote_participants.values():
+            for _pub in _participant.track_publications.values():
+                _track = getattr(_pub, "track", None)
+                if _track is not None:
+                    _on_track_subscribed(_track, _pub, _participant)
+    except Exception as e:
+        logger.warning("LILY_MEDIA | already-subscribed scan failed: %s", e)
 
     # SFX: thinking bed + stingers ride BackgroundAudioPlayer.
     background_audio = BackgroundAudioPlayer(stream_timeout_ms=10000)

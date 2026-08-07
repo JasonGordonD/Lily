@@ -53,5 +53,6 @@ create index if not exists lily_voice_identity_active_idx
 -- create index lily_voice_identity_centroid_idx
 --   on lily_voice_identity using ivfflat (centroid vector_cosine_ops);
 
--- RLS: service-role writes only, consistent with the other lily_ tables.
--- (Enable + policy to be applied with the project's standard lily_ RLS.)
+-- No client policy: the service role owns biometric reads/writes and bypasses
+-- RLS; browser/anon clients must never access speaker centroids.
+alter table public.lily_voice_identity enable row level security;

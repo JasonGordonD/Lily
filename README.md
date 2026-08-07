@@ -772,7 +772,9 @@ migrations/013_lily_group_prefs.sql      lily_group_prefs (opaque per-group pref
 migrations/014_lily_adult_bank.sql       principal adult bank + MC/image prompt columns
 migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
-tests/               858 tests, run with `python -m pytest tests/` — no network; needs
+migrations/021_lily_voice_identity.sql  RLS-protected ECAPA group centroids
+                                        for device-independent recognition
+tests/               1450+ tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.6 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
                      test_say_gate_dispatch.py / test_forget_flow.py /
@@ -867,6 +869,20 @@ plugin making it synchronous, and logs `reason=no_get_speaker_ids_api` if a
 bump removes it. On a rematch, injected `known_speakers` carry player-name
 labels, so returning voices may surface with the player name as the label —
 the enrollment row mapper handles both spellings.
+
+**Durable voice identity is active in production.** Speechmatics' refreshed
+identifier blobs still support same-device candidate verification, while the
+device-independent path uses an ECAPA embedding of the shared-mic probe and
+matches it against the RLS-protected `lily_voice_identity` pgvector centroid
+for the group. The Docker image installs CPU torch/torchaudio + SpeechBrain
+and prewarms the model during build; a broken model fails the build rather
+than silently shipping device-only recognition. Audio capture is independent
+of the optional audEERING pipeline. The one session match is not consumed
+until enough PCM exists, then runs immediately; close-time enrollment folds
+the session embedding into the running centroid inside the shutdown gate.
+`forget me` disables further identity persistence for the session, deletes
+the ordinary voiceprints/memory rows, and retires the durable centroid so it
+cannot match again.
 
 **What Lily remembers:** on a returning group, the last 3 games + group facts
 are compiled into a compact `[RETURNING TABLE]` system block (~600 chars max,

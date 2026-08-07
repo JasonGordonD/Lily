@@ -31,9 +31,17 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Dependency files first, for efficient layer caching.
-COPY requirements.txt ./
+COPY requirements.txt requirements-voice-identity.txt ./
 
-RUN pip install --no-cache-dir -r requirements.txt
+# Durable voice recognition is an active product feature, not an optional
+# local extra. Install CPU PyTorch explicitly (avoids CUDA image bloat), then
+# the application and ECAPA/SpeechBrain dependencies.
+RUN pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cpu \
+      torch torchaudio \
+  && pip install --no-cache-dir \
+      -r requirements.txt \
+      -r requirements-voice-identity.txt
 
 # All remaining application files (excludes .dockerignore entries).
 COPY . .
@@ -44,5 +52,9 @@ USER appuser
 
 # Pre-download the Silero VAD model so startup never fetches at runtime.
 RUN python -c "from livekit.plugins.silero import VAD; VAD.load()"
+
+# Fail the image build if durable voice identity cannot load, and bake the
+# ECAPA model into the image so the first live session never downloads it.
+RUN python -c "import lily_voice_embedder as v; assert v.lily_voice_embedder_available()"
 
 CMD ["python", "lily_agent.py", "start"]
