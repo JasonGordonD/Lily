@@ -8146,11 +8146,51 @@ class LilyGame:
         llm = getattr(self, "_adult_llm", None)
         if llm is None:
             try:
+                import httpx
+                import openai as openai_sdk
+
                 from livekit.plugins import openai as openai_plugin
+
+                # THE 5-SECOND WALL. livekit-plugins-openai builds its own
+                # AsyncClient when none is passed, with
+                # httpx.Timeout(connect=15, read=5, write=5, pool=5) — and
+                # `with_x_ai` exposes NO timeout parameter, so the adult
+                # lane silently inherited a 5s READ timeout.
+                #
+                # On a streaming response the read timeout is the gap
+                # between chunks, and the first gap IS the model's thinking
+                # time. grok-4.5 is a reasoning model: HOTFIX-005 X13
+                # measured llm_ttft p50 4,999ms / p95 8,254ms at high
+                # effort. That is a coin flip against the wall at the
+                # median and a certainty at p95 — and the plugin defaults
+                # to max_retries=0, so a killed turn is not retried, it is
+                # simply dead air at the table.
+                #
+                # xAI's own streaming docs call this out: reasoning models
+                # need the request timeout raised or the connection closes
+                # prematurely. Pass an explicit client (the one hook
+                # with_x_ai does forward) carrying a sane read budget.
+                # base_url and api_key must ride the CLIENT here — the
+                # plugin only uses its own when it constructs the client
+                # itself.
                 llm = openai_plugin.LLM.with_x_ai(
                     model=lily_config.adult_vocal_model(),
                     api_key=key,
                     reasoning_effort=lily_config.adult_vocal_effort(),
+                    client=openai_sdk.AsyncClient(
+                        api_key=key,
+                        base_url="https://api.x.ai/v1",
+                        max_retries=0,
+                        http_client=httpx.AsyncClient(
+                            timeout=httpx.Timeout(
+                                connect=15.0,
+                                read=lily_config.adult_vocal_read_timeout(),
+                                write=15.0,
+                                pool=15.0,
+                            ),
+                            follow_redirects=True,
+                        ),
+                    ),
                 )
             except Exception as e:
                 logger.error(

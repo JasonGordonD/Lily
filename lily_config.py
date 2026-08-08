@@ -235,6 +235,26 @@ def adult_vocal_effort() -> str:
     return effort if effort in ("low", "medium", "high") else "low"
 
 
+def adult_vocal_read_timeout() -> float:
+    """HTTP READ timeout for the adult vocal lane's streaming turn.
+
+    livekit-plugins-openai defaults to read=5.0s and `with_x_ai` exposes no
+    timeout, so the adult lane inherited a five-second wall. On a streaming
+    response the read timeout is the gap BETWEEN chunks, and the first gap
+    is the model's thinking time — so on grok-4.5, a reasoning model
+    measured at llm_ttft p50 4,999ms / p95 8,254ms (HOTFIX-005 X13), the
+    default killed the connection at the median and always at p95. With the
+    plugin's max_retries=0 that is not a slow turn, it is dead air.
+
+    30s is a BACKSTOP, not a latency control — latency is governed by
+    adult_vocal_effort(), which is `low`. It sits far above p95 so a
+    legitimately slow turn completes, and far below "the table has given up
+    and started talking about something else" so a genuinely wedged socket
+    still fails. Raise it only if a real turn is being cut; do not raise it
+    to paper over a slow effort tier."""
+    return max(5.0, _get_float("LILY_ADULT_VOCAL_READ_TIMEOUT", 30.0))
+
+
 def adult_reasoning_model() -> str:
     """Question/verification generation model for the ADULT deck.
 
