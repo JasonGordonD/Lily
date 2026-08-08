@@ -802,14 +802,35 @@ async def lily_classify_image(
 
     Mirrors lily_reasoning.approve_entity_image's fail-closed discipline
     but takes its content brief from the caller, because that gate is
-    hardcoded family-friendly and would refuse every adult entry."""
+    hardcoded family-friendly and would refuse every adult entry.
+
+    SAFETY SETTINGS ARE LOAD-BEARING HERE, and shipping without them cost
+    real money. The first seeding runs recorded 30 gate rejections against
+    ONE provider moderation rejection — the image generator was happy to
+    paint the content and this gate then threw it away at ~$0.02 a frame,
+    one suggestive run rejecting nine to bank one.
+
+    The cause was not a strict brief. It was this call running Gemini under
+    DEFAULT thresholds, which block sexual content outright: the response
+    came back empty, the JSON parse raised, and the fail-closed handler
+    logged a 'gate error' that looked indistinguishable from a considered
+    refusal. The gate was not judging adult images strictly — it could not
+    see them at all. approve_entity_image, the function this was modelled
+    on, passes BLOCK_NONE twenty lines away; this one simply omitted it.
+
+    Fail-closed is still the rule for a genuine error. But a gate that
+    cannot look at the register it was written for is not caution, it is a
+    bug with a reassuring log line."""
     import json
 
     from google.genai import types as genai_types
 
+    import lily_reasoning
+
     try:
         config = genai_types.GenerateContentConfig(
             thinking_config=genai_types.ThinkingConfig(thinking_level="low"),
+            safety_settings=lily_reasoning._SAFETY_SETTINGS,
             max_output_tokens=lily_config.judge_max_output_tokens(),
             response_mime_type="application/json",
             response_schema=genai_types.Schema(

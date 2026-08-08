@@ -298,6 +298,17 @@ async def lily_seed_partition(
         f"gate={summary['rejected_gate']} errors={summary['errors']} "
         f"cost=${summary['cost_usd']:.2f}"
     )
+    # PERSIST the per-slot reasons, not just the counts. A6 said the run
+    # "reports why anything was skipped" and it did — to stdout, which is
+    # gone the moment the terminal scrolls. The first live runs recorded
+    # gate=9/created=1 with no surviving record of WHY, so diagnosing a
+    # 30:1 rejection rate meant reasoning from the code rather than reading
+    # the run. Counts tell you something is wrong; reasons tell you what.
+    detail = (summary.get("skipped_reasons") or []) + [
+        f"FINDING: {f}" for f in (summary.get("findings") or [])
+    ]
+    if detail:
+        summary["notes"] += "\n" + "\n".join(detail[:40])
     await lily_arsenal.lily_run_finish(
         supabase,
         run_id=run_id,
