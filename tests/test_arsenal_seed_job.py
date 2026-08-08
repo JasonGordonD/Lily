@@ -433,3 +433,66 @@ def test_crossing_the_watermark_mid_play_triggers_replenishment_for_that_partiti
     assert lily_arsenal.lily_should_replenish(
         other_served, 0, target=10, available_to_group=other_available
     ) is False
+
+
+# -- --promote-all: bulk operator pass ----------------------------------------
+
+
+def test_promote_all_promotes_every_pending_entry_in_a_partition():
+    """--promote-all <partition> transitions ALL 'generating' rows in that
+    partition to 'ready' — the same state change --promote <id> makes, once
+    per entry, without the operator copying UUIDs."""
+    from fake_supabase import seed_entry
+
+    db = FakeSupabase()
+    for _ in range(4):
+        seed_entry(db, "adult_suggestive", status="generating")
+    # An already-ready row and a rejected one must be left untouched.
+    seed_entry(db, "adult_suggestive", status="ready")
+    seed_entry(db, "adult_suggestive", status="rejected")
+
+    summary = _run(
+        lily_arsenal_seed.lily_promote_all(db, partition="adult_suggestive")
+    )
+    assert summary["promoted"] == 4
+    assert summary["failed"] == 0
+    assert summary["per_partition"]["adult_suggestive"] == 4
+
+    rows = db.tables["lily_picture_arsenal"]
+    assert sum(1 for r in rows if r["status"] == "generating") == 0
+    assert sum(1 for r in rows if r["status"] == "ready") == 5  # 4 promoted + 1
+    assert sum(1 for r in rows if r["status"] == "rejected") == 1
+    # Promotion stamps the review columns exactly as the single-entry path does.
+    promoted = [r for r in rows if r.get("reviewed_by") == "operator"]
+    assert len(promoted) == 4
+
+
+def test_promote_all_no_arg_sweeps_every_partition():
+    """A bare --promote-all promotes pending entries across all partitions."""
+    from fake_supabase import seed_entry
+
+    db = FakeSupabase()
+    seed_entry(db, "adult_suggestive", status="generating")
+    seed_entry(db, "adult_suggestive", status="generating")
+    seed_entry(db, "adult_explicit", status="generating")
+
+    summary = _run(lily_arsenal_seed.lily_promote_all(db, partition=None))
+    assert summary["promoted"] == 3
+    assert summary["per_partition"]["adult_suggestive"] == 2
+    assert summary["per_partition"]["adult_explicit"] == 1
+    # 'general' has none pending -> 0, not an error.
+    assert summary["per_partition"]["general"] == 0
+    assert all(
+        r["status"] == "ready" for r in db.tables["lily_picture_arsenal"]
+    )
+
+
+def test_promote_all_on_empty_partition_is_a_noop():
+    """Nothing pending -> promotes nothing, reports zero, does not fail."""
+    db = FakeSupabase()
+    summary = _run(
+        lily_arsenal_seed.lily_promote_all(db, partition="adult_suggestive")
+    )
+    assert summary == {
+        "promoted": 0, "failed": 0, "per_partition": {"adult_suggestive": 0},
+    }

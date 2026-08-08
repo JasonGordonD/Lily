@@ -651,9 +651,21 @@ async def lily_author_question(
             else ""
         )
         + "Return JSON with keys: question_text, canonical_answer, "
-        "acceptable_answers (array of spoken variants a speech recogniser "
-        "might produce), options (array of 4 or null), reveal_color (one "
-        "spoken sentence revealing the answer with personality)."
+        "acceptable_answers, options (array of 4 or null), reveal_color (one "
+        "spoken sentence revealing the answer with personality).\n"
+        "acceptable_answers is the array a LEXICAL grader matches a spoken "
+        "answer against — it does NOT infer synonyms, so coverage here is "
+        "what makes a genuinely-correct spoken answer count. Enumerate the "
+        "informal ways a real player would say this answer OUT LOUD: the "
+        "canonical answer, formal synonyms, AND the common colloquial "
+        "abbreviations, slang, and short-forms people actually blurt out "
+        "(adult terms explicitly in scope). E.g. for 'dominatrix' include "
+        "'dom', 'domme', 'mistress'; for 'submissive' include 'sub'. For a "
+        "PAIRED answer, include the abbreviated pairing AND each part alone "
+        "(e.g. 'dominatrix and submissive' -> 'dom and sub', 'dom', 'sub'). "
+        "Add plausible speech-recogniser mishearings. Only include phrasings "
+        "that are genuinely EQUIVALENT to the correct answer — never a "
+        "near-miss, an option distractor, or a wrong-but-close term."
     )
     async def _call():
         if adult:

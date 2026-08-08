@@ -72,6 +72,9 @@ logger = logging.getLogger("lily_arsenal_seed")
 # than a shelf that quietly came up short.
 REJECTION_RATE_FINDING_THRESHOLD = 0.40
 
+# argparse const for a bare `--promote-all` (no partition): sweep them all.
+_PROMOTE_ALL_EVERY = "__all__"
+
 
 async def lily_seed_partition(
     supabase,
@@ -343,6 +346,34 @@ async def lily_seed_all(
     return results
 
 
+async def lily_promote_all(supabase, *, partition: Optional[str] = None) -> dict:
+    """Bulk operator pass: promote EVERY pending-review ('generating') entry
+    to 'ready'. partition=None sweeps every partition.
+
+    Reuses the exact single-entry code path (lily_arsenal_pending_review to
+    find them, lily_arsenal_promote to transition each), so the state change
+    is identical to running --promote <id> once per entry — just without the
+    operator copying UUIDs one at a time."""
+    partitions = [partition] if partition else list(lily_arsenal.PARTITIONS)
+    summary = {"promoted": 0, "failed": 0, "per_partition": {}}
+    for part in partitions:
+        pending = await lily_arsenal.lily_arsenal_pending_review(
+            supabase, partition=part
+        )
+        count = 0
+        for row in pending:
+            ok = await lily_arsenal.lily_arsenal_promote(
+                supabase, arsenal_id=row.get("id")
+            )
+            if ok:
+                count += 1
+                summary["promoted"] += 1
+            else:
+                summary["failed"] += 1
+        summary["per_partition"][part] = count
+    return summary
+
+
 def lily_format_run_report(results) -> str:
     """The operator-facing run summary (A6): what was created per
     partition, and WHY anything was skipped. Skipped reasons are printed,
@@ -522,7 +553,10 @@ async def _amain(args) -> int:
 
     # A real seeding run announces what it can and cannot do before it
     # claims a partition or bills a single image.
-    if not (args.status or args.review or args.promote or args.reject):
+    if not (
+        args.status or args.review or args.promote or args.reject
+        or args.promote_all is not None
+    ):
         print(lily_format_preflight(checks))
         wanted = (
             list(lily_arsenal.PARTITIONS)
@@ -585,6 +619,28 @@ async def _amain(args) -> int:
         print("promoted" if ok else "promote failed")
         return 0 if ok else 1
 
+    if args.promote_all is not None:
+        part = None if args.promote_all == _PROMOTE_ALL_EVERY else args.promote_all
+        if part is not None and part not in lily_arsenal.PARTITIONS:
+            print(
+                f"unknown partition '{part}' — choose from "
+                f"{', '.join(lily_arsenal.PARTITIONS)}, or pass --promote-all "
+                "with no argument to sweep every partition"
+            )
+            return 2
+        summary = await lily_promote_all(_SUPABASE, partition=part)
+        scope = part or "all partitions"
+        detail = ", ".join(
+            f"{k}={v}" for k, v in summary["per_partition"].items()
+        )
+        noun = "entry" if summary["promoted"] == 1 else "entries"
+        print(
+            f"promoted {summary['promoted']} pending-review {noun} to ready "
+            f"({scope}: {detail})"
+            + (f"; {summary['failed']} failed" if summary["failed"] else "")
+        )
+        return 0 if summary["failed"] == 0 else 1
+
     if args.reject:
         ok = await lily_arsenal.lily_arsenal_reject(
             _SUPABASE, arsenal_id=args.reject, reason=args.reason or "operator reject"
@@ -645,6 +701,12 @@ def main() -> int:
         "--review", metavar="PARTITION", help="list entries awaiting review"
     )
     parser.add_argument("--promote", metavar="ID", help="promote one entry to ready")
+    parser.add_argument(
+        "--promote-all", metavar="PARTITION", nargs="?",
+        const=_PROMOTE_ALL_EVERY, default=None, dest="promote_all",
+        help="promote ALL pending-review entries in PARTITION to ready "
+        "(omit PARTITION to sweep every partition)",
+    )
     parser.add_argument("--reject", metavar="ID", help="reject one entry")
     parser.add_argument("--reason", default=None)
     args = parser.parse_args()

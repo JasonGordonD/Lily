@@ -168,9 +168,76 @@ def test_question_first_path_untouched_describe_never_called():
     assert seen["describe_called"] is False
 
 
+# ---------------------------------------------------------------------------
+# Author prompt: acceptable_answers must request colloquial short-forms.
+#
+# The live grader (lily_evaluation.lily_tier1_evaluate) is purely lexical and
+# does NOT infer that "dom" == "dominatrix". Correctness therefore hinges on
+# the author enumerating the informal short-forms into acceptable_answers at
+# generation time, so the author instruction must explicitly ask for them.
+# ---------------------------------------------------------------------------
+
+
+class _CapturingReasoning:
+    """Captures the instruction the author hands the model, both decks."""
+
+    def __init__(self):
+        self.instruction = None
+        self._model = "gemini-fake"
+
+    async def _generate(self, model, instruction, **kw):
+        self.instruction = instruction
+        return (
+            '{"question_text": "Q?", "canonical_answer": "dominatrix", '
+            '"acceptable_answers": ["dominatrix", "dom", "domme"], '
+            '"options": null, "reveal_color": "It was a dominatrix."}'
+        )
+
+    async def _generate_grok_json(self, instruction, **kw):
+        self.instruction = instruction
+        return (
+            '{"question_text": "Q?", "canonical_answer": "dominatrix", '
+            '"acceptable_answers": ["dominatrix", "dom", "domme"], '
+            '"options": null, "reveal_color": "It was a dominatrix."}'
+        )
+
+
+def _author_instruction(partition):
+    reasoning = _CapturingReasoning()
+    _run(
+        lily_arsenal_gen.lily_author_question(
+            reasoning,
+            partition=partition,
+            plan={"format": "identify", "subject_area": "x",
+                  "difficulty_tier": 2},
+            image_description="a person in leather holding a riding crop",
+        )
+    )
+    return reasoning.instruction.lower()
+
+
+def test_author_prompt_requests_colloquial_short_forms_general():
+    text = _author_instruction("general")
+    assert "acceptable_answers" in text
+    assert "abbreviation" in text or "short-form" in text or "slang" in text
+    assert "colloquial" in text
+    assert "blurt out" in text  # "how a real player would SAY this out loud"
+
+
+def test_author_prompt_requests_colloquial_short_forms_adult():
+    # Adult deck rides Grok; the same enrichment must reach that instruction.
+    text = _author_instruction("adult_suggestive")
+    assert "colloquial" in text
+    assert "dom" in text and "sub" in text  # worked example is present
+    # It must still forbid loosening into wrong-but-close answers.
+    assert "equivalent" in text
+
+
 if __name__ == "__main__":
     test_image_first_author_receives_vision_caption_not_prompt()
     test_image_first_falls_back_to_prompt_when_describe_absent()
     test_image_first_falls_back_to_prompt_when_describe_raises()
     test_question_first_path_untouched_describe_never_called()
+    test_author_prompt_requests_colloquial_short_forms_general()
+    test_author_prompt_requests_colloquial_short_forms_adult()
     print("ALL PASS")
