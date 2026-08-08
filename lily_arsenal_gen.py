@@ -629,18 +629,19 @@ async def lily_author_question(
                     "Consenting adults only; never minors, never "
                     "non-consensual. Return JSON only."
                 ),
-                max_tokens=900,
+                max_tokens=2048,
             )
         return await reasoning._generate(
             reasoning._model,
             instruction,
             thinking_level="low",
             response_mime_type="application/json",
-            max_output_tokens=900,
+            max_output_tokens=2048,
         )
 
     last_err: object = "author returned nothing"
-    for attempt in (1, 2):
+    attempts = (1, 2, 3)
+    for attempt in attempts:
         try:
             raw = await _call()
             data = lily_extract_json_object(raw)
@@ -649,7 +650,7 @@ async def lily_author_question(
             last_err = "unparseable or incomplete author output"
         except Exception as e:
             last_err = e
-        if attempt == 1:
+        if attempt < attempts[-1]:
             logger.info(
                 "LILY_ARSENAL_SEED | AUTHOR_RETRY | partition=%s format=%s: %s",
                 partition, fmt, last_err,
