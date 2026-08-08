@@ -244,3 +244,64 @@ def test_retire_excludes_from_future_match(monkeypatch):
     assert _run(lily_persistence.lily_retire_voice_identity(sb, "voiceA")) is True
     # A later match load sees no active rows for the forgotten voice.
     assert _run(lily_persistence.lily_load_voice_identities(sb, TAG)) == []
+
+
+# -- orphan-centroid guard -----------------------------------------------------
+
+
+def test_enroll_never_founds_an_identity_on_a_throwaway_room_name(monkeypatch):
+    """The voiceprint was being SHREDDED, not lost. enroll_at_close wrote to
+    self.group_id unconditionally, so a session whose group resolution had
+    fallen back to the ROOM NAME minted a fresh 1-sample orphan instead of
+    adding to the real centroid. An orphan keyed to a room name can never be
+    matched TO — that room never recurs — so it survives only as an extra
+    candidate thinning the margin check for every genuine match after it.
+
+    Live 2026-08-08: three rows where there should have been one, while the
+    operator was telling Lily she ought to know his voice."""
+    sb = _FakeSB()
+    _enable(monkeypatch, available=True, embedding=[1.0, 0.0, 0.0])
+    g = _game(sb)
+    g.group_id = "lily-1D27C8-974ff7ce"
+    g.group_id_source = "room_name"
+    g.identity_persistence_allowed = lambda: True
+    # Nothing stored, so nothing to match -> the sample is DROPPED.
+    assert _run(g._voice_identity_enroll_at_close()) is False
+    assert sb.store[lily_persistence.VOICE_IDENTITY_TABLE] == []
+
+
+def test_enroll_folds_into_the_identity_the_voice_matches(monkeypatch):
+    """On a throwaway group the BIOMETRIC decides where its sample lands —
+    it is the signature, so a confident match redirects enrollment into the
+    real identity instead of founding a rival one beside it."""
+    sb = _FakeSB()
+    _enable(monkeypatch, available=True, embedding=[1.0, 0.0, 0.0])
+    sb.store[lily_persistence.VOICE_IDENTITY_TABLE] = [{
+        "id": "vi-real-1", "group_id": "grp_real",
+        "centroid": [1.0, 0.0, 0.0],
+        "sample_count": 4, "model_tag": TAG, "status": "active",
+    }]
+    g = _game(sb)
+    g.group_id = "lily-THROWAWAY-0001"
+    g.group_id_source = "room_name"
+    g.identity_persistence_allowed = lambda: True
+    assert _run(g._voice_identity_enroll_at_close()) is True
+    rows = sb.store[lily_persistence.VOICE_IDENTITY_TABLE]
+    assert len(rows) == 1, "no rival identity beside the real one"
+    assert rows[0]["group_id"] == "grp_real"
+    assert rows[0]["sample_count"] == 5, "5th sample, not a new 1-sample orphan"
+
+
+def test_a_real_group_id_may_still_found_its_first_centroid(monkeypatch):
+    """The guard is narrow on purpose. A group id off participant metadata
+    recurs, so it CAN be matched to later and is a legitimate home for a
+    first centroid. Only the room-name fallback is barred."""
+    sb = _FakeSB()
+    _enable(monkeypatch, available=True, embedding=[1.0, 0.0, 0.0])
+    g = _game(sb)
+    g.group_id = "grp_0b07f989"
+    g.group_id_source = "participant_metadata"
+    g.identity_persistence_allowed = lambda: True
+    assert _run(g._voice_identity_enroll_at_close()) is True
+    rows = sb.store[lily_persistence.VOICE_IDENTITY_TABLE]
+    assert rows[0]["group_id"] == "grp_0b07f989"

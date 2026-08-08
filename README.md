@@ -2161,6 +2161,57 @@ standing spend against the xAI account rather than a per-game cost, which is
 why depth is a config knob (`LILY_ARSENAL_TARGET_DEPTH`, per-partition
 overrides) rather than a redeploy.
 
+### The voiceprint is the signature — never found an identity on a room name (2026-08-08)
+
+The identity chain runs **device/connection (step 0, a hint only) → voiceprint
+(step 1, the signature) → group (step 2, derived when two or more known voices
+play together)**. `_voice_identity_enroll_at_close` violated it by writing to
+`self.group_id` unconditionally.
+
+When group resolution had fallen back to the room name, that minted a fresh
+**1-sample orphan centroid** rather than adding a sample to the real one. An
+orphan keyed to a room name can never be matched TO — the room never recurs —
+so it survives only as an extra candidate thinning the margin check for every
+genuine match afterwards. The system got measurably worse per broken session.
+
+Live 2026-08-08: three rows where there should have been one —
+`grp_0b07f989` (4 samples, 08-07) plus 1-sample orphans at 07:30 and 18:59,
+both written while the operator was telling Lily she ought to know his voice.
+Nothing in the embedder was broken; it was writing to the wrong key.
+
+Now: on a **room-name** group with no centroid of its own, the voice is matched
+FIRST and the sample folds into whatever identity it matches
+(`ENROLL_REDIRECTED`); no confident match means **no write**
+(`ENROLL_SKIPPED_ORPHAN`) — a sample with nowhere real to go is dropped rather
+than orphaned. The guard is deliberately narrow: a group id off participant or
+dispatch metadata recurs, so it may still found its first centroid.
+
+**Known modelling limit (not yet addressed).** `lily_voice_identity` is keyed
+`unique(group_id, model_tag)` — **one centroid per GROUP, not per person** — and
+the probe is raw rolling PCM with no speaker segmentation, even though
+Speechmatics diarization is already flowing through the transcript path. Two
+people at one table average into a single centroid that matches neither well,
+and the same person playing solo and in a group cannot be represented as one
+identity. Correcting this means re-keying the centroid to a person and
+segmenting the probe by speaker label.
+
+### The frame sink must close when the probe is full (2026-08-08)
+
+`_lily_voice_probe_fork` ran for the entire session — per participant,
+resampling every audio frame and doing two full copies of it
+(`bytes(frame.data)` → `array`) **on the event loop** — for audio nothing would
+ever read again. The probe needs ~8 seconds and enrollment reads the captured
+PCM, not the live stream.
+
+That loop is shared with the Silero VAD, and **VAD is what drives barge-in and
+turn commit**. Measured live: VAD **24.9s behind realtime**, TTS tail chunks
+undelivered (`TAIL_CHUNK_UNDELIVERED | delivered=0/1`), turns dying
+mid-sentence, `CUT_RECOVERY | RESUMED` firing on the dead air. A cut turn is
+also re-dispatched, which is where the *repetition* comes from — so barge-in
+failure and repeating herself are one fault, not two. The sink now breaks once
+the probe is full (`PROBE_COMPLETE`).
+
+
 ## Environment
 
 `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` · `GOOGLE_API_KEY` ·

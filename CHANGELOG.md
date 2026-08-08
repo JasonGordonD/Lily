@@ -5,6 +5,72 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-08 — Live-session repair: memory, honesty, latency, and the voiceprint
+
+Session `lily-1D27C8` (14:56 local): a returning operator was greeted as a
+stranger, told his memory was "strictly device and browser based", and heard
+her turns die mid-sentence. Four independent defects, all found from the
+live logs and the run tables.
+
+**The voiceprint was being SHREDDED, not lost.** `_voice_identity_enroll_at_close`
+wrote to `self.group_id` unconditionally. When group resolution had fallen
+back to the room name, that minted a fresh **1-sample orphan centroid**
+instead of adding to the real one. An orphan keyed to a room name can never
+be matched TO — that room never recurs — so it survives only as an extra
+candidate thinning the margin check for every genuine match afterwards.
+Three rows existed where there should have been one: `grp_0b07f989` with 4
+samples from 08-07, plus 1-sample orphans from 07:30 and 18:59, both written
+while the operator was telling Lily she ought to know his voice. The
+embedder was never broken — torch loaded, model loaded, 8s probe captured,
+embedding extracted, row written. It was writing to the wrong key.
+Enrollment on a room-name group now matches FIRST and folds the sample into
+whatever identity the voice actually matches; no match means no write. The
+guard is narrow on purpose — a real group id off participant metadata
+recurs, so it may still found its first centroid.
+
+**Choppiness: the frame sink never stopped.** `_lily_voice_probe_fork` ran
+for the WHOLE session — per participant, resampling every audio frame and
+doing two full copies of it (`bytes(frame.data)` -> `array`) on the event
+loop — for audio nothing would ever read again. The probe needs ~8 seconds;
+enrollment reads the captured PCM, not the live stream. That waste shares
+the event loop with the Silero VAD, which drives barge-in and turn commit.
+Measured live: VAD **24.9s behind realtime**, TTS tail chunks undelivered
+(`delivered=0/1`), turns dying mid-sentence. The sink now closes once the
+probe is full.
+
+**A 5-second wall on the adult vocal lane.** `livekit-plugins-openai` builds
+its own AsyncClient with `httpx.Timeout(read=5.0)` and `with_x_ai` exposes
+no timeout parameter. On a streaming response the read timeout is the gap
+between chunks, and the first gap is the model's thinking time — against
+grok-4.5 measured at llm_ttft p50 4,999ms / p95 8,254ms, with
+`max_retries=0`. A coin flip at the median, a certainty at p95, and a killed
+turn is dead air. This reframes HOTFIX-005 X13: effort tiers were partly
+being used to dodge a timeout nobody knew was there.
+
+**The Tier-2 judge ran on the wrong provider.** `judge()` used the Gemini
+vocal model unconditionally, including mid-adult-session — sending adult
+content to the one provider the session had already swapped away from.
+PROHIBITED_CONTENT is not a settable safety category, so it blocked, the 12s
+bound fired, and adjudication silently degraded to Tier-1 on every close
+call.
+
+**She was not lying about her memory — she was following instructions off a
+cliff.** The prompt says never NAME mechanisms beyond device-and-voice; she
+converted that into a claim about what EXISTS, asserting a negative about a
+backend she cannot see, to the person who built it. Three sites also shipped
+a scripted guess ("new device, maybe") that she delivered as diagnosis — and
+here it was wrong, blaming a returning player's own setup for a backend
+fault. She now says the true thing: the card is blank, the gap is hers, and
+she does not know why.
+
+**Also:** the arsenal content gate passed no `safety_settings`, so it ran
+Gemini under default thresholds and could not see adult images at all — 30
+gate rejections against 1 provider moderation rejection, at ~$0.02 a frame.
+The group-id resolver stopped breaking its metadata poll the moment a
+participant was present without metadata (presence and metadata-readiness
+are different things). Run summaries now persist per-slot skip reasons
+rather than printing them to a terminal that scrolls.
+
 ## 2026-08-07 — WO-LILY-ARSENAL-SEED-001: stock the picture bank
 
 `lily_picture_arsenal` had the applied schema, the private `lily-arsenal`

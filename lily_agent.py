@@ -6688,7 +6688,26 @@ class LilyGame:
     async def _voice_identity_enroll_at_close(self) -> bool:
         """Fold this session's captured voice into the group's stored centroid
         so the next session (any device) recognizes it. Runs at close, off the
-        vocal path; skipped when identity persistence is disallowed (forget)."""
+        vocal path; skipped when identity persistence is disallowed (forget).
+
+        NEVER ENROLLS INTO A THROWAWAY GROUP. This wrote to self.group_id
+        unconditionally, and when group resolution had fallen back to the
+        room name that minted a brand-new orphan centroid instead of adding
+        a sample to the real one. An orphan keyed to a room name is worse
+        than useless: the room never recurs, so nothing can ever match TO
+        it, and it survives only as an extra candidate that thins the
+        margin check for every genuine match afterwards. The voiceprint was
+        not missing — it was being shredded, one orphan per broken session.
+
+        Live 2026-08-08: three rows where there should have been one.
+        grp_0b07f989 held 4 samples from 08-07; sessions at 07:30 and 18:59
+        each wrote a fresh 1-sample orphan under a room-name group while
+        the operator was telling Lily she ought to know his voice.
+
+        On a weak group, the voice is matched FIRST and the sample folds
+        into whatever identity it matches — the biometric is the signature,
+        so it decides where its own sample lands. No match means no write:
+        a sample with nowhere real to go is dropped rather than orphaned."""
         if not self._voice_identity_ready() or not self.identity_persistence_allowed():
             return False
         probe = self._voice_identity_audio_probe()
@@ -6702,8 +6721,41 @@ class LilyGame:
             existing = await lily_persistence.lily_load_voice_identities(
                 self.supabase, tag
             )
+            enroll_group = self.group_id
+            # Narrow on purpose: only the ROOM-NAME throwaway is barred from
+            # founding an identity. A real group id off participant or
+            # dispatch metadata is a legitimate home for a first centroid —
+            # it recurs, so it can be matched to later. A room name cannot.
+            if getattr(self, "group_id_source", "") == "room_name" and not any(
+                r["group_id"] == self.group_id for r in existing
+            ):
+                # Weak group with no centroid of its own — let the voice say
+                # where it belongs rather than founding a new identity on a
+                # room name.
+                match = lily_voice_identity.lily_match_voice(
+                    emb, existing,
+                    threshold=lily_config.voice_identity_match_threshold(),
+                    margin=lily_config.voice_identity_match_margin(),
+                )
+                if match is None:
+                    logger.warning(
+                        "LILY_VOICE_ID | ENROLL_SKIPPED_ORPHAN | session=%s "
+                        "group=%s source=%s — weak group and no voice match; "
+                        "dropping the sample rather than minting an orphan "
+                        "centroid that can never be matched to",
+                        self.sk.session_id, self.group_id, self.group_id_source,
+                    )
+                    return False
+                enroll_group = match["group_id"]
+                logger.info(
+                    "LILY_VOICE_ID | ENROLL_REDIRECTED | session=%s from=%s "
+                    "to=%s score=%.3f — folding the sample into the identity "
+                    "the voice actually matches",
+                    self.sk.session_id, self.group_id, enroll_group,
+                    match["score"],
+                )
             prior = next(
-                (r for r in existing if r["group_id"] == self.group_id), None
+                (r for r in existing if r["group_id"] == enroll_group), None
             )
             centroid, count = lily_voice_identity.lily_update_centroid(
                 prior["centroid"] if prior else None,
@@ -6711,7 +6763,7 @@ class LilyGame:
                 emb,
             )
             return await lily_persistence.lily_upsert_voice_identity(
-                self.supabase, group_id=self.group_id, centroid=centroid,
+                self.supabase, group_id=enroll_group, centroid=centroid,
                 sample_count=count, model_tag=tag,
             )
         except Exception as e:
@@ -10023,6 +10075,27 @@ async def _lily_voice_probe_fork(track, game) -> None:
             if probe.ready():
                 game._voice_identity_pcm = probe.pcm()
                 game.maybe_start_voice_identity_match()
+                # STOP. The probe needs ~8 seconds; this loop was running for
+                # the WHOLE SESSION, resampling every frame and doing two
+                # full copies of it (bytes(frame.data) -> array) on the
+                # event loop, per participant, forever — for audio nothing
+                # would ever read again. Enrollment at close reads the
+                # captured PCM above, not the live stream.
+                #
+                # That waste is not free: it is on the same event loop as
+                # the Silero VAD, and VAD is what drives barge-in and turn
+                # commit. Live 2026-08-08 measured the VAD 24.9s behind
+                # realtime, with TTS tail chunks undelivered and turns dying
+                # mid-sentence — the choppiness. Holding the loop open past
+                # the point of usefulness was buying nothing and costing
+                # exactly the thing the agent cannot afford to lose.
+                logger.info(
+                    "LILY_VOICE_ID | PROBE_COMPLETE | captured=%.1fs — "
+                    "closing the frame sink; it has what enrollment needs "
+                    "and every further frame is loop time the VAD needs",
+                    lily_config.voice_identity_enroll_min_speech_seconds(),
+                )
+                break
     except Exception as e:
         logger.warning("LILY_VOICE_ID | PROBE_FORK_ENDED | %s", e)
 
