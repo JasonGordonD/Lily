@@ -354,6 +354,7 @@ async def lily_generate_entry(
     upload,
     classify=None,
     describe=None,
+    source_real=None,
     cost_per_image: Optional[float] = None,
     max_moderation_retries: Optional[int] = None,
 ) -> dict:
@@ -377,6 +378,16 @@ async def lily_generate_entry(
           Captions the rendered image for the image-first author. Optional:
           if unwired or it fails, the author falls back to the generation
           prompt (the prior behaviour), never worse.
+      source_real(partition, plan) -> dict | None
+          Sources a genuinely-dated REAL image for period formats (era_or_
+          origin) instead of generating one — a render only carries an
+          impression of a period and the gate refuses it, but a real
+          archival photograph carries authentic period cues. Returns
+          {image_bytes, content_type, question_text, canonical_answer,
+          acceptable_answers, reveal_color, provenance} or None. Optional:
+          when unwired, or it returns None (no candidate sourced), the slot
+          falls back to the generated path unchanged — never worse. Used only
+          for formats whose spec sets sources_real_image.
 
     Returns {outcome, entry, attempts, cost_usd, reason}. `entry` is
     populated only on OUTCOME_CREATED; every other outcome carries a reason
@@ -413,6 +424,77 @@ async def lily_generate_entry(
             "seconds": round(time.monotonic() - started, 2),
             "binding_direction": binding,
         }
+
+    # -- real-image formats: source a genuinely-dated photo, don't generate --
+    # era_or_origin (and any future sources_real_image format): a render only
+    # carries an IMPRESSION of a period and the correspondence gate refuses
+    # it; a real archival photo carries authentic period cues and passes. The
+    # answer is curated ground truth, not read off a render. Falls through to
+    # the generated path unchanged when no real image can be sourced.
+    fmt = str(plan.get("format") or "identify")
+    if source_real is not None and lily_arsenal_formats.lily_format_sources_real_image(fmt):
+        sourced = None
+        try:
+            sourced = await source_real(partition, plan)
+        except Exception as e:
+            logger.warning(
+                "LILY_ARSENAL_GEN | SOURCE_REAL_FAILED | partition=%s fmt=%s "
+                "(falling back to generated): %s", partition, fmt, e,
+            )
+        if sourced and sourced.get("image_bytes"):
+            real_bytes = sourced["image_bytes"]
+            real_mime = sourced.get("content_type") or "image/jpeg"
+            claim = str(sourced.get("question_text") or "").strip()
+            canonical = str(sourced.get("canonical_answer") or "").strip()
+            approved, reason = await lily_classify_entry(
+                partition=partition,
+                image_bytes=real_bytes,
+                content_type=real_mime,
+                claim=f"{claim} (the correct answer is: {canonical})",
+                classify=classify,
+            )
+            if not approved:
+                # A sourced real image that fails the gate is a counted
+                # rejection, NOT a reason to generate one instead — the
+                # generated era image is exactly what the gate was refusing.
+                return _result(OUTCOME_CLASSIFIER, attempts=0, reason=reason)
+            path = await upload(real_bytes, real_mime, partition)
+            if not path:
+                return _result(
+                    OUTCOME_ERROR, attempts=0,
+                    reason="sourced real image approved but bucket store failed",
+                )
+            entry = {
+                "question_text": claim,
+                "prompt": claim,
+                "canonical_answer": canonical,
+                "acceptable_answers": lily_answer_set(
+                    canonical, sourced.get("acceptable_answers")
+                ),
+                "options": None,
+                "reveal_color": sourced.get("reveal_color") or "",
+                # Provenance rides generation_prompt (the arsenal has no
+                # separate license column): a web image records where it came
+                # from, exactly as the live real-image path does.
+                "generation_prompt": sourced.get("provenance") or "",
+                "generation_model": None,
+                "image_storage_path": path,
+                "image_source": "web",
+                "is_real_image": True,
+                "format": fmt,
+                "binding_direction": binding,
+                "subject_area": plan.get("subject_area"),
+                "difficulty_tier": int(plan.get("difficulty_tier") or 2),
+                "_arsenal_intensity": intensity,
+            }
+            return _result(
+                OUTCOME_CREATED, entry=entry, attempts=0, reason=reason
+            )
+        logger.info(
+            "LILY_ARSENAL_GEN | SOURCE_REAL_MISS | partition=%s fmt=%s — no "
+            "real image sourced, falling back to generated path",
+            partition, fmt,
+        )
 
     # -- question-first: write the stem, then draw it ------------------------
     stem_question = None

@@ -341,6 +341,19 @@ FORMAT_SPECS: dict[str, dict] = {
             "with several dateable objects visible in one clean frame."
         ),
         "requires_real_images": False,
+        # A GENERATED image cannot honestly answer "what decade is this?" — a
+        # render only ever carries an IMPRESSION of a period, and the
+        # correspondence gate correctly refuses it ("pin-up styling reads
+        # 1940s not 1890s", "impossible to identify a specific decade"). A
+        # genuinely-dated photograph carries authentic period cues, so when a
+        # real-image source is wired (EXA, safelisted archival hosts) this
+        # format SOURCES its image instead of generating one. The ground
+        # truth (the decade) comes from curation, not from reading a render.
+        # Partition-agnostic: general and adult_suggestive both benefit.
+        # When no real-image source is wired it falls back to the generated
+        # path unchanged (which the gate will still refuse — the pre-fix
+        # ceiling, never worse).
+        "sources_real_image": True,
         "in_scope": True,
     },
 }
@@ -376,6 +389,21 @@ def lily_binding_direction(fmt: str) -> str:
     if direction not in (BINDING_IMAGE_FIRST, BINDING_QUESTION_FIRST):
         return BINDING_IMAGE_FIRST
     return direction
+
+
+def lily_format_sources_real_image(fmt: str) -> bool:
+    """True when this format should SOURCE a genuinely-dated real image (via
+    the wired EXA path) rather than generate one.
+
+    Distinct from requires_real_images (which GATES a format's availability —
+    real_or_imagined cannot exist without a real half): a sources_real_image
+    format is always in scope and simply PREFERS a real image when one is
+    wired, degrading to the generated path when it is not. era_or_origin is
+    the first such format; the answer's ground truth comes from curation, not
+    from reading the render, which is why a real archival photo passes the
+    correspondence gate a generated period-impression cannot."""
+    spec = lily_format_spec(fmt)
+    return bool(spec and spec.get("sources_real_image"))
 
 
 def lily_formats_for_partition(

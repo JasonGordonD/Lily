@@ -85,6 +85,7 @@ async def lily_seed_partition(
     upload,
     classify=None,
     describe=None,
+    source_real=None,
     target: Optional[int] = None,
     dry_run: bool = False,
     max_slots: Optional[int] = None,
@@ -188,6 +189,7 @@ async def lily_seed_partition(
                 upload=upload,
                 classify=classify,
                 describe=describe,
+                source_real=source_real,
             )
             summary["attempts"] += result.get("attempts", 0)
             summary["cost_usd"] += result.get("cost_usd", 0.0)
@@ -318,6 +320,7 @@ async def lily_seed_all(
     upload,
     classify=None,
     describe=None,
+    source_real=None,
     partitions=None,
     target: Optional[int] = None,
     dry_run: bool = False,
@@ -338,6 +341,7 @@ async def lily_seed_all(
                 upload=upload,
                 classify=classify,
                 describe=describe,
+                source_real=source_real,
                 target=target,
                 dry_run=dry_run,
                 max_slots=max_slots,
@@ -477,7 +481,15 @@ def _build_bindings():
             reasoning, image_bytes=image_bytes, content_type=content_type,
         )
 
-    return author, imagegen, upload, classify, describe
+    import lily_search
+
+    async def source_real(partition, plan):
+        # Real-image sourcing for era_or_origin: genuinely-dated archival
+        # photos via Exa (same conservative filter + safelist as the live
+        # real-entity path). Returns None -> caller falls back to generation.
+        return await lily_search.lily_source_period_entry(partition, plan)
+
+    return author, imagegen, upload, classify, describe, source_real
 
 
 _SUPABASE = None
@@ -526,7 +538,7 @@ def lily_format_preflight(checks: dict) -> str:
         f"  [{mark(checks['supabase'])}] SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY",
         f"  [{mark(checks['google'])}] GOOGLE_API_KEY   (general images + the content gate)",
         f"  [{mark(checks['xai'])}] XAI_API_KEY      (adult images + adult authoring)",
-        f"  [{mark(checks['exa'])}] EXA_API_KEY      (optional — real_or_imagined only)",
+        f"  [{mark(checks['exa'])}] EXA_API_KEY      (optional — real images: real_or_imagined + era_or_origin dating)",
         "",
         f"  general partition:  {'ready to seed' if checks['can_seed_general'] else 'CANNOT SEED'}",
         f"  adult partitions:   {'ready to seed' if checks['can_seed_adult'] else 'CANNOT SEED'}",
@@ -653,18 +665,19 @@ async def _amain(args) -> int:
         if args.partition in (None, "all")
         else [args.partition]
     )
-    author = imagegen = upload = classify = describe = None
+    author = imagegen = upload = classify = describe = source_real = None
     if not args.dry_run:
-        author, imagegen, upload, classify, describe = _build_bindings()
+        (author, imagegen, upload, classify, describe,
+         source_real) = _build_bindings()
     else:
         async def _noop(*a, **k):
             return None
-        author = imagegen = upload = classify = describe = _noop
+        author = imagegen = upload = classify = describe = source_real = _noop
 
     results = await lily_seed_all(
         _SUPABASE,
         author=author, imagegen=imagegen, upload=upload, classify=classify,
-        describe=describe,
+        describe=describe, source_real=source_real,
         partitions=partitions, target=args.depth, dry_run=args.dry_run,
         max_slots=args.max_slots,
     )

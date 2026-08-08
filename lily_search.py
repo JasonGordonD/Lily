@@ -681,3 +681,173 @@ async def lily_build_real_entity_picture_question(
             failure_reason=f"{type(e).__name__}: {e}",
         )
         return None
+
+
+# ---------------------------------------------------------------------------
+# Period ("date it") picture questions — real, genuinely-dated photographs
+# ---------------------------------------------------------------------------
+# For the arsenal seed's era_or_origin format. A GENERATED period image only
+# carries an IMPRESSION of an era and the correspondence gate refuses it; a
+# real archival photograph carries authentic period cues, so the seed sources
+# one via Exa (same conservative filter, same safelisted hosts — loc.gov and
+# si.edu especially are archives of genuinely-dated photography). The ANSWER
+# (the decade) is curated ground truth, NEVER read off the render.
+#
+# register: 'general' plays every table; 'suggestive' is period risqué (the
+# vintage pin-up / bathing-beauty / burlesque register) for adult_suggestive.
+# No 'explicit' subjects live here — explicit period sourcing is out of scope
+# for this path.
+#
+# Each subject's `query` is chosen to (a) satisfy the conservative token
+# filter (every significant name token must appear on the source page) and
+# (b) return an unambiguous, decade-locked photograph. `era` is the canonical
+# spoken answer; `acceptable` carries the decade manglings a loud-room
+# recogniser produces plus the defensible adjacent forms.
+
+PERIOD_SUBJECTS: tuple[dict, ...] = (
+    # -- general -----------------------------------------------------------
+    {"query": "penny-farthing bicycle", "era": "the 1880s",
+     "register": "general",
+     "acceptable": ["1880s", "eighteen eighties", "1870s", "victorian",
+                    "the victorian era", "19th century", "nineteenth century"],
+     "reveal": "The 1880s — the penny-farthing's whole brief decade before "
+               "the safety bicycle put both wheels the same size."},
+    {"query": "Ford Model T automobile", "era": "the 1910s",
+     "register": "general",
+     "acceptable": ["1910s", "nineteen tens", "1920s", "1900s",
+                    "early 1900s", "early twentieth century"],
+     "reveal": "The 1910s — fifteen million Model Ts, and every one of them "
+               "any colour you liked so long as it was black."},
+    {"query": "1950s American diner", "era": "the 1950s",
+     "register": "general",
+     "acceptable": ["1950s", "nineteen fifties", "fifties", "the fifties",
+                    "1960s", "mid-century"],
+     "reveal": "The 1950s — chrome, vinyl booths and a jukebox, the whole "
+               "postwar idea of a night out under one neon sign."},
+    {"query": "Victorian era formal portrait photograph", "era": "the 1800s",
+     "register": "general",
+     "acceptable": ["1800s", "1890s", "1880s", "victorian",
+                    "the victorian era", "19th century", "nineteenth century"],
+     "reveal": "The 1800s — nobody smiles because the exposure took long "
+               "enough that a smile would have blurred into a smear."},
+    {"query": "1920s flapper dress fashion", "era": "the 1920s",
+     "register": "general",
+     "acceptable": ["1920s", "nineteen twenties", "twenties", "the twenties",
+                    "roaring twenties", "jazz age", "1930s"],
+     "reveal": "The 1920s — the flapper dropped the waist, cut the hem and "
+               "scandalised everyone who'd worn a corset the decade before."},
+    {"query": "gramophone phonograph with horn", "era": "the 1900s",
+     "register": "general",
+     "acceptable": ["1900s", "1910s", "1890s", "early 1900s",
+                    "early twentieth century", "victorian", "edwardian"],
+     "reveal": "The 1900s — the horn IS the amplifier; there's no "
+               "electricity in it anywhere, just a needle and a lot of brass."},
+    # -- suggestive (period risqué register) -------------------------------
+    {"query": "1940s pin-up girl vintage photograph", "era": "the 1940s",
+     "register": "suggestive",
+     "acceptable": ["1940s", "nineteen forties", "forties", "the forties",
+                    "1950s", "wartime", "world war two era"],
+     "reveal": "The 1940s — the pin-up went to war folded in a footlocker, "
+               "which is exactly why the styling reads so specifically."},
+    {"query": "1920s bathing beauty vintage photograph", "era": "the 1920s",
+     "register": "suggestive",
+     "acceptable": ["1920s", "nineteen twenties", "twenties", "the twenties",
+                    "1930s", "roaring twenties", "jazz age"],
+     "reveal": "The 1920s — a hemline at the KNEE on a public beach was, at "
+               "the time, the sort of thing that got you a ticket."},
+    {"query": "vintage burlesque performer photograph", "era": "the 1950s",
+     "register": "suggestive",
+     "acceptable": ["1950s", "nineteen fifties", "fifties", "the fifties",
+                    "1940s", "1960s", "mid-century"],
+     "reveal": "The 1950s — burlesque's last golden decade before television "
+               "ate the whole variety circuit alive."},
+)
+
+
+def lily_period_subjects_for_register(register: str) -> tuple[dict, ...]:
+    """The curated period subjects for one register ('general' or
+    'suggestive'). Unknown registers get the general set — the safe default,
+    since a general subject never misfires the register of an adult table."""
+    reg = (register or "general").strip().lower()
+    chosen = tuple(s for s in PERIOD_SUBJECTS if s.get("register") == reg)
+    return chosen or tuple(
+        s for s in PERIOD_SUBJECTS if s.get("register") == "general"
+    )
+
+
+PERIOD_QUESTION_STEM = "This is a real photograph — what decade is it from?"
+
+
+async def lily_source_period_entry(
+    partition: str,
+    plan: dict,
+    *,
+    timeout: float = EXA_TIMEOUT_SECONDS,
+    api_key: Optional[str] = None,
+    fetch=None,
+) -> Optional[dict]:
+    """Source ONE genuinely-dated real image for an era_or_origin slot.
+
+    Picks a register-appropriate curated subject (deterministically, by the
+    slot's entry_index so a resumed run keeps walking the list), Exa-sources
+    its image through the SAME conservative filter and safelist the real-
+    entity path uses, fetches the bytes, and returns everything the seed's
+    generation pipeline needs to gate, upload and bank the entry:
+
+        {image_bytes, content_type, question_text, canonical_answer,
+         acceptable_answers, reveal_color, provenance}
+
+    Returns None on any miss (no candidate passed the filter, fetch failed,
+    Exa not configured) — the caller falls back to the generated path
+    unchanged. NEVER raises; NEVER generates. The decade answer is CURATED
+    ground truth, never read off the render.
+
+    `fetch` is injected only for tests; production uses
+    lily_fetch_image_bytes (the one shared download path)."""
+    subjects = lily_period_subjects_for_register(
+        "suggestive" if "suggestive" in (partition or "").lower()
+        else "general"
+    )
+    if not subjects:
+        return None
+    try:
+        index = int(plan.get("entry_index") or plan.get("difficulty_tier") or 0)
+    except (TypeError, ValueError):
+        index = 0
+    subject = subjects[index % len(subjects)]
+    query = subject["query"]
+
+    candidate = await lily_find_real_entity_image(
+        query, timeout=timeout, api_key=api_key
+    )
+    if candidate is None:
+        logger.info(
+            "LILY_SEARCH | PERIOD_IMAGE | query=%r no candidate -> generated "
+            "fallback", query,
+        )
+        return None
+
+    fetcher = fetch or lily_images.lily_fetch_image_bytes
+    fetched = await fetcher(candidate["image_url"])
+    if fetched is None:
+        logger.info(
+            "LILY_SEARCH | PERIOD_IMAGE | query=%r fetch failed -> generated "
+            "fallback", query,
+        )
+        return None
+    image_bytes, content_type = fetched
+
+    provenance = (
+        f"real image via Exa (curated period subject {query!r}, "
+        f"answer {subject['era']}): page={candidate['page_url']} "
+        f"image={candidate['image_url']}"
+    )
+    return {
+        "image_bytes": image_bytes,
+        "content_type": content_type,
+        "question_text": PERIOD_QUESTION_STEM,
+        "canonical_answer": subject["era"],
+        "acceptable_answers": list(subject["acceptable"]),
+        "reveal_color": subject.get("reveal") or "",
+        "provenance": provenance,
+    }

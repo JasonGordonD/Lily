@@ -644,6 +644,10 @@ def lily_plan_entries(
             "format": fmt,
             "difficulty_tier": cycle[(n + rot * passes) % n_cycle],
             "binding_direction": bindings[fmt],
+            # Absolute index — lets a real-image format walk its curated
+            # subject list deterministically and a resumed run keep walking
+            # it instead of re-clustering on the first few.
+            "entry_index": n,
         })
 
     logger.info(
