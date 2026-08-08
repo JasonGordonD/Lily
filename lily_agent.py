@@ -386,9 +386,23 @@ _DEVICE_CANDIDATE_SOURCES = (
 )
 
 # Sources that identify the live table strongly enough to skip fallback.
+# Group-id sources that OUTRANK a later re-resolution. A binding from one
+# of these is settled; the name-set hash may not move it.
+#
+# HOTFIX-006 N5: "voice_identity_match" — the source the ECAPA matcher
+# stages under — was missing from this tuple, and that omission is the whole
+# defect. On 2026-08-08 the same three humans bound to two different groups
+# three minutes apart (grp_20427c69 and grp_f76e6116) because STT heard
+# "Hi, I'm Miranda"; a changed name set changes the hash, and the hash was
+# the identity. The matcher meanwhile had found the real table with TWELVE
+# games on file. Two identity systems ran side by side — one correct, one
+# authoritative — and the correct one was not the authoritative one.
+#
+# The biometric is the signature. A mishearing may not overrule it.
 _STRONG_GROUP_SOURCES = (
     "env_override",
-    "voiceprint_match",
+    "voiceprint_match",       # Speechmatics identifier overlap (legacy path)
+    "voice_identity_match",   # ECAPA centroid match — the one that works
 )
 
 
@@ -2669,7 +2683,20 @@ class LilyGame:
         memory = dict(self._device_candidate_memory or {})
         block = self._device_candidate_memory_block
         staged_prefs = dict(self._device_candidate_prefs)
-        await self.upgrade_group_id(candidate, "voiceprint_match")
+        # Record HOW the table was recognised. This hardcoded
+        # "voiceprint_match" and discarded its own `trigger`, so an ECAPA
+        # centroid match and a Speechmatics identifier overlap were written
+        # to the ledger identically. Those are different mechanisms with
+        # very different reliability — the identifier blobs REFRESH every
+        # session and can never match across sessions (README, verified
+        # 2026-07-16), while the ECAPA centroid is the one that actually
+        # found a twelve-game table on 2026-08-08. Collapsing them cost the
+        # provenance an operator needs to debug exactly this class of
+        # problem. Both remain strong sources; only the label changes.
+        await self.upgrade_group_id(
+            candidate, trigger if trigger in _STRONG_GROUP_SOURCES
+            else "voiceprint_match"
+        )
         merged_prefs = staged_prefs
         merged_prefs.update(self.prefs or {})
         self.prefs = merged_prefs
