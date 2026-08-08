@@ -353,6 +353,7 @@ async def lily_generate_entry(
     imagegen,
     upload,
     classify=None,
+    describe=None,
     cost_per_image: Optional[float] = None,
     max_moderation_retries: Optional[int] = None,
 ) -> dict:
@@ -361,14 +362,21 @@ async def lily_generate_entry(
     Callables:
       author(partition, plan, image_description) -> dict | None
           Writes the question. `image_description` is None on the
-          question-first path (nothing has been drawn yet) and carries the
-          generated image's own prompt on the image-first path, so the stem
-          is written about what is actually in the picture.
+          question-first path (nothing has been drawn yet) and, on the
+          image-first path, carries a VISION caption of what the image model
+          ACTUALLY rendered — not the intended prompt. The image model
+          adheres to prompts loosely, so a stem authored from the prompt
+          disagrees with the picture and the gate rejects it; authoring from
+          the rendered image is what makes the stem match.
       imagegen(prompt, partition, intensity) -> (bytes, mime, model)
           RAISES on refusal or failure — the same contract
           lily_imagegen.lily_generate_image_bytes has.
       upload(bytes, mime, partition) -> storage_path | None
       classify(bytes, mime, claim, brief) -> (approved, reason)
+      describe(bytes, mime) -> str | None
+          Captions the rendered image for the image-first author. Optional:
+          if unwired or it fails, the author falls back to the generation
+          prompt (the prior behaviour), never worse.
 
     Returns {outcome, entry, attempts, cost_usd, reason}. `entry` is
     populated only on OUTCOME_CREATED; every other outcome carries a reason
@@ -468,8 +476,25 @@ async def lily_generate_entry(
     # -- image-first: now write the question about what was drawn -----------
     question = stem_question
     if question is None:
+        # Author from what the model ACTUALLY rendered, not the intended
+        # prompt: grok-imagine follows prompts loosely (codpiece -> corset,
+        # "three people" -> five), so a stem written from the prompt
+        # disagrees with the picture and the correspondence gate correctly
+        # rejects it. A vision caption of image_bytes closes that gap. Fall
+        # back to the prompt if no describer is wired or it fails.
+        rendered = prompt
+        if describe is not None:
+            try:
+                caption = await describe(image_bytes, mime or "image/jpeg")
+                if caption:
+                    rendered = caption
+            except Exception as e:
+                logger.warning(
+                    "LILY_ARSENAL_GEN | DESCRIBE_FAILED | partition=%s "
+                    "(falling back to prompt): %s", partition, e,
+                )
         try:
-            question = await author(partition, plan, prompt)
+            question = await author(partition, plan, rendered)
         except Exception as e:
             logger.warning(
                 "LILY_ARSENAL_GEN | AUTHOR_FAILED | partition=%s: %s", partition, e
@@ -729,3 +754,52 @@ async def lily_classify_image(
         return bool(verdict.get("approved")), str(verdict.get("reason", ""))[:300]
     except Exception as e:
         return False, f"gate error ({type(e).__name__}): {e}"
+
+
+async def lily_describe_image(
+    reasoning, *, image_bytes: bytes, content_type: str
+) -> Optional[str]:
+    """Caption the ACTUAL rendered image so the image-first author writes the
+    stem about what the model really drew, not the loosely-followed prompt.
+
+    Uses the SAME Gemini vision path as lily_classify_image — the gate
+    already sees adult imagery over this path, so a literal description does
+    too. Returns None on any error; lily_generate_entry then falls back to
+    the generation prompt (never worse than the prior behaviour). Partition-
+    agnostic: correspondence matters for every tier, not just adult."""
+    from google.genai import types as genai_types
+
+    try:
+        config = genai_types.GenerateContentConfig(
+            thinking_config=genai_types.ThinkingConfig(thinking_level="low"),
+            max_output_tokens=lily_config.judge_max_output_tokens(),
+        )
+        mime = (content_type or "image/jpeg").split(";", 1)[0].strip().lower()
+        prompt = (
+            "Describe exactly what is visible in this image for a trivia "
+            "question writer. Name the main subject, what it is doing, "
+            "notable objects, the setting, clothing, and the count of people. "
+            "Be concrete and literal — describe only what is actually shown, "
+            "do not infer intent or add anything that is not visible. Two to "
+            "four sentences of plain prose."
+        )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                reasoning._client.models.generate_content,
+                model=reasoning._model,
+                contents=[
+                    genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
+                    prompt,
+                ],
+                config=config,
+            ),
+            timeout=25.0,
+        )
+        text = str(getattr(response, "text", "") or "").strip()
+        return text or None
+    except Exception as e:
+        logger.warning(
+            "LILY_ARSENAL_GEN | DESCRIBE_ERROR | error_class=%s error=%s",
+            type(e).__name__, e,
+        )
+        return None

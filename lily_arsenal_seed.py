@@ -62,6 +62,7 @@ import lily_config
 # not have to import a CLI job to get them.
 lily_author_question = lily_arsenal_gen.lily_author_question
 lily_classify_image = lily_arsenal_gen.lily_classify_image
+lily_describe_image = lily_arsenal_gen.lily_describe_image
 
 logger = logging.getLogger("lily_arsenal_seed")
 
@@ -80,6 +81,7 @@ async def lily_seed_partition(
     imagegen,
     upload,
     classify=None,
+    describe=None,
     target: Optional[int] = None,
     dry_run: bool = False,
     max_slots: Optional[int] = None,
@@ -182,6 +184,7 @@ async def lily_seed_partition(
                 imagegen=imagegen,
                 upload=upload,
                 classify=classify,
+                describe=describe,
             )
             summary["attempts"] += result.get("attempts", 0)
             summary["cost_usd"] += result.get("cost_usd", 0.0)
@@ -311,6 +314,7 @@ async def lily_seed_all(
     imagegen,
     upload,
     classify=None,
+    describe=None,
     partitions=None,
     target: Optional[int] = None,
     dry_run: bool = False,
@@ -330,6 +334,7 @@ async def lily_seed_all(
                 imagegen=imagegen,
                 upload=upload,
                 classify=classify,
+                describe=describe,
                 target=target,
                 dry_run=dry_run,
                 max_slots=max_slots,
@@ -436,7 +441,12 @@ def _build_bindings():
             claim=claim, brief=brief,
         )
 
-    return author, imagegen, upload, classify
+    async def describe(image_bytes, content_type):
+        return await lily_describe_image(
+            reasoning, image_bytes=image_bytes, content_type=content_type,
+        )
+
+    return author, imagegen, upload, classify, describe
 
 
 _SUPABASE = None
@@ -587,17 +597,18 @@ async def _amain(args) -> int:
         if args.partition in (None, "all")
         else [args.partition]
     )
-    author = imagegen = upload = classify = None
+    author = imagegen = upload = classify = describe = None
     if not args.dry_run:
-        author, imagegen, upload, classify = _build_bindings()
+        author, imagegen, upload, classify, describe = _build_bindings()
     else:
         async def _noop(*a, **k):
             return None
-        author = imagegen = upload = classify = _noop
+        author = imagegen = upload = classify = describe = _noop
 
     results = await lily_seed_all(
         _SUPABASE,
         author=author, imagegen=imagegen, upload=upload, classify=classify,
+        describe=describe,
         partitions=partitions, target=args.depth, dry_run=args.dry_run,
         max_slots=args.max_slots,
     )
