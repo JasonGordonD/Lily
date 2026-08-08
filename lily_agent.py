@@ -6675,6 +6675,28 @@ class LilyGame:
     # remaining live-infra seam (a track frame sink populates
     # `_voice_identity_pcm`); everything else is wired and tested.
 
+    def _voice_capture_allowed(self) -> bool:
+        """May we CAPTURE audio for the voiceprint? Deliberately does NOT
+        require the embedding model to be loaded.
+
+        HOTFIX-006, regression introduced 2c8ecf5: lily_claim_voice_probe
+        gated the audio fork on _voice_identity_ready(), and that check
+        became "is the model loaded?" when the load moved off the event
+        loop. The claim fires on track-subscribe, at connect, before the
+        prewarm can possibly have finished — so on a cold worker the fork
+        was never claimed, no audio was ever captured, and recognition
+        could not happen at all. On a warm worker (module-level model
+        cached from an earlier session in the same process) it worked,
+        which is exactly the kind of intermittency that hides a bug.
+
+        Capture and match have different prerequisites. Capture needs a
+        session and a destination; matching needs the model. Conflating
+        them made the cheap half wait on the expensive half."""
+        return (
+            lily_config.voice_identity_enabled()
+            and getattr(self, "supabase", None) is not None
+        )
+
     def _voice_identity_ready(self) -> bool:
         """Cheap, NON-BLOCKING readiness. This used to end in
         the embedder's blocking availability check, which loads the model — and the
@@ -10229,7 +10251,10 @@ def lily_claim_voice_probe(game) -> bool:
     Independent of audEERING by design: biometric capture is a memory input,
     not an acoustic-analytics feature.
     """
-    if not game._voice_identity_ready() or getattr(
+    # Capture readiness, NOT match readiness — the model may still be
+    # warming. Requiring a loaded model here meant a cold worker never
+    # started the fork and therefore never recognised anybody.
+    if not game._voice_capture_allowed() or getattr(
         game, "_voice_probe_forked", False
     ):
         return False

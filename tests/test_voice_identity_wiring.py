@@ -234,12 +234,37 @@ def test_production_image_activates_and_prewarms_voice_identity():
 
 
 def test_voice_probe_claim_is_independent_and_single_shot():
+    # The claim now gates on CAPTURE readiness, not match readiness: the
+    # embedding model may still be warming when the track subscribes, and
+    # requiring it here meant a cold worker never started the fork at all.
     game = type("Game", (), {
-        "_voice_identity_ready": lambda self: True,
+        "_voice_capture_allowed": lambda self: True,
         "_voice_probe_forked": False,
     })()
     assert lily_claim_voice_probe(game) is True
     assert lily_claim_voice_probe(game) is False
+
+
+def test_capture_is_claimed_even_while_the_model_is_still_warming():
+    """HOTFIX-006 regression guard (introduced 2c8ecf5, live 2026-08-08).
+
+    lily_claim_voice_probe gated the audio fork on _voice_identity_ready(),
+    which became "is the model loaded?" once the load moved off the event
+    loop. The claim fires at track-subscribe, before any prewarm can have
+    finished — so a cold worker never captured audio and could never
+    recognise anyone. A warm worker (module-level model cached from an
+    earlier session in the same process) still worked, which is precisely
+    the intermittency that hides a bug.
+
+    Capture needs a session and a destination. Matching needs the model.
+    They are not the same prerequisite."""
+    game = type("Game", (), {
+        "_voice_capture_allowed": lambda self: True,
+        # Model NOT loaded — matching cannot run yet, capture still must.
+        "_voice_identity_ready": lambda self: False,
+        "_voice_probe_forked": False,
+    })()
+    assert lily_claim_voice_probe(game) is True
 
 
 # -- forget retires the voiceprint --------------------------------------------
