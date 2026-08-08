@@ -42,6 +42,8 @@ what the provider will paint shows up as a rejection-rate number the
 operator can act on instead of a mystery.
 """
 
+import asyncio
+import json
 import logging
 import re
 import time
@@ -519,6 +521,58 @@ async def lily_generate_entry(
 # ---------------------------------------------------------------------------
 
 
+def lily_extract_json_object(raw: object) -> Optional[dict]:
+    """Best-effort parse of an author reply into a dict.
+
+    Survives ```json fenced output and prose wrapped around the object by
+    pulling the first balanced {...} (string- and escape-aware) and parsing
+    that. Returns None on anything that is not valid JSON — it does not
+    coerce garbage into a dict."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if fence:
+        text = fence.group(1).strip()
+
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(text[start : i + 1])
+                    return obj if isinstance(obj, dict) else None
+                except Exception:
+                    return None
+    return None
+
+
 async def lily_author_question(
     reasoning, *, partition: str, plan: dict, image_description: Optional[str]
 ) -> Optional[dict]:
@@ -566,9 +620,9 @@ async def lily_author_question(
         "might produce), options (array of 4 or null), reveal_color (one "
         "spoken sentence revealing the answer with personality)."
     )
-    try:
+    async def _call():
         if adult:
-            raw = await reasoning._generate_grok_json(
+            return await reasoning._generate_grok_json(
                 instruction,
                 system_instruction=(
                     "You write adult-register trivia for a gated adult table. "
@@ -577,24 +631,35 @@ async def lily_author_question(
                 ),
                 max_tokens=900,
             )
-        else:
-            raw = await reasoning._generate(
-                reasoning._model,
-                instruction,
-                thinking_level="low",
-                response_mime_type="application/json",
-                max_output_tokens=900,
-            )
-        data = json.loads((raw or "{}").strip().strip("`").lstrip("json").strip())
-        if not data.get("question_text") or not data.get("canonical_answer"):
-            return None
-        return data
-    except Exception as e:
-        logger.warning(
-            "LILY_ARSENAL_SEED | AUTHOR_FAILED | partition=%s format=%s: %s",
-            partition, fmt, e,
+        return await reasoning._generate(
+            reasoning._model,
+            instruction,
+            thinking_level="low",
+            response_mime_type="application/json",
+            max_output_tokens=900,
         )
-        return None
+
+    last_err: object = "author returned nothing"
+    for attempt in (1, 2):
+        try:
+            raw = await _call()
+            data = lily_extract_json_object(raw)
+            if data and data.get("question_text") and data.get("canonical_answer"):
+                return data
+            last_err = "unparseable or incomplete author output"
+        except Exception as e:
+            last_err = e
+        if attempt == 1:
+            logger.info(
+                "LILY_ARSENAL_SEED | AUTHOR_RETRY | partition=%s format=%s: %s",
+                partition, fmt, last_err,
+            )
+
+    logger.warning(
+        "LILY_ARSENAL_SEED | AUTHOR_FAILED | partition=%s format=%s: %s",
+        partition, fmt, last_err,
+    )
+    return None
 
 
 async def lily_classify_image(
