@@ -90,6 +90,15 @@ def _enable(monkeypatch, *, available=True, embedding=None):
     monkeypatch.setattr(
         lily_voice_embedder, "lily_voice_embedder_available", lambda: available
     )
+    # The readiness check is now NON-BLOCKING (the model load moved off the
+    # event loop, where it was stalling the VAD), so it reads "already
+    # loaded?" rather than triggering a load.
+    monkeypatch.setattr(
+        lily_voice_embedder, "lily_voice_embedder_loaded", lambda: available
+    )
+    monkeypatch.setattr(
+        lily_voice_embedder, "lily_voice_embedder_load_attempted", lambda: True
+    )
     monkeypatch.setattr(
         lily_voice_embedder, "lily_extract_embedding",
         lambda samples, sample_rate=16000: embedding,
@@ -305,3 +314,28 @@ def test_a_real_group_id_may_still_found_its_first_centroid(monkeypatch):
     assert _run(g._voice_identity_enroll_at_close()) is True
     rows = sb.store[lily_persistence.VOICE_IDENTITY_TABLE]
     assert rows[0]["group_id"] == "grp_0b07f989"
+
+
+def test_no_blocking_embedder_call_survives_on_the_event_loop():
+    """Source-level guard. The ECAPA model load and forward pass must never
+    be reachable inline from an async path again.
+
+    lily_voice_embedder_available() calls _load_model(), which downloads
+    spkrec-ecapa-voxceleb and loads a torch model — multi-second work. It sat
+    behind _voice_identity_ready(), which the transcript handler calls on the
+    event loop, so the first player utterance blocked the loop for the whole
+    load. Silero VAD shares that loop and drives barge-in, turn commit and
+    TTS delivery: measured 24.9s and 33s behind realtime, with turns dying
+    mid-sentence. Off the vocal CALL GRAPH is not off the vocal EVENT LOOP.
+    """
+    src = Path(__file__).resolve().parent.parent.joinpath("lily_agent.py").read_text(
+        encoding="utf-8"
+    )
+    assert "lily_voice_embedder_available()" not in src, (
+        "blocking model load reachable from lily_agent — use "
+        "lily_voice_embedder_loaded() and warm in a thread"
+    )
+    assert "lily_voice_embedder.lily_extract_embedding(" not in src, (
+        "synchronous ECAPA forward pass on the event loop — use "
+        "lily_extract_embedding_async()"
+    )

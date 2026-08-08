@@ -153,3 +153,52 @@ def lily_extract_embedding(
     except Exception as e:
         logger.warning("LILY_VOICE_EMBEDDER | EXTRACT_FAILED | %s", e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Non-blocking availability (2026-08-08)
+#
+# lily_voice_embedder_available() CALLS _load_model(), and the first call
+# downloads spkrec-ecapa-voxceleb from HuggingFace and loads a torch model.
+# That is multi-second work. It was reachable from _voice_identity_ready(),
+# which the transcript handler calls on the event loop on every final
+# transcript — so the first player utterance blocked the loop for the whole
+# load, and the Silero VAD (which shares that loop, and which drives
+# barge-in and turn commit) fell behind by however long it took and never
+# caught up. Measured live: 24.9s and 33s behind realtime.
+#
+# The docstring said "latency-insensitive by design (off the vocal path)".
+# Off the vocal CALL GRAPH, yes. On the vocal EVENT LOOP all the same —
+# which is the only thing scheduling cares about.
+# ---------------------------------------------------------------------------
+
+
+def lily_voice_embedder_loaded() -> bool:
+    """Is the model ALREADY loaded? Pure read — never triggers a load, so it
+    is safe to call from the event loop. False means 'not yet', not
+    'unavailable': pair it with lily_warm_voice_embedder()."""
+    return _model is not None
+
+
+def lily_voice_embedder_load_attempted() -> bool:
+    """Has a load been tried? Distinguishes 'still warming' from 'tried and
+    genuinely unavailable', so a caller can stop waiting."""
+    return _load_attempted
+
+
+async def lily_warm_voice_embedder() -> bool:
+    """Load the model OFF the event loop. Idempotent — _load_model latches
+    on _load_attempted, so concurrent callers cost one load. Returns whether
+    the model is usable afterwards."""
+    import asyncio
+
+    return await asyncio.to_thread(_load_model) is not None
+
+
+async def lily_extract_embedding_async(samples, sample_rate: int = 16000):
+    """lily_extract_embedding off the event loop. The ECAPA forward pass is
+    hundreds of milliseconds to seconds of CPU on an 8-second probe; run
+    inline it is a hard stall on every other task sharing the loop."""
+    import asyncio
+
+    return await asyncio.to_thread(lily_extract_embedding, samples, sample_rate)

@@ -6615,11 +6615,44 @@ class LilyGame:
     # `_voice_identity_pcm`); everything else is wired and tested.
 
     def _voice_identity_ready(self) -> bool:
+        """Cheap, NON-BLOCKING readiness. This used to end in
+        the embedder's blocking availability check, which loads the model — and the
+        first such call downloads spkrec-ecapa-voxceleb and loads a torch
+        model, multi-second work. It is reached from the transcript handler
+        on the EVENT LOOP, so the first player utterance blocked the loop
+        for the entire load, and the Silero VAD sharing that loop fell
+        behind and never caught up (24.9s and 33s measured live). Barge-in,
+        turn commit and TTS delivery all ride on that same loop.
+
+        The load now happens in a thread (_warm_voice_embedder); this only
+        READS whether it finished."""
         return (
             lily_config.voice_identity_enabled()
             and self.supabase is not None
-            and lily_voice_embedder.lily_voice_embedder_available()
+            and lily_voice_embedder.lily_voice_embedder_loaded()
         )
+
+    def _warm_voice_embedder(self) -> None:
+        """Kick the one-time model load OFF the event loop. Fire-and-forget
+        and idempotent; failure just leaves the feature inert."""
+        if getattr(self, "_voice_embedder_warming", False):
+            return
+        if not lily_config.voice_identity_enabled() or self.supabase is None:
+            return
+        if lily_voice_embedder.lily_voice_embedder_load_attempted():
+            return
+        self._voice_embedder_warming = True
+
+        async def _warm() -> None:
+            try:
+                ok = await lily_voice_embedder.lily_warm_voice_embedder()
+                logger.info(
+                    "LILY_VOICE_ID | EMBEDDER_WARM | loaded=%s (off-loop)", ok
+                )
+            except Exception as e:
+                logger.warning("LILY_VOICE_ID | EMBEDDER_WARM_FAILED | %s", e)
+
+        asyncio.ensure_future(_warm())
 
     def _voice_identity_audio_probe(self):
         """Captured mono PCM for embedding, or None when unavailable. Reads a
@@ -6633,6 +6666,11 @@ class LilyGame:
         Returns True when scheduled. A pre-probe call remains retryable; this
         is the key distinction from the former first-final one-shot.
         """
+        # Warming is what makes _voice_identity_ready() cheap: the load runs
+        # in a thread while this call returns immediately. The trigger is
+        # retryable by design, so a not-yet-warm model simply means "next
+        # transcript".
+        self._warm_voice_embedder()
         if (
             getattr(self, "_voice_identity_attempted", False)
             or not self._voice_identity_ready()
@@ -6656,7 +6694,7 @@ class LilyGame:
         if probe is None:
             return False
         try:
-            emb = lily_voice_embedder.lily_extract_embedding(probe)
+            emb = await lily_voice_embedder.lily_extract_embedding_async(probe)
             if emb is None:
                 return False
             tag = lily_config.voice_identity_model_tag()
@@ -6714,7 +6752,7 @@ class LilyGame:
         if probe is None:
             return False
         try:
-            emb = lily_voice_embedder.lily_extract_embedding(probe)
+            emb = await lily_voice_embedder.lily_extract_embedding_async(probe)
             if emb is None:
                 return False
             tag = lily_config.voice_identity_model_tag()
