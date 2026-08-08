@@ -809,6 +809,81 @@ def lily_narrated_score_divergence(
     return {"spoken": spoken, "ledger_values": sorted(values)}
 
 
+# How Lily narrates a VERDICT about a named player's answer (distinct from
+# the score-value regexes above). WO-LILY-HOTFIX-006 N9 part 3: at 21:10 she
+# said "Jupiter was spot on, Rami, but just a split second late!" while the
+# committed q_1052 ledger row for Rami read incorrect, transcript "Go.".
+# The conversational lane KNEW the answer was right and who gave it; the
+# ledger recorded a different utterance as wrong. Narration may not
+# contradict the ledger — on disagreement the ledger wins.
+_VERDICT_CORRECT_CUES = (
+    "spot on", "you got it", "you nailed", "nailed it", "that s correct",
+    "is correct", "was correct", "correct", "exactly right", "dead right",
+    "you re right", "that s right", "was right", "got there", "well done",
+    "bang on", "on the money",
+)
+# Miss-side cues. A verdict that NEGATES correctness is not a claim of
+# correctness, however many "right"s it contains ("not quite right").
+_VERDICT_MISS_RE = _re.compile(
+    r"\b(?:not\s+quite|nobody\s+(?:got|landed)|no\s+one\s+(?:got|landed)"
+    r"|wasn\s?t\s+(?:it|right|correct)|isn\s?t\s+(?:it|right|correct)"
+    r"|not\s+(?:it|right|correct)|missed\s+it|off\s+by|afraid\s+not"
+    r"|sorry\b)"
+)
+
+
+def lily_narrated_verdict_divergence(
+    text: str, score_ledger: Optional[list]
+) -> Optional[dict]:
+    """HOTFIX-006 N9 part 3: SCORE_DIVERGENCE for VERDICTS. If Lily's own
+    outbound line tells a NAMED player their answer was correct while that
+    player's committed ledger row for the question says otherwise, the
+    narration is off-ledger — return {player, spoken, ledger, entry} for an
+    ERROR log. None when no verdict is narrated about a named player, when
+    the line rules a miss, or when narration and ledger agree.
+
+    A verdict spoken about a player's answer must GENERATE from that
+    player's ledger row. This is the safety net for when it doesn't: the
+    ledger wins and the divergence is made loud, exactly as the X1 score
+    detector does for narrated totals."""
+    if not score_ledger:
+        return None
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return None
+    if _VERDICT_MISS_RE.search(normalized):
+        # She is narrating a MISS. A ledger row marked incorrect agrees
+        # with that, and a correct row would be a different (opposite)
+        # defect than the one this detector exists for.
+        return None
+    if not any(cue in normalized for cue in _VERDICT_CORRECT_CUES):
+        return None
+    # The most recent adjudicated row per player is the one a verdict beat
+    # can be about; a name in the line binds the claim to that player.
+    latest: dict[str, dict] = {}
+    for entry in score_ledger:
+        if entry.get("cause") != "answer":
+            continue
+        name = entry.get("player")
+        if name:
+            latest[name] = entry
+    for name, entry in latest.items():
+        needle = _normalize_command_text(str(name))
+        if not needle or not _re.search(rf"\b{_re.escape(needle)}\b", normalized):
+            continue
+        if entry.get("correct") is True:
+            continue
+        return {
+            "player": name,
+            "spoken": "correct",
+            "ledger": "incorrect",
+            "question_id": entry.get("question_id"),
+            "ledger_transcript": entry.get("transcript"),
+            "utterance_id": entry.get("utterance_id"),
+        }
+    return None
+
+
 def lily_detect_state_contradiction(
     text: str,
     player_name: Optional[str],
@@ -943,6 +1018,24 @@ class LilyScorekeeper:
         self.answer_window_deadline: Optional[float] = None
         # player_name (or "unrostered:<label>") -> candidate dict
         self.answer_candidates: dict[str, dict] = {}
+        # WO-LILY-HOTFIX-006 N3 — the question this window belongs to,
+        # captured AT OPEN and deliberately NOT cleared at close: the
+        # adjudication commit and the late-answer path both read it after
+        # the window is gone. `registered` is false for a window that was
+        # never opened over a question the scorekeeper holds; nothing
+        # recorded in an unregistered window is adjudicable.
+        self.answer_window_question_id: Optional[str] = None
+        self.answer_window_question_index: Optional[int] = None
+        self.answer_window_registered: bool = False
+        self._last_window_deadline: Optional[float] = None
+        # Monotonic per-session counter behind the minted utterance ids
+        # (N9): capture binds an UTTERANCE, never a slot, so every final
+        # carries an id even when the STT event supplies none.
+        self._utterance_seq: int = 0
+        # Late-but-correct answers past the grace margin (N9 part 2) —
+        # a DEFINED outcome, recorded here so it can be announced and
+        # audited instead of silently lost.
+        self.late_answers: list[dict] = []
 
         # Prior-state inputs (WO-ADDRESSEE-H1 Task 2). host_speaking is SET
         # by the agent layer on the framework's agent-state transitions
@@ -1163,16 +1256,55 @@ class LilyScorekeeper:
         duration: Optional[float] = None,
         now: Optional[float] = None,
         reset_candidates: bool = True,
+        question_id: Optional[str] = None,
+        question_index: Optional[int] = None,
+        registered: Optional[bool] = None,
     ) -> None:
         """Open the answer window (called on TTS playback-completion).
         reset_candidates=False reopens for a steal window: prior candidates
         are kept so one-candidate-per-player still holds and only new
-        players can commit."""
+        players can commit.
+
+        WINDOW BINDING (WO-LILY-HOTFIX-006 N3, invariant 2): the question
+        this window belongs to is captured HERE, at open, and carried on
+        every candidate recorded inside it through to the ledger write —
+        never inferred at adjudication time from whatever happens to be
+        armed. In lily-4FB3B2 two questions were asked and BOTH answer rows
+        were filed against q_4821; Rhonda's "We don't know." was spoken to
+        the Frankenstein question and adjudicated against question one.
+        Explicit ids override the live state only for the reconnect/replay
+        callers that already know which question they are reopening."""
         t = now if now is not None else time.time()
         self.answer_window_open = True
         self.answer_window_opened_at = t
         self.answer_window_deadline = t + (
             duration if duration is not None else self.answer_window_seconds
+        )
+        # Captured identity. The id is the question's own id when it has
+        # one; the index alone still separates two consecutive questions in
+        # an id-less deck, so binding holds either way. Both persist past
+        # close_answer_window — adjudication reads them AFTER the window is
+        # gone, and the late-answer path reads them later still.
+        self.answer_window_question_id = (
+            question_id
+            if question_id is not None
+            else (self.current_question or {}).get("id")
+        )
+        self.answer_window_question_index = (
+            question_index if question_index is not None else self.question_number
+        )
+        # A window is REGISTERED when it was opened over a question the
+        # scorekeeper actually holds (N3 invariant 1). Speech arriving with
+        # no open REGISTERED window is logged, never scored — in
+        # lily-16A9AE, Chris's answer to an improvised, unregistered
+        # question was adjudicated against kb_180 and marked incorrect
+        # while Lily told him he had got it. The agent layer passes this
+        # explicitly (it holds the armed question and checks it before
+        # calling); the default reads the scorekeeper's own state.
+        self.answer_window_registered = (
+            bool(registered)
+            if registered is not None
+            else self.current_question is not None
         )
         if reset_candidates:
             self.answer_candidates = {}
@@ -1194,6 +1326,12 @@ class LilyScorekeeper:
                 "LILY_STATE | ANSWER_WINDOW_CLOSED | session=%s q=%d candidates=%d",
                 self.session_id, self.question_number, len(self.answer_candidates),
             )
+        # N9: the deadline is REMEMBERED across the close. The late-answer
+        # path has to be able to say HOW late an answer was — "just past
+        # the buzzer" is a reason it must be able to state, and a cleared
+        # deadline made lateness unmeasurable the moment it mattered.
+        if self.answer_window_deadline is not None:
+            self._last_window_deadline = self.answer_window_deadline
         self.answer_window_open = False
         self.answer_window_opened_at = None
         self.answer_window_deadline = None
@@ -1213,7 +1351,14 @@ class LilyScorekeeper:
         the window its speech occurred in, never the window it FINALIZED
         in — the stale-utterance bug scored speech into a window opened
         minutes after it was spoken. Falls back to arrival-time membership
-        when no spoken timestamp exists (arrival_time-source finals)."""
+        when no spoken timestamp exists (arrival_time-source finals).
+
+        N9 grace margin: speech spoken up to
+        lily_config.late_answer_grace_seconds() past the deadline — while
+        the window is still open, i.e. before the expiry task has run —
+        still belongs to it. "Just a split second late" is a STATED,
+        configurable outcome, not a coin flip against the expiry task's
+        scheduling (Rami's "Okay. It's Jupiter." at 21:10:13)."""
         if spoken_ts is None:
             return self.is_window_open(now=now)
         if not self.answer_window_open:
@@ -1225,9 +1370,71 @@ class LilyScorekeeper:
             return False
         if (
             self.answer_window_deadline is not None
-            and spoken_ts > self.answer_window_deadline
+            and spoken_ts > (
+                self.answer_window_deadline
+                + max(0.0, lily_config.late_answer_grace_seconds())
+            )
         ):
             return False
+        return True
+
+    def seconds_past_deadline(self, spoken_ts: Optional[float]) -> Optional[float]:
+        """How far past the CAPTURED window deadline this speech was
+        spoken, or None when there is no deadline to measure against.
+        Negative inside the window. Reads the last captured deadline so it
+        still answers after close_answer_window (N9 late-answer path)."""
+        deadline = self.answer_window_deadline
+        if deadline is None:
+            deadline = self._last_window_deadline
+        if deadline is None or spoken_ts is None:
+            return None
+        return round(spoken_ts - deadline, 3)
+
+    def _mint_utterance_id(
+        self, speaker_label: Optional[str], seg_start: float
+    ) -> str:
+        """A stable identity for a final the STT event gave no id for
+        (N9). Monotonic per session and carries the speaker + spoken time,
+        so two finals can never collide into one slot and a log line names
+        the exact utterance a ledger row bound to."""
+        self._utterance_seq += 1
+        return (
+            f"u{self._utterance_seq}:{speaker_label or 'UU'}"
+            f"@{seg_start:.3f}"
+        )
+
+    def window_binding(self) -> dict:
+        """The identity captured at the last window-open (N3 invariant 2).
+        Valid after the window closes — adjudication and the late-answer
+        path both run there."""
+        return {
+            "question_id": self.answer_window_question_id,
+            "question_index": self.answer_window_question_index,
+            "registered": self.answer_window_registered,
+            "deadline": (
+                self.answer_window_deadline
+                if self.answer_window_deadline is not None
+                else self._last_window_deadline
+            ),
+        }
+
+    def candidate_bound_to(
+        self, candidate: dict, question_id: Optional[str],
+        question_index: Optional[int],
+    ) -> bool:
+        """Whether this candidate arrived in THAT question's window (N3
+        invariant 2). Candidates recorded before window binding existed
+        (a checkpoint rehydrate, a hand-built harness) carry no stamp and
+        are treated as bound — the invariant tightens what it can prove,
+        it never invents a mismatch out of missing data."""
+        stamped_id = candidate.get("window_question_id")
+        stamped_index = candidate.get("window_question_index")
+        if stamped_id is None and stamped_index is None:
+            return True
+        if question_id is not None and stamped_id is not None:
+            return stamped_id == question_id
+        if question_index is not None and stamped_index is not None:
+            return stamped_index == question_index
         return True
 
     def ordered_candidates(self) -> list[dict]:
@@ -1522,6 +1729,7 @@ class LilyScorekeeper:
         addressee_confidence: Optional[float] = None,
         echo_copy_signal: Optional[bool] = None,
         assume_in_window: bool = False,
+        utterance_id: Optional[str] = None,
     ) -> dict:
         """
         Process one transcript segment. Called on every STT event.
@@ -1563,6 +1771,10 @@ class LilyScorekeeper:
             "ghost_folded": False,
             "quarantined": False,
             "quarantine_reason": None,
+            # N9: this final's own transcript id (see below — minted when
+            # the STT event supplies none). Every consumer that records an
+            # utterance reads it from here.
+            "utterance_id": utterance_id,
         }
 
         if not text or not text.strip():
@@ -1813,12 +2025,39 @@ class LilyScorekeeper:
             seg_end = (
                 segment_end_time if segment_end_time is not None else seg_start
             )
+            # N9: capture binds an UTTERANCE, identified by its own
+            # transcript id — never "most recent", never "first-seen
+            # fragment for that speaker". The live q_1052 row recorded
+            # Rami's earlier "Go." while his actual "Okay. It's Jupiter."
+            # never entered the ledger at all: a DIFFERENT utterance sat in
+            # his slot. When the STT event carries no id we mint a stable
+            # one so the binding can never silently degrade to a slot.
+            uid = utterance_id or self._mint_utterance_id(
+                speaker_label, seg_start
+            )
+            result["utterance_id"] = uid
+            # N9 grace margin telemetry: how far past the deadline this
+            # answer was spoken. Non-positive = inside the window; positive
+            # = admitted on the STATED grace margin.
+            past_deadline = self.seconds_past_deadline(seg_start)
+            if past_deadline is not None and past_deadline > 0:
+                result["late_within_grace"] = True
+                result["seconds_late"] = past_deadline
+                logger.info(
+                    "LILY_ANSWER | LATE_WITHIN_GRACE | session=%s q=%d "
+                    "label=%s late=%.3fs grace=%.3fs text=%r",
+                    self.session_id, self.question_number, speaker_label,
+                    past_deadline, lily_config.late_answer_grace_seconds(),
+                    clean[:60],
+                )
             # PATCH-001 T5(c) evaluator hygiene: a backchannel ("Yeah") or
             # a bare roster-name fragment ("Chris.") in an open window is
             # LOGGED, never adjudicated as an attempt — the live fixtures
             # scored "Yeah" incorrect and wrote a null-player "Chris." row,
             # consuming those players' judgments. Answer-surface matches
             # always pass (a yes/no question keeps "yeah" scoreable).
+            # HOTFIX-006 N4 extends the same hook to meta-speech: questions
+            # to the host, corrections, complaints, procedural remarks.
             non_answer = lily_evaluation.lily_non_answer_utterance(
                 clean, self.current_question, list(self.players)
             )
@@ -1850,6 +2089,31 @@ class LilyScorekeeper:
                 # in character ("great answer — and you are?").
                 key = f"unrostered:{speaker_label or 'UU'}"
             existing = self.answer_candidates.get(key)
+            # N3 invariant 2: a candidate left over from an EARLIER
+            # question's window is not a slot this window's speech may
+            # revise into. In lily-4FB3B2 both answer rows were filed
+            # against q_4821 — close_answer_window never cleared candidates,
+            # so Rhonda's answer to the Frankenstein question was absorbed
+            # as a "revision" of her q_4821 candidate and inherited its
+            # question id. A final arriving in a DIFFERENT window starts a
+            # fresh candidate bound to the window it actually arrived in.
+            if existing is not None and not self.candidate_bound_to(
+                existing,
+                self.answer_window_question_id,
+                self.answer_window_question_index,
+            ):
+                logger.info(
+                    "LILY_ANSWER | STALE_CANDIDATE_REPLACED | session=%s "
+                    "q=%d key=%s was=%s/%s now=%s/%s — a new window's "
+                    "answer never revises the previous window's candidate",
+                    self.session_id, self.question_number, key,
+                    existing.get("window_question_id"),
+                    existing.get("window_question_index"),
+                    self.answer_window_question_id,
+                    self.answer_window_question_index,
+                )
+                del self.answer_candidates[key]
+                existing = None
             if existing is None:
                 # First final claims the player's slot — its timestamp is
                 # their position in the answer order.
@@ -1860,6 +2124,8 @@ class LilyScorekeeper:
                     "timestamp": ts,
                     "timestamp_source": timestamp_source,
                     "timing_drift_seconds": timing_drift_seconds,
+                    # N9: the utterance's own identity travels with it.
+                    "utterance_id": uid,
                 }
                 if segment_conf is not None:
                     attempt_entry["addressee_confidence"] = segment_conf
@@ -1867,10 +2133,19 @@ class LilyScorekeeper:
                     "player": player,
                     "speaker_label": speaker_label,
                     "text": clean,
+                    "utterance_id": uid,
                     "segment_start_time": seg_start,
                     "segment_end_time": seg_end,
                     "timestamp": ts,
                     "unrostered": player is None,
+                    # N3 invariant 2: the question whose window this
+                    # candidate arrived in, stamped at RECORD time from the
+                    # identity captured at window-open. Adjudication filters
+                    # on it and the ledger write carries it — nothing is
+                    # inferred from whatever happens to be armed later.
+                    "window_question_id": self.answer_window_question_id,
+                    "window_question_index": self.answer_window_question_index,
+                    "window_registered": self.answer_window_registered,
                     "addressee_fused_confidence": result.get(
                         "addressee_fused_confidence"
                     ),
@@ -1905,6 +2180,7 @@ class LilyScorekeeper:
                 # attempt across the table, so a revision can win only from
                 # its own (later) timestamp.
                 existing["text"] = clean
+                existing["utterance_id"] = uid
                 existing["timestamp"] = ts
                 existing["segment_end_time"] = seg_end
                 existing["addressee_fused_confidence"] = result.get(
@@ -1928,6 +2204,7 @@ class LilyScorekeeper:
                         "timestamp": ts,
                         "timestamp_source": timestamp_source,
                         "timing_drift_seconds": timing_drift_seconds,
+                        "utterance_id": uid,
                         **(
                             {"addressee_confidence": segment_conf}
                             if segment_conf is not None
@@ -1971,6 +2248,7 @@ class LilyScorekeeper:
         question_index: Optional[int] = None,
         transcript: Optional[str] = None,
         eval_tier: Optional[int] = None,
+        utterance_id: Optional[str] = None,
     ) -> Optional[dict]:
         """The SOLE score writer (WS-7). Every scoring mutation — an
         adjudicated result, a bonus, a make-good, an operator-directed
@@ -2035,6 +2313,10 @@ class LilyScorekeeper:
                 else self.question_number
             ),
             "transcript": transcript,
+            # N9: which UTTERANCE this row is about. The live q_1052 row
+            # carried Rami's "Go." with nothing to say which spoken thing
+            # it was; the id makes the binding auditable.
+            "utterance_id": utterance_id,
             "eval_tier": eval_tier,
             "score_after": state["score"],
             "ts": _now_iso(),
@@ -2073,10 +2355,16 @@ class LilyScorekeeper:
         question_id: Optional[str] = None,
         transcript: Optional[str] = None,
         eval_tier: Optional[int] = None,
+        question_index: Optional[int] = None,
+        utterance_id: Optional[str] = None,
     ) -> Optional[dict]:
         """Commit an adjudicated result. Event-bound truth: Lily never
         announces a score change that hasn't landed here first. Delegates
-        to apply_score_event (cause="answer") — the single write path."""
+        to apply_score_event (cause="answer") — the single write path.
+
+        question_index/utterance_id are the HOTFIX-006 bindings: the
+        question captured at WINDOW-OPEN (N3) and the utterance actually
+        adjudicated (N9). Both default to today's behaviour when omitted."""
         entry = self.apply_score_event(
             player_name,
             cause="answer",
@@ -2084,8 +2372,10 @@ class LilyScorekeeper:
             points=points,
             category=category,
             question_id=question_id,
+            question_index=question_index,
             transcript=transcript,
             eval_tier=eval_tier,
+            utterance_id=utterance_id,
         )
         if entry is None:
             return None
@@ -2101,6 +2391,31 @@ class LilyScorekeeper:
             points=points,
             transcript=transcript,
         )
+
+    def ledger_row_for(
+        self, player_name: Optional[str], question_id: Optional[str] = None
+    ) -> Optional[dict]:
+        """The committed adjudication row for this player (optionally for a
+        specific question) — the LAST one, since a make-good supersedes.
+
+        WO-LILY-HOTFIX-006 N9 part 3: a verdict spoken about a player's
+        answer generates from THIS. At 21:10 the conversational lane said
+        "Jupiter was spot on, Rami" while Rami's committed q_1052 row read
+        incorrect with transcript "Go." — narration and ledger describing
+        two different utterances. Whatever is spoken about a player's
+        answer must be readable off the row that was actually written."""
+        if not player_name:
+            return None
+        found = None
+        for entry in self.score_ledger:
+            if entry.get("cause") != "answer":
+                continue
+            if entry.get("player") != player_name:
+                continue
+            if question_id is not None and entry.get("question_id") != question_id:
+                continue
+            found = entry
+        return found
 
     def ledger_scores(self) -> dict[str, int]:
         """Per-player score totals derived from the ledger — the standings

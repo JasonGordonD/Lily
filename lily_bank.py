@@ -277,29 +277,59 @@ async def lily_record_asked(
     session_id: str,
 ) -> None:
     """One lily_asked_history row per question SERVED (armed into the
-    state block for delivery). Fire-and-forget."""
+    state block for delivery). Fire-and-forget.
+
+    The row carries the question's CATEGORY (migration 023,
+    WO-LILY-HOTFIX-006 N2). Session lily-16A9AE was narrated as a custom
+    Cape Cod round and its six ledger rows were generic curated questions;
+    the category on the row is what makes "the round she promised was
+    actually built" a fact the ledger can answer, per group and per
+    session, instead of something reconstructed from question text."""
     if supabase is None or not group_id or not isinstance(question, dict):
         return
+    payload = {
+        "group_id": group_id,
+        "question_id": question.get("id"),
+        "question_text_hash": lily_question_text_hash(
+            question.get("prompt")
+        ),
+        # Answer-level no-repeat (migration 017): reworded
+        # regenerations of the same fact share this key.
+        "canonical_answer": str(
+            question.get("canonical_answer") or ""
+        )[:200] or None,
+        "category": str(question.get("category") or "")[:120] or None,
+        "session_id": session_id,
+        "asked_at": datetime.now(timezone.utc).isoformat(),
+    }
     try:
-        await asyncio.to_thread(
-            lambda: supabase.table("lily_asked_history").insert({
-                "group_id": group_id,
-                "question_id": question.get("id"),
-                "question_text_hash": lily_question_text_hash(
-                    question.get("prompt")
-                ),
-                # Answer-level no-repeat (migration 017): reworded
-                # regenerations of the same fact share this key.
-                "canonical_answer": str(
-                    question.get("canonical_answer") or ""
-                )[:200] or None,
-                "session_id": session_id,
-                "asked_at": datetime.now(timezone.utc).isoformat(),
-            }).execute()
-        )
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("lily_asked_history")
+                .insert(payload).execute()
+            )
+        except Exception as e:
+            # Migration-lag tolerance (the lily_register_operator_category
+            # pattern): a database still on the pre-023 schema must keep
+            # REGISTERING served questions — losing the whole no-repeat
+            # ledger to gain one audit column would be a bad trade.
+            if "category" not in str(e):
+                raise
+            trimmed = {k: v for k, v in payload.items() if k != "category"}
+            await asyncio.to_thread(
+                lambda: supabase.table("lily_asked_history")
+                .insert(trimmed).execute()
+            )
+            logger.info(
+                "LILY_BANK | ASKED_RECORDED | group=%s session=%s "
+                "question_id=%s (pre-023 schema — category skipped)",
+                group_id, session_id, question.get("id"),
+            )
+            return
         logger.info(
-            "LILY_BANK | ASKED_RECORDED | group=%s session=%s question_id=%s",
-            group_id, session_id, question.get("id"),
+            "LILY_BANK | ASKED_RECORDED | group=%s session=%s question_id=%s "
+            "category=%s",
+            group_id, session_id, question.get("id"), payload["category"],
         )
     except Exception as e:
         logger.error("LILY_BANK | ASKED_RECORD_FAILED | group=%s error=%s",

@@ -118,6 +118,82 @@ CATEGORY_FAMILIES = ["academic", "pop culture", "wordplay", "lifestyle-potpourri
 # them (live defect: adult questions introduced as "academic category").
 ADULT_CATEGORY_FAMILIES = ["adult_couples", "adult_kink"]
 
+
+def lily_custom_round_line(result) -> str:
+    """The ONE producer of anything Lily says about a requested custom round
+    (WO-LILY-HOTFIX-006 N2).
+
+    It takes a REGISTRATION RESULT — the dict LilyGame.build_custom_round
+    returns after running the real supply path — and there is exactly one
+    branch that produces a confirmation: the one where questions actually
+    registered under the topic. Every other input, including a malformed or
+    missing result, produces the refusal. That is what makes narrating a
+    round that does not exist unproducible rather than merely discouraged.
+
+    Live evidence this replaces (session lily-16A9AE): "I'm putting together
+    a custom round all about Cape Cod for you right now", spoken while the
+    engine had drawn Psycho, and again "I'm putting your round together right
+    now" with still nothing built. Both sentences were generated from the
+    operator's request and no other input, which is exactly the thing a
+    result-derived line cannot do."""
+    subject = str((result or {}).get("category") or "").strip()
+    registered = list((result or {}).get("registered") or [])
+    if not registered:
+        topic = f"{subject} " if subject else ""
+        # The refusal names what she CAN do. A bare "no" is honest but
+        # useless, and a useless refusal is what tempts the next fiction.
+        return (
+            f"NOTHING WAS BUILT — say this plainly, in your own voice: "
+            f"\"I can't build a custom {topic}round right now — want me to "
+            "pull a lane from the deck instead?\" Zero questions are "
+            f"registered for {subject!r}. Do NOT say you are building it, "
+            "putting it together, or working on it; do not ask a question "
+            "you made up about it; do not run the round under that name."
+            if subject else
+            "NOTHING WAS BUILT — say this plainly: \"I can't build a custom "
+            "round right now — want me to pull a lane from the deck "
+            "instead?\" Do NOT claim you are building one."
+        )
+    return (
+        f"BUILT AND REGISTERED: {len(registered)} question(s) are in the "
+        f"ledger under {subject!r} and the first one is in the state block. "
+        f"Tell the table their {subject} round is ready and ask that "
+        "question as written — nothing else about this round is true yet."
+    )
+
+
+# A round/questions claim. The topic alone is never the offence — she is free
+# to chat about Cape Cod — so the detector needs the CLAIM in the same
+# sentence as the topic before it calls anything a divergence.
+_CUSTOM_ROUND_CLAIM_RE = re.compile(r"\b(rounds?|questions?)\b", re.I)
+
+
+def lily_narrated_custom_round_divergence(text, unbuilt) -> str | None:
+    """The X1 safety net for custom rounds (WO-LILY-HOTFIX-006 N2).
+
+    HOTFIX-005 X1 puts the committed score in the state block AND logs
+    SCORE_DIVERGENCE when a spoken turn narrates a number that is on no
+    ledger — the field prevents, the log makes a prevention failure loud.
+    Same construction here: the tool result and the state block feed her the
+    registration truth; this catches a turn that claimed a round for a topic
+    with nothing registered under it, which is verbatim what lily-16A9AE
+    aired twice ("I'm putting together a custom round all about Cape Cod for
+    you right now").
+
+    Returns the offending topic, or None. Pure — no state, no raising."""
+    if not text or not unbuilt:
+        return None
+    lowered = str(text).lower()
+    for topic in unbuilt:
+        needle = str(topic or "").strip().lower()
+        if not needle or needle not in lowered:
+            continue
+        for sentence in re.split(r"[.!?]+", lowered):
+            if needle in sentence and _CUSTOM_ROUND_CLAIM_RE.search(sentence):
+                return topic
+    return None
+
+
 # Adaptive thinking (operator rule 2026-08-06): the vocal model runs LOW by
 # default for fast hosting patter, and ESCALATES to HIGH on turns that need
 # real reasoning — rules disputes, adjudication challenges, ambiguity,
@@ -485,6 +561,23 @@ class LilyGame:
         # so lily_set_category steers the generator without touching the
         # rotation. Non-adult only — the adult deck keeps its own families.
         self._category_override: dict[int, str] = {}
+        # HOTFIX-006 N2 — the custom-round REGISTRATION ledger for this
+        # session: normalized topic -> ids of the questions actually built
+        # and committed to the supply line under it. Written at exactly one
+        # place (_register_custom_question, at the prefetch commit) and read
+        # by the only two things allowed to speak about a custom round:
+        # lily_custom_round_line (the tool result) and
+        # custom_round_state_line (the state block). An empty entry means
+        # the round does not exist, and there is no code path that can say
+        # otherwise — the lily-16A9AE failure was a confirmation produced
+        # from the operator's own words with nothing behind it.
+        self._custom_round_registered: dict[str, list[str]] = {}
+        # Topics she has already refused this session. A refusal rolls the
+        # override back, so without this the refused topic would vanish from
+        # every honesty read the moment it was declined — and the second live
+        # fabrication ("I'm putting your round together right now") came
+        # AFTER the round had already failed to appear.
+        self._custom_round_refused: list[str] = []
         # 50/50 lifeline (multiple-choice WO): eliminated choice indices for
         # the CURRENT question — reset at arm, rides publish_metadata.
         self.eliminated: list[int] = []
@@ -654,6 +747,9 @@ class LilyGame:
         # filtered, consumed at the turn's playout).
         self._explain_request_note: str | None = None
         self._contest_note: str | None = None
+        # HOTFIX-006 N9: a correct answer that landed past the closed
+        # window — announced once, with its reason, then consumed.
+        self._late_answer_note: str | None = None
         # HOTFIX-004 Defect 1: deterministic 18+ consent floor. Set only by
         # the age-consent detector on a real user final; the adult-mode gate
         # requires it IN ADDITION to the model's confirmed_all_18_plus flag,
@@ -2825,6 +2921,203 @@ class LilyGame:
             return False
         return category in set(getattr(self, "_category_override", {}).values())
 
+    # -- custom rounds: registration is the only proof (HOTFIX-006 N2) --------
+    #
+    # The lily-16A9AE failure was not a bad question, a bad category or a bad
+    # generator. It was a SEQUENCE: the confirmation went out first and the
+    # round was expected to catch up, and when it didn't, nothing downstream
+    # could tell. Same shape as X1 (a score narrated ahead of the ledger) and
+    # X3 (a reveal aired ahead of its delivery), and the same cure: the claim
+    # is derived from the record, so it cannot run ahead of it.
+
+    def _register_custom_question(self, category: str, question: dict) -> None:
+        """Record one built question against the topic it was built for.
+
+        The ONLY writer of _custom_round_registered. Called at the prefetch
+        commit — after verification, after the deck/category switch guards,
+        with the question in hand and its category stamped — so an entry here
+        means "a real question for this topic is committed to the supply
+        line and will be written to lily_asked_history under it at arm"."""
+        if not self._is_operator_category(category) or not isinstance(
+            question, dict
+        ):
+            return
+        if str(question.get("category") or "") != category:
+            # A question that does not carry the topic is not evidence FOR
+            # the topic, whatever it was drawn under.
+            return
+        key = lily_bank.lily_normalize_category_name(category)
+        if not key:
+            return
+        registry = getattr(self, "_custom_round_registered", None)
+        if registry is None:
+            self._custom_round_registered = registry = {}
+        ids = registry.setdefault(key, [])
+        qid = str(question.get("id") or "")
+        if qid and qid not in ids:
+            ids.append(qid)
+        logger.info(
+            "LILY_CUSTOM_ROUND | REGISTERED | session=%s topic=%r id=%s "
+            "total=%d",
+            self.sk.session_id, category, qid, len(ids),
+        )
+
+    def custom_round_registrations(self, category: str) -> list:
+        """Question ids registered for `category` this session (read-only)."""
+        key = lily_bank.lily_normalize_category_name(category)
+        return list(
+            getattr(self, "_custom_round_registered", {}).get(key, [])
+        )
+
+    def custom_round_unbuilt_topics(self) -> list:
+        """Every topic this session has been asked for that has NO registered
+        question behind it: the ones still building, and the ones already
+        refused. Saying "your Cape Cod round" about anything on this list is
+        a fabrication — it is the read the state block and the divergence
+        detector share.
+
+        Refused topics stay on the list for the whole session on purpose.
+        The second live line ("I'm putting your round together right now")
+        landed AFTER the round had already failed to materialise, so a check
+        that only watched the build window would have missed half the
+        defect."""
+        override = getattr(self, "_category_override", {})
+        unbuilt = [
+            topic for topic in override.values()
+            if not self.custom_round_registrations(topic)
+        ]
+        for topic in getattr(self, "_custom_round_refused", []):
+            if topic not in unbuilt and not self.custom_round_registrations(
+                topic
+            ):
+                unbuilt.append(topic)
+        return unbuilt
+
+    async def build_custom_round(self, subject: str, rnd: int) -> dict:
+        """Actually BUILD the round the table just asked for, and return the
+        registration result the confirmation is allowed to read.
+
+        This is the awaited part of lily_set_category. It runs the real
+        supply path for the topic — strict bank draw first (a topic with
+        banked questions serves them; the arsenal compounds), then the
+        reasoning lane's generate+verify — and reports what registered.
+
+        The wait is deliberate and it is the whole fix. The old tool returned
+        "I'm generating those questions now" synchronously, which made the
+        confirmation a statement about intent while the table heard it as a
+        statement about the round. Nothing downstream ever checked, so when
+        the supply path quietly served the generic deck instead, six generic
+        questions went out under a Cape Cod banner.
+
+        Bounded by lily_config.custom_round_build_seconds(). On timeout or
+        failure the topic override is ROLLED BACK — a round she could not
+        build must not keep running under its name — and the caller gets an
+        empty registration, which can only produce a refusal."""
+        subject = str(subject or "").strip()
+        result = {"category": subject, "round": rnd, "registered": []}
+        if not subject:
+            return result
+        budget = lily_config.custom_round_build_seconds()
+        task = None
+        try:
+            self.start_prefetch()
+            task = self._prefetch_task
+            if task is not None and not task.done():
+                # shield: wait_for cancels what it waits on, and a draw
+                # killed mid-commit is worse than one left to finish (the
+                # rollback below re-points the round, and the existing
+                # CATEGORY_SWITCH_DISCARD guard drops the late arrival).
+                await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+        except asyncio.TimeoutError:
+            logger.error(
+                "LILY_CUSTOM_ROUND | BUILD_TIMEOUT | session=%s topic=%r "
+                "budget=%.1fs — refusing rather than narrating",
+                self.sk.session_id, subject, budget,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "LILY_CUSTOM_ROUND | BUILD_FAILED | session=%s topic=%r",
+                self.sk.session_id, subject,
+            )
+        result["registered"] = self.custom_round_registrations(subject)
+        if result["registered"]:
+            self.sk.clear_status_notes()
+            return result
+        # Nothing was built. Roll the round back to the fixed rotation so the
+        # game cannot keep serving under a name she is about to disown, then
+        # relaunch supply normally — the refusal offers the deck, so the deck
+        # has to actually be coming.
+        if getattr(self, "_category_override", {}).get(rnd) == subject:
+            self._category_override.pop(rnd, None)
+        refused = getattr(self, "_custom_round_refused", None)
+        if refused is None:
+            self._custom_round_refused = refused = []
+        if subject not in refused:
+            refused.append(subject)
+        if task is not None and not task.done():
+            task.cancel()
+        self._prefetch_task = None
+        self._prefetch_stall_ticks = 0
+        self.sk.set_status_note(
+            f"custom round NOT built: {subject!r} produced no registered "
+            "question. Say plainly that you can't build it right now and "
+            "offer a lane from the deck. Do NOT say you're putting it "
+            "together, do not invent a question about it, and do not run "
+            "the round under that name."
+        )
+        if self.game_started and not self.game_over:
+            self.start_prefetch()
+        logger.error(
+            "LILY_CUSTOM_ROUND | BUILD_EMPTY | session=%s topic=%r round=%d "
+            "— override rolled back, refusal is the only honest line",
+            self.sk.session_id, subject, rnd,
+        )
+        return result
+
+    def custom_round_state_line(self) -> str | None:
+        """HOTFIX-006 N2, the X1-shaped half of the fix: the grounded read of
+        every topic this session has been asked for, as a hard read-only
+        state field.
+
+        The tool is not the only channel — she can also just talk, and in
+        lily-16A9AE she did ("I'm putting your round together right now").
+        This is the truth sitting in front of that sentence."""
+        override = getattr(self, "_category_override", {})
+        refused = list(getattr(self, "_custom_round_refused", []))
+        if not override and not refused:
+            return None
+        parts = []
+        for rnd in sorted(override):
+            topic = override[rnd]
+            count = len(self.custom_round_registrations(topic))
+            if count:
+                parts.append(
+                    f"{topic!r} round {rnd}: BUILT, {count} registered "
+                    "question(s)"
+                )
+            else:
+                parts.append(
+                    f"{topic!r} round {rnd}: NOT BUILT — zero registered "
+                    "questions"
+                )
+        for topic in refused:
+            if self.custom_round_registrations(topic):
+                continue  # asked again later and built that time
+            parts.append(
+                f"{topic!r}: NOT BUILT — you already told the table you "
+                "can't build it"
+            )
+        return (
+            "CUSTOM ROUNDS — AUTHORITATIVE, READ-ONLY (the registration "
+            f"ledger, the ONLY truth about custom rounds): {'; '.join(parts)}. "
+            "A round marked NOT BUILT does not exist: never say you are "
+            "building it, putting it together, or working on it, and never "
+            "ask a question you invented about it. Say plainly that you "
+            "can't build it and offer a lane from the deck instead."
+        )
+
     def _difficulty_for_round(self, rnd: int) -> int:
         if rnd <= 1:
             return 1
@@ -2978,6 +3271,14 @@ class LilyGame:
                     and self.supabase is not None
                     and self.sk.media_mode != "pictures"
                 )
+                # HOTFIX-006 N2: a topic the table NAMED draws strictly.
+                # This preference is what turned "build me a Cape Cod round"
+                # into "serve me anything" in session lily-16A9AE — the bank
+                # had no Cape Cod rows, so the any-category fallback stage
+                # handed back Psycho and the round ran generic under the
+                # narration. Strict here means the bank either has that
+                # topic or gets out of the generator's way.
+                strict = self._is_operator_category(category)
                 if (lily_config.kb_only() or prefer_bank) and (
                     self.supabase is not None
                 ):
@@ -2990,6 +3291,7 @@ class LilyGame:
                             exclude_ids=history_ids,
                             exclude_hashes=history_hashes,
                             exclude_answers=set(history_answers),
+                            strict_category=strict,
                         ),
                         timeout=20.0,
                     )
@@ -3005,6 +3307,16 @@ class LilyGame:
                 if question is not None and not str(
                     question.get("id", "")
                 ).startswith("kb_"):
+                    # HOTFIX-006 N2: a question generated FOR a named topic
+                    # is labelled with that topic before anything else looks
+                    # at it. _shape_question defaults an unlabelled question
+                    # to "potpourri", so the Cape Cod round's own questions
+                    # used to bank under a category no later Cape Cod
+                    # request could ever find — the compounding arsenal
+                    # never compounded for operator topics, and the ledger
+                    # row could not name the round either.
+                    if strict:
+                        question["category"] = category
                     # Generated (verified) question: asked-history check,
                     # category-proposal gating (F), then banking (D).
                     question = self._curate_generated_question(
@@ -3013,13 +3325,18 @@ class LilyGame:
             if question is None and self.supabase is not None:
                 # Generation failed — curated bank is the insurance policy.
                 # Bounded for the same reason as above: the insurance line
-                # must never hang the supply task.
+                # must never hang the supply task. N2: the insurance draw is
+                # the OTHER door the generic round came through — for a
+                # named topic it stays strict, so a failed build surfaces as
+                # a refusal instead of a stranger's question wearing the
+                # topic's name.
                 question = await asyncio.wait_for(
                     lily_persistence.lily_fetch_bank_question(
                         self.supabase, category, tier, self.used_prompts,
                         mode=supply_mode,
                         exclude_ids=history_ids, exclude_hashes=history_hashes,
                         exclude_answers=set(history_answers),
+                        strict_category=strict,
                     ),
                     timeout=20.0,
                 )
@@ -3078,6 +3395,13 @@ class LilyGame:
                     question["image_source"] = "none"
             if question is not None:
                 self.next_question = question
+                # HOTFIX-006 N2 — THE registration point. This is the moment
+                # a named topic stops being a promise: a real, verified,
+                # category-matched question is committed to the supply line
+                # and the very next arm writes it to lily_asked_history under
+                # that category. Everything allowed to SAY the round exists
+                # reads what this writes.
+                self._register_custom_question(category, question)
                 # Auto-advance (frozen-reveal deadlock fix): when the reveal
                 # consumed the previous question BEFORE this prefetch landed,
                 # arm_next_question() at reveal time returned False and no
@@ -3949,6 +4273,7 @@ class LilyGame:
         # PATCH-001 T7: the group's cross-session answers also exclude —
         # a differently-worded bank question with a played answer repeats.
         history_answers = set(lily_bank.lily_history_answers(self.asked_history))
+        released_note = None
         try:
             # Bounded: the sync client has no HTTP timeout of its own — an
             # unbounded hang here would wedge the very watchdog that is
@@ -3959,9 +4284,51 @@ class LilyGame:
                     mode=self.sk.mode,
                     exclude_ids=history_ids, exclude_hashes=history_hashes,
                     exclude_answers=history_answers,
+                    # HOTFIX-006 N2: the third door into the generic round.
+                    # This fallback exists to break a supply stall, and for
+                    # the fixed families "anything" is exactly right — but
+                    # inside a round the table NAMED it is how Psycho ends up
+                    # in a Cape Cod round ("what does that have to do with
+                    # Cape Cod?").
+                    strict_category=self._is_operator_category(category),
                 ),
                 timeout=20.0,
             )
+            if question is None and self._is_operator_category(category):
+                # The topic is dry and the game is starving. The round loses
+                # its NAME rather than its honesty: drop the override, tell
+                # the table the custom round is out of questions, and pull
+                # from the fixed rotation like any other stalled round.
+                logger.error(
+                    "LILY_CUSTOM_ROUND | TOPIC_EXHAUSTED | session=%s "
+                    "topic=%r round=%d — releasing the round to the fixed "
+                    "rotation rather than serving a stranger under its name",
+                    self.sk.session_id, category, rnd,
+                )
+                self._category_override.pop(rnd, None)
+                # Held aside, not set here: the arm tail below clears status
+                # notes to retire the stall vamp, and this is a different
+                # fact with a different lifetime — it has to outlive the
+                # clear or she introduces a deck question as the next Cape
+                # Cod question.
+                released_note = (
+                    f"the {category!r} round is out of questions — say so "
+                    "plainly ('that's everything I've got on "
+                    f"{category}') and carry on with the regular deck. The "
+                    "next question is NOT about that topic; never introduce "
+                    "it as one."
+                )
+                category = self._category_for_round(rnd)
+                question = await asyncio.wait_for(
+                    lily_persistence.lily_fetch_bank_question(
+                        self.supabase, category, tier, self.used_prompts,
+                        mode=self.sk.mode,
+                        exclude_ids=history_ids,
+                        exclude_hashes=history_hashes,
+                        exclude_answers=history_answers,
+                    ),
+                    timeout=20.0,
+                )
         except Exception:
             logger.exception(
                 "LILY_WATCHDOG | SUPPLY_FALLBACK_ERROR | session=%s q=%d",
@@ -4003,6 +4370,10 @@ class LilyGame:
         # The stall is over: clear the honest-vamp status note the watchdog
         # or prefetch-crash path may have set.
         self.sk.clear_status_notes()
+        if released_note:
+            # ...but a released custom round is not a stall note, and the
+            # table is owed the sentence (N2).
+            self.sk.set_status_note(released_note)
         logger.error(
             "LILY_WATCHDOG | SUPPLY_FALLBACK_ARMED | session=%s q=%d id=%s — "
             "generation starved; armed a curated-bank question",
@@ -4154,9 +4525,16 @@ class LilyGame:
                 asyncio.ensure_future(lily_bank.lily_record_category_proposal(
                     self.supabase, proposed, family, self.group_id,
                 ))
-            question["category"] = (
-                proposed if proposed in self.promoted_categories else family
-            )
+            # HOTFIX-006 N2: a topic the TABLE named outranks a category the
+            # generator proposed, promoted or not. Letting a promoted
+            # proposal relabel the question would re-open the defect from the
+            # other side — a question built for the Cape Cod round arriving
+            # labelled something else, failing its registration check, and
+            # turning a round she really did build into a refusal.
+            if not self._is_operator_category(family):
+                question["category"] = (
+                    proposed if proposed in self.promoted_categories else family
+                )
         if self.supabase is not None:
             asyncio.ensure_future(lily_bank.lily_bank_generated_question(
                 self.supabase, dict(question), self.sk.mode,
@@ -4211,12 +4589,17 @@ class LilyGame:
         # Asked history (migration 010): one row per question SERVED,
         # keyed to the resolved group id; the in-memory mirror keeps this
         # session's own draws excluded without a re-read.
+        # The category rides the row (migration 023, HOTFIX-006 N2): the
+        # lily-16A9AE ledger could say WHICH questions were served but not
+        # what round they belonged to, so a narrated Cape Cod round and a
+        # real one were indistinguishable in the only durable record.
         self.asked_history.append({
             "question_id": self.armed_question.get("id"),
             "question_text_hash": lily_bank.lily_question_text_hash(
                 self.armed_question.get("prompt")
             ),
             "canonical_answer": self.armed_question.get("canonical_answer"),
+            "category": self.armed_question.get("category"),
         })
         if self.supabase is not None:
             asyncio.ensure_future(lily_bank.lily_record_asked(
@@ -4433,6 +4816,10 @@ class LilyGame:
         # or contest utterance next turn re-arms.
         self._explain_request_note = None
         self._contest_note = None
+        # HOTFIX-006 N9: the late-answer announcement rode this turn. Also
+        # one-shot — the miss is stated once, warmly, and does not become a
+        # thing she keeps bringing up.
+        self._late_answer_note = None
         # Self-knowledge Task 3: the what's-new delta rode the greeting —
         # once the greet has genuinely played out, the stamp moves forward
         # (never before: an interrupted greet keeps the delta for a retry).
@@ -4606,8 +4993,37 @@ class LilyGame:
                 self.sk.session_id, self.sk.question_number,
             )
             return
+        # HOTFIX-006 N3 invariant 1: an adjudicable window may only ever
+        # exist over a REGISTERED question. In lily-16A9AE Lily improvised
+        # a question that was never registered; Chris answered it and his
+        # "Cape Cod Canal." was adjudicated against kb_180 (Psycho) and
+        # marked incorrect — while she told him "Chris, you got it!
+        # Putting you right on the board." Nothing improvised gets a
+        # window; speech arriving with no open registered window is logged
+        # and never scored.
+        registered = self.armed_question if not steal else (
+            self.armed_question or self.sk.current_question
+        )
+        if registered is None:
+            logger.error(
+                "LILY_WINDOW | UNREGISTERED_REFUSED | session=%s q=%d — "
+                "window requested with no registered question armed; "
+                "refusing (N3 invariant 1)",
+                self.sk.session_id, self.sk.question_number,
+            )
+            return
         dur = duration if duration is not None else self._answer_window_duration()
-        self.sk.open_answer_window(duration=dur, reset_candidates=not steal)
+        # N3 invariant 2: the question id is CAPTURED HERE, at window-open,
+        # and carried through to the ledger write — never inferred at
+        # adjudication time from whatever is armed by then. A steal window
+        # rides the same question, so it captures the same identity.
+        self.sk.open_answer_window(
+            duration=dur,
+            reset_candidates=not steal,
+            question_id=registered.get("id"),
+            question_index=self.sk.question_number,
+            registered=True,
+        )
         self._steal_window = steal
         # M4: the window opening IS the stem's completion — terminal.
         if not steal:
@@ -5325,6 +5741,18 @@ class LilyGame:
             result, text, speaker_label=speaker_label, segment_ts=ts,
             nbest=nbest,
         )
+        # HOTFIX-006 N4: FL-1's judgment rides the CANDIDATE it was computed
+        # for, so the adjudication boundary can consult the fused
+        # classification and not only the deterministic answer-shape floor.
+        # The classifier runs after the scorekeeper's recording pass, which
+        # is why the judgment is stamped here rather than at record time.
+        if result.get("candidate_recorded") and judgment is not None:
+            cand = self.sk.answer_candidates.get(
+                result.get("player") or f"unrostered:{speaker_label or 'UU'}"
+            )
+            if cand is not None:
+                cand["fl1_classification"] = judgment.classification
+                cand["fl1_score"] = judgment.score
 
         # B1 corpus row — logged BEFORE command handling so skipped-on and
         # system-directed segments are captured too (fire-and-forget).
@@ -5663,6 +6091,30 @@ class LilyGame:
         if not self.game_started and not self.game_over:
             self._maybe_auto_start_after_lobby()
 
+        # HOTFIX-006 N9 part 2: a CORRECT answer that arrived after the
+        # window closed is a defined outcome, not a silent loss. Inside the
+        # stated grace margin the window itself already admitted it (it
+        # would be a candidate above); past the margin this announces the
+        # miss with its reason and audits the real utterance. Never runs
+        # while a window is open, and never for meta-speech or a wrong
+        # guess — see note_late_answer.
+        if (
+            not result.get("candidate_recorded")
+            and not self.sk.answer_window_open
+            and not result.get("control_command")
+            and not result.get("system_directed")
+        ):
+            try:
+                self.note_late_answer(
+                    text,
+                    player=result.get("player"),
+                    speaker_label=speaker_label,
+                    segment_ts=ts,
+                    utterance_id=result.get("utterance_id"),
+                )
+            except Exception as e:
+                logger.warning("LILY_ANSWER | LATE_CHECK_FAILED: %s", e)
+
         # Instant Tier-1 path: a clean earliest answer scores immediately.
         if result.get("candidate_recorded") and self.sk.answer_window_open:
             # n-best (WO-ADDRESSEE-H1 Task 1): the drained hypothesis set
@@ -5947,11 +6399,106 @@ class LilyGame:
             acceptable = question.get("acceptable_answers") or [
                 str(question.get("canonical_answer", "")).lower()
             ]
-            ordered = [
-                c for c in self.sk.ordered_candidates()
-                if (c["player"] or f"unrostered:{c['speaker_label']}")
-                not in self._judged_keys
-            ]
+            # ── THE ADJUDICATION BOUNDARY (WO-LILY-HOTFIX-006 N3/N4) ──────
+            # Everything past this point writes to the ledger, so this is
+            # where WHAT may be adjudicated, and against WHICH question, is
+            # decided once.
+            #
+            # N3 invariant 2 — WINDOW BINDING. The question is the one
+            # captured AT WINDOW-OPEN, never re-derived from whatever is
+            # armed by the time the reveal chain finally runs. In
+            # lily-4FB3B2 two questions were asked and BOTH answer rows
+            # were filed against q_4821: Rhonda's "We don't know." was
+            # spoken to the Frankenstein question and adjudicated against
+            # question one. The captured id/index below is what reaches
+            # record_result and the lily_answers row.
+            binding = self.sk.window_binding()
+            bound_question_id = (
+                binding.get("question_id")
+                if binding.get("question_id") is not None
+                else question.get("id")
+            )
+            bound_question_index = (
+                binding.get("question_index")
+                if binding.get("question_index") is not None
+                else self.sk.question_number
+            )
+            # N3 invariant 1 — ADJUDICATION SCOPE. A window that was never
+            # opened over a registered question produces nothing scoreable.
+            if binding.get("registered") is False:
+                logger.error(
+                    "LILY_ADJUDICATE | UNREGISTERED_WINDOW | session=%s "
+                    "q=%s — candidates arrived with no registered question; "
+                    "logged, never scored (N3 invariant 1)",
+                    self.sk.session_id, bound_question_index,
+                )
+            ordered = []
+            for c in self.sk.ordered_candidates():
+                key = c["player"] or f"unrostered:{c['speaker_label']}"
+                if key in self._judged_keys:
+                    continue
+                if binding.get("registered") is False:
+                    continue
+                # Candidates carried over from an EARLIER question's window
+                # (close_answer_window never cleared them) are not this
+                # question's answers. They are logged and dropped, never
+                # filed under a question they were not spoken to.
+                if not self.sk.candidate_bound_to(
+                    c, bound_question_id, bound_question_index
+                ):
+                    logger.error(
+                        "LILY_ADJUDICATE | UNBOUND_CANDIDATE | session=%s "
+                        "key=%s arrived_in=%s/%s adjudicating=%s/%s "
+                        "text=%r — dropped, never filed against another "
+                        "question (N3 invariant 2)",
+                        self.sk.session_id, key,
+                        c.get("window_question_id"),
+                        c.get("window_question_index"),
+                        bound_question_id, bound_question_index,
+                        str(c.get("text"))[:60],
+                    )
+                    continue
+                # N4 — the open window admits ANSWER-SHAPED utterances
+                # only. Seven live rows across three sessions were
+                # meta-speech about the game entered as answer attempts,
+                # one of them scored a point ("Um. Why are we. Why are we
+                # in Mumbai or Delhi?" -> kb_128, CORRECT, 1 point). The
+                # intake filter is the first gate; this is the boundary
+                # gate, so a candidate that arrived by any other route
+                # (replay, steal carryover, a rehydrated checkpoint) still
+                # cannot be adjudicated. Answer-surface matches always
+                # pass, so a murmured real answer inside a complaint-heavy
+                # turn keeps scoring.
+                non_answer = lily_evaluation.lily_non_answer_utterance(
+                    str(c.get("text") or ""), question, list(self.sk.players)
+                )
+                if non_answer:
+                    logger.info(
+                        "LILY_ADJUDICATE | NON_ANSWER_DROPPED | session=%s "
+                        "key=%s reason=%s text=%r — routed to the "
+                        "conversational lane, never adjudicated (N4)",
+                        self.sk.session_id, key, non_answer,
+                        str(c.get("text"))[:60],
+                    )
+                    continue
+                # FL-1's fused judgment, where it exists, on top of the
+                # deterministic floor above. Speech the floor machine read
+                # as a SIDE CLUSTER — players deep in a conversation with
+                # each other — is not an answer to the host, whatever shape
+                # it has. (Plain side_chatter is NOT enough on its own: a
+                # muttered real answer classifies that way, and the
+                # answer-surface override is what protects it.)
+                if c.get("fl1_classification") == (
+                    lily_addressee_classifier.CLASS_SIDE_CLUSTER
+                ):
+                    logger.info(
+                        "LILY_ADJUDICATE | SIDE_CLUSTER_DROPPED | session=%s "
+                        "key=%s text=%r — FL-1 read the floor as a "
+                        "player-to-player conversation (N4)",
+                        self.sk.session_id, key, str(c.get("text"))[:60],
+                    )
+                    continue
+                ordered.append(c)
 
             winner: str | None = None
             winner_candidate: dict | None = None
@@ -5965,18 +6512,50 @@ class LilyGame:
             # (later) timestamp, so it can never jump the queue — but it can
             # score, which "first final locks the slot" wrongly prevented
             # ("the spine… no, the femur" lost a point it had earned).
+            # N9 part 1: capture binds the UTTERANCE, not a slot. Every
+            # attempt in the timeline carries its own transcript id, and
+            # the one that decides a candidate's verdict is recorded on the
+            # candidate — so the ledger row names the utterance actually
+            # judged. The live q_1052 row recorded Rami's earlier "Go."
+            # while "Okay. It's Jupiter." never entered the ledger at all.
+            # Each candidate's default binding is its FIRST answer-shaped
+            # attempt (the one that claimed their place in the order),
+            # never "most recent".
+            timeline_entries = []
+            for cand in ordered:
+                attempts = cand.get("attempts") or [{
+                    "text": cand["text"],
+                    "segment_start_time": cand["segment_start_time"],
+                    "utterance_id": cand.get("utterance_id"),
+                }]
+                for attempt in attempts:
+                    attempt_text = attempt.get("text") or ""
+                    # N4 at attempt granularity: one meta-speech fragment
+                    # inside a player's turn must not become the utterance
+                    # their row is written from.
+                    if lily_evaluation.lily_non_answer_utterance(
+                        attempt_text, question, list(self.sk.players)
+                    ):
+                        continue
+                    if cand.get("_bound_attempt") is None:
+                        cand["_bound_attempt"] = attempt
+                    timeline_entries.append((
+                        attempt.get(
+                            "segment_start_time", cand["segment_start_time"]
+                        ),
+                        cand, attempt_text, attempt,
+                    ))
+                if cand.get("_bound_attempt") is None:
+                    # Nothing answer-shaped survived — the candidate has no
+                    # adjudicable utterance and is dropped with the rest of
+                    # the meta-speech.
+                    cand["_bound_attempt"] = None
+            ordered = [c for c in ordered if c.get("_bound_attempt") is not None]
+            timeline_entries = [
+                e for e in timeline_entries if e[1] in ordered
+            ]
             attempts_timeline = sorted(
-                (
-                    (attempt.get("segment_start_time", cand["segment_start_time"]),
-                     cand, attempt["text"], attempt)
-                    for cand in ordered
-                    for attempt in (
-                        cand.get("attempts")
-                        or [{"text": cand["text"],
-                             "segment_start_time": cand["segment_start_time"]}]
-                    )
-                ),
-                key=lambda entry: entry[0],
+                timeline_entries, key=lambda entry: entry[0]
             )
             for _, cand, attempt_text, attempt in attempts_timeline:
                 attempt_conf = (
@@ -6010,6 +6589,7 @@ class LilyGame:
                 if t1["verdict"] == "correct":
                     cand["_tier1"] = t1
                     cand["text"] = attempt_text  # score the words that won
+                    cand["_bound_attempt"] = attempt  # …and bind THAT one
                     winner_candidate = cand
                     break
                 # Keep the strongest per-candidate verdict for audit and
@@ -6021,6 +6601,7 @@ class LilyGame:
                     cand["_tier1"] = t1
                     if t1["verdict"] == "uncertain":
                         cand["text"] = attempt_text  # judge these words
+                        cand["_bound_attempt"] = attempt
             if winner_candidate is None:
                 uncertain = [
                     c for c in ordered
@@ -6108,14 +6689,24 @@ class LilyGame:
             # an in-character hold plus an ERROR, never a celebration the
             # ledger can't back (the live "Saturn is correct — you're on
             # the board!" ×3 with zero answers rows).
+            def _bound_utterance_id(cand: dict) -> str | None:
+                """N9: the id of the utterance THIS row is about — the
+                attempt that decided the verdict, falling back to the
+                candidate's own first final. Never "most recent"."""
+                attempt = cand.get("_bound_attempt") or {}
+                return attempt.get("utterance_id") or cand.get("utterance_id")
+
             if winner_candidate is not None:
                 if winner_candidate["player"]:
                     winner = winner_candidate["player"]
                     try:
                         self.sk.record_result(
                             winner, correct=True, points=points,
-                            question_id=question.get("id"),
+                            # N3: the question CAPTURED at window-open.
+                            question_id=bound_question_id,
+                            question_index=bound_question_index,
                             transcript=winner_candidate["text"],
+                            utterance_id=_bound_utterance_id(winner_candidate),
                         )
                     except Exception:
                         logger.exception(
@@ -6143,27 +6734,35 @@ class LilyGame:
                     self._pending_unbound_award = {
                         "speaker_label": winner_candidate["speaker_label"],
                         "points": points,
-                        "question_id": question.get("id"),
-                        "question_index": self.sk.question_number,
+                        "question_id": bound_question_id,
+                        "question_index": bound_question_index,
                         "transcript": winner_candidate["text"],
+                        "utterance_id": _bound_utterance_id(winner_candidate),
                     }
             for cand in ordered:
                 key = cand["player"] or f"unrostered:{cand['speaker_label']}"
                 self._judged_keys.add(key)
                 is_winner = cand is winner_candidate
+                utterance_id = _bound_utterance_id(cand)
                 if cand["player"] and not is_winner:
                     self.sk.record_result(
                         cand["player"], correct=False, points=0,
-                        question_id=question.get("id"),
+                        question_id=bound_question_id,
+                        question_index=bound_question_index,
                         transcript=cand["text"],
+                        utterance_id=utterance_id,
                     )
                 if self.supabase is not None:
+                    # N3: the audit row names the question whose window the
+                    # utterance arrived in, and the index captured with it —
+                    # not self.sk.question_number, which has already moved
+                    # on in every race this WO documents.
                     asyncio.ensure_future(lily_persistence.lily_write_answer(
                         self.supabase,
                         self.sk.session_id,
                         cand["player"],
-                        question.get("id"),
-                        self.sk.question_number,
+                        bound_question_id,
+                        bound_question_index,
                         cand["text"],
                         "correct" if is_winner else "incorrect",
                         # Tier-1 decided verdicts (correct, or MC's
@@ -6172,6 +6771,7 @@ class LilyGame:
                         in ("correct", "incorrect") else eval_tier,
                         points if is_winner else 0,
                         cause="answer",
+                        utterance_id=utterance_id,
                     ))
 
             # B1 implicit weak labels at adjudication commit: the winning
@@ -6308,7 +6908,26 @@ class LilyGame:
                 answer_text = str(question.get("canonical_answer", ""))
                 # RULINGS-001 R1: ratified verdict-beat register anchor —
                 # verdict word first, then at most one short flourish.
+                # HOTFIX-006 N9 part 3: the verdict is GENERATED FROM the
+                # committed ledger row — the row that was actually written,
+                # naming the utterance actually bound. The live failure was
+                # narration and ledger describing two different utterances
+                # ("Jupiter was spot on, Rami" over a q_1052 row reading
+                # incorrect, transcript "Go."). On any disagreement the
+                # ledger wins; lily_narrated_verdict_divergence makes a
+                # disagreement loud after the fact.
+                ledger_row = self.sk.ledger_row_for(winner, bound_question_id)
                 if winner_candidate is not None:
+                    committed = ""
+                    if ledger_row is not None:
+                        committed = (
+                            " THE COMMITTED ROW you are speaking from: "
+                            f"{ledger_row.get('player')} — "
+                            f"{str(ledger_row.get('transcript') or '')!r} — "
+                            "CORRECT. Those are the words that scored; do "
+                            "NOT credit a different utterance or a "
+                            "different player."
+                        )
                     verdict_instr = (
                         "VERDICT BEAT. The ruling is COMMITTED. "
                         "REGISTER GUIDANCE (vary freely "
@@ -6317,7 +6936,7 @@ class LilyGame:
                         f"short flourish — 'Correct — {answer_text}!', "
                         f"point to {winner or 'the table'}. No trivia "
                         "color, no next question — those come in your next "
-                        "turn."
+                        "turn." + committed
                     )
                 else:
                     verdict_instr = (
@@ -6327,7 +6946,12 @@ class LilyGame:
                         "longer): the verdict first, then at most one "
                         f"short line — nobody landed it, it was "
                         f"{answer_text}. No next question — that comes in "
-                        "your next turn."
+                        "your next turn. NO committed row for this question "
+                        "is correct, so do NOT tell anyone their answer was "
+                        "right — not as a consolation, not 'you were close', "
+                        "not 'that was right but late'. If someone was right "
+                        "after the buzzer you will have been given a late-"
+                        "answer note; without one, nobody was right."
                     )
                 self.gated_say(
                     verdict_key, "verdict", verdict_instr,
@@ -6436,6 +7060,134 @@ class LilyGame:
         finally:
             self._adjudicating = False
             self.sk.adjudicating = False
+
+    # -- N9: late-but-correct is a DEFINED outcome ---------------------------
+
+    def note_late_answer(
+        self,
+        text: str,
+        *,
+        player: str | None,
+        speaker_label: str | None = None,
+        segment_ts: float | None = None,
+        utterance_id: str | None = None,
+    ) -> dict | None:
+        """A correct answer that arrived after the window closed
+        (WO-LILY-HOTFIX-006 N9 part 2).
+
+        THE fixture: at 21:10:13 Rami said "Okay. It's Jupiter." and Lily
+        replied "Jupiter was spot on, Rami, but just a split second late!"
+        — the conversational lane knew the answer was correct AND who said
+        it. The ledger for q_1052 recorded his answer as "Go." (his earlier
+        start command), incorrect, zero points. His actual answer never
+        entered the ledger; a different utterance was captured in its
+        place.
+
+        Late-but-correct is now one of two stated outcomes, never a silent
+        loss: inside lily_config.late_answer_grace_seconds() the window
+        itself still admits the speech (window_contains), and past that
+        margin THIS records an explicit announced miss WITH ITS REASON and
+        an audit row carrying the real utterance and its id. What is no
+        longer possible is narrating correctness while recording a
+        different utterance as wrong.
+
+        Returns the late-answer record, or None when nothing applies.
+        """
+        binding = self.sk.window_binding()
+        if not binding.get("registered"):
+            return None
+        question = self.sk.current_question or self.armed_question
+        # The window that just closed belongs to the question it captured;
+        # if the game has already moved on to a DIFFERENT question, this
+        # utterance is not a late answer to anything adjudicable.
+        if question is None or (
+            binding.get("question_id") is not None
+            and question.get("id") is not None
+            and binding.get("question_id") != question.get("id")
+        ):
+            return None
+        if self.sk.answer_window_open:
+            return None  # the live window owns it, not this path
+        if self._adjudicating or self.sk.adjudicating:
+            return None  # the ruling is mid-commit; it owns the outcome
+        if self._is_burned(question):
+            # WS-4: the answer has already gone to air. A player echoing
+            # the just-revealed answer is not a late attempt, and calling
+            # it one would turn every reveal into a "you were right"
+            # announcement.
+            return None
+        if lily_evaluation.lily_non_answer_utterance(
+            text, question, list(self.sk.players)
+        ):
+            return None
+        try:
+            verdict = self._tier1_question(text, question)["verdict"]
+        except Exception:
+            return None
+        if verdict != "correct":
+            # Only a CORRECT late answer is a loss worth announcing; a
+            # late wrong guess is just conversation.
+            return None
+        seconds_late = self.sk.seconds_past_deadline(segment_ts)
+        if seconds_late is None or seconds_late <= 0:
+            return None
+        grace = max(0.0, lily_config.late_answer_grace_seconds())
+        # N9: this row is ABOUT an utterance, so it gets an id even off the
+        # late path — a row with no utterance identity is exactly what made
+        # the q_1052 defect unreadable after the fact.
+        utterance_id = utterance_id or self.sk._mint_utterance_id(
+            speaker_label, segment_ts or 0.0
+        )
+        record = {
+            "player": player,
+            "speaker_label": speaker_label,
+            "text": text,
+            "utterance_id": utterance_id,
+            "verdict": "correct",
+            "seconds_late": seconds_late,
+            "within_grace": seconds_late <= grace,
+            "grace_seconds": grace,
+            "question_id": binding.get("question_id"),
+            "question_index": binding.get("question_index"),
+        }
+        self.sk.late_answers.append(record)
+        logger.error(
+            "LILY_ANSWER | LATE_MISS | session=%s q=%s player=%s late=%.3fs "
+            "grace=%.3fs utterance=%s text=%r — correct after the window "
+            "closed; announced as a miss WITH its reason, never silent",
+            self.sk.session_id, record["question_index"], player,
+            seconds_late, grace, utterance_id, str(text)[:80],
+        )
+        # The ledger carries the fact. Zero points (the window closed), its
+        # own cause, and — critically — the REAL utterance with its id, so
+        # nothing has to guess later what the player actually said.
+        if self.supabase is not None:
+            asyncio.ensure_future(lily_persistence.lily_write_answer(
+                self.supabase,
+                self.sk.session_id,
+                player,
+                record["question_id"],
+                record["question_index"] or 0,
+                text,
+                "late",
+                1,
+                0,
+                cause="late_answer",
+                utterance_id=utterance_id,
+            ))
+        # And she SAYS it, with the reason. An announced miss is the whole
+        # point: the alternative that shipped was a correct answer vanishing
+        # while a different utterance took the blame.
+        who = player or "that voice"
+        self._late_answer_note = (
+            f"[late answer — {who} said {text.strip()!r} and it was RIGHT, "
+            f"{seconds_late:.1f}s after the window closed. Say so plainly and "
+            f"warmly in your next beat: name them, confirm the answer was "
+            f"right, and give the reason it didn't score — just past the "
+            f"buzzer. Do NOT award a point (the window was closed and the "
+            f"ledger says zero) and do NOT pretend it scored.]"
+        )
+        return record
 
     def _verdict_already_spoken(
         self, question: dict, winner_candidate: dict | None
@@ -6924,7 +7676,16 @@ class LilyGame:
         pending = self._pending_unbound_award
         if pending and pending.get("speaker_label") == label:
             self._pending_unbound_award = None
-            self.sk.record_result(into, correct=True, points=pending["points"])
+            self.sk.record_result(
+                into, correct=True, points=pending["points"],
+                # N3/N9: the merge commits the SAME question and the SAME
+                # utterance the held award was decided from — never
+                # whatever the scorekeeper happens to be on now.
+                question_id=pending.get("question_id"),
+                question_index=pending.get("question_index"),
+                transcript=pending.get("transcript"),
+                utterance_id=pending.get("utterance_id"),
+            )
         durable = {}
         if self.supabase is not None:
             durable = await lily_persistence.lily_merge_speaker(
@@ -7958,6 +8719,16 @@ class LilyGame:
                 extra.append(glass_line)
         except Exception:
             pass
+        # HOTFIX-006 N2: the custom-round registration ledger. The tool
+        # result governs the turn that calls it; this governs every turn
+        # after, which is where "I'm putting your round together right now"
+        # came from in lily-16A9AE. Same never-break, context-only contract.
+        try:
+            custom_line = self.custom_round_state_line()
+            if custom_line:
+                extra.append(custom_line)
+        except Exception:
+            pass
         # PATCH-003 P7: a slow delivery pace shapes the TEXT on both voices
         # (the voice speed change is best-effort; this always applies).
         if getattr(self.sk, "delivery_pace", "normal") == "slow":
@@ -8109,6 +8880,13 @@ class LilyGame:
         contest_note = getattr(self, "_contest_note", None)
         if contest_note:
             extra.append(contest_note)
+        # HOTFIX-006 N9: a correct answer that landed past the window. It
+        # rides here so the miss is ANNOUNCED with its reason — the live
+        # alternative was Rami's "Okay. It's Jupiter." vanishing while
+        # "Go." took the blame on his q_1052 row.
+        late_note = getattr(self, "_late_answer_note", None)
+        if late_note:
+            extra.append(late_note)
         if not self.game_started:
             extra.append(
                 "game not started: you are in the lobby — bind names, fish "
@@ -8487,6 +9265,9 @@ class LilyGame:
                 question_id=pending.get("question_id"),
                 question_index=pending.get("question_index"),
                 transcript=pending.get("transcript"),
+                # N9: the make-good names the same utterance the held
+                # award was decided from.
+                utterance_id=pending.get("utterance_id"),
             )
             if entry is not None and self.supabase is not None:
                 asyncio.ensure_future(lily_persistence.lily_write_score_event(
@@ -9167,10 +9948,15 @@ class LilyAgent(Agent):
         of Thrones round", "let's do Japan", "a round about 90s hip-hop".
         You write your own questions on the fly, so ANY topic is fair game:
         call this the moment a table asks for a specific subject, and NEVER
-        tell them the deck is fixed or the topic isn't available. It takes
-        effect on the current/next round; if the first question needs a
-        beat to build, say you're putting their round together and vamp —
-        never invent a question, never fall back to the old topic.
+        tell them the deck is fixed.
+
+        THIS TOOL BUILDS THE ROUND BEFORE IT ANSWERS YOU. It takes a beat,
+        and its result is the ONLY thing that makes a custom round true:
+        say NOTHING about the topic until it returns. If it reports the
+        round is built, tell them and ask the question in the state block.
+        If it reports nothing was built, say exactly that and offer a lane
+        from the deck. Never say you're "putting their round together" —
+        either it is built or it isn't, and this tool is what knows.
 
         Args:
             topic: The subject for the round, in the table's own words
@@ -9231,19 +10017,19 @@ class LilyAgent(Agent):
         game._prefetch_task = None
         game._prefetch_stall_ticks = 0
         game.sk.set_status_note(
-            f"custom round committed: building {subject!r} questions now — "
-            "the first lands in the state block in a beat. Tell the table "
-            "you're putting their round together, vamp honestly until it "
-            "arrives, and never invent a question or fall back to the old "
-            "topic."
+            f"custom round requested: {subject!r} is BUILDING right now and "
+            "is NOT built yet. Say nothing about this round until the tool "
+            "result comes back — not that it's coming, not that you're "
+            "putting it together. Never invent a question about it."
         )
-        if game.game_started and not game.game_over:
-            game.start_prefetch()
-        return (
-            f"Round topic set to {subject!r} — I'm generating those "
-            "questions now. Tell the table you're building their round; the "
-            "first one lands in a beat."
-        )
+        # HOTFIX-006 N2 — the awaited build. Everything above this line only
+        # POINTS the round at the topic; nothing above it has produced a
+        # question, which is precisely the state session lily-16A9AE narrated
+        # as a finished Cape Cod round. The result of the build is the only
+        # input to what she says next, and an empty result has exactly one
+        # rendering: the refusal.
+        result = await game.build_custom_round(subject, target_round)
+        return lily_custom_round_line(result)
 
     @function_tool()
     async def lily_show_demo_picture(
@@ -10798,6 +11584,52 @@ async def entrypoint(ctx: JobContext) -> None:
                     )
             except Exception:
                 pass
+            # HOTFIX-006 N2: the same safety net for CUSTOM ROUNDS. In
+            # lily-16A9AE she narrated a Cape Cod round twice with nothing
+            # registered under it, and no log said so — the fiction was only
+            # discovered by reading lily_asked_history days later. The tool
+            # result and the state block prevent; this makes a prevention
+            # failure loud at ERROR, in the session it happens in.
+            try:
+                topic = lily_narrated_custom_round_divergence(
+                    game._last_assistant_text,
+                    game.custom_round_unbuilt_topics(),
+                )
+                if topic is not None:
+                    logger.error(
+                        "LILY_CUSTOM_ROUND | CUSTOM_ROUND_DIVERGENCE | "
+                        "session=%s topic=%r — narrated a round with zero "
+                        "registered questions",
+                        game.sk.session_id, topic,
+                    )
+            except Exception:
+                pass
+            # HOTFIX-006 N9 part 3: the same safety net for VERDICTS. At
+            # 21:10 she said "Jupiter was spot on, Rami, but just a split
+            # second late!" while Rami's committed q_1052 row read
+            # incorrect with transcript "Go." — the conversational lane
+            # narrated correctness over a ledger recording a DIFFERENT
+            # utterance as wrong. A verdict spoken about a player's answer
+            # generates from that player's ledger row; on disagreement the
+            # ledger wins and the divergence is made loud here.
+            try:
+                vdiv = lily_scorekeeper.lily_narrated_verdict_divergence(
+                    game._last_assistant_text, game.sk.score_ledger
+                )
+                if vdiv is not None:
+                    logger.error(
+                        "LILY_SCORE | SCORE_DIVERGENCE | session=%s "
+                        "player=%s spoken=%s ledger=%s question=%s "
+                        "ledger_transcript=%r utterance=%s — narrated "
+                        "verdict contradicts the committed row; the LEDGER "
+                        "wins",
+                        game.sk.session_id, vdiv["player"], vdiv["spoken"],
+                        vdiv["ledger"], vdiv["question_id"],
+                        str(vdiv["ledger_transcript"])[:80],
+                        vdiv["utterance_id"],
+                    )
+            except Exception:
+                pass
             m = report or {}
             get = (lambda k: m.get(k)) if isinstance(m, dict) else (
                 lambda k: getattr(m, k, None)
@@ -10832,6 +11664,18 @@ async def entrypoint(ctx: JobContext) -> None:
         created = getattr(ev, "created_at", None)
         arrival_ts = (
             created.timestamp() if hasattr(created, "timestamp") else time.time()
+        )
+        # HOTFIX-006 N9: the utterance's OWN transcript id, when the event
+        # carries one. Answer capture binds this — never "most recent",
+        # never "first-seen fragment for that speaker" (the live q_1052 row
+        # recorded Rami's "Go." while "Okay. It's Jupiter." never entered
+        # the ledger). The field name has drifted across plugin versions,
+        # so read defensively; the scorekeeper mints a stable id when the
+        # event supplies none, so the binding never degrades to a slot.
+        utterance_id = (
+            getattr(ev, "item_id", None)
+            or getattr(ev, "id", None)
+            or getattr(ev, "transcript_id", None)
         )
         # n-best (WO-ADDRESSEE-H1 Task 1): drain the per-word alternatives
         # buffered off raw AddTranscript for this speaker's finalized
@@ -10884,6 +11728,7 @@ async def entrypoint(ctx: JobContext) -> None:
             timing_drift_seconds=timing.get("drift_seconds"),
             now=arrival_ts,
             addressee_confidence=fused_conf,
+            utterance_id=utterance_id,
         )
         if result.get("quarantined"):
             # WS-10: an insane final (span/lag beyond the sanity gate) is
@@ -10921,6 +11766,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 "timestamp_source": timing.get("source"),
                 "timing_drift_seconds": timing.get("drift_seconds"),
                 "addressee_confidence": fused_conf,
+                # N9: the identity travels with the buffered final, so an
+                # early answer replayed at window open binds to the SAME
+                # utterance it was captured as.
+                "utterance_id": utterance_id,
             }
             # WS-5 buzz-buffer widening: remember this final so it can be
             # back-filled if the delivery claim lands within T seconds.

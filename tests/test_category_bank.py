@@ -192,7 +192,24 @@ def _make_game(question_number: int = 0) -> LilyGame:
     game.game_over = False
     game.supabase = None  # tool's register leg is guarded off
     game.group_id = "grp_fixture"
-    game.start_prefetch = lambda: None
+    game._custom_round_registered = {}
+
+    def _supply():
+        """HOTFIX-006 N2: the tool now builds before it answers, and an
+        unbuilt topic rolls its override back. This models _prefetch_inner's
+        commit tail so the fixture exercises the bank-preference wiring
+        rather than the refusal path."""
+        rnd = game._round_for_next_question()
+        category = game._category_for_round(rnd)
+        question = {
+            "id": "q_built", "prompt": f"A {category} question?",
+            "canonical_answer": "answer", "acceptable_answers": ["answer"],
+            "category": category,
+        }
+        game.next_question = question
+        game._register_custom_question(category, question)
+
+    game.start_prefetch = _supply
     return game
 
 

@@ -433,15 +433,20 @@ async def lily_write_answer(
     eval_tier: int,
     awarded_points: int,
     cause: Optional[str] = None,
+    utterance_id: Optional[str] = None,
 ) -> None:
     """Fire-and-forget audit row for every scoring event (WS-7: not just
     adjudicated attempts — bonuses, make-goods, operator awards too).
 
-    ``cause`` targets the lily_answers.cause column (Doc DDL request).
-    Until that column lands, the first insert fails and is retried once
-    without the key — the row is never lost, and non-adjudication events
-    keep their trace because their verdict field carries the cause code.
-    Once the column exists the same code path lights it up unchanged."""
+    ``cause`` targets the lily_answers.cause column (Doc DDL request), and
+    ``utterance_id`` the HOTFIX-006 N9 column: WHICH spoken utterance this
+    row is about. The live q_1052 row carried Rami's "Go." with nothing to
+    say which utterance it had bound — his actual answer, "Okay. It's
+    Jupiter.", never entered the ledger. Until either column lands the
+    first insert fails and is retried once with the optional keys stripped
+    — the row is never lost, and non-adjudication events keep their trace
+    because their verdict field carries the cause code. Once the columns
+    exist the same code path lights them up unchanged."""
     row = {
         "session_id": session_id,
         "player_name": player_name,
@@ -455,18 +460,22 @@ async def lily_write_answer(
     }
     if cause is not None:
         row["cause"] = cause
+    if utterance_id is not None:
+        row["utterance_id"] = utterance_id
     try:
         await asyncio.to_thread(
             lambda: supabase.table("lily_answers").insert(row).execute()
         )
     except Exception as e:
-        if "cause" not in row:
+        optional = [k for k in ("cause", "utterance_id") if k in row]
+        if not optional:
             logger.error("lily_write_answer error: %s", e)
             return
+        dropped = {k: row.pop(k) for k in optional}
         logger.info(
-            "lily_write_answer: cause column not accepted (%s) — "
-            "retrying without it (cause=%s encoded in verdict for "
-            "non-adjudication rows)", e, row.pop("cause"),
+            "lily_write_answer: optional column(s) not accepted (%s) — "
+            "retrying without %s (cause is encoded in verdict for "
+            "non-adjudication rows)", e, sorted(dropped),
         )
         try:
             await asyncio.to_thread(
@@ -501,6 +510,7 @@ async def lily_write_score_event(
         int(entry.get("eval_tier") or 0),
         int(entry.get("points") or 0),
         cause=cause,
+        utterance_id=entry.get("utterance_id"),
     )
 
 
@@ -672,10 +682,21 @@ async def lily_fetch_bank_question(
     exclude_ids: Optional[set] = None,
     exclude_hashes: Optional[set] = None,
     exclude_answers: Optional[set] = None,
+    strict_category: bool = False,
 ) -> Optional[dict]:
     """Pull one unused curated question from lily_questions, preferring the
     requested category/tier, falling back to any unused row. Returns the
     §4.2 structured shape or None.
+
+    Category strictness (WO-LILY-HOTFIX-006 N2): `strict_category=True`
+    removes the any-category fallback stage, so the draw returns a row in
+    THIS category or nothing at all. That stage is the anti-starvation
+    policy for the fixed family rotation — "academic is dry, serve
+    pop_culture" is a fallback nobody is lied to by. For a topic the table
+    NAMED it is something else entirely: in session lily-16A9AE a "Cape Cod"
+    round drew Psycho, One Direction and the rupee question through this
+    exact stage while Lily narrated a custom Cape Cod round over the top.
+    A named topic gets that topic or an honest refusal — never "anything".
 
     Mode guard (consent-safety): adult=true bank rows are returned ONLY
     when mode == 'adult' — general mode hard-excludes them.
@@ -716,7 +737,13 @@ async def lily_fetch_bank_question(
                 query = query.eq("difficulty_tier", stage_tier)
             return query.limit(BANK_FETCH_CANDIDATE_LIMIT).execute()
 
+        # Tier relaxation stays inside a strict draw: a Cape Cod question at
+        # the wrong difficulty is still a Cape Cod question. Only the
+        # category filter is inviolable.
         stages = (
+            (category, difficulty_tier),
+            (category, None),
+        ) if strict_category else (
             (category, difficulty_tier),
             (category, None),
             (None, None),

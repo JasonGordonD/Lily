@@ -277,7 +277,24 @@ def test_custom_category_capability_invocation_routes_the_topic():
     game._prefetch_stall_ticks = 0
     game.game_started = True
     game.game_over = False
-    game.start_prefetch = lambda: None
+    game._custom_round_registered = {}
+
+    def _supply():
+        # HOTFIX-006 N2: the tool builds before it answers and rolls the
+        # override back when nothing registers, so "she builds the round
+        # instead of denying it" is now proven THROUGH a real commit —
+        # this models _prefetch_inner's commit tail.
+        rnd = game._round_for_next_question()
+        category = game._category_for_round(rnd)
+        question = {
+            "id": "q_built", "prompt": f"A {category} question?",
+            "canonical_answer": "answer", "acceptable_answers": ["answer"],
+            "category": category,
+        }
+        game.next_question = question
+        game._register_custom_question(category, question)
+
+    game.start_prefetch = _supply
 
     agent = LilyAgent.__new__(LilyAgent)
     agent._game = game

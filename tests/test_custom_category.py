@@ -10,10 +10,22 @@ no path for a table-named subject to reach it.
 This suite pins the restored path deterministically: lily_set_category
 routes the requested topic into _category_for_round (the exact seam
 _prefetch_inner reads before calling the generator), invalidates the
-stale prefetch, never denies, and keeps the adult deck's identity
-firewall intact. The live proof that the generator honors an arbitrary
-topic (a real Gemini "Game of Thrones" round) is attached to the WO
-report — it needs a funded GOOGLE_API_KEY and does not run in CI.
+stale prefetch, never denies a topic it can build, and keeps the adult
+deck's identity firewall intact. The live proof that the generator honors
+an arbitrary topic (a real Gemini "Game of Thrones" round) is attached to
+the WO report — it needs a funded GOOGLE_API_KEY and does not run in CI.
+
+AMENDED BY WO-LILY-HOTFIX-006 N2. This suite originally asserted that the
+tool sets the override and answers IMMEDIATELY ("never denies"), which is
+exactly the shape session lily-16A9AE failed in: the confirmation was a
+statement about intent, the supply path underneath served the generic
+deck, and six non-Cape-Cod questions went out under a Cape Cod banner.
+The tool now BUILDS before it answers, so the fixtures below give the
+harness a supply stub that actually commits a question for the topic —
+the same seam, exercised under the contract that a custom round is a
+claim about the registration ledger. The "never denies" rule survives
+where it was true (a topic she CAN build) and is replaced by an honest
+refusal where it never was (see tests/test_hotfix006_category.py).
 """
 
 import asyncio
@@ -46,9 +58,28 @@ def _make_game(question_number: int = 0, mode: str = "general") -> LilyGame:
     game.game_started = True
     game.game_over = False
     game.prefetch_calls = 0
-    game.start_prefetch = lambda: setattr(
-        game, "prefetch_calls", game.prefetch_calls + 1
-    )
+    game._custom_round_registered = {}
+
+    def _supply():
+        """Stand-in for _prefetch_inner's commit tail (N2): a draw lands a
+        question for whatever category the round currently points at, and
+        registers it. Modelling the COMMIT is the point — a stub that only
+        counted calls let the tool confirm a round nothing had built, which
+        is the defect this contract exists to make impossible."""
+        game.prefetch_calls += 1
+        rnd = game._round_for_next_question()
+        category = game._category_for_round(rnd)
+        question = {
+            "id": f"q_built_{game.prefetch_calls}",
+            "prompt": f"A {category} question?",
+            "canonical_answer": "answer",
+            "acceptable_answers": ["answer"],
+            "category": category,
+        }
+        game.next_question = question
+        game._register_custom_question(category, question)
+
+    game.start_prefetch = _supply
     return game
 
 
@@ -80,12 +111,15 @@ def test_requested_topic_reaches_the_generator_seam():
 def test_stale_prefetch_is_dropped_and_reissued():
     game = _make_game(question_number=0)
     _call_set_category(game, "Japan")
-    # The question drawn on the old category is discarded; a fresh draw
-    # under the new topic is kicked off.
-    assert game.next_question is None
+    # The question drawn on the old category is discarded and exactly one
+    # fresh draw is issued under the new topic.
     assert game.prefetch_calls == 1
-    # And the table hears an honest "building your round" vamp, not silence.
-    assert any("Japan" in note for note in game.sk.status_notes)
+    assert game.next_question["id"] != "q_old"
+    assert game.next_question["category"] == "Japan"
+    # N2: the "not built yet" note is transient scaffolding — once the round
+    # IS built it must not linger, or the state block keeps telling her a
+    # built round is still coming.
+    assert not any("BUILDING" in note for note in game.sk.status_notes)
 
 
 def test_topic_is_whitespace_normalized_and_bounded():
@@ -125,13 +159,20 @@ def test_adult_mode_redirects_without_denying_or_crossing_the_firewall():
     assert "Game of Thrones" in msg
 
 
-def test_before_game_start_sets_override_without_prefetching():
+def test_before_game_start_the_round_is_still_really_built():
+    """AMENDED BY N2. This used to assert the tool sets the override and
+    prefetches NOTHING before the game starts — which meant a lobby request
+    got a confirmation with no round behind it, the same fiction as
+    lily-16A9AE with a longer fuse. The build runs whenever it is asked for;
+    what waits for game start is ARMING, not building."""
     game = _make_game(question_number=0)
     game.game_started = False
     _call_set_category(game, "Ancient Rome")
     assert game._category_override[1] == "Ancient Rome"
-    # No live supply line before the game engine is running.
-    assert game.prefetch_calls == 0
+    assert game.prefetch_calls == 1
+    assert game.next_question["category"] == "Ancient Rome"
+    # Built, not served: nothing arms while the engine is still in the lobby.
+    assert game.armed_question is None
 
 
 def test_cancelled_old_category_draw_cannot_commit_after_switch():

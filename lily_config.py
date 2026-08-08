@@ -468,6 +468,21 @@ def steal_window_seconds() -> float:
     return _get_float("LILY_STEAL_WINDOW_SECONDS", 5.0)
 
 
+def late_answer_grace_seconds() -> float:
+    """WO-LILY-HOTFIX-006 N9: the STATED grace margin on the answer
+    window. Speech spoken up to this many seconds past the deadline still
+    counts — "just a split second late" is a defined outcome, not a coin
+    flip against the expiry task's scheduling.
+
+    Live evidence, 2026-08-08 21:10:13: Rami said "Okay. It's Jupiter."
+    and Lily replied "Jupiter was spot on, Rami, but just a split second
+    late!" — while the ledger recorded a DIFFERENT utterance ("Go.") as
+    his answer, marked incorrect. Beyond this margin the miss is announced
+    with its reason and audited as cause="late_answer"; what may never
+    happen again is a correct answer disappearing silently."""
+    return _get_float("LILY_LATE_ANSWER_GRACE_SECONDS", 1.5)
+
+
 def hold_timeout_seconds() -> float:
     """PATCH-002 A4: how long the hold state (a decline/wait/'take your
     time') binds every dispatch lane before it lifts on its own. Generous
@@ -634,6 +649,25 @@ def supply_fallback_seconds() -> float:
     fires anyway. The 583a0f16 session sat starved for five minutes filled
     with vamping and never fell back."""
     return _get_float("LILY_SUPPLY_FALLBACK_SECONDS", 30.0)
+
+
+def custom_round_build_seconds() -> float:
+    """How long lily_set_category may block while the requested round is
+    ACTUALLY built (WO-LILY-HOTFIX-006 N2).
+
+    The live session lily-16A9AE is why this wait exists at all. The tool
+    used to return "I'm generating those questions now" the instant it was
+    called, so the confirmation was produced from the operator's own words
+    and nothing else; underneath, the supply path served the generic deck.
+    A confirmation that is a claim about the ledger has to WAIT for the
+    ledger, so the build is awaited and only its result can speak.
+
+    The wait is the price of the honesty, so it is bounded: past this
+    budget the build is abandoned, the topic override rolls back, and she
+    refuses plainly. One generate+verify pair on the reasoning node runs
+    well inside 40s at p95 (PREFETCH_TIMEOUT_SECONDS is 30s per leg), and a
+    dead provider therefore costs one bounded pause, never the table."""
+    return _get_float("LILY_CUSTOM_ROUND_BUILD_SECONDS", 40.0)
 
 
 def participant_metadata_wait_seconds() -> float:

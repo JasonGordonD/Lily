@@ -87,6 +87,15 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_INTAKE_SETTLE_SECONDS",
     "LILY_MEMORY_MIN_QUESTIONS",
     "LILY_RELAXED_WINDOW_MULTIPLIER",
+    # HOTFIX-006 N9 late-answer grace margin — ships on its in-code
+    # default (1.5s); tune via deploy.yml `vars.` if a room needs it.
+    "LILY_LATE_ANSWER_GRACE_SECONDS",
+    # HOTFIX-006 N2 custom-round build budget — how long lily_set_category
+    # may block while the requested round is actually built before it
+    # refuses. Ships on its in-code default (40s); raise it via deploy.yml
+    # `vars.` only if a slower reasoning node starts timing out honest
+    # builds.
+    "LILY_CUSTOM_ROUND_BUILD_SECONDS",
     "LILY_SUPPLY_FALLBACK_SECONDS",
     "LILY_UNDELIVERED_RECONCILE_SECONDS",
     # PATCH-002 A4 solo-vamping hold tunables — ship on in-code defaults.

@@ -780,16 +780,163 @@ LILY_BACKCHANNELS: frozenset = frozenset({
     "come on", "wait", "what", "really", "nice", "cool", "haha", "lol",
 })
 
+# ---------------------------------------------------------------------------
+# Meta-speech (WO-LILY-HOTFIX-006 N4) — the open window admits ANSWER-SHAPED
+# utterances only.
+#
+# Seven confirmed production rows, 2026-08-08, every one meta-speech about
+# the game entered into lily_answers as an answer attempt:
+#
+#   "Sorry. We're talking about Cape Cod, Massachusetts. The peninsula."
+#       -> kb_14, incorrect                        (a topic CLARIFICATION)
+#   "But what does that mean to do with Cape Cod?"
+#       -> kb_176, incorrect                       (a QUESTION to the host)
+#   "Um. Why are we. Why are we in Mumbai or Delhi? Uh. And why are we
+#    talking about that?"  -> kb_128, CORRECT, 1 POINT AWARDED. A player
+#                             scored for COMPLAINING ABOUT THE TOPIC.
+#   "Oh. Why did you point at me? I wasn't even listening..."  -> q_1052
+#   "Like, can we just put it here? ..."                       -> q_4819
+#   "Use me. The person. And now you telling her my answer."   -> q_8294
+#   "She's getting confused. Like she jumped from a question to question."
+#                                                              -> q_8291
+#
+# A player also said aloud "Sorry, Lily. We're not talking to you. That was
+# side banter" and was scored anyway.
+#
+# The classes below are deliberately narrow and anchored on that evidence.
+# The answer-surface override upstream is what keeps them conservative: a
+# genuine answer murmured inside a complaint-heavy turn matches a surface
+# and returns before any of this runs, so the filter can never eat a real
+# answer that was actually spoken.
+# ---------------------------------------------------------------------------
+
+LILY_META_INTERROGATIVE = "interrogative"
+LILY_META_HOST_ADDRESS = "host_address"
+LILY_META_GAME_TALK = "game_talk"
+
+# A question ASKED rather than answered. A bare noun-phrase question is NOT
+# this ("Saturn?" is an ordinary hedged guess and still an attempt): the
+# interrogative must also carry a wh-word at a clause boundary, or a
+# modal/auxiliary aimed at the host or the table's own conduct. Every live
+# row above that ends in "?" fires here.
+_INTERROGATIVE_WH_RE = re.compile(
+    r"(?:^|[,.;:!?]\s*|\band\s+|\bbut\s+|\bso\s+|\bor\s+|\blike\s+)"
+    r"(?:why|what|how come|how|who|when|where|which)\b"
+)
+# Modal / auxiliary interrogatives about US or YOU — "can we just put it
+# here?", "why did you point at me?", "are you listening?". Never about a
+# third-party fact, which is what an answer-shaped question would be.
+_INTERROGATIVE_ADDRESS_RE = re.compile(
+    r"\b(?:can|could|would|will|should|do|does|did|are|is|was|were|have|has)"
+    r"\s+(?:we|you|i|she|he|they|u)\b"
+)
+
+# Talk ABOUT the host or the run of play — corrections, complaints,
+# procedural remarks. Third-person narration of the host ("she's getting
+# confused", "she jumped from a question to question"), second-person
+# narration of what she is doing ("you telling her my answer"), and the
+# table declaring what IT is doing ("we're talking about Cape Cod").
+#
+# Note what is deliberately NOT here: any bare mention of "answer",
+# "question" or "point". "The answer is Provincetown" is a hedged wrong
+# GUESS and must keep auditing as an attempt — _FILLER_PREFIXES already
+# treats "the answer is" as an answer form.
+_GAME_TALK_RE = re.compile(
+    # The host, narrated in the third person. The PREDICATE is what makes
+    # this host-conduct talk rather than a fact about a third party — "it's
+    # going to be Saturn" is a hedged guess and must stay adjudicable, so
+    # generic verbs (got / going / talking) are deliberately absent.
+    r"\b(?:she|he)\s*(?:'s|s| is| was| keeps| kept| just)?\s*"
+    r"(?:getting\s+confus\w+|confus\w+|jumped|jumping|skipping|skipped|"
+    r"asking|asked)\b"
+    # the host, narrated in the second person
+    r"|\byou(?:'re|r| are)?\s+"
+    r"(?:telling|told|saying|said|asking|asked|giving|gave|reading|read|"
+    r"pointing|point|skipping|skipped|confusing|repeating)\b"
+    # the table declaring the floor / the topic (the clarification class)
+    r"|\bwe(?:'re| are| were)\s+"
+    r"(?:talking|discussing|arguing|having|not\s+talking|in\s+the\s+middle)\b"
+    # explicitly disowned speech
+    r"|\bside\s+(?:banter|conversation|chat)\b"
+    r"|\bignore\s+(?:that|it|me|us)\b"
+    r"|\bdon'?t\s+count\s+(?:that|it)\b"
+    r"|\bnot\s+(?:my|an)\s+answer\b"
+    r"|\bwasn'?t\s+(?:even\s+)?(?:listening|answering|talking)\b"
+    # procedural narration of the run of play itself
+    r"|\bfrom\s+(?:a\s+)?questions?\s+to\s+(?:a\s+)?questions?\b"
+)
+
+
+def _meta_normalize(text: str) -> str:
+    """Lowercased, diarization-tag-stripped text with punctuation KEPT —
+    the interrogative test needs the question mark and the clause
+    boundaries that lily_normalize_answer throws away."""
+    stripped = re.sub(r"^\s*\[S\d+\]\s*", "", text or "").strip().lower()
+    return re.sub(r"\s+", " ", stripped)
+
+
+def lily_meta_speech_utterance(text: str) -> Optional[str]:
+    """Return the meta-speech class of an utterance, or None when it is not
+    meta-speech (WO-LILY-HOTFIX-006 N4).
+
+    Classes: LILY_META_HOST_ADDRESS (spoken AT Lily — FL-1's own name
+    evidence and floor-hold detectors decide this), LILY_META_INTERROGATIVE
+    (a question asked, not an answer given), LILY_META_GAME_TALK
+    (corrections, complaints, procedural remarks about the run of play).
+
+    Pure and deterministic. This is the conservative answer-shape floor the
+    WO requires wherever FL-1's fused classification is unavailable: an
+    utterance that is interrogative, or addressed to Lily, is not an
+    answer. Callers apply the answer-surface override FIRST."""
+    normalized = _meta_normalize(text)
+    if not normalized:
+        return None
+
+    # -- addressed to Lily (FL-1 machinery, reused verbatim) --------------
+    # Imported lazily so this module stays importable in the offline pure
+    # harnesses that predate FL-1; the classifier is stdlib-only, so this
+    # never fails in practice.
+    try:
+        import lily_addressee_classifier as _fl1
+
+        if _fl1.lily_floor_hold(normalized):
+            # "Sorry, Lily. We're not talking to you." — the table saying
+            # in plain words that this is not for her. It was scored.
+            return LILY_META_HOST_ADDRESS
+        if _fl1.lily_name_evidence(normalized) != _fl1.NAME_NONE:
+            # Any use of her name — vocative, mention or referential. A
+            # player naming the host is talking TO or ABOUT her, not
+            # answering a trivia question. (An answer that happens to BE
+            # "Lily" matched its surface upstream and never reaches here.)
+            return LILY_META_HOST_ADDRESS
+    except Exception:  # pragma: no cover - defensive, FL-1 is stdlib-only
+        pass
+
+    # -- a question asked, not an answer given ---------------------------
+    if "?" in normalized and (
+        _INTERROGATIVE_WH_RE.search(normalized)
+        or _INTERROGATIVE_ADDRESS_RE.search(normalized)
+    ):
+        return LILY_META_INTERROGATIVE
+
+    # -- corrections / complaints / procedural remarks -------------------
+    if _GAME_TALK_RE.search(normalized):
+        return LILY_META_GAME_TALK
+    return None
+
 
 def lily_non_answer_utterance(
     text: str, question: Optional[dict], roster_names: Optional[list] = None
 ) -> Optional[str]:
-    """Return the reason a final is NOT an answer attempt ("backchannel"
-    or "bare_name"), or None when it is answer-shaped and must be judged.
+    """Return the reason a final is NOT an answer attempt ("backchannel",
+    "bare_name", or one of the LILY_META_* meta-speech classes), or None
+    when it is answer-shaped and must be judged.
 
     Answer-surface match always wins: a final matching the canonical
     answer, an acceptable variant, an MC choice, or an MC letter is an
-    answer no matter what else it looks like."""
+    answer no matter what else it looks like. That override is why N4's
+    meta-speech classes are safe — "Why are we even talking about this?
+    Chatham, I guess. Ridiculous." carries the answer and still scores."""
     norm = lily_normalize_answer(text or "")
     if not norm:
         return "empty"
@@ -812,4 +959,6 @@ def lily_non_answer_utterance(
     for name in roster_names or []:
         if norm == lily_normalize_answer(str(name)):
             return "bare_name"
-    return None
+    # N4: meta-speech LAST, so every answer-surface and roster escape has
+    # already had its say. The seven live rows land here.
+    return lily_meta_speech_utterance(text)
