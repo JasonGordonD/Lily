@@ -447,12 +447,100 @@ _SUPABASE = None
 # ---------------------------------------------------------------------------
 
 
+def lily_preflight() -> dict:
+    """What this host can actually do, checked BEFORE anything is spent.
+
+    A seeding run needs four things and fails differently for each missing
+    one, so guessing from a traceback is a poor use of an operator's
+    evening. In particular a missing XAI_API_KEY does not fail loudly at
+    import — it surfaces as the first adult generation raising 'adult image
+    provider unconfigured', which the job correctly treats as
+    generation-unavailable and halts on. That is the right behaviour and a
+    terrible first experience, so it is reported up front instead."""
+    checks = {
+        "supabase": bool(
+            lily_config.supabase_url() and lily_config.supabase_service_role_key()
+        ),
+        "google": bool(lily_config.google_api_key_present()),
+        "xai": bool(lily_config.xai_api_key()),
+        "exa": bool(lily_config.exa_api_key()),
+    }
+    checks["can_seed_general"] = checks["supabase"] and checks["google"]
+    # Adult partitions render on Grok AND are authored on Grok; the
+    # classifier is Gemini either way, so both keys are required.
+    checks["can_seed_adult"] = (
+        checks["supabase"] and checks["xai"] and checks["google"]
+    )
+    return checks
+
+
+def lily_format_preflight(checks: dict) -> str:
+    def mark(ok: bool) -> str:
+        return "OK     " if ok else "MISSING"
+
+    lines = [
+        "",
+        "PICTURE ARSENAL — preflight",
+        "-" * 52,
+        f"  [{mark(checks['supabase'])}] SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY",
+        f"  [{mark(checks['google'])}] GOOGLE_API_KEY   (general images + the content gate)",
+        f"  [{mark(checks['xai'])}] XAI_API_KEY      (adult images + adult authoring)",
+        f"  [{mark(checks['exa'])}] EXA_API_KEY      (optional — real_or_imagined only)",
+        "",
+        f"  general partition:  {'ready to seed' if checks['can_seed_general'] else 'CANNOT SEED'}",
+        f"  adult partitions:   {'ready to seed' if checks['can_seed_adult'] else 'CANNOT SEED'}",
+        "-" * 52,
+    ]
+    return "\n".join(lines)
+
+
 async def _amain(args) -> int:
     global _SUPABASE
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
+
+    checks = lily_preflight()
+    if not checks["supabase"]:
+        print(lily_format_preflight(checks))
+        print(
+            "\nSUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are required for every\n"
+            "mode, including --status. Nothing was attempted."
+        )
+        return 2
     _SUPABASE = _build_supabase()
+
+    # A real seeding run announces what it can and cannot do before it
+    # claims a partition or bills a single image.
+    if not (args.status or args.review or args.promote or args.reject):
+        print(lily_format_preflight(checks))
+        wanted = (
+            list(lily_arsenal.PARTITIONS)
+            if args.partition in (None, "all")
+            else [args.partition]
+        )
+        blocked = [
+            p for p in wanted
+            if (p in lily_arsenal.ADULT_PARTITIONS and not checks["can_seed_adult"])
+            or (p == "general" and not checks["can_seed_general"])
+        ]
+        if blocked and not args.dry_run:
+            print(
+                f"\nCannot seed {', '.join(blocked)} — the keys above are "
+                "missing. Nothing was attempted for them, nothing was billed."
+            )
+            if len(blocked) == len(wanted):
+                print("There is nothing this host can seed. Set the keys and "
+                      "re-run.")
+                return 2
+            # Seed what we CAN rather than refusing wholesale: a stocked
+            # general shelf is worth having even on a night the adult keys
+            # are absent, and the job is idempotent so the rest tops up
+            # later without duplicating any of this.
+            args.partition_filter = [p for p in wanted if p not in blocked]
+            print(
+                f"Proceeding with: {', '.join(args.partition_filter)}"
+            )
 
     if args.status:
         health = await lily_arsenal.lily_arsenal_health(_SUPABASE)
@@ -494,7 +582,7 @@ async def _amain(args) -> int:
         print("rejected" if ok else "reject failed")
         return 0 if ok else 1
 
-    partitions = (
+    partitions = getattr(args, "partition_filter", None) or (
         list(lily_arsenal.PARTITIONS)
         if args.partition in (None, "all")
         else [args.partition]
