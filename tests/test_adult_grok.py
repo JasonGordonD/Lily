@@ -49,23 +49,48 @@ def test_adult_model_pins_and_coercions(monkeypatch):
                 "LILY_ADULT_REASONING_MODEL", "LILY_ADULT_REASONING_EFFORT"):
         monkeypatch.delenv(var, raising=False)
     assert lily_config.adult_vocal_model() == "grok-4.5"
-    # HOTFIX-005 X13: front-facing vocal effort lowered high -> medium
-    # (latency-critical lane; high cost ~5s TTFT).
-    assert lily_config.adult_vocal_effort() == "medium"
+    # X13 lowered the front-facing vocal lane high -> medium; the
+    # 2026-08-08 directive drops it again medium -> LOW after a starved
+    # slot lost a direct address past the 3.0s budget. Thinking depth is
+    # the cheapest thing to give back under contention.
+    assert lily_config.adult_vocal_effort() == "low"
     # HOTFIX-005 X2: grok-4.2 was truncated/nonexistent (400 dead-air) ->
-    # grok-4.20-multi-agent. X13: routine question generation defaults to
-    # low (4-agent), not high (16-agent).
+    # grok-4.20-multi-agent. The 2026-08-08 directive raises question
+    # generation low -> medium: both are 4-agent on the vendor's mapping,
+    # so this buys quality inside the same agent budget and the 4x
+    # fan-out cliff at `high` is untouched.
     assert lily_config.adult_reasoning_model() == "grok-4.20-multi-agent"
-    assert lily_config.adult_reasoning_effort() == "low"
+    assert lily_config.adult_reasoning_effort() == "medium"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "low")
     assert lily_config.adult_vocal_effort() == "low"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "medium")
     assert lily_config.adult_vocal_effort() == "medium"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "garbage")
-    assert lily_config.adult_vocal_effort() == "medium"
+    assert lily_config.adult_vocal_effort() == "low"
     # "off" disables sending the parameter (models that reject it).
     monkeypatch.setenv("LILY_ADULT_REASONING_EFFORT", "off")
     assert lily_config.adult_reasoning_effort() is None
+
+
+def test_adult_reasoning_effort_is_injectable_per_call(monkeypatch):
+    """The lanes have different economics: a live prefetch a player waits
+    on should not be forced to share one global tier with an
+    out-of-session seeding run that nobody is waiting on."""
+    monkeypatch.delenv("LILY_ADULT_REASONING_EFFORT", raising=False)
+    assert lily_config.adult_reasoning_effort() == "medium"
+    # A caller pins its own tier.
+    assert lily_config.adult_reasoning_effort("high") == "high"
+    assert lily_config.adult_reasoning_effort("low") == "low"
+    # "off" injects as "send no parameter at all".
+    assert lily_config.adult_reasoning_effort("off") is None
+    # An unrecognised injection falls back to the CONFIGURED value rather
+    # than silently substituting a tier the operator never chose — and
+    # never raises, because a bad string must not take a lane down.
+    assert lily_config.adult_reasoning_effort("turbo") == "medium"
+    monkeypatch.setenv("LILY_ADULT_REASONING_EFFORT", "low")
+    assert lily_config.adult_reasoning_effort("turbo") == "low"
+    # Injection still beats the environment.
+    assert lily_config.adult_reasoning_effort("high") == "high"
 
 
 # -- the vocal swap ------------------------------------------------------------

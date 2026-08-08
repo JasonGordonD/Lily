@@ -482,6 +482,7 @@ class LilyReasoning:
         system_instruction: Optional[str] = None,
         max_tokens: int,
         timeout: float = PREFETCH_TIMEOUT_SECONDS,
+        effort: Optional[str] = None,
     ) -> str:
         """ADULT-deck generation transport (owner directive 2026-08-06):
         xAI Grok chat completions in JSON mode. Gemini's non-overridable
@@ -490,14 +491,20 @@ class LilyReasoning:
         the fleet's established adult-content provider (vision + adult
         imagegen already use XAI_API_KEY). Same honest-failure contract
         as _generate: raises on any failure; the prefetch wrapper turns
-        that into a status note + bank fallback, never silence."""
+        that into a status note + bank fallback, never silence.
+
+        `effort` is INJECTED per call (operator directive 2026-08-08):
+        the lanes have different economics, so a live prefetch a player is
+        waiting on and an out-of-session seeding run should not be forced
+        to share one global tier. None means "use the configured
+        default"."""
         key = lily_config.xai_api_key()
         if not key:
             raise RuntimeError(
                 "XAI_API_KEY missing — adult-deck generation unavailable"
             )
         model = lily_config.adult_reasoning_model()
-        effort = lily_config.adult_reasoning_effort()
+        effort = lily_config.adult_reasoning_effort(effort)
         # xAI's multi-agent tier (grok-*-multi-agent) does NOT support the
         # Chat Completions endpoint (HTTP 400 "Multi Agent requests are not
         # allowed on chat completions") and rejects `max_tokens`; it speaks

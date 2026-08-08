@@ -222,11 +222,17 @@ def adult_vocal_effort() -> str:
     latency-critical — a player waits through every token — and running it
     at "high" cost ~5s to first token (session lily-FFDEAE: llm_ttft p50
     4,999ms, p95 8,254ms; "I've been a half-beat behind you tonight").
-    Default lowered to "medium" for snappier turns while holding character
-    quality; set LILY_ADULT_VOCAL_EFFORT=low for maximum speed, or =high to
-    restore deep banter. Anything else coerces to medium."""
-    effort = (_get("LILY_ADULT_VOCAL_EFFORT", "medium") or "").lower()
-    return effort if effort in ("low", "medium", "high") else "medium"
+
+    Operator directive 2026-08-08: dropped again, medium -> LOW. Session
+    lily-CE6FF4 on a starved slot showed the vocal lane losing races it
+    cannot afford to lose (a direct address unanswered past the 3.0s
+    budget at 12:52:58, VAD 33s behind realtime alongside it). Thinking
+    depth is the cheapest thing to give back when the slot is contended —
+    character lives in the prompt and the voice, not in the extra tokens.
+    Set LILY_ADULT_VOCAL_EFFORT=medium or =high to restore depth once the
+    slot has headroom. Anything else coerces to low."""
+    effort = (_get("LILY_ADULT_VOCAL_EFFORT", "low") or "").lower()
+    return effort if effort in ("low", "medium", "high") else "low"
 
 
 def adult_reasoning_model() -> str:
@@ -241,25 +247,45 @@ def adult_reasoning_model() -> str:
     return _get("LILY_ADULT_REASONING_MODEL", "grok-4.20-multi-agent")
 
 
-def adult_reasoning_effort() -> Optional[str]:
+def adult_reasoning_effort(override: Optional[str] = None) -> Optional[str]:
     """Reasoning effort for adult question generation. On
     grok-4.20-multi-agent this is an AGENT-COUNT dial, not thinking depth:
     low/medium = 4 agents, high/xhigh = 16 agents (operator docs) — a 4x
     fan-out on latency AND spend.
 
-    HOTFIX-005 X13: routine question generation is a TCP-vs-UDP-class task
-    — one trivia line — so the default is `low` (4-agent). 16 agents to
-    write one question is disproportionate; reserve `high` for tool-enabled
-    current-events / corpus building where the arsenal absorbs the wait.
+    Operator directive 2026-08-08: default raised low -> MEDIUM. Note what
+    this does and does not buy: per the vendor's own mapping low and medium
+    are BOTH 4-agent, so this is not a fan-out change and costs neither
+    latency nor spend — the 4x cliff is at `high`. It is a quality dial
+    inside the same agent budget, which is exactly why it is safe to raise
+    on the same day the vocal lane is being dropped to `low`.
+
     `xhigh` is ACCEPTED but its exact agent-count/cost mapping is
     UNCONFIRMED against the vendor (X13 open item) — treat it as ≥16-agent
-    and do not enable it until measured. Override per lane via
-    LILY_ADULT_REASONING_EFFORT. "off" disables the parameter entirely (for
-    ids that reject it)."""
-    effort = (_get("LILY_ADULT_REASONING_EFFORT", "low") or "").lower()
+    and do not enable it until measured.
+
+    INJECTABLE (operator directive 2026-08-08): `override` lets a CALLER
+    pin the effort for one call instead of every lane reading the same
+    global. That matters because the lanes have genuinely different
+    economics — a live prefetch a player is waiting on wants the cheap
+    tier, while out-of-session corpus building (the arsenal seeding job)
+    can absorb `high` because nobody is waiting on it. An unrecognised
+    override falls through to the configured default rather than raising:
+    a bad string must never take a question lane down. "off" (from either
+    source) disables the parameter entirely, for model ids that reject
+    it."""
+    raw = (override if override is not None else
+           _get("LILY_ADULT_REASONING_EFFORT", "medium")) or ""
+    effort = raw.strip().lower()
     if effort in ("off", "none", "0"):
         return None
-    return effort if effort in ("low", "medium", "high", "xhigh") else "low"
+    if effort in ("low", "medium", "high", "xhigh"):
+        return effort
+    if override is not None:
+        # Unrecognised injection — fall back to the configured value rather
+        # than silently substituting a tier the operator never chose.
+        return adult_reasoning_effort()
+    return "medium"
 
 
 def adult_imagegen_model() -> str:

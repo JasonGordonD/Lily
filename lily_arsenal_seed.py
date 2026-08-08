@@ -510,13 +510,30 @@ def lily_preflight() -> dict:
     provider unconfigured', which the job correctly treats as
     generation-unavailable and halts on. That is the right behaviour and a
     terrible first experience, so it is reported up front instead."""
+    def _real(value) -> bool:
+        """A credential that is present but obviously a PLACEHOLDER is not
+        a credential. Copy-pasting a documented example leaves things like
+        `SUPABASE_SERVICE_ROLE_KEY='...'` in the environment, which passes
+        a bare truthiness check and then fails at the provider as a bare
+        401 — the least informative possible moment to find out. Catch it
+        here instead, where the message can say which key."""
+        text = str(value or "").strip()
+        if len(text) < 12:
+            return False
+        return not (
+            set(text) <= set(".") or text.lower() in {
+                "changeme", "your-key-here", "xxx", "todo", "placeholder",
+            } or text.startswith("<") and text.endswith(">")
+        )
+
     checks = {
         "supabase": bool(
-            lily_config.supabase_url() and lily_config.supabase_service_role_key()
+            _real(lily_config.supabase_url())
+            and _real(lily_config.supabase_service_role_key())
         ),
-        "google": bool(lily_config.google_api_key_present()),
-        "xai": bool(lily_config.xai_api_key()),
-        "exa": bool(lily_config.exa_api_key()),
+        "google": _real(lily_config.google_api_key()),
+        "xai": _real(lily_config.xai_api_key()),
+        "exa": _real(lily_config.exa_api_key()),
     }
     checks["can_seed_general"] = checks["supabase"] and checks["google"]
     # Adult partitions render on Grok AND are authored on Grok; the

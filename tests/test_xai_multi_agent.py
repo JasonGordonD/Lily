@@ -112,7 +112,11 @@ def _run(coro):
 def _call(monkeypatch, model):
     monkeypatch.setattr(lily_config, "xai_api_key", lambda: "k")
     monkeypatch.setattr(lily_config, "adult_reasoning_model", lambda: model)
-    monkeypatch.setattr(lily_config, "adult_reasoning_effort", lambda: "high")
+    # Signature gained an optional per-call `override` (2026-08-08
+    # injectable-effort directive), so the double takes it too.
+    monkeypatch.setattr(
+        lily_config, "adult_reasoning_effort", lambda override=None: "high"
+    )
     monkeypatch.setattr(R.aiohttp, "ClientSession", lambda *a, **k: _FakeSession())
     r = R.LilyReasoning.__new__(R.LilyReasoning)
     text = _run(r._generate_grok_json(
