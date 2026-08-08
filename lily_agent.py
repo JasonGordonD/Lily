@@ -688,6 +688,12 @@ class LilyGame:
         # LILY_GREETING_MEMORY_BUDGET_SECONDS so a returning table is
         # recognized in the FIRST utterance instead of one turn late.
         self.memory_settled: asyncio.Event = asyncio.Event()
+        # HOTFIX-006 N1: has the voice-identity probe FINISHED (matched or
+        # definitively not)? Distinct from memory_settled, which only says
+        # the greeting's budget elapsed. A probe still running means the
+        # absence of memory is UNKNOWN, not established — and an unknown
+        # may not be spoken as a fact.
+        self._voice_identity_resolved: bool = False
         # GROUP PREFERENCES (group prefs WO): the OPAQUE per-group prefs
         # dict (lily_group_prefs.prefs, migration 013), loaded at session
         # start for a returning group and persisted whole on every
@@ -2624,6 +2630,33 @@ class LilyGame:
                 "resolves later", budget,
             )
 
+    def identity_probe_outstanding(self) -> bool:
+        """Is a voice-identity probe still running?
+
+        HOTFIX-006 N1. This is the difference between "I have no memory of
+        you" and "I do not know yet whether I have memory of you", and only
+        the second was ever true at greeting time. Live 2026-08-08, three
+        sessions in a row: Lily said "my memory bank is sitting on a
+        completely clean slate for you all" and "tonight is actually a
+        clean slate" — and roughly two and a half minutes later the matcher
+        landed [RETURNING TABLE] with TWELVE games on file. The matcher was
+        never wrong. It was simply not waited for, and its absence was
+        narrated as a fact.
+
+        While this is True, no line may assert the absence of memory —
+        not "clean slate", not "blank card", not "my card doesn't have
+        you". Saying nothing about memory is always available and always
+        honest."""
+        if getattr(self, "_voice_identity_resolved", False):
+            return False
+        if not lily_config.voice_identity_enabled():
+            return False
+        if getattr(self, "supabase", None) is None:
+            return False
+        # A device candidate already staged means recognition is in flight
+        # by another route; either way the question is open, not closed.
+        return True
+
     def greeting_instructions(self) -> str:
         """The fresh-room landing line (single source of truth — both the
         on_enter and entrypoint trigger paths dispatch THIS text under the
@@ -2711,6 +2744,26 @@ class LilyGame:
                 "tonight. Never claim you remember them, and never "
                 "announce it's their first time — let them tell you."
             )
+            if self.identity_probe_outstanding():
+                # HOTFIX-006 N1: the probe has NOT come back. "My card
+                # doesn't have you" is a claim about memory, and right now
+                # its truth is unknown. Override the gap-naming beat: say
+                # nothing about memory at all.
+                parts.append(
+                    " OVERRIDE — MEMORY IS UNRESOLVED, NOT ABSENT. Your "
+                    "recognition check has not finished. You therefore do "
+                    "NOT know whether you have played with this table "
+                    "before, and you must not speak as if you do. Say "
+                    "NOTHING about your memory, your card, your ledger or "
+                    "a clean slate — no 'blank slate', no 'clean slate', "
+                    "no 'my card doesn't have you', not even to concede a "
+                    "gap. If they say they have played before, take it at "
+                    "face value warmly and move on ('good to have you "
+                    "back') without characterising what you do or do not "
+                    "hold. Recognition may land within the next minute and "
+                    "you will get a beat for it; a denial spoken now is a "
+                    "denial you will have to retract."
+                )
         parts.append(
             " Bind names as people speak. When the table feels ready — "
             "the first genuine group laugh, or a clear 'start' — call "
@@ -5338,7 +5391,9 @@ class LilyGame:
                 "do NOT say you've never played together, do NOT tell them "
                 "their voice isn't on file as if that settles it, do NOT "
                 "argue with their memory of you. The honest truth you MAY "
-                "give, ONCE and lightly: a blank card is a gap in YOUR records "
+                "give ONLY IF your recognition check has already come back "
+                "(if it has not, say nothing about memory at all — see "
+                "below): a blank card is a gap in YOUR records "
                 "and you do not know what caused it. Do NOT name a cause on "
                 "their end — not a new device, not a cleared browser. You "
                 "cannot see which link dropped, and on 2026-08-08 that guess "
@@ -5347,7 +5402,13 @@ class LilyGame:
                 "setup was at fault. Never proof they're "
                 "wrong. Believe them, name the gap once if you haven't, then "
                 "move forward warmly. If you already named it this session, "
-                "don't repeat it — just don't deny.]"
+                "don't repeat it — just don't deny. AND IF THE "
+                "RECOGNITION CHECK IS STILL OUT: you do not know whether "
+                "you know them. Say nothing about your memory, your card "
+                "or a clean slate — not even to concede a gap. Take their "
+                "word warmly and carry on; recognition may land in the "
+                "next minute and a denial spoken now is one you will have "
+                "to retract.]"
             )
             logger.info(
                 "LILY_HONESTY | RETURNER_CLAIM | session=%s player=%s "
@@ -6689,6 +6750,8 @@ class LilyGame:
         if not self._voice_identity_ready() or getattr(
             self, "device_identity_verified", False
         ):
+            # Not going to run at all — nothing is outstanding.
+            self._voice_identity_resolved = True
             return False
         probe = self._voice_identity_audio_probe()
         if probe is None:
@@ -6706,6 +6769,7 @@ class LilyGame:
                 threshold=lily_config.voice_identity_match_threshold(),
                 margin=lily_config.voice_identity_match_margin(),
             )
+            self._voice_identity_resolved = True
             if match is None or match["group_id"] == self.group_id:
                 return False
             logger.info(
@@ -6720,6 +6784,7 @@ class LilyGame:
                 return True
             return False
         except Exception as e:
+            self._voice_identity_resolved = True
             logger.warning("LILY_VOICE_ID | MATCH_AT_START_FAILED | %s", e)
             return False
 
