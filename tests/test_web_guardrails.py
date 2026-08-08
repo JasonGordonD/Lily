@@ -24,7 +24,22 @@ import lily_search
 REPO = Path(__file__).resolve().parent.parent
 
 # The reasoning-side modules — the ONLY code allowed to touch web tools.
-LEGAL_SEARCH_IMPORTERS = {"lily_reasoning", "lily_imagegen"}
+#
+# lily_arsenal_seed joins them (WO-LILY-ARSENAL-SEED-001): it sources real,
+# genuinely-dated photographs through Exa for the era_or_origin format. The
+# guardrail's rule is "no web tool on the VOCAL path, ever" — and the
+# seeding job is not merely off the vocal path, it is out-of-session
+# entirely, a standalone CLI an operator runs between game nights with no
+# room, no session and no player waiting. Nothing it fetches reaches Lily
+# except as an already-banked arsenal row, which is the same seam the
+# reasoning node uses.
+#
+# The vocal module's own two tests (above) are the ones that actually
+# enforce the constraint, and they are unchanged: lily_agent still
+# references neither lily_search nor the image stack.
+LEGAL_SEARCH_IMPORTERS = {
+    "lily_reasoning", "lily_imagegen", "lily_arsenal_seed",
+}
 
 
 def _module_source(name: str) -> str:
