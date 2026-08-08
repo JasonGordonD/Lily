@@ -602,6 +602,24 @@ def supply_fallback_seconds() -> float:
     return _get_float("LILY_SUPPLY_FALLBACK_SECONDS", 30.0)
 
 
+def participant_metadata_wait_seconds() -> float:
+    """How long the group-id resolver polls for a participant's
+    `lily_group_id` token metadata before minting a throwaway group.
+
+    This is a PROPAGATION window, not a "will the value change" window —
+    token metadata is fixed at join, but it reaches the agent
+    asynchronously, and a participant object can land in
+    room.remote_participants a beat before its metadata field syncs. On a
+    slow-booting or CPU-contended agent (model loads, frame sinks) that
+    beat stretches, and every session that loses the race is greeted as a
+    stranger with its real history sitting untouched in the database.
+
+    3.0s is the shipped default. Raise it on a deployment that boots slow;
+    the greeting memory budget still bounds how long a cold greeting
+    waits, so this cannot strand a table in silence."""
+    return max(0.5, _get_float("LILY_PARTICIPANT_METADATA_WAIT", 3.0))
+
+
 def group_id_override() -> Optional[str]:
     """Stable group id for voiceprint rematch (v2); defaults to room name."""
     return _get("LILY_GROUP_ID")

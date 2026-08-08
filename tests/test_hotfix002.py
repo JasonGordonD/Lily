@@ -156,9 +156,14 @@ class _FakeCtx:
         self.room = _FakeRoom(participants)
 
 
-def _resolve(ctx, monkeypatch):
+def _resolve(ctx, monkeypatch, wait=0.0):
     monkeypatch.delenv("LILY_GROUP_ID", raising=False)
-    monkeypatch.setattr(lily_agent, "PARTICIPANT_METADATA_WAIT_SECONDS", 0.0)
+    # The resolver reads the wait from config now (it became a knob so a
+    # slow-booting deployment can widen the propagation window).
+    monkeypatch.setattr(
+        lily_agent.lily_config, "participant_metadata_wait_seconds",
+        lambda: wait,
+    )
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(
@@ -271,3 +276,73 @@ def test_near_miss_rewrites_before_nudge_or_playout(caplog):
     assert rewrites
     assert game.session.instructions == []  # caller replaces this first turn
     assert game.sk.answer_window_open is False
+
+
+# -- WO-LILY-ARSENAL-SEED-001 follow-on: the amnesia race ---------------------
+
+
+class _LateMetadataParticipant:
+    """A participant already in the room whose `metadata` field has not yet
+    propagated to the agent. Presence and metadata-readiness are different
+    things: the object lands in room.remote_participants first, and the
+    metadata syncs a beat later."""
+
+    def __init__(self, metadata, ready_on_scan):
+        self._metadata = metadata
+        self._ready_on_scan = ready_on_scan
+        self.scans = 0
+        self.kind = None
+        self.identity = "late-probe"
+
+    @property
+    def metadata(self):
+        self.scans += 1
+        return self._metadata if self.scans > self._ready_on_scan else None
+
+
+def test_present_participant_with_late_metadata_is_waited_for(monkeypatch):
+    """THE amnesia bug. The resolver used to break the moment a human was
+    present without usable metadata, on the reasoning that token metadata
+    is fixed at join so waiting could not help. That confuses the VALUE
+    (fixed) with its PROPAGATION (asynchronous) — and a busy or
+    slow-booting agent loses that race, mints a throwaway group, and greets
+    a returning table as a stranger with its real history sitting in the
+    database untouched. 27 of 68 live sessions went this way."""
+    late = _LateMetadataParticipant(
+        '{"lily_group_id": "grp_0b07f989"}', ready_on_scan=1
+    )
+    ctx = _FakeCtx(participants={"p1": late})
+    group, source = _resolve(ctx, monkeypatch, wait=2.0)
+    assert (group, source) == ("grp_0b07f989", "participant_metadata")
+    assert late.scans > 1, "the resolver must poll, not give up on first sight"
+
+
+def test_a_participant_with_genuinely_no_metadata_still_mints_a_throwaway(
+    caplog, monkeypatch
+):
+    """The wait is bounded: a token that truly carries no group id still
+    falls through to a throwaway rather than hanging the greeting — and it
+    says so at WARNING, because silent amnesia is the defect class."""
+    bare = _FakeParticipant(metadata=None)
+    ctx = _FakeCtx(participants={"p1": bare})
+    with caplog.at_level(logging.WARNING):
+        group, source = _resolve(ctx, monkeypatch, wait=0.0)
+    assert (group, source) == ("lily-TEST99", "room_name")
+    assert any(
+        "THROWAWAY_GROUP_MINTED" in r.message for r in caplog.records
+    )
+    assert any(
+        "no lily_group_id metadata within" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_metadata_already_present_returns_on_the_first_scan(monkeypatch):
+    """Polling must cost nothing in the common case."""
+    ready = _LateMetadataParticipant(
+        '{"lily_group_id": "grp_ready"}', ready_on_scan=0
+    )
+    ctx = _FakeCtx(participants={"p1": ready})
+    group, source = _resolve(ctx, monkeypatch, wait=30.0)
+    assert (group, source) == ("grp_ready", "participant_metadata")
+    assert ready.scans == 1

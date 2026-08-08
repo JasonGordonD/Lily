@@ -9880,25 +9880,51 @@ async def _resolve_initial_group_id(ctx: JobContext, room_name: str) -> tuple[st
             logger.warning("LILY_MEMORY | GROUP_ID | participant scan failed: %s", e)
         return None, non_agents
 
-    deadline = time.time() + PARTICIPANT_METADATA_WAIT_SECONDS
+    wait_seconds = lily_config.participant_metadata_wait_seconds()
+    deadline = time.time() + wait_seconds
+    saw_participant = False
     while True:
         candidate, non_agents = _scan()
         if candidate:
             return candidate, "participant_metadata"
-        if non_agents > 0:
-            # A human is here with no usable metadata — waiting won't help
-            # (token metadata is fixed at join). Late joiners WITH metadata
-            # are handled by the participant_connected upgrade hook.
-            logger.info(
-                "LILY_MEMORY | GROUP_ID | %d participant(s) present, no "
-                "lily_group_id metadata", non_agents,
-            )
-            break
+        saw_participant = saw_participant or non_agents > 0
+        # DO NOT break early just because a human is present without usable
+        # metadata. That was this resolver's amnesia bug: presence and
+        # metadata-readiness are different things. Token metadata is fixed
+        # at join, so its VALUE never changes — but it PROPAGATES to the
+        # agent asynchronously, and a participant object can appear in
+        # room.remote_participants a beat before its `metadata` field
+        # syncs. Breaking on presence turned that beat into a coin flip,
+        # and a busy or slow-booting agent process loses the flip: the
+        # room event loop falls behind, metadata lands late, and the
+        # resolver has already given up and minted a throwaway group.
+        #
+        # The participant_connected upgrade hook does NOT cover this —
+        # it only fires for participants who join AFTER it is registered,
+        # and this participant is already in the room.
+        #
+        # Live evidence: 27 of 68 stored sessions ran under a
+        # room-name-shaped throwaway group, first seen 2026-07-16, on a
+        # deployment whose Silero VAD was measured 33s behind realtime.
+        # Every one of those tables was greeted as a stranger with its
+        # real history sitting in the database untouched.
+        #
+        # Polling the full window costs nothing in the common case: when
+        # metadata is already there the FIRST scan returns it.
         if time.time() >= deadline:
-            logger.info(
-                "LILY_MEMORY | GROUP_ID | no non-agent participant within "
-                "%.1fs of connect", PARTICIPANT_METADATA_WAIT_SECONDS,
-            )
+            if saw_participant:
+                logger.warning(
+                    "LILY_MEMORY | GROUP_ID | participant(s) present but no "
+                    "lily_group_id metadata within %.1fs — the token carried "
+                    "none, or it never propagated. Raise "
+                    "LILY_PARTICIPANT_METADATA_WAIT if this agent boots slow.",
+                    wait_seconds,
+                )
+            else:
+                logger.info(
+                    "LILY_MEMORY | GROUP_ID | no non-agent participant within "
+                    "%.1fs of connect", wait_seconds,
+                )
             break
         await asyncio.sleep(0.25)
 
