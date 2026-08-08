@@ -10092,7 +10092,8 @@ async def _lily_voice_probe_fork(track, game) -> None:
     tested via LilyVoiceProbe."""
     try:
         probe = lily_voice_embedder.LilyVoiceProbe(
-            target_seconds=lily_config.voice_identity_enroll_min_speech_seconds()
+            target_seconds=lily_config.voice_identity_enroll_min_speech_seconds(),
+            match_seconds=lily_config.voice_identity_match_min_speech_seconds(),
         )
         resampler = None
         stream = rtc.AudioStream(track)
@@ -10110,6 +10111,16 @@ async def _lily_voice_probe_fork(track, game) -> None:
                     probe.add_samples(_frame_int16(out))
             else:
                 probe.add_samples(_frame_int16(frame))
+            if probe.match_ready() and not getattr(
+                game, "_voice_identity_attempted", False
+            ):
+                # RECOGNITION at the low bar (~2.5s). Waiting for an
+                # enrollment-grade sample put the match minutes into the
+                # night: live 2026-08-08 it landed correctly at 3m36s,
+                # long after the greeting had called a four-win regular a
+                # blank slate.
+                game._voice_identity_pcm = probe.match_pcm()
+                game.maybe_start_voice_identity_match()
             if probe.ready():
                 game._voice_identity_pcm = probe.pcm()
                 game.maybe_start_voice_identity_match()
@@ -10234,6 +10245,28 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     room_name = ctx.room.name or "unknown"
     _setup_session_log(room_name)
+
+    # --- Voiceprint model: start loading NOW, in a thread ---------------
+    # The ECAPA load is a HuggingFace fetch plus a torch init. It used to
+    # start on the FIRST TRANSCRIPT, which put a cold-container download
+    # directly in front of recognition: live 2026-08-08 the match landed
+    # correctly ("NOW I've got you: reigning champion, four wins") 3m36s
+    # into the session, long after the greeting had called a four-win
+    # regular a blank slate. Kicked here it warms during connect, group
+    # resolution and the lobby, so by the time ~2.5s of speech exists the
+    # model is ready and recognition is a cosine compare, not a download.
+    # Fire-and-forget: failure leaves the feature inert, never blocks boot.
+    if lily_config.voice_identity_enabled():
+        async def _prewarm_embedder() -> None:
+            try:
+                ok = await lily_voice_embedder.lily_warm_voice_embedder()
+                logger.info(
+                    "LILY_VOICE_ID | EMBEDDER_PREWARM | loaded=%s — warmed at "
+                    "session start, off the event loop", ok,
+                )
+            except Exception as e:
+                logger.warning("LILY_VOICE_ID | EMBEDDER_PREWARM_FAILED | %s", e)
+        asyncio.ensure_future(_prewarm_embedder())
 
     # --- Group identity resolution (observable: this line MUST appear
     # every session) ---

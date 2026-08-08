@@ -50,19 +50,38 @@ class LilyVoiceProbe:
     the agent wiring; this is the fully-testable buffer + gate."""
 
     def __init__(self, target_seconds: float = 8.0,
-                 sample_rate: int = ECAPA_SAMPLE_RATE):
+                 sample_rate: int = ECAPA_SAMPLE_RATE,
+                 match_seconds: float = 2.5):
         self._target = max(1, int(target_seconds * sample_rate))
-        # A floor below which an embedding is too noisy to enroll/match.
+        # A floor below which an embedding is too noisy to ENROLL.
         self._floor = max(1, int(0.5 * self._target))
+        # MATCHING is a different job from enrolling and wants a different
+        # bar. Enrollment folds a sample into a stored centroid, so it wants
+        # a long clean take. Recognition only has to clear a cosine
+        # threshold, which ECAPA does on a couple of seconds of speech.
+        # Sharing one 4-second floor meant recognition waited for an
+        # enrollment-grade sample before it could even try — and on a
+        # congested loop that is minutes of wall clock, not seconds. Live
+        # 2026-08-08: the match landed correctly ("NOW I've got you:
+        # reigning champion, four wins") 3m36s into the session, long after
+        # the greeting had already called the player a blank slate.
+        self._match_floor = max(1, int(match_seconds * sample_rate))
         self._buf = collections.deque(maxlen=self._target)
 
     def add_samples(self, samples) -> None:
-        """Append 16 kHz mono int16 samples (any iterable of ints)."""
+        """Append 16 kHz mono int16 samples (any iterable of ints).
+
+        deque.extend, NOT a per-sample Python loop. The old form ran
+        `for s in samples: append(int(s))` — sixteen thousand interpreter
+        iterations per second per participant, on the EVENT LOOP, for audio
+        that is already int16 so the int() was a no-op anyway. The sink
+        feeding the probe was itself congesting the loop it shares with the
+        Silero VAD, which is why recognition was slowest exactly when it
+        most needed to be fast. extend() does the same work in C."""
         if samples is None:
             return
         try:
-            for s in samples:
-                self._buf.append(int(s))
+            self._buf.extend(samples)
         except TypeError:
             return
 
@@ -70,8 +89,21 @@ class LilyVoiceProbe:
         return len(self._buf)
 
     def ready(self) -> bool:
-        """Enough speech accrued for a usable embedding."""
+        """Enough speech accrued to ENROLL a usable centroid."""
         return len(self._buf) >= self._floor
+
+    def match_ready(self) -> bool:
+        """Enough speech accrued to attempt RECOGNITION — a lower bar than
+        enrollment, so a returning voice is placed near the door instead of
+        several minutes into the night."""
+        return len(self._buf) >= self._match_floor
+
+    def match_pcm(self) -> Optional[list]:
+        """Normalized float PCM for a RECOGNITION attempt — same buffer,
+        the lower floor."""
+        if len(self._buf) < self._match_floor:
+            return None
+        return [s / 32768.0 for s in self._buf]
 
     def pcm(self) -> Optional[list]:
         """Normalized float PCM in [-1, 1], or None below the floor. int16
