@@ -5732,6 +5732,7 @@ class LilyGame:
                         {key: hyps} if len(hyps) > 1 else None
                     ),
                 ),
+                adult=(self.sk.mode == "adult"),
             )
             verdict = lily_evaluation.lily_parse_judge_response(raw)
             logger.info(
@@ -6012,7 +6013,8 @@ class LilyGame:
                                 acceptable_answers=acceptable,
                                 hypotheses_by_speaker=hyp_map or None,
                             ),
-                        )
+                adult=(self.sk.mode == "adult"),
+            )
                         verdict = lily_evaluation.lily_parse_judge_response(raw)
                     except Exception as e:
                         logger.error("LILY_JUDGE | call failed: %s", e)

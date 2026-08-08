@@ -211,3 +211,60 @@ def test_grok_transport_requires_key(monkeypatch):
         raise AssertionError("must raise without XAI_API_KEY")
     except RuntimeError as e:
         assert "XAI_API_KEY" in str(e)
+
+
+# -- Tier-2 judge provider routing --------------------------------------------
+
+
+def _judge_probe(monkeypatch, *, adult, has_xai_key=True):
+    """Run judge() with both transports stubbed; report which one fired."""
+    import asyncio
+
+    import lily_reasoning
+
+    calls = {"gemini": 0, "grok": 0}
+    r = lily_reasoning.LilyReasoning.__new__(lily_reasoning.LilyReasoning)
+    r._vocal_model = "gemini-3.6-flash"
+
+    async def fake_gemini(model, prompt, level, **kw):
+        calls["gemini"] += 1
+        return "{}"
+
+    async def fake_grok(prompt, **kw):
+        calls["grok"] += 1
+        return "{}"
+
+    monkeypatch.setattr(r, "_generate", fake_gemini, raising=False)
+    monkeypatch.setattr(r, "_generate_grok_json", fake_grok, raising=False)
+    monkeypatch.setattr(
+        lily_config, "xai_api_key", lambda: "xai-test" if has_xai_key else None
+    )
+    asyncio.run(r.judge("instructions", "prompt", adult=adult))
+    return calls
+
+
+def test_judge_routes_to_grok_on_the_adult_deck(monkeypatch):
+    """The judge used to run on Gemini unconditionally — including
+    mid-adult-session, sending adult content to the one provider the
+    session had already swapped AWAY from. PROHIBITED_CONTENT is not a
+    settable safety category, so it blocked, the 12s bound fired, and
+    adjudication silently degraded to Tier-1: twelve seconds of stall per
+    close call, with a weaker ruling to show for it."""
+    calls = _judge_probe(monkeypatch, adult=True)
+    assert calls["grok"] == 1
+    assert calls["gemini"] == 0
+
+
+def test_judge_stays_on_gemini_for_the_general_deck(monkeypatch):
+    calls = _judge_probe(monkeypatch, adult=False)
+    assert calls["gemini"] == 1
+    assert calls["grok"] == 0
+
+
+def test_judge_falls_back_to_gemini_when_xai_is_unconfigured(monkeypatch):
+    """A missing key must never take adjudication down — it degrades to the
+    Gemini path (which may block on adult material) rather than raising
+    into adjudicate and wedging the session."""
+    calls = _judge_probe(monkeypatch, adult=True, has_xai_key=False)
+    assert calls["gemini"] == 1
+    assert calls["grok"] == 0
