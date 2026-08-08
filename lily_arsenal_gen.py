@@ -56,6 +56,16 @@ import lily_config
 
 logger = logging.getLogger("lily_arsenal_gen")
 
+# Offline author timeout for the ADULT deck. The live game bounds Grok at
+# PREFETCH_TIMEOUT_SECONDS (30s) because dead-air at a table is intolerable,
+# but seeding is a batch job with no dead-air budget, and the adult author
+# rides grok-*-multi-agent — a 4-agent (low) / 16-agent (high) Responses-API
+# fan-out that routinely exceeds 30s to write one question. Reusing the live
+# 30s here made every adult author call TimeoutError-out (empty str repr in
+# 3.11), logging an empty AUTHOR_FAILED and banking nothing. Give the offline
+# author room; the arsenal absorbs the wait.
+ADULT_AUTHOR_TIMEOUT_SECONDS = 180.0
+
 # Outcomes a slot can end in. Everything is counted; nothing is dropped.
 OUTCOME_CREATED = "created"
 OUTCOME_DUPLICATE = "duplicate"
@@ -630,6 +640,7 @@ async def lily_author_question(
                     "non-consensual. Return JSON only."
                 ),
                 max_tokens=2048,
+                timeout=ADULT_AUTHOR_TIMEOUT_SECONDS,
             )
         return await reasoning._generate(
             reasoning._model,
@@ -649,7 +660,9 @@ async def lily_author_question(
                 return data
             last_err = "unparseable or incomplete author output"
         except Exception as e:
-            last_err = e
+            # str(TimeoutError()) is "" on 3.11 (asyncio.TimeoutError is the
+            # builtin); fall back to repr so a timeout never logs blank.
+            last_err = str(e) or repr(e)
         if attempt < attempts[-1]:
             logger.info(
                 "LILY_ARSENAL_SEED | AUTHOR_RETRY | partition=%s format=%s: %s",

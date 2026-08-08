@@ -481,6 +481,7 @@ class LilyReasoning:
         *,
         system_instruction: Optional[str] = None,
         max_tokens: int,
+        timeout: float = PREFETCH_TIMEOUT_SECONDS,
     ) -> str:
         """ADULT-deck generation transport (owner directive 2026-08-06):
         xAI Grok chat completions in JSON mode. Gemini's non-overridable
@@ -537,7 +538,7 @@ class LilyReasoning:
                 endpoint,
                 json=body,
                 headers={"Authorization": f"Bearer {key}"},
-                timeout=aiohttp.ClientTimeout(total=PREFETCH_TIMEOUT_SECONDS),
+                timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 if resp.status != 200:
                     err = await resp.text()
