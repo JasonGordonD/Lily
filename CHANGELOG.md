@@ -5,6 +5,7 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+<<<<<<< HEAD
 ## 2026-08-09 — Empty STOP at llm_node + voice inventory freeze
 
 Post-PR-#12 residual P0 and the structure gate for extraction.
@@ -23,6 +24,24 @@ release — never a silent lobby turn. Prompt copy is untouched.
 keys, voices, sheets, and say-gate surfaces at the `638dd71` baseline.
 Extraction of `speech/delivery` must move code with **zero** string
 edits against this inventory; Audeering stays parked.
+=======
+## 2026-08-09 — Hot-path await audit (glass publishes)
+
+Persistence writes on adjudicate / reveal / answer / transcript were
+already fire-and-forget. Residual turn blockers were `await
+publish_attributes` / `await publish_metadata` sitting in front of
+`gated_say` or tool returns. Converted to the existing nowait /
+`ensure_future(metadata)` idiom on:
+
+- `skip_question` (skip → next delivery speech)
+- `start_game` attributes (identity resolve stays awaited)
+- `lily_enter_adult_mode` / `lily_award_bonus` tool returns
+- reconnect `session_rejoin` (initial glass publish at entry still awaited)
+
+Honesty awaits unchanged: adjudicate gather before verdict, custom-round
+build, forget cascade, greeting memory, group identity resolve, 50/50
+screen, finale events. Audeering stays parked; no module extraction.
+>>>>>>> origin/cursor/hot-path-await-audit-984c
 
 ## 2026-08-09 — Live-session repair: lobby control, answer shape, delivery
 

@@ -236,7 +236,8 @@ def test_confirmed_entry_proceeds_when_gate_ready():
     assert "Adult mode is ON" in msg
     assert "18+ confirmed" in msg
     assert game.sk.mode == "adult"
-    assert game.publish_calls == 1
+    assert game.publish_calls == 0
+    assert game.publish_nowait_calls == 1
 
 
 def test_degraded_no_persistence_session_refuses_adult_mode():
