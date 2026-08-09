@@ -5,3 +5,6 @@ logs/
 .pytest_cache/
 .venv-ws12/
 .venv166/
+
+# Claude Code agent worktrees / local session config — never repo content
+.claude/
