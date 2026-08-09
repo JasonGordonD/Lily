@@ -5,6 +5,17 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-H: responsiveness latch clears on playout
+
+The direct-address responsiveness clock used to clear when `gated_say`
+dispatched a response. Dispatch is not delivery: a queued, suppressed or
+wedged handle could therefore erase the clock without the room hearing Lily
+and hide the `ADDRESS_UNANSWERED` evidence.
+
+The latch now survives generation and dispatch. It clears only on the
+framework's real playout-start transition, alongside the existing speech-id
+airing marker; the one-shot warning resets only after that audible response.
+
 ## 2026-08-09 — P0-F: pre-window answers require actual delivery playout
 
 A `q_N_delivery` claim is created in `tts_node`, before its audio necessarily
