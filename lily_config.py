@@ -107,13 +107,31 @@ def google_api_key_present() -> bool:
 
 
 def vocal_model() -> str:
-    """Front-facing host model for every deck."""
-    return "grok-4.5"
+    """Front-facing host model for every deck. Env-overridable so a faster
+    xAI tier (e.g. grok-4-fast-non-reasoning, TTFT ~0.6s vs grok-4.5's
+    ~2s/8s p50/p95 reasoning floor) can be A/B'd live without a code
+    deploy. Same-family models only — the adult deck requires xAI's
+    permissiveness (Gemini hard-blocks it)."""
+    return _get("LILY_VOCAL_MODEL", "grok-4.5") or "grok-4.5"
 
 
 def vocal_effort() -> str:
     """Routine voice stays fast; llm_node escalates complex turns to medium."""
     return "low"
+
+
+def prefetch_timeout_seconds() -> float:
+    """Per-call wall for question authoring/verification/distractors
+    (lily-1C53C6: 30s walls stacked ~90s of dead wait). Keep above the
+    authoring lane's measured p95 — cutting healthy-but-slow generation
+    converts latency into supply failures."""
+    return max(5.0, _get_float("LILY_PREFETCH_TIMEOUT_SECONDS", 20.0))
+
+
+def prefetch_total_budget_seconds() -> float:
+    """Overall bound across the whole prefetch chain (generate -> verify ->
+    distractors) — the real cap on stacked stalls."""
+    return max(10.0, _get_float("LILY_PREFETCH_TOTAL_BUDGET_SECONDS", 45.0))
 
 
 def reasoning_model() -> str:
