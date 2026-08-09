@@ -9,9 +9,8 @@ scorekeeper, the answer-window timer, SFX dispatch, checkpointing, and the
 deterministic enforcement of the sticky player commands ("skip",
 "back to normal").
 
-Dual-brain LLM binding (spec §4.4): vocal node gemini-3.5-flash (this
-session's LLM), reasoning node gemini-3.1-pro-preview (lily_reasoning,
-own HTTP client).
+Dual-brain LLM binding: front-facing vocal node Grok 4.5; background
+reasoning remains isolated in lily_reasoning and migrates independently.
 """
 
 import asyncio
@@ -56,7 +55,6 @@ from livekit.agents.voice.background_audio import (
 )
 from livekit.agents.voice.events import UserInputTranscribedEvent
 from livekit.plugins import noise_cancellation, silero
-from livekit.plugins.google import LLM as GoogleLLM
 from livekit.plugins.speechmatics import (
     AdditionalVocabEntry,
     SpeakerFocusMode,
@@ -86,7 +84,6 @@ import lily_say_gate
 import lily_speech_delivery
 import lily_stt_tuning
 from lily_speechmatics import LilySpeechmaticsSTT
-import lily_gemini_safety
 from lily_binding import (
     LilyFragmentAccumulator,
     lily_extract_explicit_name,
@@ -268,6 +265,44 @@ def lily_is_prohibited_content_error(error: BaseException) -> bool:
 
 def _lily_short_hash(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:16]
+
+
+def lily_build_grok_vocal_llm(
+    *,
+    model: str,
+    effort: str,
+    api_key: str,
+):
+    """Construct the one Grok vocal transport with a live-safe read budget."""
+    if not api_key:
+        raise RuntimeError("XAI_API_KEY missing for Grok vocal model")
+    import httpx
+    import openai as openai_sdk
+    from livekit.plugins import openai as openai_plugin
+
+    llm = openai_plugin.LLM.with_x_ai(
+        model=model,
+        api_key=api_key,
+        reasoning_effort=effort,
+        client=openai_sdk.AsyncClient(
+            api_key=api_key,
+            base_url="https://api.x.ai/v1",
+            max_retries=0,
+            http_client=httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=15.0,
+                    read=lily_config.adult_vocal_read_timeout(),
+                    write=15.0,
+                    pool=15.0,
+                ),
+                follow_redirects=True,
+            ),
+        ),
+    )
+    # with_x_ai omits the constructor's max_completion_tokens argument;
+    # retain Lily's bounded spoken-turn contract explicitly.
+    llm._opts.max_completion_tokens = lily_config.vocal_max_output_tokens()
+    return llm
 
 
 def lily_spine_line(
@@ -10231,28 +10266,19 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
     # -- adult-mode vocal swap (owner directive 2026-08-06) -------------------
     #
-    # Gemini's PROHIBITED_CONTENT filter is non-overridable (BLOCK_NONE
-    # does not cover it) and blocks spoken turns around adult-deck
-    # material — live at 21:33: four blocked generations on the Kama
-    # Sutra answer, ~58s of retry stall. On adult entry the vocal LLM
-    # swaps to xAI Grok (the fleet's adult-content provider — vision and
-    # adult imagegen already ride XAI_API_KEY); every adult exit swaps
-    # the general Gemini node back. Question generation swaps too, in
-    # lily_reasoning (mode-routed to _generate_grok_json).
+    # Both general and adult vocal lanes now use Grok 4.5. The hook remains
+    # for an explicit adult model/effort override, while the adult prompt
+    # layer still supplies the register.
 
     def enter_adult_vocal(self) -> bool:
-        """Swap the session's vocal LLM to Grok for the adult deck.
-        False (with an ERROR log) when the swap is impossible — the
-        session then keeps Gemini, which is tonight's degraded status
-        quo, never a crash."""
+        """Apply an optional adult Grok model/effort override."""
         agent = getattr(self, "agent", None)
         update = getattr(agent, "update_options", None)
         key = lily_config.xai_api_key()
         if update is None or not key:
             logger.error(
                 "LILY_ADULT_VOCAL | SWAP_UNAVAILABLE | session=%s "
-                "reason=%s — adult rounds stay on the general vocal node "
-                "(Gemini may refuse explicit turns)",
+                "reason=%s — adult rounds stay on the general Grok node",
                 self.sk.session_id,
                 "no_xai_key" if update is not None else "no_agent_handle",
             )
@@ -10260,51 +10286,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         llm = getattr(self, "_adult_llm", None)
         if llm is None:
             try:
-                import httpx
-                import openai as openai_sdk
-
-                from livekit.plugins import openai as openai_plugin
-
-                # THE 5-SECOND WALL. livekit-plugins-openai builds its own
-                # AsyncClient when none is passed, with
-                # httpx.Timeout(connect=15, read=5, write=5, pool=5) — and
-                # `with_x_ai` exposes NO timeout parameter, so the adult
-                # lane silently inherited a 5s READ timeout.
-                #
-                # On a streaming response the read timeout is the gap
-                # between chunks, and the first gap IS the model's thinking
-                # time. grok-4.5 is a reasoning model: HOTFIX-005 X13
-                # measured llm_ttft p50 4,999ms / p95 8,254ms at high
-                # effort. That is a coin flip against the wall at the
-                # median and a certainty at p95 — and the plugin defaults
-                # to max_retries=0, so a killed turn is not retried, it is
-                # simply dead air at the table.
-                #
-                # xAI's own streaming docs call this out: reasoning models
-                # need the request timeout raised or the connection closes
-                # prematurely. Pass an explicit client (the one hook
-                # with_x_ai does forward) carrying a sane read budget.
-                # base_url and api_key must ride the CLIENT here — the
-                # plugin only uses its own when it constructs the client
-                # itself.
-                llm = openai_plugin.LLM.with_x_ai(
+                llm = lily_build_grok_vocal_llm(
                     model=lily_config.adult_vocal_model(),
                     api_key=key,
-                    reasoning_effort=lily_config.adult_vocal_effort(),
-                    client=openai_sdk.AsyncClient(
-                        api_key=key,
-                        base_url="https://api.x.ai/v1",
-                        max_retries=0,
-                        http_client=httpx.AsyncClient(
-                            timeout=httpx.Timeout(
-                                connect=15.0,
-                                read=lily_config.adult_vocal_read_timeout(),
-                                write=15.0,
-                                pool=15.0,
-                            ),
-                            follow_redirects=True,
-                        ),
-                    ),
+                    effort=lily_config.adult_vocal_effort(),
                 )
             except Exception as e:
                 logger.error(
@@ -10330,7 +10315,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         return True
 
     def exit_adult_vocal(self) -> None:
-        """Restore the general (Gemini) vocal LLM on any adult exit —
+        """Restore the general Grok vocal configuration on any adult exit —
         idempotent; a session that never swapped is a no-op."""
         agent = getattr(self, "agent", None)
         update = getattr(agent, "update_options", None)
@@ -11750,23 +11735,29 @@ class LilyAgent(Agent):
         self._apply_context_blocks(chat_ctx)
         self._game.publish_attributes_nowait()
 
-        # Adaptive thinking (operator 2026-08-06): escalate the vocal model to
-        # HIGH for complex/high-stakes user turns (disputes, adjudication
-        # challenges, ambiguity, multi-step), LOW for reflexive banter. The
-        # plugin's chat() reads _opts.thinking_config per call, so a contained
-        # per-turn override + finally-restore keeps LOW as the default and
-        # never rips out the LiveKit LLM integration. thinking_level only
-        # affects reasoning depth/latency, never output structure — so a rare
-        # overlap with a preemptive turn is a latency detail, not a bug.
+        # Adaptive vocal depth: Grok stays LOW for routine host reflexes and
+        # moves to MEDIUM for disputes, ambiguity and multi-intent. The
+        # contained per-turn override restores the configured default.
         _sentinel = object()
         _restore = _sentinel
+        _restore_effort = _sentinel
         _opts = getattr(getattr(self, "llm", None), "_opts", None)
         if _opts is not None and self._thinking_level_for_turn(chat_ctx) == "high":
-            _restore = getattr(_opts, "thinking_config", None)
-            try:
-                _opts.thinking_config = {"thinking_level": "high"}
-            except Exception:
-                _restore = _sentinel
+            if hasattr(_opts, "reasoning_effort"):
+                _restore_effort = getattr(_opts, "reasoning_effort", None)
+                try:
+                    # Front-facing high historically cost ~5s TTFT. Medium
+                    # adds depth for disputes/multi-intent without putting
+                    # every complex turn on the slowest tier.
+                    _opts.reasoning_effort = "medium"
+                except Exception:
+                    _restore_effort = _sentinel
+            elif hasattr(_opts, "thinking_config"):
+                _restore = getattr(_opts, "thinking_config", None)
+                try:
+                    _opts.thinking_config = {"thinking_level": "high"}
+                except Exception:
+                    _restore = _sentinel
         try:
             async for chunk in self._llm_node_with_empty_stop_guard(
                 chat_ctx, tools, model_settings
@@ -11776,6 +11767,11 @@ class LilyAgent(Agent):
             if _restore is not _sentinel and _opts is not None:
                 try:
                     _opts.thinking_config = _restore
+                except Exception:
+                    pass
+            if _restore_effort is not _sentinel and _opts is not None:
+                try:
+                    _opts.reasoning_effort = _restore_effort
                 except Exception:
                     pass
 
@@ -13201,22 +13197,21 @@ async def entrypoint(ctx: JobContext) -> None:
             len(_focus_kwargs.get("focus_speakers") or []),
         )
 
-    # --- Session: vocal node gemini-3.5-flash, explicit safety settings ---
-    # The general-deck vocal LLM is held on the game so the adult-mode
-    # vocal swap (enter/exit_adult_vocal — Gemini's non-overridable
-    # PROHIBITED_CONTENT filter blocks adult-round speech) can restore it
-    # on every adult exit.
-    general_vocal_llm = GoogleLLM(
+    # --- Session: one Grok 4.5 vocal host across general + adult layers ---
+    general_vocal_llm = lily_build_grok_vocal_llm(
         model=lily_config.vocal_model(),
-        # Default sampling — never set temperature/top_p/top_k on 3.x.
-        thinking_config={"thinking_level": "low"},
-        max_output_tokens=lily_config.vocal_max_output_tokens(),
-        # §11.1 CRITICAL: without these, adult mode silently dies
-        # (empty candidate, no error).
-        safety_settings=lily_gemini_safety.lily_gemini_safety_dicts(),
-        api_key=lily_config.google_api_key(),
+        api_key=lily_config.xai_api_key(),
+        effort=lily_config.vocal_effort(),
     )
     game._general_llm = general_vocal_llm
+    game._adult_llm = (
+        general_vocal_llm
+        if (
+            lily_config.adult_vocal_model() == lily_config.vocal_model()
+            and lily_config.adult_vocal_effort() == lily_config.vocal_effort()
+        )
+        else None
+    )
     lily_tts_instance = LilyTTS()  # voice1 (primary)
     game.tts = lily_tts_instance  # P7: reachable for set_delivery_pace
     session = AgentSession(

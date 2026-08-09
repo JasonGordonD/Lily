@@ -6,7 +6,6 @@ import inspect
 
 from google.genai import types as gt
 
-import lily_agent
 import lily_assessment
 import lily_gemini_safety
 import lily_imagegen
@@ -50,7 +49,6 @@ def test_reasoning_and_assessment_use_shared_policy():
 
 def test_every_remaining_gemini_lane_imports_shared_policy():
     for module in (
-        lily_agent,
         lily_reasoning,
         lily_assessment,
         lily_imagegen,
