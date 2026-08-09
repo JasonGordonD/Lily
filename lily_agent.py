@@ -11965,15 +11965,31 @@ class LilyAgent(Agent):
         # they belong after it.
         anchor = 1 if items and getattr(items[0], "role", None) == "system" else 0
 
+        # PROMPT-EVICTION FIX (2026-08-09, P0). These scans were keyed on
+        # MARKER TEXT ("[GAME STATE]", "[RETURNING TABLE]"). 59c437b
+        # (2026-08-08) added those literal strings to lily_system.txt
+        # itself — from that deploy on, the state scan matched the
+        # INSTRUCTIONS item (the framework injects the system prompt as a
+        # ctx item, id lk.agent_task.instructions, at activity start;
+        # Lily's instructions are a plain str so NOTHING re-adds them per
+        # generation) and popped the entire persona/rules prompt on the
+        # FIRST user turn of every session, while the memory scan matched
+        # the prompt and skipped injecting the memory block. Every
+        # 2026-08-09 call (incl. lily-A070E8) ran user turns with NO
+        # system prompt. The scans now key on the exact injection ids —
+        # every block this method has ever injected carries one, ids
+        # survive ChatContext.copy(), and no foreign item can collide.
+        def _idx_by_id(ctx_id: str):
+            return next(
+                (
+                    i for i, m in enumerate(items)
+                    if getattr(m, "id", None) == ctx_id
+                ),
+                None,
+            )
+
         # Adult layer: additive injection/removal keyed on the sticky flag.
-        adult_idx = next(
-            (
-                i for i, m in enumerate(items)
-                if getattr(m, "role", None) == "system"
-                and _ADULT_LAYER_MARKER in _message_text(m)
-            ),
-            None,
-        )
+        adult_idx = _idx_by_id(self._CTX_ID_ADULT)
         if self._game.sk.mode == "adult" and adult_idx is None:
             items.insert(
                 anchor,
@@ -11991,14 +12007,7 @@ class LilyAgent(Agent):
         # (re-inserted if history trimming ever drops it) — and REMOVED the
         # same way when memory_block is cleared (forget-me teardown:
         # injection stops immediately, WO-LILY-FORGETME-001).
-        memory_idx = next(
-            (
-                i for i, m in enumerate(items)
-                if getattr(m, "role", None) == "system"
-                and lily_memory.MEMORY_BLOCK_MARKER in _message_text(m)
-            ),
-            None,
-        )
+        memory_idx = _idx_by_id(self._CTX_ID_MEMORY)
         if self._game.memory_block and memory_idx is None:
             items.insert(
                 anchor,
@@ -12036,8 +12045,7 @@ class LilyAgent(Agent):
         state = lily_say_gate.lily_wrap_state_block(stable_text)
         existing = [
             i for i, m in enumerate(items)
-            if getattr(m, "role", None) == "system"
-            and _STATE_BLOCK_MARKER in _message_text(m)
+            if getattr(m, "id", None) == self._CTX_ID_STATE
         ]
         if len(existing) == 1 and _message_text(items[existing[0]]) == state:
             pass  # unchanged block stays put — the equivalence check passes
