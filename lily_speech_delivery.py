@@ -86,6 +86,7 @@ _DELIVERY_MAX_CUT_REAIRS = 2
 _STALE_CLAIM_SECONDS = 12.0
 _STALE_CLAIM_MAX_RETRIES = 2   # re-dispatches per key before declaring the audio path down
 _STALE_CLAIM_MAX_RECHECKS = 20  # bounded host_speaking re-check loop (no task leak)
+_PROGRESSION_ACTS = ("question_delivery", "question_nudge")
 
 
 
@@ -129,6 +130,16 @@ class LilySpeechDeliveryMixin:
                 "source=%s", act, source,
             )
             return False
+        if act in _PROGRESSION_ACTS:
+            paused = self.progression_paused_reason()
+            if paused:
+                logger.info(
+                    "LILY_PROGRESSION | DISPATCH_PAUSED | session=%s q=%d "
+                    "act=%s source=%s reason=%s",
+                    self.sk.session_id, self.sk.question_number,
+                    act, source, paused,
+                )
+                return False
         # PATCH-003 P8: a game-lane payload (delivery, verdict, reveal,
         # steal/lockout, scores) requires a LIVE game state — the "Nobody
         # landed it" lockout aired into lobby conversation with no
@@ -358,6 +369,14 @@ class LilySpeechDeliveryMixin:
                 "LILY_DELIVERY | EXPECT_BLOCKED | session=%s q=%d "
                 "reason=game_stopped",
                 self.sk.session_id, self.sk.question_number,
+            )
+            return
+        paused = self.progression_paused_reason()
+        if paused:
+            logger.info(
+                "LILY_DELIVERY | EXPECT_BLOCKED | session=%s q=%d "
+                "reason=%s",
+                self.sk.session_id, self.sk.question_number, paused,
             )
             return
         if not getattr(self, "game_started", False):

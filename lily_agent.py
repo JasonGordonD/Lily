@@ -1819,6 +1819,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             or getattr(self, "game_over", False)
         ):
             return False
+        paused = self.progression_paused_reason()
+        if paused:
+            logger.info(
+                "LILY_PROGRESSION | PAUSED | session=%s q=%d "
+                "source=%s reason=%s",
+                self.sk.session_id, self.sk.question_number, source, paused,
+            )
+            return False
         # T2 (PATCH-001): an answered question never re-airs.
         if self.question_already_answered(self.sk.question_number):
             return False
@@ -3616,6 +3624,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     and not self.sk.answer_window_open
                     and not self._adjudicating
                     and not getattr(self, "_question_transitioning", False)
+                    and self.progression_paused_reason() is None
                 ):
                     if self.arm_next_question() and self.session is not None:
                         logger.info(
@@ -3737,6 +3746,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                             # Re-offer already spent — convert to a hold.
                             self.release_question_pending(reason="reoffer_timeout")
                             self.enter_hold(reason="question_unanswered")
+                    continue
+                paused = self.progression_paused_reason()
+                if paused:
+                    logger.info(
+                        "LILY_PROGRESSION | WATCHDOG_PAUSED | session=%s "
+                        "q=%d reason=%s",
+                        self.sk.session_id, self.sk.question_number, paused,
+                    )
                     continue
                 if (
                     self.sk.answer_window_open
@@ -4268,6 +4285,22 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         return not getattr(self, "game_started", False) or getattr(
             self, "game_over", False
         )
+
+    def progression_paused_reason(self) -> str | None:
+        """Why a new question delivery must not take the floor right now."""
+        if getattr(self, "_delivery_stop_sticky", False):
+            return "game_stopped"
+        if getattr(self, "_hold_active", False):
+            return "hold"
+        if getattr(self, "_question_pending", False):
+            return "question_pending"
+        if getattr(self, "_awaiting_address_since", 0.0):
+            return "address_unanswered"
+        if getattr(self.sk, "host_speaking", False):
+            return "host_speaking"
+        if self.pending_setup_jobs():
+            return "setup_pending"
+        return None
 
     def hold_blocks_dispatch(self, act: str, source: str) -> bool:
         """True when the hold state must suppress this dispatch. Exempt

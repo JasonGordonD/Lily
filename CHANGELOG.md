@@ -5,6 +5,20 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-G: meta and intake pause game progression
+
+Question delivery could still take the floor while Lily owed the table a
+direct/meta response or setup completion. The idle watchdog, prefetch
+auto-advance and post-reveal path each had their own progression trigger, so
+a local conversational hold did not veto every gun.
+
+One `progression_paused_reason()` now covers unanswered direct address,
+active host speech, conversational hold/question and pending setup. It gates
+delivery expectation, the `gated_say` delivery choke point, post-reveal
+dispatch, prefetch auto-advance and watchdog reconciliation/re-arm. Pauses are
+greppable as `LILY_PROGRESSION`; no question number advances merely because
+the host is handling meta.
+
 ## 2026-08-09 — P0-H: responsiveness latch clears on playout
 
 The direct-address responsiveness clock used to clear when `gated_say`

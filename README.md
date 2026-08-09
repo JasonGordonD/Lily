@@ -114,6 +114,11 @@ question IDs and context-component hashes, never raw private prompt contents.
   does not clear it. Only the framework's real playout-start transition
   clears the latch, so a wedged/suppressed handle still produces the
   one-shot `LILY_RESPONSIVENESS | ADDRESS_UNANSWERED` warning.
+- **Meta/intake owns progression.** An unresolved direct address, a
+  conversational question/hold, active host speech, or pending setup pauses
+  `expect_delivery`, post-reveal dispatch, prefetch auto-advance and watchdog
+  nudges. `LILY_PROGRESSION | *PAUSED` names the blocker; once the owned
+  response/setup completes, the same deterministic progression paths resume.
 - **tts_node punctuation-flush guard is mandatory** — suspense holds ("The answer
   is…") deadlock the SegmentSynchronizer without it.
 - **Outbound speech passes the say gate** (`lily_say_gate.py`): the designated
