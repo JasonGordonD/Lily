@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_scorekeeper
+import lily_say_gate
 from lily_agent import LilyAgent, LilyGame
 from lily_scorekeeper import LilyScorekeeper
 
@@ -152,3 +153,37 @@ def test_picture_only_setup_applies_before_start():
     assert calls and calls[0]["source"] == "multi_intent_setup"
     assert game.sk.media_mode == "pictures"
     assert game.pending_setup_jobs() == set()
+
+
+def test_be8d8b_kickoff_fragments_are_detected():
+    for text in [
+        "Round",
+        "Round One",
+        "Let's do it!",
+        "Let's kick off Round One!",
+        "Round One is Geography!",
+    ]:
+        assert lily_say_gate.lily_unowned_kickoff_fragment(text), text
+
+
+def test_real_question_or_hold_is_not_kickoff_debris():
+    assert not lily_say_gate.lily_unowned_kickoff_fragment(
+        "Let's do it! Looking at these blue domes, what country are we in?"
+    )
+    assert not lily_say_gate.lily_unowned_kickoff_fragment(
+        "Hold on — don't start Round One yet."
+    )
+
+
+def test_kickoff_words_require_delivery_owner():
+    game = _game()
+    game._setup_pending = {"voice", "adult"}
+
+    assert game.unowned_kickoff_must_suppress("Round", None) is True
+    assert game.unowned_kickoff_must_suppress("Let's do it!", None) is True
+    assert (
+        game.unowned_kickoff_must_suppress(
+            "Round One is Geography!", "claimed_structural"
+        )
+        is False
+    )

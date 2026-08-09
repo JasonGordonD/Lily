@@ -69,6 +69,12 @@ Spoken-surface freeze before any speech/delivery extract:
   partition while adult/heat tools are pending. The state block lists pending
   jobs and forbids `lily_begin_round`; VAD blocks the split-final race where
   "I want to play" is followed immediately by a longer setup utterance.
+- **One start owner.** Standalone kickoff fragments/category teasers
+  (`"Round"`, `"Let's do it"`, `"Round One is …"`) are physically suppressed
+  at TTS unless that same turn owns `q_N_delivery`. Suppression returns silent
+  playout directly—no empty retry/re-air. A full keyed/organic question
+  delivery remains legal; its `q_N_delivery` claim is the sole Round One
+  speech owner.
 - **Outbound speech yields after the first question** except for MC
   deliveries (stem + options). Freeform deliveries and verdict-plus-next
   stacks clip at the first `?`. Undelivered-delivery re-fires wait for
