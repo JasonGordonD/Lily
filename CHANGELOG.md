@@ -5,6 +5,55 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0 PROMPT EVICTION: every 2026-08-09 call ran user turns with NO system prompt
+
+Found by the new pre-call readiness simulation on its FIRST run — not by
+a transcript, not by a live call.
+
+**The defect:** `_apply_context_blocks`' dedup scans were keyed on
+MARKER TEXT. 59c437b (2026-08-08, HOTFIX-006 N2) added the literal
+strings `[GAME STATE]` and `[RETURNING TABLE]` to lily_system.txt
+itself. From that deploy on: the state scan matched the INSTRUCTIONS
+item — the framework injects the system prompt as a chat item
+(id `lk.agent_task.instructions`) once at activity start, and
+plain-string instructions are never re-added per generation — and
+POPPED THE ENTIRE PERSONA/RULES PROMPT on the first user turn of every
+session, while the memory scan matched the prompt text and SKIPPED
+injecting the returning-table memory block. Every call on 2026-08-09
+(including lily-A070E8, the "Correct"/"Supposed" name-chaos call) ran
+its user-turn generations with no system prompt: no persona doc, no
+game rules, no tool guidance, no memory block on turn one. Reproduced
+production-exact (framework `update_instructions` + real ChatContext)
+before fixing.
+
+**The fix:** all three scans now key on the exact injection ids
+(_CTX_ID_ADULT / _CTX_ID_MEMORY / _CTX_ID_STATE) — every block this
+method ever injected carries one, ids survive ChatContext.copy(), and
+no foreign item (the instructions above all) can ever collide again.
+Marker text remains only in the say-gate leak filter and a diagnostics
+logger, where text-matching is the point.
+
+**New pre-call measures (the operator's ask — "test before another
+disappointing call"):**
+1. tests/test_precall_cache_readiness.py — scripted-game simulation
+   through the REAL hooks (real ChatContext, real injection, real
+   framework is_equivalent): instructions survive (the regression pin),
+   system prefix byte-stable across quiet turns, preemptive equivalence
+   survives the killer churn (candidate landing mid-window) and
+   recovers after a history trim, 30 quiet turns = 0 would-be
+   invalidations. Runs in every CI test job from now on.
+2. .github/workflows/cache-canary.yml + scripts/grok_cache_canary.py —
+   live-fire canary (manual dispatch; CI holds the key): two real Grok
+   calls with the production prompt; FAILS unless the second call
+   reports cached_tokens > 0. Proves the Y1b premise against the real
+   provider before any phone call.
+
+**Deletions:** the three marker-text scans (replaced by id lookups —
+net simpler). Suite 2011 → 2016 green.
+
+Mandate numbers: lily_agent.py 14,790 lines; prompt ~8,880 tokens; main
+tip `71e7af2` (deploying); deployed `1e1c192` at time of writing.
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 wave-1 review: findings fixed (nothing waved through)
 
 Independent adversarial review of the five wave-1 commits (b0da435,
