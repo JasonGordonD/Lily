@@ -247,16 +247,13 @@ def test_judge_routes_to_grok_on_the_adult_deck(monkeypatch):
     assert calls["gemini"] == 0
 
 
-def test_judge_stays_on_gemini_for_the_general_deck(monkeypatch):
+def test_judge_routes_to_grok_on_the_general_deck(monkeypatch):
     calls = _judge_probe(monkeypatch, adult=False)
-    assert calls["gemini"] == 1
-    assert calls["grok"] == 0
+    assert calls["gemini"] == 0
+    assert calls["grok"] == 1
 
 
-def test_judge_falls_back_to_gemini_when_xai_is_unconfigured(monkeypatch):
-    """A missing key must never take adjudication down — it degrades to the
-    Gemini path (which may block on adult material) rather than raising
-    into adjudicate and wedging the session."""
+def test_judge_provider_does_not_change_by_deck_or_key_probe(monkeypatch):
     calls = _judge_probe(monkeypatch, adult=True, has_xai_key=False)
-    assert calls["gemini"] == 1
-    assert calls["grok"] == 0
+    assert calls["gemini"] == 0
+    assert calls["grok"] == 1
