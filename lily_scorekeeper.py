@@ -548,13 +548,45 @@ _AGE_CONSENT_RE = _re.compile(
 
 
 def lily_detect_age_consent(text: str) -> bool:
-    """True only for an explicit, affirmative 18+ consent utterance. The
-    deterministic floor the adult-mode gate requires IN ADDITION to the
-    model's flag — a question or verification prompt can never satisfy it."""
+    """True only for an explicit, affirmative adult-age declaration.
+
+    Accepts the original 18+ affirmatives plus a first-person adult age or
+    birth year. Questions, verification talk, and negations remain false.
+    The deterministic result is the gate; a model boolean is not a second
+    ceremony.
+    """
     normalized = _normalize_command_text(text)
     if not normalized or _AGE_CONSENT_NEGATION_RE.search(normalized):
         return False
-    return bool(_AGE_CONSENT_RE.search(normalized))
+    if _AGE_CONSENT_RE.search(normalized):
+        return True
+    if _re.search(
+        r"\b(?:i m|i am|we re|we are)\s+"
+        r"(?:explicitly\s+)?(?:above|over)\s+(?:the age of\s+)?18\b",
+        normalized,
+    ):
+        return True
+    age_match = _re.search(
+        r"\b(?:i m|i am|my age is)\s+(\d{2,3})"
+        r"(?:\s+years?\s+old)?\b",
+        normalized,
+    )
+    if age_match:
+        age = int(age_match.group(1))
+        if 18 <= age <= 120:
+            return True
+    year_match = _re.search(
+        r"\b(?:i (?:was|am) )?born in ((?:19|20)\d{2})\b",
+        normalized,
+    )
+    if year_match:
+        year = int(year_match.group(1))
+        current_year = datetime.now(timezone.utc).year
+        # Birth year alone lacks month/day. Require the year that makes 18+
+        # unambiguous for the entire current year; boundary year re-asks.
+        if current_year - 120 <= year <= current_year - 19:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -1872,7 +1872,12 @@ Actions (veto-only, BOTH tiers):
 **Adult entry policy:** audEERING is optional veto telemetry, never an
 authorization service. `lily_enter_adult_mode` requires Lily to ask every
 player to explicitly confirm aloud that they are 18 or older and want the
-grown-up deck, then call with `confirmed_all_18_plus=true`.
+grown-up deck. The deterministic spoken latch is authoritative: explicit
+18+/above-18 wording, an unambiguously adult first-person age, or an
+unambiguously adult birth year consumes the gate for the session. The model's
+`confirmed_all_18_plus` argument cannot authorize by itself and cannot force a
+second ceremony after the latch is true. State carries
+`adult_consent: CONFIRMED — do NOT ask again`.
 
 - Missing `AUDEERING_API_KEY`, failed preflight, quota exhaustion, or a
   breaker opening never blocks entry and never exits an active adult game.
@@ -1881,8 +1886,8 @@ grown-up deck, then call with `confirmed_all_18_plus=true`.
 - An actual sustained young-voice signal may still block entry or exit an
   active adult game through `LilyGame.on_child_signal`.
 - `LILY_ARCHITECT_MODE=1` is a deployment-authenticated testing override:
-  it bypasses verbal confirmation and young-voice vetoes. Merely saying
-  "I'm the architect" never activates it. Every use logs
+  it bypasses verbal confirmation only; it never overrides an active
+  young-voice veto. Merely saying "I'm the architect" never activates it. Every use logs
   `LILY_ADULT_GATE | ARCHITECT_OVERRIDE`.
 
 Framing, stamped doc-verbatim at every emit site

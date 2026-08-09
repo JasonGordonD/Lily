@@ -55,8 +55,7 @@ def test_be8d8b_final_parses_all_setup_intents():
         "media": "pictures",
         "heat": "mix",
         "age_mentioned": True,
-        # P0-3 owns expanding "above 18 / age / birth year" consent.
-        "age_consent": False,
+        "age_consent": True,
     }
 
 

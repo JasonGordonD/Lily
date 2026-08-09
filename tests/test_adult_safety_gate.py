@@ -183,19 +183,30 @@ def test_start_helper_registers_even_a_breaker_open_pipeline():
 
 def test_entry_requires_explicit_18_plus_confirmation(caplog):
     agent, game = _make_agent()
+    game._age_consent_confirmed = False
     _ready_pipeline(consumers.LilyAcousticState())  # gate READY — the age
     # ceremony is what refuses here, not the sensor
     with caplog.at_level(logging.WARNING, logger="lily_agent"):
         msg = _call_enter_adult(agent, confirmed_all_18_plus=False)
     assert "NOT enabled yet" in msg
     assert "18 or older" in msg
-    assert "confirmed_all_18_plus=true" in msg
     assert game.sk.mode == "general"
     assert game.publish_calls == 0
     assert any(
         "reason=age_confirmation_required" in record.message
         for record in caplog.records
     )
+
+
+def test_heard_consent_consumes_gate_even_if_model_flag_is_false():
+    agent, game = _make_agent()
+    _ready_pipeline(consumers.LilyAcousticState())
+    game._age_consent_confirmed = True
+
+    msg = _call_enter_adult(agent, confirmed_all_18_plus=False)
+
+    assert "Adult mode is ON" in msg
+    assert game.sk.mode == "adult"
 
 
 def test_entry_refused_without_acoustic_pipeline_even_when_confirmed(
@@ -263,6 +274,7 @@ def test_active_young_voice_signal_blocks_normal_entry():
 
 def test_spoken_architect_claim_does_not_override_configuration():
     agent, game = _make_agent()
+    game._age_consent_confirmed = False
     _ready_pipeline(consumers.LilyAcousticState())
     # Voice content cannot set LILY_ARCHITECT_MODE; without server config,
     # the same unconfirmed tool call remains blocked.

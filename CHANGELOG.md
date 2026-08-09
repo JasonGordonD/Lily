@@ -5,6 +5,17 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-3: Explicit adult consent consumes the gate
+
+Live `lily-BE8D8B-a19913e2`: the player said "above 18," "I'm 43," and
+"born in 1983"; the old yes-shaped regex missed it, then Lily re-asked.
+
+**Fix.** Declarative above/over-18, adult first-person age, and
+unambiguously adult birth year latch consent (questions, negations, minors,
+and boundary birth years remain false). The spoken latch—not the model
+boolean—is authoritative for `lily_enter_adult_mode`. Confirmed consent rides
+the state block with a do-not-re-ask rule.
+
 ## 2026-08-09 — P0-2: Multi-intent setup before start
 
 Live `lily-BE8D8B-a19913e2`: "I want to play" won the LLM/tool race while
