@@ -732,6 +732,10 @@ off the reveal moment:
   lag is a SQL query mid-game:
   `select session_id, updated_at, metadata->'pipeline_latency' from
   lily_sessions order by updated_at desc limit 10;`
+- **Hot-path glass publishes:** skip / start-game attributes / adult-enter /
+  bonus / reconnect-rejoin use `publish_attributes_nowait` (or
+  `ensure_future(publish_metadata)`). Adjudicate still **awaits** the
+  metadata+attributes gather before verdict speech (screen-truth honesty).
 - Known remaining baseline: ElevenLabs v3 sentence-chunked HTTP synthesis is
   the fleet standard (the low-latency model families don't support the v3
   audio tags her register depends on; the dialogue endpoint stays off per

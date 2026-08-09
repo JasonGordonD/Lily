@@ -26,7 +26,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 class _FakeBonusGame:
     """Minimum surface LilyAgent.lily_award_bonus touches: game_started,
-    sk.players, sk.award_bonus, send_event_nowait, publish_attributes."""
+    sk.players, sk.award_bonus, send_event_nowait, publish_attributes_nowait."""
 
     def __init__(self, game_started: bool, players: list[str]) -> None:
         self.game_started = game_started
@@ -50,6 +50,7 @@ class _FakeBonusGame:
             }
         self.events: list[tuple[str, dict]] = []
         self.publish_calls = 0
+        self.publish_nowait_calls = 0
         # WS-7: the tool persists a bonus audit row when a supabase client
         # exists; None keeps these tests offline.
         self.supabase = None
@@ -59,6 +60,9 @@ class _FakeBonusGame:
 
     async def publish_attributes(self) -> None:
         self.publish_calls += 1
+
+    def publish_attributes_nowait(self) -> None:
+        self.publish_nowait_calls += 1
 
 
 def _make_agent(
@@ -95,6 +99,7 @@ def test_award_bonus_refused_before_game_started():
     assert game.sk.players["Dave"]["score"] == 0
     assert game.events == []
     assert game.publish_calls == 0
+    assert game.publish_nowait_calls == 0
 
 
 def test_award_bonus_allowed_once_game_started():
@@ -106,7 +111,8 @@ def test_award_bonus_allowed_once_game_started():
     assert game.events[0][0] == "best_wrong_answer"
     assert game.events[0][1]["player"] == "Dave"
     assert game.events[0][1]["answer"] == "brilliant misfire"
-    assert game.publish_calls == 1
+    assert game.publish_calls == 0
+    assert game.publish_nowait_calls == 1
 
 
 def test_award_bonus_gate_precedes_roster_check():

@@ -6645,8 +6645,10 @@ class LilyGame:
             self.armed_question = None
             self.sk.current_question = None
             self._set_ui_phase("question")
-            await self.publish_metadata("")
-            await self.publish_attributes()
+            # Hot-path: glass updates must not delay skip → next-question
+            # speech. Same pattern as flush_for_mode_switch / on_answer_leak.
+            asyncio.ensure_future(self.publish_metadata(""))
+            self.publish_attributes_nowait()
             # Structural delivery claim: when the next question arms, the
             # skip follow-up turn is its delivery.
             if self.arm_next_question():
@@ -8614,7 +8616,9 @@ class LilyGame:
         self.start_prefetch()
         self.arm_next_question()
         self.start_idle_watchdog()
-        await self.publish_attributes()
+        # Hot-path: identity was awaited above (honesty); attribute publish
+        # must not gate kickoff speech / host-tool return.
+        self.publish_attributes_nowait()
         self._enroll_started = True
         self.fire_enrollment("game_start")
         if source == "host_tool":
@@ -10236,7 +10240,9 @@ class LilyAgent(Agent):
         # question is flushed (the live "powerhouse of the cell" defect)
         # and the adult deck starts drawing immediately.
         self._game.flush_for_mode_switch(source="enter_adult")
-        await self._game.publish_attributes()
+        # flush_for_mode_switch already published nowait; a second awaited
+        # publish only delayed the tool result / follow-up turn.
+        self._game.publish_attributes_nowait()
         return (
             "Adult mode is ON (sticky"
             + (", architect override" if architect else ", 18+ confirmed")
@@ -10394,7 +10400,9 @@ class LilyAgent(Agent):
                 "text": clean_reason,
             },
         )
-        await self._game.publish_attributes()
+        # Score is committed in-memory; event is nowait — don't block the
+        # tool-return turn on attribute RTT.
+        self._game.publish_attributes_nowait()
         return f"Bonus point to {name}."
 
     # Ungated by game_started (tool-gating principle: gate tools that
@@ -12966,7 +12974,9 @@ async def entrypoint(ctx: JobContext) -> None:
         # as start_game (which this path bypasses).
         game.set_game_live_preemptive(True)
         game.start_idle_watchdog()
-        await game.publish_attributes()
+        # Initial glass truth already published above; don't await another
+        # attribute RTT before the rejoin line.
+        game.publish_attributes_nowait()
         game.gated_say(
             "session_rejoin",
             "rejoin",
