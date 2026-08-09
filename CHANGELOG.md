@@ -5,6 +5,25 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Empty STOP at llm_node + voice inventory freeze
+
+Post-PR-#12 residual P0 and the structure gate for extraction.
+
+**Empty STOP intercept (lobby-safe).** PR #12 forced the armed question
+sheet on a second empty at `tts_node`; lobby / banter / reveal-flavor
+turns still had no sheet and could air silence after Gemini
+`FinishReason.STOP` with no text and no tools. `llm_node` now detects
+that class, retries the LLM once inline (contentful streams still
+pass through without buffering), then either yields
+`rendered_armed_question()` when a delivery is armed or raises
+`APIConnectionError` so the speech handle fails closed and claims
+release — never a silent lobby turn. Prompt copy is untouched.
+
+**Voice inventory freeze.** `docs/voice_inventory.md` catalogs acts,
+keys, voices, sheets, and say-gate surfaces at the `638dd71` baseline.
+Extraction of `speech/delivery` must move code with **zero** string
+edits against this inventory; Audeering stays parked.
+
 ## 2026-08-09 — Live-session repair: lobby control, answer shape, delivery
 
 Sessions `RM_qs6YeUdkV7or` and `RM_VYp6bgALNC4L`: the table watched Lily
