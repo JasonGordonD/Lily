@@ -5,6 +5,30 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — lily-A070E8: the name-fix death spiral and the repeat storm
+
+Live 11:03 UTC. STT heard "Robin" for Rami; the fix exchange then bound
+him as "Correct" (his one-word confirmation) and "Supposed" (a fragment
+of "it's supposed to be"), while the same cut greeting aired up to FOUR
+times around it. Two contained fixes:
+
+- **Adjudication vocabulary is never a name** (`lily_binding.py`):
+  verdict words, spelling-fix words and screen-complaint words
+  ("correct", "supposed", "wrong", "screen", "spelled", "put", "fixing",
+  "latency"…) join the bind stoplist. Exact lowercase match — Wright and
+  Newman stay bindable. Pinned in `tests/test_bind_stoplist.py` against
+  the live utterances.
+- **The stubborn-repeat third copy is silence, not another replay**
+  (`lily_agent.py` tts_node): the WS-3 regen gate suppressed a verbatim
+  re-air once and regenerated — but when the regen ALSO came back
+  verbatim, the old contract aired it anyway. That third copy (and the
+  fourth) was the storm. It now yields the floor silently
+  (`LILY_SAY_SUPPRESSED | reason=stubborn_repeat`), claims released;
+  question deliveries stay verbatim-exempt.
+
+Deploy note: pushes to main auto-deploy (deploy.yml on: push). Suite
+1900 green.
+
 ## 2026-08-09 — P2 volatile-tail split: preemptive generation back ON in-game
 
 G1 turned preemptive generation OFF for the whole live game for a sound

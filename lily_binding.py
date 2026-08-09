@@ -58,6 +58,18 @@ _STOPWORDS = {
     "play", "playing", "question", "trivia", "team", "skip", "pass",
     "game", "round", "point", "points", "answer",
     "you", "tonight",
+    # Adjudication/correction vocabulary (live 2026-08-09 lily-A070E8: a
+    # name-fix exchange bound the player as "Correct" and then "Supposed" —
+    # the confirmation word and a fragment of "it's supposed to be" both
+    # passed as capitalized STT tokens). Verdict words, spelling-fix words
+    # and screen-complaint words are never names. Lowercase exact match, so
+    # real names that merely CONTAIN these (Wright, Newman) stay bindable.
+    "correct", "incorrect", "supposed", "wrong", "answers", "questions",
+    "score", "scores", "rounds", "next", "repeat", "again", "screen",
+    "spell", "spelled", "spelling", "word", "correctly", "exactly",
+    "instead", "removed", "put", "puts", "putting", "fix", "fixed",
+    "fixing",
+    "latency", "terrible", "board", "locked",
 }
 
 _INTRODUCER_RE = re.compile(

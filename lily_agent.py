@@ -12669,6 +12669,44 @@ class LilyAgent(Agent):
                 samples_per_channel=2400,
             )
             return
+        if (
+            getattr(self, "_reair_regen_pending", False)
+            and repeat_kind
+            and not self._game.is_question_delivery_turn(full)
+        ):
+            # WS-3 tightening (live 2026-08-09 lily-A070E8: the same cut
+            # greeting aired up to FOUR times): the one regen retry ALSO
+            # came back verbatim, and the old contract aired it anyway
+            # ("a stubborn repeat still yields the floor"). The room has
+            # already heard this content twice — the third copy is the
+            # storm, not the recovery. Yield the floor with silence;
+            # the next user turn drives on. Question deliveries stay
+            # exempt (a barged question is re-read verbatim on purpose).
+            self._reair_regen_pending = False
+            speech_id = _current_speech_id()
+            released = (
+                self._game.say_registry.release_owner(speech_id)
+                if speech_id
+                else self._game.say_registry.release_pending()
+            )
+            for k in released:
+                logger.warning(
+                    "LILY_SAY | RELEASED | key=%s | reason=stubborn_repeat",
+                    k,
+                )
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=stubborn_repeat | session=%s "
+                "kind=%s — regen retry repeated verbatim again; suppressing "
+                "the third copy instead of airing the storm",
+                self._game.sk.session_id, repeat_kind,
+            )
+            yield rtc.AudioFrame(
+                data=b"\x00\x00" * 2400,
+                sample_rate=24000,
+                num_channels=1,
+                samples_per_channel=2400,
+            )
+            return
         self._reair_regen_pending = False
 
         if len(full) < 3:
