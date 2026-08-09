@@ -224,3 +224,42 @@ def test_the_image_proves_the_offline_load_at_build_time():
         Path(__file__).resolve().parent.parent / "Dockerfile"
     ).read_text(encoding="utf-8")
     assert "HF_HUB_OFFLINE=1" in dockerfile
+
+
+# -- the device+name amnesia (2026-08-09) -------------------------------------
+
+
+def test_a_staged_candidate_plus_its_own_stated_name_promotes():
+    """THE 2026-08-09 fixture. The staged-candidate guard used to slam the
+    name door shut UNCONDITIONALLY — so on a deploy without the ECAPA deps
+    the same-device returner who said his own name stayed quarantined
+    forever. Device history + a name ON that history is strictly stronger
+    evidence than the name alone (which opens the door by itself), so it
+    promotes exactly as weakly: verified=False, voice still outranks."""
+    g = _game(groups_for_name=[REAL_TABLE])
+    g.device_candidate_group_id = REAL_TABLE
+    g._device_candidate_memory = {"total_games": 4, "player_names": ["Rami"]}
+    promoted = []
+
+    async def _promote(trigger, *, verified=True):
+        promoted.append((trigger, verified))
+
+    g._promote_device_candidate = _promote
+    assert _run(g.maybe_recognize_by_stated_name("Rami")) is True
+    assert promoted == [("device_plus_name", False)]
+
+
+def test_a_stranger_name_on_a_staged_device_stays_quarantined():
+    """A shared device is not an identity: a name NOT on the staged file
+    keeps the quarantine — nothing promotes, nothing is fought over."""
+    g = _game(groups_for_name=[REAL_TABLE])
+    g.device_candidate_group_id = REAL_TABLE
+    g._device_candidate_memory = {"total_games": 4, "player_names": ["Rami"]}
+    promoted = []
+
+    async def _promote(trigger, *, verified=True):
+        promoted.append((trigger, verified))
+
+    g._promote_device_candidate = _promote
+    assert _run(g.maybe_recognize_by_stated_name("Chris")) is False
+    assert promoted == []
