@@ -5,6 +5,40 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 wave 1: Y5 transcript truth (diagnosis inverted), Y11 canon draft
+
+**Y5 archaeology (mandate rule 0):** the mechanism the WO asked for already
+exists and is correct by construction — the one-question yield clip runs in
+tts_node BEFORE synthesis, the clipped text binds to the speech handle
+(note_post_tts_text), that exact text synthesizes, and playout consumes the
+binding for both transcripts (P0-C). What failed was OBSERVABILITY: the
+consume log was named `POST_TTS_REWRITE`, which reads as post-hoc
+falsification when it in fact corrects the record TOWARD the TTS input
+(the "raw" it replaces is the model's pre-clip prose, which never aired).
+That name sent a day of transcript analysis the wrong way. Renamed to
+`RECORD_BOUND_TO_TTS_INPUT` (info level, with lengths). The audio-vs-record
+divergence in the evidence session is therefore most plausibly Y6
+cross-turn interleaving (audio of turn A read against the DB row of
+re-asked turn B) — flagged for re-verification against speech_ids + audio.
+**Deletions:** none — the claimed post-hoc rewrite path does not exist as
+diagnosed. **Net addition:** tests only (tests/test_transcript_truth.py:
+source-order pin trim→bind→synthesis; record==TTS-input; one-shot binding;
+fallback). **Documented limit (Y7's scope):** with text_output=False there
+is no transcript synchronizer, so no text source knows the aired portion
+of an INTERRUPTED turn — "…[cut off]" is the honest partial-airing marker;
+audio stays the only ground truth there.
+
+**Y11:** docs/HOST_CANON_DRAFT.md — host-first canon draft around the
+approved spine, explicit PRESERVED section (wit/warmth/timing/callbacks/
+v3 audio tags quoted from the live prompt), and a 7-row conflict table.
+Key finding: the push mandate lives mostly in CODE, not the prompt
+(responsiveness budget 3.0s, the M1 silence gate, speak-by-default) —
+FLOOR-001's restraint counterweight remains unbuilt (Y10). DRAFT —
+operator approval required; nothing installed.
+
+Mandate numbers: lily_agent.py 14,659 → 14,670 lines (log rename +
+contract comment); prompt 8,400 tokens unchanged; suite 1900 → 1904.
+
 ## 2026-08-09 — lily-A070E8: the name-fix death spiral and the repeat storm
 
 Live 11:03 UTC. STT heard "Robin" for Rami; the fix exchange then bound

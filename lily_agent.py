@@ -2165,10 +2165,20 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if final is None:
             return (fallback or "").strip()
         if final != (fallback or "").strip():
-            logger.warning(
-                "LILY_TRANSCRIPT | POST_TTS_REWRITE | session=%s "
-                "speech_id=%s raw=%r final=%r",
+            # Y5 (WO-LILY-HOTFIX-007): this is NOT a post-hoc rewrite of
+            # aired speech — it is the record being bound TO the exact text
+            # that entered TTS (P0-C), after every pre-synthesis clip and
+            # substitution. The old tag POST_TTS_REWRITE read as
+            # falsification and sent a whole day of transcript analysis
+            # the wrong way; the raw text here is the model's PRE-clip
+            # prose, which never aired. The record follows aired truth by
+            # construction: clip (tts_node) -> note_post_tts_text ->
+            # synthesis of that same text -> this consume at playout.
+            logger.info(
+                "LILY_TRANSCRIPT | RECORD_BOUND_TO_TTS_INPUT | session=%s "
+                "speech_id=%s raw_len=%d final_len=%d raw=%r final=%r",
                 self.sk.session_id, speech_id,
+                len((fallback or "").strip()), len(final),
                 (fallback or "")[:160], final[:160],
             )
         return final
