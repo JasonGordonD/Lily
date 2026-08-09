@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at voice-quarantine P0-E2 start: `main @ eb94ea6`
+Pinned at verified-cleanup P0-E3 start: `main @ c0c7f39`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -52,8 +52,8 @@ Each row is a separate merged PR.
 | P0-C | Post-TTS truth | Transcript, TTS and glass share the actual post-transform delivery text | Shipped `0d667ab` |
 | P0-D | Confirmed identity before Q1 | No semantic-name placeholder (`Playing`) can satisfy start gate | Shipped `0143541` |
 | P0-E1 | Voiceprint rekey schema | Production-schema rekey succeeds and is idempotent | Shipped `eb94ea6` |
-| P0-E2 | Voice identity quarantine/promotion | Temporary samples cannot found a rival identity before canonical match | **Completed in this change** |
-| P0-E3 | Verified identity cleanup | Repair `Playing` rows/group only after code and biometric verification | Next |
+| P0-E2 | Voice identity quarantine/promotion | Temporary samples cannot found a rival identity before canonical match | Shipped `c0c7f39` |
+| P0-E3 | Verified identity cleanup | Retire borderline rival; delete only false derivatives; preserve audit rows | **Completed in this change** |
 | P0-F | Pre-window scope | Only speech during actual delivery playout can become an early answer | Queued |
 | P0-G | Meta/progression ownership | Delivery watchdog pauses for intake/meta; responsiveness latch clears; one-emission cut behavior | Queued |
 
