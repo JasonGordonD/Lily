@@ -54,7 +54,7 @@ def _run(coro):
 
 
 def _reasoning_with_stub(monkeypatch_target: dict, raw: str) -> LilyReasoning:
-    """LilyReasoning with _generate stubbed to capture kwargs + return raw."""
+    """LilyReasoning with both transports stubbed for lane-specific tests."""
     r = LilyReasoning.__new__(LilyReasoning)
     r._model = "test-reasoning-model"
     r._vocal_model = "test-vocal-model"
@@ -65,7 +65,12 @@ def _reasoning_with_stub(monkeypatch_target: dict, raw: str) -> LilyReasoning:
         )
         return raw
 
+    async def _fake_grok(prompt, **kwargs):
+        monkeypatch_target.update(prompt=prompt, **kwargs)
+        return raw
+
     r._generate = _fake_generate
+    r._generate_grok_json = _fake_grok
     return r
 
 
@@ -112,26 +117,26 @@ def test_verification_schema_shape():
 
 # -- generation call contract -----------------------------------------------------
 
-def test_generate_question_sets_mime_type_and_schema_and_budget():
+def test_generate_question_sets_grok_model_effort_and_budget():
     seen: dict = {}
     r = _reasoning_with_stub(seen, json.dumps(VALID_QUESTION))
     q = _run(r.generate_question("pop culture", 2, "general", []))
     assert q is not None and q["canonical_answer"] == "Back to the Future"
-    assert seen["response_mime_type"] == "application/json"
-    assert seen["response_schema"] is _QUESTION_RESPONSE_SCHEMA
-    assert seen["max_output_tokens"] == lily_config.reasoning_max_output_tokens()
+    assert seen["model"] == "grok-4.5"
+    assert seen["effort"] == "medium"
+    assert seen["max_tokens"] == lily_config.reasoning_max_output_tokens()
 
 
-def test_verify_question_sets_mime_type_and_schema_and_budget():
+def test_verify_question_sets_grok_model_effort_and_budget():
     seen: dict = {}
     r = _reasoning_with_stub(
         seen, json.dumps({"verdict": "pass", "reason": "checks out"})
     )
     ok, reason = _run(r.verify_question(dict(VALID_QUESTION)))
     assert ok is True and reason == "checks out"
-    assert seen["response_mime_type"] == "application/json"
-    assert seen["response_schema"] is _VERIFICATION_RESPONSE_SCHEMA
-    assert seen["max_output_tokens"] == lily_config.reasoning_max_output_tokens()
+    assert seen["model"] == "grok-4.5"
+    assert seen["effort"] == "medium"
+    assert seen["max_tokens"] == lily_config.reasoning_max_output_tokens()
 
 
 def test_judge_uses_vocal_model_and_judge_budget():

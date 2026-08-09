@@ -5,6 +5,17 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — M5a: question reasoning on Grok 4.5
+
+Question generation, verification and multiple-choice distractor synthesis
+now use Grok 4.5 through the Responses API. General work runs `medium`;
+adult sub-theme/category/question authoring and verification is always
+`high` and cannot be downgraded by an environment override.
+
+The Gemini client remains temporarily isolated for the not-yet-migrated
+Tier-2 judge and multimodal image gate. Prefetch failure behavior is
+unchanged: visible status + bank/freeform fallback, never vocal invention.
+
 ## 2026-08-09 — M4: one Grok 4.5 vocal host
 
 General vocal moved from Gemini 3.6 Flash to Grok 4.5, joining the adult

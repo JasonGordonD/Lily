@@ -147,7 +147,12 @@ def _reasoning_with_capture(raw: str):
         captured["prompt"] = prompt
         return raw
 
+    async def _fake_grok(prompt, **kwargs):
+        captured["prompt"] = prompt
+        return raw
+
     r._generate = _fake_generate
+    r._generate_grok_json = _fake_grok
     return r, captured
 
 

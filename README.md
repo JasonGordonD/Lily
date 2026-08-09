@@ -24,7 +24,7 @@ Spoken-surface freeze before any speech/delivery extract:
 | Framework | `livekit-agents==1.6.8` (plugin family pinned to match; endpointing uses `TurnHandlingOptions.endpointing` with FIXED mode; the LiveKit Turn Detector default remains off) |
 | STT | Speechmatics — `en`, diarization, `model=ENHANCED`; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`): `speaker_sensitivity=0.35`, `prefer_current_speaker=True`, `max_speakers=7`, FIXED turn mode, `ignore_speakers=["__ASSISTANT__"]`, player-name vocab, and StartRecognition `get_speakers`/volume injection. `LilySpeechmaticsSTT` maps the 1.6.8 plugin onto the supported RT `model` property; deprecated `operating_point` never reaches the wire. |
 | Vocal LLM | `grok-4.5` for general + adult; `low` routine effort, per-turn `medium` for dispute/ambiguity/multi-intent/meta; adult behavior is an additive prompt layer, not a provider swap |
-| Reasoning LLM | `gemini-3.1-pro-preview` — background node, own google-genai client (HTTP isolation): question prefetch (N+1) + verification at prefetch time; never speaks |
+| Question reasoning | `grok-4.5` Responses API; general author/verify/distractors `medium`, every adult sub-theme/category/question author/verify `high`; never speaks or mutates state |
 | TTS | ElevenLabs v3 via `lily_tts.py` (`/v1/text-to-speech/{voice_id}/stream`; the dialogue endpoint stays off per fleet revert). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`) |
 | VAD | Silero — barge-in enabled; STT is never gated during TTS |
 | Persistence | Supabase (`lily_*` tables), fail-fast init, checkpoint on score change / 60s / key events |
@@ -284,11 +284,14 @@ reach it.
 
 Every model ID below was verified live on the funded keys before wiring.
 
-- **Brain (vocal LLM):** `gemini-3.6-flash` (`lily_config.vocal_model`), text-mode
-  via the LiveKit `GoogleLLM` plugin — NOT Gemini Live. Streaming is on by
-  default (plugin streams into TTS). `previous_interaction_id` is not used —
-  local `chat_ctx` stays authoritative for the game's structural/desync/floor
-  logic.
+- **Brain (vocal LLM):** `grok-4.5` for general and adult. Routine host
+  turns run `low`; complex turns temporarily use `medium`. Local `chat_ctx`
+  and deterministic state remain authoritative.
+- **Question author/verification/distractors:** `grok-4.5` Responses API.
+  General uses `medium`; all adult sub-theme/category/question authoring and
+  verification is `high`.
+- **Tier-2 judge and multimodal content gate:** temporarily Gemini until
+  their own migration PRs; they no longer share the vocal model setting.
 - **Image gen — standard deck:** `gemini-3.1-flash-lite-image` (Nano Banana 2
   Lite; `lily_config.imagegen_model`) on the classic `generate_content` path
   (no Interactions API migration needed).
@@ -301,30 +304,6 @@ Every model ID below was verified live on the funded keys before wiring.
   on `media_mode` only, and `prefetch_picture_question` threads `mode='adult'`
   through `lily_build_real_or_imagined_question` so its GENERATED branch routes
   to Grok. The web-sourced (real-entity / real-photo) branches are unchanged.
-- **thinking_level** is per call-site, never global: content GENERATION
-  (`REASONING_THINKING_LEVEL`) and close-answer ADJUDICATION
-  (`JUDGE_THINKING_LEVEL`) run HIGH; hosting banter runs LOW (the `GoogleLLM`
-  default); complex conversational turns (disputes/adjudication/ambiguity/
-  multi-step) escalate to HIGH via `_thinking_level_for_turn` in `llm_node`,
-  which overrides `_opts.thinking_config` for that turn and restores in
-  `finally`. Gemini 3.x accepts only `low`/`high`.
-- **Adult-deck reasoning effort per lane (HOTFIX-005 X13).** On
-  `grok-4.20-multi-agent`, `reasoning.effort` is an **agent-count dial**, not
-  thinking depth: `low`=4-agent, `high`=16-agent — a 4× fan-out on latency
-  AND spend. Effort is matched to task complexity, not lane importance:
-
-  | Lane | Model | Effort | Rationale |
-  | --- | --- | --- | --- |
-  | Adult vocal (front-facing) | `grok-4.5` (`adult_vocal_effort`) | **`medium`** | Latency-critical — a player waits through every token. `high` cost ~5s TTFT in `lily-FFDEAE` (llm_ttft p50 4,999ms / p95 8,254ms; non-adult vocal ~1,102ms). `low` for max speed, `high` to restore deep banter. |
-  | Adult question generation | `grok-4.20-multi-agent` (`adult_reasoning_effort`) | **`low`** (4-agent) | One trivia line is a TCP-vs-UDP-class task; 16 agents is disproportionate in time and spend. |
-  | Hard synthesis (future) | `grok-4.20-multi-agent` | `high` (16-agent) | Reserved for tool-enabled current-events / corpus building where the arsenal absorbs the wait. |
-
-  `xhigh` is accepted but its exact agent-count/cost mapping is **unconfirmed**
-  against the vendor — treat as ≥16-agent, not for use until measured. Effort
-  is a spend multiplier; record measured cost per question when the
-  multi-agent lane is exercised. Overrides: `LILY_ADULT_VOCAL_EFFORT`,
-  `LILY_ADULT_REASONING_EFFORT` (`off` disables the param for ids that reject
-  it).
 
 ## Both-sides record, continuous recognition, variety (WO-LILY-RECOGNITION-VARIETY-001)
 
