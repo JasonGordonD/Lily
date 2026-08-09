@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at verified-cleanup P0-E3 start: `main @ c0c7f39`
+Pinned at endpointing M2 start: `main @ 669fb88`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -53,7 +53,7 @@ Each row is a separate merged PR.
 | P0-D | Confirmed identity before Q1 | No semantic-name placeholder (`Playing`) can satisfy start gate | Shipped `0143541` |
 | P0-E1 | Voiceprint rekey schema | Production-schema rekey succeeds and is idempotent | Shipped `eb94ea6` |
 | P0-E2 | Voice identity quarantine/promotion | Temporary samples cannot found a rival identity before canonical match | Shipped `c0c7f39` |
-| P0-E3 | Verified identity cleanup | Retire borderline rival; delete only false derivatives; preserve audit rows | **Completed in this change** |
+| P0-E3 | Verified identity cleanup | Retire borderline rival; delete only false derivatives; preserve audit rows | Shipped/applied `669fb88` |
 | P0-F | Pre-window scope | Only speech during actual delivery playout can become an early answer | Queued |
 | P0-G | Meta/progression ownership | Delivery watchdog pauses for intake/meta; responsiveness latch clears; one-emission cut behavior | Queued |
 
@@ -94,7 +94,7 @@ failure becomes the sole hotfix ticket.
 | ID | Ticket |
 |---|---|
 | M1 | Disable every configurable Gemini filter; deterministic fallback for non-configurable `PROHIBITED_CONTENT`; blocked-request observability |
-| M2 | LiveKit endpointing → `TurnHandlingOptions`, preserving current detector |
+| M2 | LiveKit endpointing → `TurnHandlingOptions`, preserving current detector (**completed in this change**) |
 | M3 | Speechmatics `operating_point` → supported `model`, preserving enhanced STT |
 | M4 | General/adult vocal → Grok 4.5 with deterministic low/medium effort router |
 | M5 | Reasoning/judge/vision/assessment → Grok 4.5, structured Responses API |
