@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at sticky-STOP P0-B start: `main @ bb0077c`
+Pinned at post-TTS truth P0-C start: `main @ 377e496`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -48,9 +48,9 @@ Each row is a separate merged PR.
 | ID | Ticket | Done when | Status |
 |---|---|---|---|
 | P0-A | Answered question dead forever | Result/reveal clears clarify; no final-answer check, window reopen, or re-ask; Freud fixture | Shipped `bb0077c` |
-| P0-B | Sticky global STOP | One STOP freezes game delivery/supply/window until explicit resume | **Completed in this change** |
-| P0-C | Post-TTS truth | Transcript, TTS and glass share the actual post-transform delivery text | Next |
-| P0-D | Confirmed identity before Q1 | No semantic-name placeholder (`Playing`) can satisfy start gate | Queued |
+| P0-B | Sticky global STOP | One STOP freezes game delivery/supply/window until explicit resume | Shipped `377e496` |
+| P0-C | Post-TTS truth | Transcript, TTS and glass share the actual post-transform delivery text | **Completed in this change** |
+| P0-D | Confirmed identity before Q1 | No semantic-name placeholder (`Playing`) can satisfy start gate | Next |
 | P0-E | Voiceprint rekey/identity | Production-schema rekey succeeds; temporary samples quarantine/promote; poisoned rows repaired | Queued |
 | P0-F | Pre-window scope | Only speech during actual delivery playout can become an early answer | Queued |
 | P0-G | Meta/progression ownership | Delivery watchdog pauses for intake/meta; responsiveness latch clears; one-emission cut behavior | Queued |
