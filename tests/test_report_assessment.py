@@ -272,6 +272,33 @@ def test_sweep_with_no_supabase_is_a_silent_noop():
     assert stats == {"scanned": 0, "assessed": 0, "failed": 0}
 
 
+def test_default_assessment_uses_grok_4_5_high(monkeypatch):
+    captured = {}
+
+    async def _fake_grok(self, prompt, **kwargs):
+        captured.update(kwargs)
+        return json.dumps({
+            "summary": "A session.",
+            "group_dynamics": "Solo.",
+            "per_player": {},
+            "host_performance": "Reviewed.",
+            "flags": [],
+        })
+
+    monkeypatch.setattr(
+        lily_assessment.lily_reasoning.LilyReasoning,
+        "_generate_grok_json",
+        _fake_grok,
+    )
+    result = asyncio.run(
+        lily_assessment._default_generate([], {"rounds_played": 0})
+    )
+    assert result["summary"] == "A session."
+    assert captured["model"] == "grok-4.5"
+    assert captured["effort"] == "high"
+    assert captured["timeout"] == 60.0
+
+
 # ---------------------------------------------------------------------------
 # Model-output parsing: fenced / prose-wrapped JSON still lands
 # ---------------------------------------------------------------------------

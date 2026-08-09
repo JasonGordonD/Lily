@@ -6,7 +6,6 @@ import inspect
 
 from google.genai import types as gt
 
-import lily_assessment
 import lily_gemini_safety
 import lily_imagegen
 import lily_reasoning
@@ -38,19 +37,15 @@ def test_livekit_plugin_policy_matches_sdk_policy():
     assert all(item["threshold"] == "BLOCK_NONE" for item in settings)
 
 
-def test_reasoning_and_assessment_use_shared_policy():
+def test_reasoning_legacy_multimodal_helper_uses_shared_policy():
     assert {
         item.category for item in lily_reasoning._SAFETY_SETTINGS
-    } == EXPECTED
-    assert {
-        item.category for item in lily_assessment._SAFETY_SETTINGS
     } == EXPECTED
 
 
 def test_every_remaining_gemini_lane_imports_shared_policy():
     for module in (
         lily_reasoning,
-        lily_assessment,
         lily_imagegen,
         lily_search,
     ):

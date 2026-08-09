@@ -296,6 +296,8 @@ Every model ID below was verified live on the funded keys before wiring.
   descriptions, web-image approval, arsenal correspondence and image-first
   captions. It receives URL or base64 image input and returns text/structured
   verdicts; dedicated image models still render pixels.
+- **Post-session assessment:** `grok-4.5` `high`, offline only; report fill
+  and reconciliation never add latency to a live room.
 - **Image gen — standard deck:** `gemini-3.1-flash-lite-image` (Nano Banana 2
   Lite; `lily_config.imagegen_model`) on the classic `generate_content` path
   (no Interactions API migration needed).

@@ -5,6 +5,13 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — M5d: post-session assessment on Grok 4.5 High
+
+The offline clinical-desk assessment and reconciliation sweep now use Grok
+4.5 at `high` effort through the same structured Responses transport. The
+pending/complete/failed report state machine and retry discipline are
+unchanged; no live player turn waits on this lane.
+
 ## 2026-08-09 — M5c: vision and image correspondence on Grok 4.5
 
 Player photo analysis, real-entity image approval, arsenal correspondence and
