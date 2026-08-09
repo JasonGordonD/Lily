@@ -69,14 +69,16 @@ REASONING_THINKING_LEVEL = "high"
 # bound in judge() + Tier-1 fallback protects the critical path if a HIGH
 # turn runs long.
 JUDGE_THINKING_LEVEL = "high"
-# 30s -> 15s (lily-1C53C6): a stalled grok call is pathological well before
-# 15s (normal completions land in single-digit seconds), and at 30s per call
-# the generate -> verify -> choices chain could stack ~90s of dead air
-# before PREFETCH_FAILED fired — the live q2 hang rode exactly two of those
-# stacked timeouts. The whole prefetch additionally shares one overall
-# budget below, so no combination of stalls can exceed it.
-PREFETCH_TIMEOUT_SECONDS = 15.0
-PREFETCH_TOTAL_BUDGET_SECONDS = 30.0
+# 30s -> 20s per call (lily-1C53C6): at 30s per call the generate ->
+# verify -> choices chain could stack ~90s of dead wait before
+# PREFETCH_FAILED fired — the live q2 hang rode exactly two of those
+# stacked timeouts. 20s keeps margin over healthy-but-slow authoring
+# turns (grok-4.5 reasoning lanes routinely run double-digit seconds);
+# the overall budget below is the real bound — no combination of stalls
+# can exceed it. Both env-tunable (lily_config accessors) so the walls
+# can track the measured authoring p95 without a code deploy.
+PREFETCH_TIMEOUT_SECONDS = lily_config.prefetch_timeout_seconds()
+PREFETCH_TOTAL_BUDGET_SECONDS = lily_config.prefetch_total_budget_seconds()
 
 # xAI multi-agent transport (Engineering Note 2026-08-07): the
 # grok-*-multi-agent tier rejects the Chat Completions endpoint (HTTP 400
