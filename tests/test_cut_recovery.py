@@ -154,8 +154,12 @@ def test_trigger_dispatches_fresh_resume():
     assert game.trigger_cut_recovery() is True
     assert len(game.session.instructions) == 1
     assert _CUT_RECOVERY_DIRECTIVE in game.session.instructions[0]
-    # Re-air gate armed so the resume regenerates rather than replays.
-    assert game.peek_reair_gate() is True
+    # HOTFIX-007 Y10: the resume now dispatches through gated_say (chain F
+    # closed), so it CONSUMES the re-air arm itself instead of leaving it
+    # for the next code dispatch — the regenerate-not-replay signal reaches
+    # tts_node via _reair_turn_pending, which is the arm's actual purpose.
+    assert game.peek_reair_gate() is False
+    assert game._reair_turn_pending is True
 
 
 # --------------------------------------------------------------------------

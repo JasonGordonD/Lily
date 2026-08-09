@@ -590,6 +590,76 @@ class LilySpeechDeliveryMixin:
         self._last_user_turn_at = time.monotonic()
         self.cancel_cut_recovery()
 
+    def _floor_yields_recovery(self) -> "str | None":
+        """The floor read for the auto-resume: the floor state to yield to,
+        or None to proceed. Derived read only (LilyGame.floor_state).
+
+        IN-GAME ONLY (Y10 review F2). Pre-game there is no machine path that
+        can re-engage after a yield: the idle watchdog returns early when
+        `game_started` is False, so a stood-down lobby/intake resume is
+        one-shot dead air at the exact moment intake needs her to come back.
+        There is also nothing to protect the room FROM pre-game — the
+        restraint this gate exists for is her talking over the table's own
+        conversation during a live game, not her finishing an intake line.
+        A pre-game HOLD still refuses, one layer down: gated_say's hold gate
+        binds the dispatch itself now that chain F is closed, so an explicit
+        "give us a minute" is honoured in the lobby too."""
+        if not getattr(self, "game_started", False):
+            return None
+        if getattr(self, "game_over", False):
+            return None
+        floor = self.floor_state()
+        if floor in (self.FLOOR_PLAYER_SPEAKING, self.FLOOR_HOLD):
+            return floor
+        return None
+
+    def _stand_down_cut_recovery(self, reason: str) -> None:
+        """THE single exit for a recovery that will NOT speak — the floor
+        yield and a gated dispatch both land here. Restraint has to clean up
+        after itself; a stood-down recovery leaves no live arm and no
+        unpayable debt behind (both found by the Y10 adversarial review).
+
+        (F3) The re-air arm. The cut armed it (on_agent_speech_finished) so
+        that the NEXT code-triggered turn regenerates rather than replays.
+        With the resume stood down, "the next code dispatch" can be an
+        unrelated act minutes later — an IDLE_REARM question_nudge would
+        take the arm and air a never-cut question carrying the "you were cut
+        short mid-question, pick up where you broke off" directive. The arm
+        is cleared, not consumed: consuming it would set _reair_turn_pending
+        and hand the regen GATE a turn that is not a re-air. There is
+        nothing left to avoid replaying anyway — the abandoned clause is not
+        owed to anyone.
+
+        (F1) The address debt. `_awaiting_address_since` is set for every
+        host-directed final and cleared ONLY at real playout
+        (note_playout_started). A reply that died before playout, whose
+        recovery then stands down, leaves that latch set with no actor left
+        to clear it — and `progression_paused_reason` returns
+        address_unanswered forever, so the idle watchdog logs
+        WATCHDOG_PAUSED and skips the WHOLE game-lane recovery ladder on
+        every tick: machine-unbounded in-game dead air, which is M1's
+        failure mode arriving through the counterweight's own door. The
+        address was answered — by a turn that died — so the debt dies with
+        the recovery that would have paid it. Releasing it here restores
+        exactly what the pre-Y10 code got by accident (the bypassing resume
+        fired and its playout cleared the latch), without the bypass."""
+        if getattr(self, "_reair_gate_armed", False):
+            self._reair_gate_armed = False
+            logger.info(
+                "LILY_CUT_RECOVERY | REAIR_ARM_CLEARED | session=%s "
+                "reason=%s — resume stood down; no live arm may leak to an "
+                "unrelated dispatch", self.sk.session_id, reason,
+            )
+        if getattr(self, "_awaiting_address_since", 0.0):
+            self._awaiting_address_since = 0.0
+            self._address_unanswered_warned = False
+            logger.warning(
+                "LILY_RESPONSIVENESS | ADDRESS_DEBT_CLEARED | session=%s "
+                "reason=%s — the answering turn died and its recovery stood "
+                "down; releasing the latch so progression is not paused on a "
+                "debt nothing can pay", self.sk.session_id, reason,
+            )
+
     def _cut_recovery_should_fire(self, token: int) -> bool:
         """True only if this token's watchdog is still live AND the cut left
         genuine dead air: not superseded, nobody speaking, no user turn in
@@ -597,6 +667,29 @@ class LilySpeechDeliveryMixin:
         answers), game still live and out of a scoring window."""
         if getattr(self, "_cut_recovery_token", 0) != token:
             return False  # superseded by a newer cut or an explicit cancel
+        # FLOOR-001 counterweight (HOTFIX-007 Y10) — THE GRADED CHOICE.
+        # This watchdog is the purest expression of the code-side push
+        # mandate: a machine timer, firing into silence, with no user turn
+        # asking for anything. Its five original pre-conditions all ask "is
+        # the air free?" and none asks "is the floor MINE?". Dead air while
+        # the table talks among itself is not her failure to fill (canon:
+        # "Silence while the table plays without you is not your hosting
+        # failing — it is your hosting, working"), and a cut that lands
+        # inside a hold must not produce the auto-resume the hold exists to
+        # prevent (GUARD_MAP chain F). Both cases choose SILENCE here: no
+        # resume, no minimal ack, and nothing re-armed — her dropped clause
+        # is not owed to anyone, and the idle watchdog still owns a genuine
+        # game stall. The floor read is derived from state that already
+        # existed (see LilyGame.floor_state).
+        floor_yield = self._floor_yields_recovery()
+        if floor_yield:
+            logger.info(
+                "LILY_FLOOR | RECOVERY_YIELDED | session=%s floor=%s — cut "
+                "left dead air but the floor is not hers; staying quiet",
+                self.sk.session_id, floor_yield,
+            )
+            self._stand_down_cut_recovery(f"floor:{floor_yield}")
+            return False
         if getattr(self.sk, "host_speaking", False):
             return False  # audio already resumed / a new turn is airing
         armed_at = getattr(self, "_cut_recovery_armed_at", 0.0)
@@ -614,16 +707,50 @@ class LilySpeechDeliveryMixin:
     def trigger_cut_recovery(self) -> bool:
         """Dispatch the fresh auto-resume. Arms the re-air gate first so the
         resume regenerates rather than replays (the shared WS-3 gate), then
-        fires the cut-recovery directive through the between-turns speech
-        path. Returns True if a resume was dispatched."""
+        fires the cut-recovery directive THROUGH gated_say. Returns True if
+        a resume was actually dispatched.
+
+        HOTFIX-007 Y10 — CHAIN F CLOSED. This method used to call
+        instructed_reply directly, so the auto-resume was the one outbound
+        lane that skipped the dispatch choke point entirely: the hold gate,
+        the question-pending gate, the P0-G progression pause and the P8
+        live-game gate never ran on it (GUARD_MAP chain F). A cut landing
+        inside a hold produced exactly the auto-resume the hold was built to
+        prevent. It routes through the SAME funnel every other code-driven
+        turn uses now — no second gate implementation, no new gate.
+        Keyless by design (key=None): the resume claims no speech act, so it
+        arms neither the stale-claim watchdog nor any retry ladder — a
+        refused resume is simply silence, which is the point.
+
+        Consuming its own re-air arm here also closes a latent leak: the arm
+        set by the cut (on_agent_speech_finished) was previously eaten by
+        whatever code dispatch came NEXT, which could hand the
+        cut-short-mid-question directive to a question that was never cut."""
         self.arm_reair_gate()
-        logger.warning(
-            "LILY_CUT_RECOVERY | RESUMED | session=%s — cut turn left dead "
-            "air, auto-resuming fresh (no operator poke)",
-            self.sk.session_id,
+        dispatched = self.gated_say(
+            None,
+            "cut_recovery",
+            _CUT_RECOVERY_DIRECTIVE,
+            source="cut_recovery",
         )
-        handle = self.instructed_reply(_CUT_RECOVERY_DIRECTIVE)
-        return handle is not None
+        if dispatched:
+            logger.warning(
+                "LILY_CUT_RECOVERY | RESUMED | session=%s — cut turn left "
+                "dead air, auto-resuming fresh (no operator poke)",
+                self.sk.session_id,
+            )
+        else:
+            logger.info(
+                "LILY_CUT_RECOVERY | GATED | session=%s floor=%s — the "
+                "dispatch gate refused the auto-resume; the dropped clause "
+                "is not owed", self.sk.session_id, self.floor_state(),
+            )
+            # A refused dispatch is a stood-down recovery: same cleanup as
+            # the floor yield (arm cleared, address debt released). The arm
+            # was set above and gated_say refuses BEFORE consuming it, so
+            # without this it strands (Y10 review F3).
+            self._stand_down_cut_recovery("gated")
+        return dispatched
 
     async def _cut_recovery_watch(self, token: int) -> None:
         """Wait out the grace window, then auto-resume iff the cut still

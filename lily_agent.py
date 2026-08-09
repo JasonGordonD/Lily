@@ -1481,6 +1481,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     # user turn — the normal reply path handles that (with the re-air gate
     # making it fresh), and the user-turn recency guard below suppresses the
     # watchdog so it never double-speaks over a reply already in flight.
+    #
+    # FLOOR AMENDMENT (WO-LILY-HOTFIX-007 Y10, FLOOR-001 counterweight):
+    # "fires only into silence" was never the same claim as "fires only when
+    # the floor is hers", and this watchdog used to make the weaker one on
+    # its own authority — it dispatched through instructed_reply, so the
+    # hold/question-pending/progression/live-game gates in gated_say never
+    # saw it (GUARD_MAP chain F). Two bindings now: the fire decision reads
+    # LilyGame.floor_state() and chooses silence when the ROOM holds the
+    # floor or a hold is active, and the dispatch itself goes through
+    # gated_say like every other code-driven turn. Silence is a legitimate
+    # outcome of this watchdog, not a failure of it.
 
 
 
@@ -4483,6 +4494,120 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         return not getattr(self, "game_started", False) or getattr(
             self, "game_over", False
         )
+
+    # -- WO-LILY-FLOOR-001 counterweight (HOTFIX-007 Y10) ------------------
+    #
+    # ARCHAEOLOGY — what already existed, and why none of it sufficed.
+    # Four surfaces already held a PIECE of "whose floor is it":
+    #
+    #   * SpeechActRegistry claims + _playout_started_ids (lily_say_gate,
+    #     lily_speech_delivery) — the substrate for WHICH ACT is airing or
+    #     owed. That is act identity, not floor ownership: a PENDING claim
+    #     says "this reveal is in flight", never "the room is talking".
+    #   * _hold_active / hold_blocks_dispatch (PATCH-002 A4) — a genuine,
+    #     already-global YIELD that binds every gated_say lane. But it is
+    #     only ever ENTERED by an explicit event: STOP, a player's
+    #     decline, her own wait-promise, a timed-out question. Nothing
+    #     enters it because the table is simply enjoying itself.
+    #   * _question_pending (PATCH-003 P10) — the floor yielded after SHE
+    #     asks. Blind to the room talking on its own.
+    #   * last_addressee_judgment (FLOOR-001 FL-1) — the ONLY per-utterance
+    #     read of player-to-player talk, and until Y10 it was consumed
+    #     EXCLUSIVELY as two prompt context lines in build_state_block
+    #     ("floor read: ..."). It conditioned her words and gated nothing.
+    #     FL-2, the floor-state machine named as FL-1's own downstream
+    #     contract (lily_addressee_classifier.py:31), was never built.
+    #
+    # So the states existed, scattered across four owners, and the one
+    # surface that can detect the ROOM holding the floor had no authority
+    # over dispatch at all. Meanwhile the push mandate is enforced in code
+    # (responsiveness budget, the M1 "silence is her failure mode" gate,
+    # the auto-resume watchdog) with no counterweight.
+    #
+    # Y10 adds NO fifth state and no parallel floor manager. floor_state()
+    # is a pure DERIVED READ over the four surfaces above — no new
+    # attribute, nothing to keep in sync, nothing to reset — and it is what
+    # finally gives the FL-1 judgment authority over a dispatch decision.
+    #
+    # DELIBERATELY NOT BUILT (see the Y10 commit message): the full graded
+    # -response ladder (per-act "full turn vs minimal acknowledgment vs
+    # silence" selection on every lane) and a stateful FL-2 machine with
+    # transitions of its own. Both would be the second layer the mandate
+    # forbids. The minimal counterweight is: one derived read, one push
+    # path that can now choose silence, and chain F closed.
+
+    FLOOR_LILY_SPEAKING = "lily_speaking"
+    FLOOR_PLAYER_SPEAKING = "player_speaking"
+    FLOOR_OPEN = "open_floor"
+    FLOOR_HOLD = "hold"
+
+    def _room_talk_recency_seconds(self, *, cluster: bool) -> float:
+        """How long a player-to-player read stays live, in the CLASSIFIER's
+        own units — no new tuning knob. A locked side-cluster is a running
+        conversation and keeps the floor for its own liveness bound
+        (cluster_max_gap_seconds); a lone table-talk line goes stale as
+        fast as the adjacency window it was scored against."""
+        classifier = getattr(self, "addressee_classifier", None)
+        if cluster:
+            return float(getattr(classifier, "cluster_max_gap_seconds", 15.0))
+        return float(getattr(classifier, "adjacency_seconds", 4.0))
+
+    def room_holds_floor(self, now: float | None = None) -> bool:
+        """True when the ROOM owns the floor: she asked and they have not
+        answered (P10), or FL-1's latest judgment read the last utterance
+        as player-to-player talk and that read is still live.
+
+        A HOST_DIRECTED judgment deliberately does NOT hold the floor — the
+        canon keeps the responsiveness budget for a direct address ("she
+        never has to be told twice"). This yields only where the canon says
+        yield: table talk and side clusters.
+
+        KNOWN SLACK (Y10 review F4, accepted): the classifier kills a live
+        side-cluster on `note_agent_prompt` (any Lily turn that aired), but
+        `last_addressee_judgment` itself is never cleared — so a cluster
+        read can still say player_speaking for up to
+        cluster_max_gap_seconds after the cluster machine has moved on. Two
+        things bound it: the recency window above, and floor_state's
+        precedence (her own live audio outranks the room read). The cost is
+        confined to this one lane and is at most a few extra seconds of
+        silence on an auto-resume; clearing the judgment on note_agent_prompt
+        would be a second write path into FL-1 state, which is the layer
+        Y10 is under mandate not to add."""
+        if getattr(self, "_question_pending", False):
+            return True
+        judgment = getattr(self, "last_addressee_judgment", None)
+        if judgment is None:
+            return False
+        cluster = judgment.classification == (
+            lily_addressee_classifier.CLASS_SIDE_CLUSTER
+        )
+        if not cluster and judgment.classification != (
+            lily_addressee_classifier.CLASS_SIDE_CHATTER
+        ):
+            return False
+        ref = now if now is not None else time.time()
+        age = ref - float(getattr(judgment, "ts", 0.0) or 0.0)
+        # Deliberate failure direction: an unusable timestamp (missing, or
+        # ahead of the clock) reads as NO room floor, so the lane falls back
+        # to its pre-Y10 behaviour and speaks. A restraint counterweight
+        # must never be able to fail into a permanent mute.
+        return 0.0 <= age <= self._room_talk_recency_seconds(cluster=cluster)
+
+    def floor_state(self) -> str:
+        """Whose floor is it — derived, never stored. Precedence is the
+        precedence the existing gates already enforce: an explicit hold
+        outranks everything (it is the one state that already binds every
+        dispatch lane), her own live audio outranks a stale room read, and
+        the room's talk outranks the default. FLOOR_OPEN is the residual —
+        a genuine lull, which is exactly when the canon says the floor
+        comes back to her."""
+        if getattr(self, "_hold_active", False):
+            return self.FLOOR_HOLD
+        if getattr(getattr(self, "sk", None), "host_speaking", False):
+            return self.FLOOR_LILY_SPEAKING
+        if self.room_holds_floor():
+            return self.FLOOR_PLAYER_SPEAKING
+        return self.FLOOR_OPEN
 
     def progression_paused_reason(self) -> str | None:
         """Why a new question delivery must not take the floor right now."""
