@@ -5,6 +5,13 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Spine log (`LILY_SPINE`)
+
+One operability line on each distinct glass publish:
+`phase / q / delivery / window / hold / supply`. Deduped so identical
+snapshots do not spam. Pure `lily_spine_line` + `LilyGame.spine_fields`
+/ `log_spine`.
+
 ## 2026-08-09 — Extract speech/delivery (zero copy edits)
 
 Main structural cut against the voice-inventory freeze. Moved
