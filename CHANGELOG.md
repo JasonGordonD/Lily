@@ -5,6 +5,18 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Extract speech/delivery (zero copy edits)
+
+Main structural cut against the voice-inventory freeze. Moved
+`gated_say` + stale-claim watchdog, re-air / cut recovery,
+`expect_delivery` / `register_delivery_claim`, and MC abort + pre-window
++ early answer into `lily_speech_delivery.LilySpeechDeliveryMixin`.
+`LilyGame` inherits the mixin so those names stay the single choke
+points on the game object. Directive strings and act/key behavior are
+byte-stable; tests that monkeypatched stale-claim knobs now target
+`lily_speech_delivery`. Audeering stays parked. Supply / director /
+identity / thin shell left for follow-on PRs.
+
 ## 2026-08-09 — Hot-path await audit (glass publishes)
 
 Persistence writes on adjudicate / reveal / answer / transcript were

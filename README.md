@@ -748,6 +748,8 @@ off the reveal moment:
 
 ```
 lily_agent.py        entrypoint + LilyAgent + LilyGame (windows, prefetch, publishing, tools)
+lily_speech_delivery.py  gated_say + delivery claims, re-air / cut recovery, MC abort /
+                     pre-window / early answer (LilySpeechDeliveryMixin; zero copy edits)
 lily_scorekeeper.py  N-player roster, per-player state, answer windows, system-directed
                      classifier, state-block builder — pure local state, zero LLM calls
 lily_binding.py      lily_bind_speaker name extraction (2s fragment accumulation, stopwords)
