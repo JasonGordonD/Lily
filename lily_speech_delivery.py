@@ -544,16 +544,82 @@ class LilySpeechDeliveryMixin:
             return False
         return not self.is_question_delivery_turn(spoken_text)
 
+    def note_user_speech_state(self, speaking: bool) -> None:
+        """The VAD user-speech edge — the ONE wiring point (session
+        `user_state_changed`). Keeps `_user_speaking` (the P0-2 kickoff
+        floor) and stamps the FALLING edge, which is what makes the cut
+        CAUSE readable after the fact (Y7).
+
+        Why here and not off the interrupt itself: `user_state_changed`
+        fires from the framework's VAD `on_start_of_speech`, which
+        necessarily precedes its interruption decision
+        (`on_vad_inference_done` -> speech_duration >=
+        interruption.min_duration -> `_interrupt_by_audio_activity`). By
+        the time a cut reaches `on_agent_speech_finished` the human may
+        already be back in `listening` and her transcript may have been
+        dropped, so the timestamp is the only surviving evidence."""
+        if not speaking and getattr(self, "_user_speaking", False):
+            self._user_speech_ended_at = time.monotonic()
+        self._user_speaking = bool(speaking)
+
+    def cut_was_deliberate_barge_in(self) -> bool:
+        """Y7 (WO-LILY-HOTFIX-007): did a HUMAN end this turn on purpose?
+
+        `SpeechHandle.interrupted` is cause-blind — a barge-in, a
+        `cancel_speech(force=True)`, an MC abort and a paused-then-
+        committed turn all set the same flag — and recovery is legitimate
+        for exactly one cause: the stream died on its own. This is the
+        discriminator, and it reads the VAD layer (the human's own voice),
+        not the interrupt.
+
+        Two signals, one question ("has a human taken the floor?"):
+        `_user_speaking` while the cut lands, and either edge —
+        VAD end-of-speech or a COMMITTED user turn — inside the shared
+        barge window. The committed-turn half is the pre-existing
+        `_cut_recovery_should_fire` proxy; it stays because it is free,
+        but it cannot carry this decision alone: (1) the framework drops
+        the transcript that caused the barge when it falls inside
+        `ignore_user_transcript_until` (AudioRecognition
+        `_flush_held_transcripts`), so the utterance may never commit,
+        and (2) `_on_end_of_turn` awaits `current_speech.interrupt()`
+        BEFORE `on_user_turn_completed`, so even a committed turn can be
+        stamped after this decision has already been made."""
+        if getattr(self, "_user_speaking", False):
+            return True
+        for stamp in (
+            getattr(self, "_user_speech_ended_at", None),
+            getattr(self, "_last_user_turn_at", None),
+        ):
+            if stamp and (
+                time.monotonic() - stamp <= _CUT_RECOVERY_USER_TURN_LOOKBACK
+            ):
+                return True
+        return False
+
     def _cut_recovery_should_arm(
         self, released: "list | None", interrupted: bool, failed: bool
     ) -> bool:
         """Arm the auto-resume only for a cut/failed ORGANIC turn. A keyed
         game act (released non-empty) recovers through the game loop; the
         answer window / adjudication own their own timing; a finished game
-        has nothing to resume."""
+        has nothing to resume.
+
+        Y7: and only for the right CAUSE. A deliberate barge-in is a
+        CANCEL — she stops and yields the floor — so it arms nothing.
+        Recovery machinery exists for a turn the ROOM did not end: a dead
+        TTS stream, a mid-air network death. `failed` names that cause
+        outright and is never overridden by a voice near the cut."""
         if not (interrupted or failed):
             return False
         if released:  # a keyed game act — the game loop owns its re-dispatch
+            return False
+        if interrupted and not failed and self.cut_was_deliberate_barge_in():
+            logger.info(
+                "LILY_INTERRUPT | BARGE_IN_CANCEL | session=%s — human talked "
+                "over her; yielding the floor (no auto-resume, no re-air, no "
+                "regeneration)",
+                self.sk.session_id,
+            )
             return False
         if getattr(self, "game_over", False):
             return False
@@ -604,6 +670,19 @@ class LilySpeechDeliveryMixin:
         if last_user >= armed_at - _CUT_RECOVERY_USER_TURN_LOOKBACK:
             # A user turn landed around/after the cut — a genuine barge with
             # content; the normal reply path (re-air-gated fresh) owns it.
+            return False
+        if self.hold_blocks_dispatch("cut_recovery", "cut_recovery"):
+            # Y7 / Chain F (GUARD_MAP §8): this dispatch bypasses gated_say,
+            # so the hold every other lane obeys never reached it — a cut
+            # followed by "hang on a sec" auto-resumed straight over the
+            # player's own request for the floor. Same predicate gated_say
+            # uses (mech. 5), read at fire time because the hold is usually
+            # entered DURING the grace window.
+            logger.info(
+                "LILY_CUT_RECOVERY | HELD | session=%s reason=%s — the table "
+                "asked for the floor; no auto-resume",
+                self.sk.session_id, getattr(self, "_hold_reason", None),
+            )
             return False
         if getattr(self, "game_over", False):
             return False

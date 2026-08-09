@@ -5,6 +5,103 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y7: a barge-in is a CANCEL, not a cut to recover
+
+When a human deliberately talks over Lily she now stops and yields the
+floor: the cut turn arms no auto-resume, no re-air, no regeneration. The
+line the player killed does not come back.
+
+**Archaeology (mandate rule 1) — what existed and why it didn't cover
+this.** Barge-in DETECTION was already correct and already at the VAD
+layer: `InterruptionOptions(min_words=1, min_duration=0.25,
+resume_false_interruption=True, false_interruption_timeout=2.0,
+mode="adaptive")` with silero VAD — the framework interrupts once VAD
+`speech_duration >= min_duration` (`on_vad_inference_done` ->
+`_interrupt_by_audio_activity`), which is the WO's ~200ms budget, and a
+noise burst with no transcript pauses-and-resumes instead of cutting
+(WS-14, pinned in tests/test_interruption_layer.py). What was missing was
+the CAUSE reaching the recovery machinery:
+
+- `SpeechHandle.interrupted` — the single cut signal fed to
+  `on_agent_speech_finished` (A:14224) — is **cause-blind**. A human
+  barge-in, `cancel_speech(force=True)` (mech. 35), the MC abort, the
+  STOP primitive and a paused-then-committed turn all set the same flag.
+- `_cut_recovery_should_arm` (WS-3) already refused keyed acts, open
+  windows, adjudication, STOP and game-over — but armed on ANY
+  `interrupted`.
+- One barge-in proxy DID exist: `_cut_recovery_should_fire`'s user-turn
+  recency guard. It keys on `_last_user_turn_at`, stamped by
+  `note_user_turn()` from `on_user_turn_completed` — i.e. **only when a
+  transcript commits**. Two facts in the installed livekit-agents 1.6.8
+  make that insufficient: (1) `_interrupt_by_audio_activity` pauses and
+  sets `ignore_user_transcript_until=now`, and
+  `AudioRecognition._flush_held_transcripts` **drops** transcripts whose
+  end time falls in that window — so the very utterance that caused the
+  barge often never commits as a user turn (routine in a game whose
+  steady state is shouting over the host); (2) `_on_end_of_turn` awaits
+  `current_speech.interrupt()` **before** `on_user_turn_completed`, so
+  even a committed turn can be stamped after the cut has been processed —
+  the proxy can work at fire time, never at arm time.
+- Net effect, live defect class: a barge with no committed transcript left
+  `_last_user_turn_at` stale, the auto-resume fired 3.5s later, and the
+  re-air arm told the next code-dispatched act to say the killed line
+  again in fresh words — which is also exactly the input that defeats the
+  exact-match dup guards (GUARD_MAP §7). Chain A from there.
+
+**The fix (gates on existing arms, no new layer).** One discriminator,
+`cut_was_deliberate_barge_in()`, reads the VAD layer — the only place the
+cause is knowable before the framework acts on it — off the
+`user_state_changed` subscription that ALREADY existed for the P0-2
+kickoff floor (`_user_speaking`); `note_user_speech_state` keeps that flag
+and stamps the falling edge. It gates:
+1. `_cut_recovery_should_arm` — the auto-resume (`LILY_INTERRUPT |
+   BARGE_IN_CANCEL`). `failed` (dead TTS/network stream) is never
+   overridden by a voice near the cut: that is the cause recovery is for.
+2. `arm_reair_gate` in `on_agent_speech_finished` — cause decided ONCE,
+   both arms read it (source-order pinned). Bonus: the arm is consumed
+   only by `gated_say` (`take_reair_dispatch`, sole call site), so a
+   barged CONVERSATIONAL turn used to leave it armed for the next
+   code-dispatched act — handing a never-heard question delivery "you
+   were cut short mid-question, pick up from where you broke off". Gone
+   for the barge case.
+3. Chain F, the yield case: `_cut_recovery_should_fire` now consults the
+   EXISTING `hold_blocks_dispatch` predicate (mech. 5), so a cut followed
+   by "hang on a sec" no longer auto-resumes over the player's own
+   request for the floor (`LILY_CUT_RECOVERY | HELD`). No new bypass was
+   added — `trigger_cut_recovery` still routes through the same single
+   `instructed_reply` it always used (pinned); re-routing it through
+   gated_say is a separate consolidation, not smuggled in here.
+
+Y5's transcript contract is untouched: a barged turn still records once,
+marked `…[cut off]` (pinned again here). **Deletions:** none — declared
+**net addition**: one predicate + one edge stamp + three gates (~55 lines
+in lily_speech_delivery.py, +26 in lily_agent.py, all but 12 comment).
+Nothing could be deleted honestly: every existing arm still covers the
+stream-death cause, which is the one recovery was built for.
+
+**Residual risk (for the reviewer to attack):** WS-3's founding case
+(lily-0BD414, "…how does that sound to you? If" [dead]) was itself a
+barge-in with no follow-up — Y7 deliberately hands that shape to the
+framework's pause-and-resume (which resumes from the pause point rather
+than regenerating, and needs RoomIO's `can_pause`, true today) instead of
+to the auto-resume. If a deployment ever chains an audio output without
+pause, that shape becomes dead air. And the barge window is the existing
+2.0s `_CUT_RECOVERY_USER_TURN_LOOKBACK`: a cut with no human voice inside
+2s of a committed user turn is still classified as a barge — behavior-
+identical at fire time (the same 2s guard already stood the watchdog
+down), newly affecting only the re-air arm.
+
+Tests: tests/test_bargein_cancels.py (20) — cause discriminator, the
+no-committed-turn reproduction, end-to-end arms-nothing + BARGE_IN_CANCEL
+log, no-regeneration, no stale re-air arm, PROTECTED network-cut/failed/
+keyed-act paths, the `…[cut off]` row, the hold stand-down, and four
+structural pins (VAD budget, single VAD wiring point, no new dispatch
+path, cause-decided-once source order). Suite 2016 → 2036 green.
+
+Mandate numbers: lily_agent.py 14,801 lines (14,779 + 22, comments
+included); prompt ~8,880 tokens UNCHANGED (no prompt touched); main tip /
+deployed sha: integrator's concern.
+
 ## 2026-08-09 — P0 PROMPT EVICTION: every 2026-08-09 call ran user turns with NO system prompt
 
 Found by the new pre-call readiness simulation on its FIRST run — not by
