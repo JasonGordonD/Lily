@@ -507,6 +507,12 @@ def test_clarify_allowed_once_game_started():
     agent._game = game
     game.game_started = True
     game.pending_clarify = {}
+    game._answered_questions = set()
+    game._adjudicating = False
+    game.sk.question_number = 1
+    game.armed_question = {"id": "q1", "prompt": "Question?"}
+    game.sk.current_question = dict(game.armed_question)
+    game.sk.open_answer_window(duration=30.0)
     game.sk.players["Sarah"] = {"speaker_label": "S1", "score": 0}
     events: list = []
     game.send_event_nowait = lambda t, p: events.append((t, p))

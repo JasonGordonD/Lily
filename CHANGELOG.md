@@ -5,6 +5,17 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-A: answered/revealed question is dead forever
+
+Live `lily-9337B1-331ff234`: Q3 ("Sigmund Freud") committed and revealed,
+then a stale clarification for the earlier fragment "He said it" asked for
+a final answer and re-asked the already-scored question.
+
+**Fix.** `note_answer_heard` now clears/cancels every clarify owned by that
+question. Deterministic clarify triggers and `lily_log_clarify` refuse once
+the question is terminal; racing clarify replies are ignored. The state block
+marks the current question `answered_closed` until N+1 owns the turn.
+
 ## 2026-08-09 — Latency: the read timeout that actually applies, and the cache prefix
 
 Live `lily-2C489B`: `e2e_latency` p50 4,374ms / **p95 13,610ms**, `llm_ttft`
