@@ -30,6 +30,7 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=False)
 from livekit import rtc, api
 from livekit.agents import (
     APIConnectionError,
+    APIConnectOptions,
     AutoSubscribe,
     InterruptionOptions,
     JobContext,
@@ -43,6 +44,7 @@ from livekit.agents import (
 )
 from livekit.agents.llm import ChatMessage
 from livekit.agents.voice import Agent, AgentSession
+from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions
 from livekit.agents.voice.agent_activity import _SpeechHandleContextVar
 from livekit.agents.voice.background_audio import (
@@ -11096,6 +11098,15 @@ class LilyAgent(Agent):
         markers (_ADULT_LAYER_MARKER, MEMORY_BLOCK_MARKER,
         _STATE_BLOCK_MARKER)."""
         items = _chat_items(chat_ctx)
+        # BEHIND the agent's own instructions, never in front of them. Both
+        # blocks used to insert(0, ...), which puts them ahead of the
+        # ~8,000-token system prompt — and a provider's prompt cache keys on
+        # the PREFIX, so every injection invalidated the largest stable
+        # thing in the context. Live: 134,357 input tokens against 42,368
+        # cached. The system prompt does not change within a session; the
+        # adult layer and memory block do (mode swap, late recognition), so
+        # they belong after it.
+        anchor = 1 if items and getattr(items[0], "role", None) == "system" else 0
 
         # Adult layer: additive injection/removal keyed on the sticky flag.
         adult_idx = next(
@@ -11108,7 +11119,7 @@ class LilyAgent(Agent):
         )
         if self._game.sk.mode == "adult" and adult_idx is None:
             items.insert(
-                0,
+                anchor,
                 ChatMessage(
                     id=self._CTX_ID_ADULT,
                     role="system",
@@ -11133,7 +11144,7 @@ class LilyAgent(Agent):
         )
         if self._game.memory_block and memory_idx is None:
             items.insert(
-                0,
+                anchor,
                 ChatMessage(
                     id=self._CTX_ID_MEMORY,
                     role="system",
@@ -12648,6 +12659,27 @@ async def entrypoint(ctx: JobContext) -> None:
         llm=general_vocal_llm,
         tts=lily_tts_instance,  # voice1 (primary) via lily_config.lily_voice_id()
         vad=silero.VAD.load(),  # barge-in enabled; no STT gating during TTS
+        # THE READ TIMEOUT THAT ACTUALLY APPLIES. 0f31b71 raised the adult
+        # lane's client read budget to 30s because livekit-plugins-openai
+        # built its own AsyncClient with httpx.Timeout(read=5.0) — correct
+        # diagnosis, ineffective fix. The plugin's LLMStream INHERITS from
+        # livekit.agents.inference.llm.LLMStream, which passes
+        # `timeout=httpx.Timeout(self._conn_options.timeout)` on every
+        # create() — and in openai-python a per-request timeout REPLACES
+        # the client's. So the real wall was DEFAULT_API_CONNECT_OPTIONS'
+        # 10s, on both lanes, and the 30s client budget never applied.
+        #
+        # Worse, max_retry defaults to 3: one wedged first token became
+        # ~40s of dead air on a voice-first game. Against grok-4.5 measured
+        # at llm_ttft p95 8.3s and this session's 7.3s, a 10s wall is a
+        # coin flip at the tail.
+        conn_options=SessionConnectOptions(
+            llm_conn_options=APIConnectOptions(
+                timeout=lily_config.adult_vocal_read_timeout(),
+                max_retry=1,        # one retry, not three: 2x the wall, not 4x
+                retry_interval=0.5,
+            ),
+        ),
         # HOTFIX-005 X9: raise the endpointing floor so a slow enhanced-point
         # STT (max_delay 1.5s) delivers its final transcript BEFORE the turn
         # commits — the runtime's own remedy for the split-utterance class

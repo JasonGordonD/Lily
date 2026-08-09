@@ -5,6 +5,65 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Latency: the read timeout that actually applies, and the cache prefix
+
+Live `lily-2C489B`: `e2e_latency` p50 4,374ms / **p95 13,610ms**, `llm_ttft`
+p50 1,954ms / p95 7,301ms, `tts_ttfb` p50 412ms. TTS is not the problem.
+
+**The 30s adult read budget was dead config, on both lanes.** `0f31b71`
+raised it because `livekit-plugins-openai` builds its own AsyncClient with
+`httpx.Timeout(read=5.0)` — correct diagnosis, ineffective fix. The
+plugin's `LLMStream` **inherits** from
+`livekit.agents.inference.llm.LLMStream`, which passes
+`timeout=httpx.Timeout(self._conn_options.timeout)` on every `create()`,
+and in openai-python a per-request timeout REPLACES the client's. So the
+real wall was `DEFAULT_API_CONNECT_OPTIONS`' **10s** the whole time — a
+coin flip against a lane measured at p95 7.3s. Worse, `max_retry` defaults
+to **3**: one wedged first token was ~40s of dead air on a voice-first
+game. Now set where the framework reads it, via the supported
+`AgentSession(conn_options=SessionConnectOptions(llm_conn_options=...))`,
+with `max_retry=1`. The external fact is asserted against the INSTALLED
+package, so a version bump that changes it fails loudly.
+
+**The prompt-cache prefix was invalidated on every injection.** The adult
+layer and memory block both `insert(0, ...)` — in FRONT of the ~8,000-token
+system prompt. A provider's cache keys on the prefix, so the largest stable
+thing in the context was pushed out of it every time. Live: 134,357 input
+tokens against 42,368 cached. Both now anchor behind the agent's own
+instructions; the volatile per-turn state block already appended at the
+tail and stays there.
+
+**Four premises in the original brief were wrong and are corrected here so
+they are not re-derived:** (1) "43 turns" is ~21 agent turns —
+`lily_metrics.py:97` counts one per `MetricsReport` and the handler feeds
+it both user and assistant items, so per-turn token maths was off 2x;
+(2) the 134k input tokens are the VOCAL lane only — `lily_reasoning`
+builds its own clients and never reaches `session_usage_updated`; (3) the
+state block was already correctly at the tail, not the head — the
+cache-hostile calls were the two `insert(0, ...)`; (4)
+`on_user_turn_completed_delay` p50 0.5ms is measured proof the injection
+path is not on the critical path.
+
+**Deliberately NOT changed: turn-taking.** `end_of_turn − transcription =
+150ms`, so `min_endpointing_delay` costs nothing; the 1,361ms is
+Speechmatics finalization, driven by `max_delay: 1.5` and
+`end_of_utterance_silence_trigger: 0.8` in `stt_tuned.json`. Those came out
+of the WS-13 echo-room study against a named evidence session, and trading
+transcript accuracy for latency is not a call to make from a metrics table.
+Flagged as the lever; left alone.
+
+**Open, not closed:** `tts_node` drains the ENTIRE LLM stream into a list
+before TTS is called, which the reported stages cannot see (`tts_ttfb` is
+anchored to the moment text reaches ElevenLabs) — ~496ms unaccounted for at
+p50, ≥3,975ms at p95. The buffer is load-bearing: the delivery-claim and
+dup guards are whole-turn decisions, so it must be predicated, not removed.
+Preemptive generation is also off for the whole live game, putting up to
+1,511ms on the critical path. Neither is safe to change without first
+instrumenting `tts_node`'s first-chunk and yield timestamps — without that,
+the two are indistinguishable from outside and their fixes differ.
+
+1809 passed.
+
 ## 2026-08-09 — Glass truth: the phase that was reached is the phase that is published
 
 A UI-sync audit of the agent↔glass seam. Three HIGH findings, **one root
