@@ -12066,6 +12066,43 @@ class LilyAgent(Agent):
             )
         )
 
+    def _trim_history(self, chat_ctx) -> None:
+        """Y3 (HOTFIX-007): bound conversation-history growth. Archaeology:
+        nothing ever trimmed the chat context — a long session grew the
+        prompt without limit (live: 134k input tokens on a trivia game).
+        The framework already ships the mechanism (ChatContext.truncate:
+        keeps the tail, drops orphaned function calls, re-adds the first
+        instruction message) — this is a WIRE to it, not a new layer.
+
+        Hysteresis by design: trimming slides the provider's cacheable
+        prefix, so it fires in rare big steps (high -> low watermarks),
+        never per turn. The injected system blocks (adult/memory/state)
+        are re-inserted by _apply_context_blocks immediately after every
+        trim site, exactly as its comment always promised. The one-turn
+        preemptive invalidation a trim causes is expected and visible in
+        the Y2 counter."""
+        high = lily_config.history_trim_high()
+        if high <= 0:
+            return  # disabled
+        truncate = getattr(chat_ctx, "truncate", None)
+        items = _chat_items(chat_ctx)
+        if not callable(truncate) or len(items) <= high:
+            return
+        low = min(lily_config.history_trim_low(), high)
+        before = len(items)
+        try:
+            truncate(max_items=low)
+        except Exception:
+            logger.exception(
+                "LILY_CTX | HISTORY_TRIM_FAILED — turn proceeds untrimmed"
+            )
+            return
+        logger.info(
+            "LILY_CTX | HISTORY_TRIMMED | items %d -> %d (high=%d low=%d) — "
+            "one preemptive invalidation expected this turn",
+            before, len(_chat_items(chat_ctx)), high, low,
+        )
+
     # -- node overrides ------------------------------------------------------------
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
@@ -12125,6 +12162,11 @@ class LilyAgent(Agent):
             )
         try:
             context_now = time.time()
+            # Y3: trim BEFORE block injection so a trim can never drop a
+            # block that was just injected; both ctxs trim on the same
+            # watermarks so the next equivalence check compares like shapes.
+            self._trim_history(turn_ctx)
+            self._trim_history(self._chat_ctx)
             self._apply_context_blocks(
                 turn_ctx, now=context_now
             )  # this turn sees FINAL context

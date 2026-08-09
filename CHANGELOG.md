@@ -5,6 +5,38 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y3: conversation history bounded (framework truncate, wired)
+
+**Archaeology (mandate rule 0):** nothing anywhere trimmed the chat
+context — a long session grew the prompt without limit (live evidence:
+134,357 input tokens against 42,368 cached; the operator's "why is it
+115k for a trivia agent"). The framework already ships the mechanism —
+`ChatContext.truncate(max_items=)` keeps the tail, drops orphaned
+function-call items, re-adds the first instruction message — and
+`_apply_context_blocks`' own comment has promised since the anchor fix
+that its blocks get "re-inserted if history trimming ever drops it".
+Y3 is therefore a WIRE, not a mechanism: `_trim_history()` calls the
+framework's truncate under hysteresis watermarks
+(LILY_HISTORY_TRIM_HIGH=120 items → trim to LILY_HISTORY_TRIM_LOW=60;
+0 disables), invoked in on_user_turn_completed on BOTH the turn context
+and the preemptive snapshot, BEFORE block injection (source-order
+pinned).
+
+**Why hysteresis:** a trim slides the provider's cacheable prefix, so it
+must fire rarely in big steps — never per turn. The one-turn preemptive
+invalidation a trim causes is expected and visible in the Y2 counter;
+the token ceiling it buys is visible in the Y1c per-call prompt_tokens.
+Durable truth (memory block, state block, asked-history ledger, scores)
+rides system blocks and the DB — only conversational color ages out.
+
+**Deletions:** none. **Net addition declared:** one method + 2 hook
+lines + 2 config accessors + deploy forwarding + 6 tests (real
+ChatContext fixtures; block re-insertion proven). Suite 2002 → 2008
+green.
+
+Mandate numbers: lily_agent.py 14,765 lines; prompt ~8,880 tokens; main
+tip `1e1c192`; deployed `1e1c192`.
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 Y4 measurement gate: round-trips per spoken turn
 
 **Archaeology (mandate rule 0):** Y1c's per-call log already tags each
