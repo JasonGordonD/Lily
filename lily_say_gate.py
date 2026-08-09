@@ -366,7 +366,11 @@ _FALSE_CLEAN_SLATE_RE = re.compile(
     # the voice-identity probe was still outstanding.
     r"|\b(?:completely\s+)?clean\s+slate\b"
     r"|\bblank\s+slate\b"
-    r"|\bno\s+saved\s+stats\b"
+    r"|\bno\s+saved\s+(?:voices?|games?|stats?|facts?|history|records?)\b"
+    r"|\bno\s+(?:past|prior|previous|recorded)\s+games?\b"
+    r"|\bno\s+(?:saved\s+)?(?:voices?|games?)\s+(?:or\s+"
+    r"(?:saved\s+)?(?:voices?|games?)\s+)?on\s+file\b"
+    r"|\bnothing\s+(?:is\s+)?saved\b"
     r"|\bnothing\s+on\s+file\b"
     r"|\bno\s+(?:stats|facts|record|history)\s+on\s+file\b"
     r"|\bmemory\s+bank\s+is\s+sitting\s+on\b"

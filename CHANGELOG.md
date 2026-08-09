@@ -5,6 +5,18 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-1: False clean slate impossible after returner claim
+
+Live regression `lily-BE8D8B-a19913e2`: "I certainly have been on your
+table before" missed the returner detector; after the lookup resolved empty,
+Lily aired "completely clean slate — no saved voices or past games."
+
+**Fix.** The live returner phrase is detected and persisted for the entire
+session (`_returner_claim_seen`). A returner claim permanently makes
+`can_claim_empty_memory()` false. The TTS choke now covers `no saved voices`,
+`no past/prior games`, and `nothing saved`; the exact 22:03 line rewrites to
+the existing still-checking sheet even after an empty lookup resolves.
+
 ## 2026-08-09 — One-owner delivery: near-miss confirms, no re-read
 
 Gun 3 (`NUDGE_NEAR_MISS`): table already heard a ≥0.9 similarity Q, then
