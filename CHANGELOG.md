@@ -5,6 +5,108 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Barge-in is the steady state, not the error path
+
+Operator directive: *"it's a game that's going to have a lot of barging in,
+a lot of shouting out, there's going to be a lot of interruptions like this
+— this is normal."* Every defect below is the system treating an
+interruption as a failure to retry.
+
+Live session `lily-2C489B-a61fb6d9`, 22:45:30 → 22:52:31 ET. **Deployed sha
+at session time: `72fd25c`** (deploy succeeded 02:33:01 UTC, twelve minutes
+before the call — the first session to run the full B2/B3/B4 + P0-1…P0-5
+series). Outcome: **seven minutes, zero questions played, one arsenal entry
+burned.** `lily_answers` empty, `score_ledger` `[]`, `answer_window_open`
+false on all 25 addressee rows including the ones stamped `phase=question`.
+
+**The glass deadlock.** Two gates both bound on the delivery turn's playout
+COMPLETING: the published phase (`_phase_hold`, pinned to lobby at arm) and
+the metadata publish carrying `image_url` (moved to window-open by the
+2026-07-31 "screen never leads the voice" fix). A barged delivery completes
+neither. He stared at "START THE QUESTIONS" — his screenshot is preserved in
+the session's `status_notes` — while she described a photograph whose signed
+URL was sitting in `current_question.image_url`. So he interrupted to say the
+picture wasn't there, which cut the delivery, which kept the picture off the
+glass. **His reason for interrupting was the thing the interruption prevented
+from being fixed.** One publisher now, `publish_question_to_glass`, fired when
+the delivery STARTS airing; the screen still never leads the voice.
+
+**The burn.** `lily_record_asked` fired at ARM — twenty seconds before the
+delivery began and three cut attempts before it gave up. Arsenal entry
+`861712c7` can never be served to that table again, for a question nobody
+heard. The durable row now lands at air; the in-session mirror stays at arm
+so one session still cannot draw the same question twice.
+
+**The self-repetition.** `record_agent_turn`'s dup guard read
+`if not interrupted and ...`. Live, every copy marked cut off: the "Great to
+meet you, Rami" turn ×4, the burlesque delivery ×3, "Yeah" ×3. Because the
+record feeds `sk.agent_turns` — her own conversational context — she read her
+line back four times and said it again: *"Okay, now you're repeating
+yourself."* PATCH-001 T3 had already widened the guard to the last 6 turns
+"regardless of interleaving" because every live dup pair had a user row
+between the copies — which IS the interrupted case. The exemption was the
+hole in T3, not a decision; removing it completes T3 and leaves
+RECOGNITION-VARIETY's marked-first-record behaviour intact.
+
+**Re-reading a question the room talks over.** Seven guns can re-speak the
+same `q_N`, all descended from "silence is worse than asking twice". A cut
+delivery released its claim, re-armed through `expect_delivery`, re-read the
+whole sheet, got cut again — no cap. An interrupted delivery whose aired
+text already presented the question now confirms and opens the window
+(reusing `_delivery_text_matches_armed`, which the delivery path already
+owned and simply never got asked at the interrupt). `interrupted` only — a
+suppressed turn aired nothing, and confirming there would reopen the #3418
+ghost-window hole. Two cut re-airs, then back to supply.
+`_REGEN_DELIVERY_DIRECTIVE` said "exactly as written, in one unbroken beat";
+now it resumes from the break.
+
+**Recognition at sixteen turns.** He said "My name is Rami" at 22:46:04 —
+twenty-two seconds in. Recognition landed at 22:49:15, **3m31s and sixteen
+player turns later**, through "I have met you a million times", "you still
+don't remember me", "I just told you my name. You forgot my name already."
+The only door open was the ECAPA matcher, and the matcher was behind a cold
+model load: the Dockerfile baked ECAPA to `/tmp`, which container runtimes
+mount as tmpfs — shadowing the baked copy — and nothing forbade the Hugging
+Face round-trip `from_hparams` makes even when every file is cached. Savedir
+moved to `/app/.cache`, `HF_HUB_OFFLINE` defaulted on, and the image now
+proves the offline load at build time.
+
+New **name-stated door**, built weak on purpose: an unambiguous single group
+only (two tables with a Rami resolve to neither), it does not set
+`device_identity_verified` so the matcher still runs, and `name_stated` stays
+out of `_STRONG_GROUP_SOURCES` so a voice still outranks a name. N5 in the
+correct direction.
+
+**The steamroll.** 22:49:15 was ONE turn carrying the recognition beat, the
+offer "want a quick refresher on the options, or straight in?", and the
+question. She asked him what he wanted and answered it herself; he said so
+at 22:49:37. P0-5's unowned-kickoff gate is widened to the question itself —
+the thing it was really protecting — so a turn that does not own
+`q_N_delivery` cannot speak the armed question, and the offer has to wait.
+
+**Narrating her own internals.** 22:47:50: *"my first memory check came back
+blank, and my setup treated 'unknown' like 'nothing on file' instead of
+waiting for the lookup to finish — that was a bug in how I handle the start
+of a session."* A release note read aloud to someone who came to play
+trivia. The 08-08 honesty fix stopped her denying mechanisms and diagnosing a
+blank card; she started anatomising them instead. Owning a fault is one
+sentence.
+
+**Also:** `lily_voice_identity.updated_at` had a DEFAULT but no trigger and
+was never written on update, so it froze at insert — reading as "enrollment
+stopped" while `sample_count` climbed 4 → 7. (Enrollment was working; the
+column lied.)
+
+**Open, under investigation, not closed:** ~110 seconds of dead audio at
+session open (agent published 295s of TTS with `tts_ttfb` p50 412ms and
+`playback_latency` p50 0.3ms; he heard nothing until 22:47:42 and never
+clicked anything — needs the LiveKit track publish/subscribe timeline);
+`e2e_latency_ms` p95 **13,610** with `llm_ttft` p95 7,301 (TTS is not the
+problem); and a broader UI-sync audit beyond the phase-hold deadlock.
+
+42 new fixtures across `tests/test_bargein_is_normal.py` and
+`tests/test_name_stated_recognition.py`; full suite 1795 passed.
+
 ## 2026-08-09 — P0-5: One start owner
 
 Live `lily-BE8D8B-a19913e2`: free LLM kickoff fragments ("Round",

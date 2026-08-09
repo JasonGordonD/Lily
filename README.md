@@ -436,6 +436,37 @@ claims+confirms `q_N_delivery` and opens the window — never dispatches a
 full sheet re-read. Open symbols: `reconcile_undelivered_claim`,
 `on_agent_speech_finished` (nudge), `adjudicate` (verdict), `record_result`.
 
+**Cut-delivery contract (2026-08-09, barge-in is normal).** Every gun above
+descends from "silence is worse than asking twice". In a game where the
+table talks over the host by design that trade is inverted — re-reading is
+what produces the mess. `lily-2C489B` read one question three times
+(22:49:37 / 22:49:47 / 22:50:05), each cut on the same word, and never
+asked it. Two rules bound the loop, both in `delivery_reached_the_table`:
+
+- An **interrupted** delivery whose aired text already presented the
+  question (`_delivery_text_matches_armed` — the predicate the delivery
+  path already owned) confirms and opens the window instead of re-arming.
+  `interrupted` only: a **suppressed** turn aired nothing, and confirming
+  it there reopens the #3418 ghost-window hole.
+- `_DELIVERY_MAX_CUT_REAIRS` (2) caps re-reads; past it the question goes
+  back to supply via `_release_armed_question_to_supply`
+  (`DELIVERY_CUT_EXHAUSTED`).
+
+**One owner speaks the question.** `unowned_kickoff_must_suppress` covers
+the armed question itself, not just kickoff debris: a turn without
+`q_N_delivery` ownership may not present it. Live 22:49:15 put the
+recognition beat, "want a refresher, or straight in?", and the question in
+one turn — asking the table what it wanted and answering for them.
+
+**The glass never waits for the voice to finish.** `publish_question_to_glass`
+fires at delivery playout START (`note_playout_started`), not at
+window-open, and drops `_phase_hold` there. Both used to bind on playout
+COMPLETION, which a barged delivery never reaches — the board sat on the
+lobby for a whole session with a signed image URL in hand. Window-open
+still calls it as an idempotent backstop. `record_question_asked` moved to
+the same seam: the durable `lily_asked_history` burn happens when the table
+HEARS a question, never at arm.
+
 **Stale-claim recovery (WO-LILY-HOTFIX-001).** The 08-06 P0 exposed a
 third lifecycle state with no exit: claimed, never played, never failed.
 Krisp NC wedged RoomIO audio setup, so the greet's dispatched speech
