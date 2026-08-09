@@ -800,6 +800,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._recognition_dispute: bool = False
         self._recognition_dispute_why_answered: bool = False
         self._recognition_why_note: str | None = None
+        # Pictures-on offer: after she asks "want them on?", a short yes /
+        # "live immediately" flips media_mode (bank was stocked; mode stuck).
+        self._pending_picture_on_offer: bool = False
         # HOTFIX-005 X12: explain-on-request + verdict-contest conditioning —
         # same one-shot lifecycle as the notes above (context only, leak-
         # filtered, consumed at the turn's playout).
@@ -4409,6 +4412,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.record_agent_turn(
             spoken_text, act_keys=sorted(confirmed or []), interrupted=False
         )
+        # Pictures-on offer: arm so a short "yes" / "live immediately"
+        # flips media_mode while the lane is healthy but still voice_only.
+        try:
+            self.note_picture_on_offer(spoken_text)
+        except Exception:
+            pass
         # PATCH-002 A4b: her own wait-promise binds her. A turn that just
         # played and said "take your time" enters the hold — no unsolicited
         # turn or delivery until the table speaks (the live "take your
@@ -5701,46 +5710,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 # A down lane never flips to a false "ON" — the honest,
                 # specific unavailability line names the real cause (P4
                 # grounding) and media_mode stays voice_only.
-                outcome = self.picture_activation_outcome()
-                status = {
-                    "generation_available": outcome != "unavailable_gen",
-                    "pipeline_available": outcome != "unavailable_pipeline",
-                }
-                if not status["generation_available"]:
-                    self.gated_say(
-                        None, "media_mode_unavailable",
-                        "The table asked for pictures but the image "
-                        "GENERATION lane is not configured (no key). Do "
-                        "NOT say pictures are on. Say plainly that pictures "
-                        "aren't available tonight because the image "
-                        "generator isn't switched on, offer to keep going "
-                        "voice-only, and move on. Name no other cause.",
-                        source="voice_command",
-                    )
-                elif not status["pipeline_available"]:
-                    self.gated_say(
-                        None, "media_mode_unavailable",
-                        "The table asked for pictures but the picture "
-                        "PIPELINE is unreachable right now. Do NOT say "
-                        "pictures are on. Say plainly the picture system "
-                        "isn't reachable this session, offer voice-only, "
-                        "and move on. Name no other cause.",
-                        source="voice_command",
-                    )
-                else:
-                    self.sk.set_media_mode("pictures")
-                    self.publish_attributes_nowait()
-                    self.gated_say(
-                        None, "media_mode",
-                        "Picture rounds are ON — committed, in code, the "
-                        "lane is healthy. One short confirmation (the "
-                        "screen is in the game now), then keep moving. Only "
-                        "claim an image is on the screen once one actually "
-                        "lands there.",
-                        source="voice_command",
-                    )
+                self.try_activate_pictures(source="voice_command")
             else:
                 self.sk.set_media_mode(media_choice)
+                self._pending_picture_on_offer = False
                 self.publish_attributes_nowait()
                 self.gated_say(
                     None, "media_mode",
@@ -5749,6 +5722,16 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     "ceremony, keep moving.",
                     source="voice_command",
                 )
+        elif (
+            not media_choice
+            and getattr(self, "_pending_picture_on_offer", False)
+        ):
+            # She offered "want them on?" — short yes / live flips the flag
+            # so the stocked arsenal can serve (E66E1B: bank ready, mode stuck).
+            try:
+                self.note_picture_on_confirm(text)
+            except Exception:
+                pass
 
         # Safety-net auto-start: cheap gate check on every user segment so
         # the game can start off the ambient chatter of a settled lobby —
@@ -8424,6 +8407,94 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return "unavailable_pipeline"
         return "on"
 
+    def try_activate_pictures(
+        self, *, source: str, announce: bool = True
+    ) -> str:
+        """Dependency-checked flip to media_mode=pictures.
+
+        Returns 'on', 'already_on', 'unavailable_gen', or
+        'unavailable_pipeline'. Shared by spoken media choice, adult heat
+        set, and picture-on confirm — so adult+mix never leaves the bank
+        dark while the lane is healthy.
+
+        When announce=False (tool result will speak the truth), still flip
+        and publish but skip gated_say so heat+pictures don't double-air.
+        """
+        if getattr(self.sk, "media_mode", "voice_only") == "pictures":
+            return "already_on"
+        outcome = self.picture_activation_outcome()
+        if outcome == "unavailable_gen":
+            if announce:
+                self.gated_say(
+                    None, "media_mode_unavailable",
+                    "The table asked for pictures but the image "
+                    "GENERATION lane is not configured (no key). Do "
+                    "NOT say pictures are on. Say plainly that pictures "
+                    "aren't available tonight because the image "
+                    "generator isn't switched on, offer to keep going "
+                    "voice-only, and move on. Name no other cause.",
+                    source=source,
+                )
+            return outcome
+        if outcome == "unavailable_pipeline":
+            if announce:
+                self.gated_say(
+                    None, "media_mode_unavailable",
+                    "The table asked for pictures but the picture "
+                    "PIPELINE is unreachable right now. Do NOT say "
+                    "pictures are on. Say plainly the picture system "
+                    "isn't reachable this session, offer voice-only, "
+                    "and move on. Name no other cause.",
+                    source=source,
+                )
+            return outcome
+        self.sk.set_media_mode("pictures")
+        self._pending_picture_on_offer = False
+        self.publish_attributes_nowait()
+        if announce:
+            self.gated_say(
+                None, "media_mode",
+                "Picture rounds are ON — committed, in code, the "
+                "lane is healthy. One short confirmation (the "
+                "screen is in the game now), then keep moving. Only "
+                "claim an image is on the screen once one actually "
+                "lands there.",
+                source=source,
+            )
+        logger.info(
+            "LILY_STATE | PICTURES_ON | session=%s source=%s",
+            self.sk.session_id, source,
+        )
+        return "on"
+
+    def note_picture_on_offer(self, spoken_text: str) -> None:
+        """Arm when Lily offers to switch pictures on while still voice_only."""
+        if getattr(self.sk, "media_mode", "voice_only") == "pictures":
+            self._pending_picture_on_offer = False
+            return
+        if lily_scorekeeper.lily_detect_picture_on_offer(spoken_text):
+            self._pending_picture_on_offer = True
+            logger.info(
+                "LILY_STATE | PICTURE_ON_OFFER | session=%s — short yes/"
+                "live will flip media_mode",
+                self.sk.session_id,
+            )
+
+    def note_picture_on_confirm(self, text: str) -> bool:
+        """If a picture-on offer is pending and the user confirmed, flip."""
+        if not getattr(self, "_pending_picture_on_offer", False):
+            return False
+        if getattr(self.sk, "media_mode", "voice_only") == "pictures":
+            self._pending_picture_on_offer = False
+            return False
+        if not lily_scorekeeper.lily_is_picture_on_confirm(text):
+            # Non-confirm reply consumes the offer (they answered the choice).
+            if text and text.strip():
+                self._pending_picture_on_offer = False
+            return False
+        self.try_activate_pictures(source="picture_on_confirm")
+        return True
+
     def note_image_rendered(self, url: str) -> None:
         """HOTFIX-005 X4: the frontend confirmed a picture actually LOADED
         on the glass (its <img> onLoad fired), reported over the
@@ -9601,8 +9672,11 @@ class LilyAgent(Agent):
             "varies the heat question to question.) Wait for the table "
             "(not one enthusiast) to agree, then call "
             "lily_set_adult_image_intensity with intensity="
-            "'suggestive'|'explicit'|'mix' and confirmed_table=true. Do "
-            "not assume explicit. Re-ask only if they change it."
+            "'suggestive'|'explicit'|'mix' and confirmed_table=true — that "
+            "call also turns picture rounds ON when the lane is healthy "
+            "(media_mode=pictures). Do not assume explicit. Re-ask only if "
+            "they change it. Heat alone without that tool does NOT make "
+            "pictures live."
         )
 
     @function_tool()
@@ -9639,12 +9713,33 @@ class LilyAgent(Agent):
             )
         if not self._game.sk.set_adult_image_intensity(level):
             return "Intensity not accepted — use suggestive, explicit, or mix."
+        # Adult heat is a pictures request — flip media_mode when the lane
+        # is healthy so the stocked arsenal can serve (E66E1B: mix set,
+        # media stuck voice_only → "not switched on" while bank was ready).
+        flip = self._game.try_activate_pictures(
+            source="adult_image_intensity", announce=False
+        )
         self._game.publish_attributes_nowait()
+        if flip == "on" or flip == "already_on":
+            return (
+                f"Adult image intensity is now {level.upper()} — sticky for "
+                "this session until they change it or say back to normal. "
+                "Picture rounds are ON (media_mode=pictures) — the bank will "
+                "serve when a picture slot opens. One short confirmation, "
+                "then keep the night moving. Only claim an image is on the "
+                "screen once one actually lands there."
+            )
+        if flip == "unavailable_gen":
+            return (
+                f"Adult image intensity is now {level.upper()}, but pictures "
+                "could NOT be switched on — the image generation key is "
+                "missing. Heat is saved; stay voice-only and do not claim "
+                "pictures are live."
+            )
         return (
-            f"Adult image intensity is now {level.upper()} — sticky for "
-            "this session until they change it or say back to normal. "
-            "One short confirmation, then keep the night moving. Demo "
-            "and generated adult pictures follow this heat."
+            f"Adult image intensity is now {level.upper()}, but pictures "
+            "could NOT be switched on — the picture pipeline is unreachable. "
+            "Heat is saved; stay voice-only and do not claim pictures are live."
         )
 
     @function_tool()

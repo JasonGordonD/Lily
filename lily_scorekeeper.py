@@ -689,10 +689,42 @@ _MEDIA_PICTURES_RE = _re.compile(
     r"pictures? on"
     r"|(?:turn|put) (?:the )?pictures? (?:on|up)"
     r"|with (?:the )?pictures?"
+    r"|pictures? in(?:\s+\w+){0,3}\s+mode"
+    r"|pictures? (?:and|with) mix"
     r"|picture rounds?"
+    r"|picture (?:trivia|lane|bank)"
     r"|use the screen"
     r"|screen on"
+    r"|(?:get|make|switch|turn) .{0,24}(?:images?|pictures?) (?:on|live|up)"
+    r"|(?:images?|pictures?) live"
+    r"|live (?:with )?(?:the )?(?:images?|pictures?)"
     r")\b"
+)
+
+# Affirmative / go-live replies after Lily offers to switch pictures on
+# ("want them on?", "images live first?"). Deterministic — not LLM whim.
+_MEDIA_PICTURE_ON_CONFIRM_RE = _re.compile(
+    r"^\s*(?:"
+    r"y(?:es|eah|ep|up)|sure|ok(?:ay)?|alright|all right"
+    r"|yes(?:,?\s*(?:ma'?am|sir|please|i am|i do|i will))?"
+    r"|live(?:\s+immediately)?"
+    r"|(?:turn|switch|put) (?:them|it|pictures?|images?) on"
+    r"|get (?:them|it|pictures?|images?) (?:on|live)"
+    r")\.?\s*$",
+    _re.IGNORECASE,
+)
+
+# Lily's spoken offer to turn pictures on while media_mode is still off.
+_MEDIA_PICTURE_ON_OFFER_RE = _re.compile(
+    r"(?:"
+    r"want (?:them|pictures?|images?) on"
+    r"|not switched on yet"
+    r"|pictures? (?:are )?(?:not|aren'?t) (?:switched )?on"
+    r"|get the images? live"
+    r"|images? live first"
+    r"|picture lane .{0,40}not"
+    r")",
+    _re.IGNORECASE,
 )
 
 _MEDIA_VOICE_ONLY_RE = _re.compile(
@@ -724,6 +756,22 @@ def lily_detect_media_choice(text: str) -> Optional[str]:
     if _MEDIA_PICTURES_RE.search(normalized):
         return "pictures"
     return None
+
+
+def lily_detect_picture_on_offer(text: str) -> bool:
+    """True when Lily offered to switch pictures on (lane healthy, off)."""
+    return bool(_MEDIA_PICTURE_ON_OFFER_RE.search(text or ""))
+
+
+def lily_is_picture_on_confirm(text: str) -> bool:
+    """True for a short yes / live / turn-them-on after a picture-on offer."""
+    raw = (text or "").strip()
+    if not raw or len(raw) > 48:
+        return False
+    # Explicit voice-only wins — never treat "no pictures" as a confirm.
+    if lily_detect_media_choice(raw) == "voice_only":
+        return False
+    return bool(_MEDIA_PICTURE_ON_CONFIRM_RE.match(raw))
 
 
 # ---------------------------------------------------------------------------
