@@ -396,6 +396,46 @@ def lily_still_checking_rewrite() -> str:
     return _STILL_CHECKING_REWRITE
 
 
+# False on-screen picture claims (WO-B4) — "look at the screen" / "picture
+# is up" only when lily_control.image_shown confirmed the armed URL.
+_FALSE_ON_SCREEN_RE = re.compile(
+    r"(?:"
+    r"\blook(?:ing)?\s+at\s+the\s+screen\b"
+    r"|\beyes?\s+on\s+the\s+screen\b"
+    r"|\b(?:the\s+)?picture\s+is\s+(?:up|on|live|there)\b"
+    r"|\b(?:it'?s|its)\s+on\s+the\s+screen\b"
+    r"|\bon\s+the\s+screen\s+now\b"
+    r"|\bthere\s+it\s+is\b.{0,40}\bscreen\b"
+    r"|\bimage\s+is\s+(?:up|on|live)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_PICTURE_PENDING_REWRITE = (
+    "The picture should be coming up — tell me when you see it on the screen."
+)
+
+_PICTURE_DIDNT_LAND_REWRITE = (
+    "That picture didn't land on the screen on my side — we'll keep going "
+    "voice-first."
+)
+
+
+def lily_false_on_screen_claim(text: str) -> bool:
+    """True when Lily asserts a picture is visible on the glass."""
+    return bool(_FALSE_ON_SCREEN_RE.search(text or ""))
+
+
+def lily_picture_pending_rewrite() -> str:
+    """Sheet when she claims on-screen without image_shown confirm."""
+    return _PICTURE_PENDING_REWRITE
+
+
+def lily_picture_didnt_land_rewrite() -> str:
+    """Sheet when the intended image never got image_shown in time."""
+    return _PICTURE_DIDNT_LAND_REWRITE
+
+
 def lily_mirror_flag(text: str) -> Optional[str]:
     """Return the matched mirror pattern when the turn OPENS with a
     flattery/agreement-echo reflex, else None. Only the first ~120 chars

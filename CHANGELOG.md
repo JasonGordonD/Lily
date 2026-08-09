@@ -5,6 +5,13 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — B4: image_shown speak gate
+
+Not drawn ≠ on screen. TTS rewrites "look at the screen" / "picture is
+up" unless `lily_control.image_shown` confirmed the armed URL. Pending
+sheet while waiting; didn't-land sheet after timeout. Need-to-know image
+flag matches confirm state. Open-window arms pending confirm.
+
 ## 2026-08-09 — B3: Metadata image_url lifecycle
 
 Reveal re-published the prior question's `image_url`, so the picture
