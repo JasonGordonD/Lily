@@ -5,6 +5,30 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y4 measurement gate: round-trips per spoken turn
+
+**Archaeology (mandate rule 0):** Y1c's per-call log already tags each
+vocal LLM call with its speech_id; nothing aggregated it, so "how many
+serialized calls hide inside one spoken turn" (Y4's target: tool
+follow-ups, regenerations) still needed hand-grepping. The AUTHORING
+lane (lily_reasoning: generate/verify/judge over aiohttp + genai) is a
+different pipeline off the vocal path and is already budget-instrumented
+(prefetch timeout/total-budget) — Y4's serialized-micro-call concern is
+the VOCAL turn, measured here. **What changed:** collect_llm_call groups
+calls by speech_id (bounded, 200 turns); the `llm_cache` summary block
+gains calls_per_turn_p50 / calls_per_turn_max /
+turns_with_multiple_calls. **Deletions:** none. **Net addition
+declared:** ~12 lines in the existing method + 1 test. Suite 2001 →
+2002 green.
+
+With this, ALL THREE phase-1 measurement gates are live: Y1b cache hit
+rate (per call), Y2 invalidation count, Y4 round-trips per turn. The
+next live session on this build closes the Y2/Y3/Y4 design decisions on
+numbers, per the mandate.
+
+Mandate numbers: lily_agent.py 14,725 lines; prompt ~8,880 tokens; main
+tip `1e1c192`; deployed `1e1c192`.
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 Y2 measurement gate: preemptive-outcome counters
 
 **Archaeology (mandate rule 0):** the framework itself already announces

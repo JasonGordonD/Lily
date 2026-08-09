@@ -81,6 +81,10 @@ class LilyMetricsCollector:
         # The Y2 settle-vs-split decision closes on `invalidated`.
         self._preemptive_used = 0
         self._preemptive_invalidated = 0
+        # Round-trips per spoken turn (HOTFIX-007 Y4 measurement gate):
+        # calls grouped by speech_id — >1 means tool follow-ups / regens
+        # serialized inside one turn. Bounded ring of recent speech ids.
+        self._llm_calls_by_speech = {}  # insertion-ordered; oldest evicted
 
     def collect_turn(self, report) -> None:
         """Fold one ChatMessage.metrics (a MetricsReport dict; total=False so
@@ -139,6 +143,12 @@ class LilyMetricsCollector:
                 self._llm_calls_with_hit += 1
             if isinstance(ttft, (int, float)) and ttft > 0:
                 self._llm_call_ttft.append(ttft)
+            speech = g("speech_id")
+            if speech:
+                by = self._llm_calls_by_speech
+                by[speech] = by.get(speech, 0) + 1
+                while len(by) > 200:
+                    by.pop(next(iter(by)))
             hit = (100.0 * cached / prompt) if prompt else 0.0
             logger.info(
                 "LILY_METRICS | LLM_CALL | request=%s speech=%s ttft_ms=%s "
@@ -264,6 +274,13 @@ class LilyMetricsCollector:
             if self._llm_call_ttft:
                 cache["ttft_ms_p50"] = _ms(_pct(self._llm_call_ttft, 50))
                 cache["ttft_ms_p95"] = _ms(_pct(self._llm_call_ttft, 95))
+            if self._llm_calls_by_speech:
+                per_turn = list(self._llm_calls_by_speech.values())
+                cache["calls_per_turn_p50"] = _pct(per_turn, 50)
+                cache["calls_per_turn_max"] = max(per_turn)
+                cache["turns_with_multiple_calls"] = sum(
+                    1 for n in per_turn if n > 1
+                )
             out["llm_cache"] = cache
         if self._preemptive_used or self._preemptive_invalidated:
             out["preemptive"] = {

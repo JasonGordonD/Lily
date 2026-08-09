@@ -60,6 +60,22 @@ def test_per_call_log_line_carries_the_numbers(caplog):
     assert "ttft_ms=900.0" in line
 
 
+def test_round_trips_per_turn_grouped_by_speech_id():
+    """Y4 measurement gate: >1 call on one speech_id is a serialized
+    round-trip (tool follow-up / regen) inside a single spoken turn."""
+    c = LilyMetricsCollector()
+    for sid, n in (("speech_a", 1), ("speech_b", 3), ("speech_c", 1)):
+        for _ in range(n):
+            m = _call(1000, 0)
+            m.speech_id = sid
+            c.collect_llm_call(m)
+    cache = c.summary()["llm_cache"]
+    assert cache["calls"] == 5
+    assert cache["calls_per_turn_p50"] == 1
+    assert cache["calls_per_turn_max"] == 3
+    assert cache["turns_with_multiple_calls"] == 1
+
+
 def test_no_calls_means_no_llm_cache_section():
     assert "llm_cache" not in LilyMetricsCollector().summary()
 
