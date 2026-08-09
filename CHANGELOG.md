@@ -5,6 +5,49 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — lily-1C53C6: the journaled-but-silent transition deadlock
+
+Live 07:38–07:43 UTC, single caller, adult mode: q1 perfect, then ~92s of
+dead air on q2 until the caller hung up. The q2 reveal generation
+(grok-4.5) timed out twice at the 30s prefetch timeout; the transition had
+been OPENED and JOURNALED but its verdict turn died before playout. The
+watchdog then fired ARMED_LIMBO → forced adjudication every ~20s, and the
+N12 SECOND_LANE_REFUSED guard refused every one of them because "a journal
+already exists" — journaled-but-unspoken, unreclaimable, permanent dead
+air. Same class as STREAM-INTEGRITY-002, which patched real barge-in
+cutoffs but not this path.
+
+- **The deadlock** (`lily_agent.py`): the N12 guard now distinguishes
+  journaled from AIRED, using state the class already tracks. New
+  `_transition_reached_air()`: a bound narration, a CONFIRMED stage key,
+  or a journaled next_delivery = the transition spoke.
+  `open_question_transition(reclaim_unaired=True)` — passed ONLY by the
+  watchdog's recovery adjudication (`adjudicate(reclaim_transition=True)`)
+  — releases a dead journal and its stale claims (`RECLAIMED_UNAIRED`) so
+  recovery can narrate. A transition with ANY aired stage keeps the
+  refusal: N12 stands, recovery never re-narrates something that played.
+- **The trigger** (`lily_reasoning.py`): PREFETCH_TIMEOUT_SECONDS 30→15
+  (a stalled grok call is pathological well before 15s), plus one overall
+  PREFETCH_TOTAL_BUDGET_SECONDS=30 across generate → verify → choices —
+  stacked per-call timeouts could previously wait ~90s before
+  PREFETCH_FAILED fired.
+- **P0-G scoped to its own contract** (`lily_speech_delivery.py`,
+  `lily_agent.py`): the unfiltered `progression_paused_reason()` checks
+  d233e3c added at the dispatch chokepoint, `expect_delivery`, and the
+  prefetch auto-advance re-blocked the game-lane acts the older P10 gate
+  deliberately exempts — `question_pending` refused the very delivery
+  nudge that resolves it (both fixtures P0-G left red pinned exactly
+  this), and the address latch blocked silent re-ARMING after "back to
+  normal" when it only owns the floor. Dispatch/expect now pause on
+  address-unanswered + setup-pending only (hold, question-pending, stop
+  are already governed at the same chokepoints by their own gates);
+  auto-advance arms silently under an address latch while its nudge
+  still yields at dispatch. P0-G's own tests pass unchanged.
+
+Regression suite: `tests/test_transition_reclaim.py` (deadlock repro,
+reclaim, three N12-stands cases, prefetch budget). Full suite 1884 green —
+including the two fixtures red on main since P0-G landed.
+
 ## 2026-08-09 — P0-G: meta and intake pause game progression
 
 Question delivery could still take the floor while Lily owed the table a

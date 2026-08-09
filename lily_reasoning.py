@@ -69,7 +69,14 @@ REASONING_THINKING_LEVEL = "high"
 # bound in judge() + Tier-1 fallback protects the critical path if a HIGH
 # turn runs long.
 JUDGE_THINKING_LEVEL = "high"
-PREFETCH_TIMEOUT_SECONDS = 30.0
+# 30s -> 15s (lily-1C53C6): a stalled grok call is pathological well before
+# 15s (normal completions land in single-digit seconds), and at 30s per call
+# the generate -> verify -> choices chain could stack ~90s of dead air
+# before PREFETCH_FAILED fired — the live q2 hang rode exactly two of those
+# stacked timeouts. The whole prefetch additionally shares one overall
+# budget below, so no combination of stalls can exceed it.
+PREFETCH_TIMEOUT_SECONDS = 15.0
+PREFETCH_TOTAL_BUDGET_SECONDS = 30.0
 
 # xAI multi-agent transport (Engineering Note 2026-08-07): the
 # grok-*-multi-agent tier rejects the Chat Completions endpoint (HTTP 400
@@ -838,7 +845,8 @@ class LilyReasoning:
                 await self.ensure_choices(from_bank)
             scorekeeper.clear_status_notes()
             return from_bank
-        try:
+
+        async def _generate_verify_choices() -> dict:
             question = await asyncio.wait_for(
                 self.generate_question(
                     category, difficulty_tier, scorekeeper.mode,
@@ -879,6 +887,17 @@ class LilyReasoning:
                     self.ensure_choices(question),
                     timeout=PREFETCH_TIMEOUT_SECONDS,
                 )
+            return question
+
+        try:
+            # One OVERALL budget across the whole chain (lily-1C53C6): the
+            # per-call timeouts bound each model stall, this bounds their
+            # sum — a bad provider night can never stack per-call timeouts
+            # into minutes of silence before the honest failure fires.
+            question = await asyncio.wait_for(
+                _generate_verify_choices(),
+                timeout=PREFETCH_TOTAL_BUDGET_SECONDS,
+            )
             scorekeeper.clear_status_notes()
             logger.info(
                 "LILY_REASONING | PREFETCH_OK | id=%s category=%s tier=%s",

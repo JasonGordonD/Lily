@@ -1576,8 +1576,31 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             journals = self._transition_journal = {}
         return journals
 
+    def _transition_reached_air(self, qnum: int) -> bool:
+        """True when any stage of q_{qnum}'s journaled transition provably
+        reached the air: a bound narration (tts_node binds words at the say
+        gate), a CONFIRMED stage key (confirm fires at playout), or a
+        journaled next_delivery (the beat finished — N+1 went out). A
+        journal none of whose entries carries any of the three is dispatch
+        bookkeeping for speech that never played."""
+        for entry in self._transition_journals().get(qnum) or []:
+            if entry["stage"] == "next_delivery":
+                return True
+            detail = entry.get("detail") or {}
+            if detail.get("narration"):
+                return True
+            key = detail.get("key")
+            if (
+                key
+                and self.say_registry.state(key)
+                == lily_say_gate.CLAIM_CONFIRMED
+            ):
+                return True
+        return False
+
     def open_question_transition(
-        self, qnum: int, *, owner: str, source: str
+        self, qnum: int, *, owner: str, source: str,
+        reclaim_unaired: bool = False,
     ) -> bool:
         """Claim the WHOLE q_{N} transition for one owner. True = the caller
         owns reveal, verdict and next-delivery for this question; False =
@@ -1585,17 +1608,47 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
         Two independent refusals, because a released claim must not hand a
         second lane a transition that already spoke: an existing journal for
-        this question, and the claim key itself."""
+        this question, and the claim key itself.
+
+        `reclaim_unaired` (watchdog recovery ONLY — lily-1C53C6 deadlock):
+        a transition that was opened and journaled but whose speech never
+        reached playout (the q2 reveal generation timed out; the verdict
+        turn died silent) used to satisfy the "journal exists" refusal
+        forever — ARMED_LIMBO forced adjudication every ~20s and this guard
+        refused it every ~20s, a permanent dead-air loop. When the caller is
+        the recovery path and NO journaled stage reached air (see
+        _transition_reached_air), the dead journal and its stale claims are
+        released and the transition is claimed fresh. A transition with any
+        aired stage keeps the original refusal — recovery must never grant
+        a second narration of something that actually played (N12)."""
         journals = self._transition_journals()
         if qnum in journals:
-            logger.error(
-                "LILY_TRANSITION | SECOND_LANE_REFUSED | session=%s q=%d "
-                "source=%s stages=%s — this transition is already owned and "
-                "narrated; the second lane does not speak (N12)",
-                self.sk.session_id, qnum, source,
-                ",".join(e["stage"] for e in journals[qnum]),
-            )
-            return False
+            if reclaim_unaired and not self._transition_reached_air(qnum):
+                stale_entries = journals.pop(qnum)
+                self.say_registry.release(self.transition_key(qnum))
+                for entry in stale_entries:
+                    stale_key = (entry.get("detail") or {}).get("key")
+                    if stale_key:
+                        self.say_registry.release(stale_key)
+                if getattr(self, "_open_transition_qnum", None) == qnum:
+                    self._open_transition_qnum = None
+                logger.error(
+                    "LILY_TRANSITION | RECLAIMED_UNAIRED | session=%s q=%d "
+                    "source=%s stages=%s — journaled transition never "
+                    "reached playout; releasing the dead claim so recovery "
+                    "can narrate (lily-1C53C6)",
+                    self.sk.session_id, qnum, source,
+                    ",".join(e["stage"] for e in stale_entries),
+                )
+            else:
+                logger.error(
+                    "LILY_TRANSITION | SECOND_LANE_REFUSED | session=%s q=%d "
+                    "source=%s stages=%s — this transition is already owned "
+                    "and narrated; the second lane does not speak (N12)",
+                    self.sk.session_id, qnum, source,
+                    ",".join(e["stage"] for e in journals[qnum]),
+                )
+                return False
         if not self.say_registry.claim(self.transition_key(qnum), owner=owner):
             logger.error(
                 "LILY_TRANSITION | SECOND_LANE_REFUSED | session=%s q=%d "
@@ -3617,6 +3670,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 # later code path arms or asks — Lily only takes a turn when
                 # someone speaks, so a quiet table stares at a stale reveal
                 # forever. If the game is live and idle, arm and nudge now.
+                paused = self.progression_paused_reason()
+                if paused == "address_unanswered":
+                    # P0-G, scoped (2026-08-09): an unresolved direct
+                    # address owns the FLOOR, not the supply line. Arming
+                    # writes the state block silently; the nudge below
+                    # still yields at the dispatch chokepoint until her
+                    # response plays out. Without this, "back to normal"
+                    # (itself host-directed, so the latch is up) blocked
+                    # the general deck from re-arming — the exact contract
+                    # the adult-identity fixture pins.
+                    paused = None
                 if (
                     self.game_started
                     and not self.game_over
@@ -3624,7 +3688,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     and not self.sk.answer_window_open
                     and not self._adjudicating
                     and not getattr(self, "_question_transitioning", False)
-                    and self.progression_paused_reason() is None
+                    and paused is None
                 ):
                     if self.arm_next_question() and self.session is not None:
                         logger.info(
@@ -3791,7 +3855,15 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                                     self.sk.session_id, self.sk.question_number,
                                 )
                                 asyncio.ensure_future(
-                                    self.adjudicate(steal_allowed=False)
+                                    # Recovery may reclaim a journaled
+                                    # transition whose speech never aired —
+                                    # without this the SECOND_LANE_REFUSED
+                                    # guard and this watchdog ping-pong
+                                    # forever over dead air (lily-1C53C6).
+                                    self.adjudicate(
+                                        steal_allowed=False,
+                                        reclaim_transition=True,
+                                    )
                                 )
                             else:
                                 logger.error(
@@ -6956,10 +7028,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
     # -- adjudication ---------------------------------------------------------
 
-    async def adjudicate(self, steal_allowed: bool = True) -> None:
+    async def adjudicate(
+        self, steal_allowed: bool = True, reclaim_transition: bool = False
+    ) -> None:
         """Close the window and commit results. The scorekeeper decided
         ORDER by timestamps; Tier-1/Tier-2 decide CORRECTNESS; this commit
-        happens BEFORE Lily narrates (§11.3 event-bound truth)."""
+        happens BEFORE Lily narrates (§11.3 event-bound truth).
+
+        `reclaim_transition` is the watchdog recovery's flag ONLY: it lets
+        open_question_transition release a journaled-but-never-aired
+        transition (see RECLAIMED_UNAIRED) instead of dead-locking against
+        it (lily-1C53C6)."""
         if (
             getattr(self, "_delivery_stop_sticky", False)
             or self._adjudicating
@@ -7530,7 +7609,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             transition_qnum = self.sk.question_number
             transition_owner = f"transition_{uuid.uuid4().hex}"
             if not self.open_question_transition(
-                transition_qnum, owner=transition_owner, source="adjudicate"
+                transition_qnum, owner=transition_owner, source="adjudicate",
+                reclaim_unaired=reclaim_transition,
             ):
                 return
 

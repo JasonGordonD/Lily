@@ -131,7 +131,23 @@ class LilySpeechDeliveryMixin:
             )
             return False
         if act in _PROGRESSION_ACTS:
-            paused = self.progression_paused_reason()
+            # P0-G, scoped (2026-08-09): of progression_paused_reason's
+            # states, exactly the META ones pause DISPATCH here — an
+            # unresolved direct address (the state P0-G's own fixtures
+            # assert) and pending setup/ownership work. The rest are
+            # already governed at this chokepoint by older, deliberately
+            # narrower gates — hold (A4 above), question-pending with its
+            # game-lane exemption (P10 above), stop and no-live-game (P8
+            # below). The unfiltered check re-blocked the game-lane acts
+            # P10 exempts: question_pending refused the very delivery
+            # nudge that resolves it, and host_speaking refused the nudge
+            # that fires as her own turn ends (both caught by the
+            # desync/adult fixtures the original P0-G left red).
+            paused = (
+                "address_unanswered"
+                if getattr(self, "_awaiting_address_since", 0.0)
+                else "setup_pending" if self.pending_setup_jobs() else None
+            )
             if paused:
                 logger.info(
                     "LILY_PROGRESSION | DISPATCH_PAUSED | session=%s q=%d "
@@ -371,7 +387,19 @@ class LilySpeechDeliveryMixin:
                 self.sk.session_id, self.sk.question_number,
             )
             return
-        paused = self.progression_paused_reason()
+        # P0-G, scoped (2026-08-09) — same narrowing as the dispatch gate:
+        # an unresolved direct address or pending setup/ownership work
+        # blocks arming the delivery expectation; nothing else. The
+        # unfiltered progression_paused_reason blocked the expectation for
+        # the pending question's OWN nudge/re-offer
+        # (reason=question_pending), so the nudge aired without ever
+        # becoming a registered delivery — the desync fixture's exact
+        # regression.
+        paused = (
+            "address_unanswered"
+            if getattr(self, "_awaiting_address_since", 0.0)
+            else "setup_pending" if self.pending_setup_jobs() else None
+        )
         if paused:
             logger.info(
                 "LILY_DELIVERY | EXPECT_BLOCKED | session=%s q=%d "
