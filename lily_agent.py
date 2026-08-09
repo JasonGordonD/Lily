@@ -2219,8 +2219,105 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     self.sk.session_id, speech_id, exc,
                 )
 
+        # Glass transcript (2026-08-09 live report: transcript panel ran
+        # EMPTY): the panel consumes lk.transcription TEXT STREAMS
+        # (useTranscriptions), while the publish above speaks only the
+        # LEGACY rtc.Transcription API. Mirror the same final text onto
+        # the stream wire — same segment id, marked final — so the glass
+        # renders Lily's turns again. Legacy publish stays for older
+        # clients; P0-C is preserved (this is the corrected post-TTS text,
+        # RoomIO's pre-TTS prose stays off).
+        async def _publish_stream() -> None:
+            try:
+                writer = await participant.stream_text(
+                    topic="lk.transcription",
+                    attributes={
+                        "lk.transcription_final": "true",
+                        "lk.segment_id": segment_id,
+                        "lk.transcribed_track_id": track_sid,
+                    },
+                )
+                await writer.write(value)
+                await writer.aclose()
+            except Exception as exc:
+                logger.warning(
+                    "LILY_TRANSCRIPT | STREAM_PUBLISH_FAILED | session=%s "
+                    "speech_id=%s error=%s",
+                    self.sk.session_id, speech_id, exc,
+                )
+
         try:
-            asyncio.get_running_loop().create_task(_publish())
+            loop = asyncio.get_running_loop()
+            loop.create_task(_publish())
+            loop.create_task(_publish_stream())
+        except RuntimeError:
+            pass
+
+    def publish_user_transcript_nowait(
+        self, text: str, *, speaker_label: str | None, utterance_id: str | None
+    ) -> None:
+        """Forward one FINAL user utterance to the glass transcript.
+
+        P0-C set RoomOptions text_output=False so the agent's pre-TTS
+        prose can't race the corrected transcript — but that switch ALSO
+        turned off the framework's USER transcript forwarding
+        (_ParticipantTranscriptionOutput only builds when text output is
+        on), so the glass transcript ran completely empty (live
+        2026-08-09 report). This publishes the same wire shape the
+        framework would: a lk.transcription text stream with
+        sender_identity impersonating the speaking device's participant,
+        so the glass attributes the line to the table — never to Lily.
+        The bound player name rides prmpt.speaker_label when the roster
+        resolves one. Fire-and-forget; never blocks the STT hot path."""
+        clean = (text or "").strip()
+        if not clean:
+            return
+        ctx = getattr(self, "ctx", None)
+        room = getattr(ctx, "room", None)
+        local = getattr(room, "local_participant", None)
+        if local is None:
+            return
+        user_identity = ""
+        for remote in (getattr(room, "remote_participants", {}) or {}).values():
+            if (
+                getattr(remote, "kind", None)
+                != rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+            ):
+                user_identity = str(getattr(remote, "identity", "") or "")
+                if user_identity:
+                    break
+        if not user_identity:
+            return
+        attributes = {
+            "lk.transcription_final": "true",
+            "lk.segment_id": str(utterance_id or f"user-{uuid.uuid4().hex}"),
+        }
+        try:
+            resolved, _method = self.sk.resolve_speaker(
+                None, speaker_label, None, clean
+            )
+            if resolved:
+                attributes["prmpt.speaker_label"] = resolved
+        except Exception:
+            pass  # display-only nicety — never blocks the forward
+
+        async def _forward() -> None:
+            try:
+                writer = await local.stream_text(
+                    topic="lk.transcription",
+                    sender_identity=user_identity,
+                    attributes=attributes,
+                )
+                await writer.write(clean)
+                await writer.aclose()
+            except Exception as exc:
+                logger.warning(
+                    "LILY_TRANSCRIPT | USER_FORWARD_FAILED | session=%s "
+                    "error=%s", self.sk.session_id, exc,
+                )
+
+        try:
+            asyncio.get_running_loop().create_task(_forward())
         except RuntimeError:
             pass
 
@@ -13628,6 +13725,17 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         if not ev.is_final:
             return  # partials display, finals score — never the reverse
+        # Glass transcript (2026-08-09): forward the final to the panel —
+        # text_output=False silenced the framework's own forwarding.
+        game.publish_user_transcript_nowait(
+            text,
+            speaker_label=speaker_label,
+            utterance_id=(
+                getattr(ev, "item_id", None)
+                or getattr(ev, "id", None)
+                or getattr(ev, "transcript_id", None)
+            ),
+        )
         # Event arrival wall-clock (created_at) plus recovered STT
         # stream-relative timings from the n-best collector feed the
         # timestamp reconciler for "first answered first" ordering under

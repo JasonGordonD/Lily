@@ -5,6 +5,28 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — the empty glass transcript: P0-C's silent casualty
+
+Live report: the transcript panel sat open and completely EMPTY through a
+whole call. P0-C set RoomOptions `text_output=False` so RoomIO's pre-TTS
+prose can't race the corrected transcript — correct — but that switch
+ALSO disabled the framework's USER transcript forwarding, and Lily's own
+final transcript went out on the LEGACY `rtc.Transcription` API only,
+while the glass consumes `lk.transcription` TEXT STREAMS
+(`useTranscriptions`). Neither lane reached the panel.
+
+- `publish_agent_transcription_nowait` now mirrors the same corrected
+  final text onto the stream wire (same segment id, final=true) alongside
+  the legacy publish. P0-C preserved: pre-TTS prose stays off.
+- New `publish_user_transcript_nowait`, hooked at the STT final handler:
+  publishes the user's final utterance as a text stream with
+  `sender_identity` impersonating the device's participant (the same
+  mechanism the framework's own forwarder uses), so the glass attributes
+  the line to the table, never to Lily. The bound player name rides
+  `prmpt.speaker_label` when the roster resolves one.
+
+Pinned offline in `tests/test_transcript_forwarding.py`. Suite 1887 green.
+
 ## 2026-08-09 — lily-1C53C6: the journaled-but-silent transition deadlock
 
 Live 07:38–07:43 UTC, single caller, adult mode: q1 perfect, then ~92s of
