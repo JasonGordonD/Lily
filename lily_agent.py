@@ -2551,6 +2551,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return "setup_pending"
         return None
 
+    def unowned_kickoff_must_suppress(
+        self, text: str, delivery_result: str | None
+    ) -> bool:
+        """P0-5: kickoff words may air only with q_N_delivery ownership."""
+        if not lily_say_gate.lily_unowned_kickoff_fragment(text):
+            return False
+        return delivery_result not in (
+            "claimed_structural",
+            "claimed_core_sentence",
+        )
+
     def clear_ambiguous_yes_block(self, *, reason: str) -> None:
         if getattr(self, "_ambiguous_yes_blocks_start", False) or getattr(
             self, "_pending_or_choice_offer", False
@@ -11529,6 +11540,38 @@ class LilyAgent(Agent):
                     self._game._suppressed_speech_ids = set()
                     suppressed_ids = self._game._suppressed_speech_ids
                 suppressed_ids.add(speech_id)
+            yield rtc.AudioFrame(
+                data=b"\x00\x00" * 2400,
+                sample_rate=24000,
+                num_channels=1,
+                samples_per_channel=2400,
+            )
+            return
+
+        # P0-5 BE8D8B: "Round" / "Let's do it!" / category teaser may not
+        # create a second start owner. Only the turn that structurally owns
+        # q_N_delivery may carry kickoff language. Suppress directly (no
+        # empty-candidate retry, no re-air) so setup/user-speech holds cannot
+        # regenerate the same debris.
+        if self._game.unowned_kickoff_must_suppress(full, delivery):
+            blocked = self._game.start_blocked_reason() or "no_delivery_owner"
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=unowned_kickoff | session=%s "
+                "q=%d blocked=%s text=%r",
+                self._game.sk.session_id,
+                self._game.sk.question_number,
+                blocked,
+                full[:160],
+            )
+            if speech_id:
+                suppressed_ids = getattr(
+                    self._game, "_suppressed_speech_ids", None
+                )
+                if suppressed_ids is None:
+                    self._game._suppressed_speech_ids = set()
+                    suppressed_ids = self._game._suppressed_speech_ids
+                suppressed_ids.add(speech_id)
+                self._game.say_registry.release_owner(speech_id)
             yield rtc.AudioFrame(
                 data=b"\x00\x00" * 2400,
                 sample_rate=24000,

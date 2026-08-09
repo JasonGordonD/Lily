@@ -5,6 +5,16 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-5: One start owner
+
+Live `lily-BE8D8B-a19913e2`: free LLM kickoff fragments ("Round",
+"Let's do it") aired before the keyed Q1 delivery while setup was pending.
+
+**Fix.** TTS suppresses standalone kickoff/category fragments unless the
+same turn structurally owns `q_N_delivery`. Suppression is terminal silent
+playout—not an empty-candidate retry—so debris cannot regenerate. Full
+question deliveries remain unchanged.
+
 ## 2026-08-09 — P0-4: Late recognition at seams only
 
 Live `lily-BE8D8B-a19913e2`: recognition landed after Q1 opened and spoke

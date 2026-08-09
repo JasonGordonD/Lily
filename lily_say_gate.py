@@ -440,6 +440,39 @@ def lily_picture_didnt_land_rewrite() -> str:
     return _PICTURE_DIDNT_LAND_REWRITE
 
 
+# P0-5 start debris: a standalone kickoff/category fragment has no right to
+# speak unless the same TTS turn structurally owns q_N_delivery.
+_UNOWNED_KICKOFF_RE = re.compile(
+    r"\b(?:"
+    r"round(?:\s+(?:one|1))?\b"
+    r"|let'?s\s+(?:do\s+it|kick(?:\s+off)?|begin|start)\b"
+    r"|here\s+we\s+go\b"
+    r"|time\s+for\s+round\s+(?:one|1)\b"
+    r"|kick\s+off\s+round\s+(?:one|1)\b"
+    r")",
+    re.IGNORECASE,
+)
+_KICKOFF_NEGATION_RE = re.compile(
+    r"\b(?:do\s+not|don'?t|won'?t|not\s+yet|hold|wait|before)\b",
+    re.IGNORECASE,
+)
+
+
+def lily_unowned_kickoff_fragment(text: str) -> bool:
+    """True for a kickoff/category teaser that does not contain the Q.
+
+    A real delivery normally contains a question mark and is separately
+    claimed by q_N_delivery. Negated/hold language is conversational, not
+    a kickoff claim.
+    """
+    value = (text or "").strip()
+    if not value or "?" in value or len(value) > 220:
+        return False
+    if _KICKOFF_NEGATION_RE.search(value):
+        return False
+    return bool(_UNOWNED_KICKOFF_RE.search(value))
+
+
 def lily_mirror_flag(text: str) -> Optional[str]:
     """Return the matched mirror pattern when the turn OPENS with a
     flattery/agreement-echo reflex, else None. Only the first ~120 chars
