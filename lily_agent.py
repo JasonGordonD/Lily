@@ -872,6 +872,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # window open instead of a question re-read.
         self._active_delivery_qnum: int | None = None
         self._active_delivery_started_at: float | None = None
+        self._active_delivery_ended_at: float | None = None
         # Exact user turns whose response is already owned by deterministic
         # game speech. on_user_turn_completed consumes these and raises
         # StopResponse so LiveKit does not also generate a conversational
@@ -1512,11 +1513,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if not question:
             return False
         qnum = self.sk.question_number
-        delivery_key = f"q_{qnum}_delivery"
+        delivery_started = getattr(
+            self, "_active_delivery_started_at", None
+        )
+        delivery_ended = getattr(self, "_active_delivery_ended_at", None)
         answer_live = (
             self.sk.answer_window_open
-            or getattr(self, "_active_delivery_qnum", None) == qnum
-            or self.say_registry.state(delivery_key) is not None
+            or (
+                getattr(self, "_active_delivery_qnum", None) == qnum
+                and delivery_started is not None
+                and delivery_ended is None
+            )
         )
         if not answer_live:
             return False
@@ -4431,6 +4438,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._pending_delivery_qnum = None
         self._active_delivery_qnum = None
         self._active_delivery_started_at = None
+        self._active_delivery_ended_at = None
         self._mc_delivery_qnum = None
         self._mc_delivery_started_at = None
         self._delivery_speech_acts = {}
@@ -5029,6 +5037,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._pending_delivery_qnum = None  # stale delivery intent dies at arm
         self._active_delivery_qnum = None
         self._active_delivery_started_at = None
+        self._active_delivery_ended_at = None
         getattr(self, "_prehook_answer_suppressions", set()).clear()
         self._undelivered_ticks = 0  # WS-2: reconcile counters are per-question
         self._undelivered_refires = 0
@@ -5143,6 +5152,16 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         never earlier. (The old "no early buzz-ins" v1 concession is
         retired: finals spoken during the delivery playout buffer via
         buffer_pre_window_answer and replay at open — fixture Q5.)"""
+        delivery_key = f"q_{self.sk.question_number}_delivery"
+        if (
+            speech_id
+            and self.say_registry.owner_of(delivery_key) == speech_id
+            and getattr(self, "_active_delivery_started_at", None) is not None
+        ):
+            # Close the exact audible interval before any discharge delay.
+            # Finals may arrive after this callback, but only a segment whose
+            # captured timestamps overlap [started, ended] is an early answer.
+            self._active_delivery_ended_at = time.time()
         # A deterministic instruction speech finished playing out — its
         # items are committed, the persistent context is stable again, so
         # preemptive generation can resume (P2).
@@ -5578,6 +5597,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._mc_delivery_qnum = None
         self._active_delivery_qnum = None
         self._active_delivery_started_at = None
+        self._active_delivery_ended_at = None
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
         # Screen sync: idempotent backstop. The publish normally already
@@ -13616,9 +13636,6 @@ async def entrypoint(ctx: JobContext) -> None:
                 # utterance it was captured as.
                 "utterance_id": utterance_id,
             }
-            # WS-5 buzz-buffer widening: remember this final so it can be
-            # back-filled if the delivery claim lands within T seconds.
-            game.note_recent_final(seg, seg_start_ts)
             # A correct answer during an MC options read or a freeform
             # question truncates the remaining read and adjudicates early
             # (buffers this seg + opens the window itself). Otherwise buffer

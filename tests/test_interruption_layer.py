@@ -345,19 +345,22 @@ def test_discharge_racing_open_wins(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_answers_during_gap_keep_buffering():
-    """During the discharge gap the window is still closed and the
-    delivery claim is registered — exactly buffer_pre_window_answer's
-    buffering condition, so early answers spoken into the gap replay at
-    open instead of vanishing."""
+def test_answers_during_gap_do_not_become_early_answers():
+    """The discharge gap begins after question audio ends. A closed window
+    plus a registered claim is not enough to make later speech an answer."""
     game = _make_game()
     _arm(game, PROMPT)
     game.expect_delivery()
     game.register_delivery_claim(PROMPT, speech_id="speech_2")
+    game._active_delivery_started_at = 1.0
+    game._active_delivery_ended_at = 2.0
     assert game.sk.answer_window_open is False
     game.buffer_pre_window_answer(
-        {"speaker_label": "S1", "text": "Peru", "segment_start": 1.0}
+        {
+            "speaker_label": "S1",
+            "text": "Peru",
+            "segment_start_time": 2.1,
+            "segment_end_time": 2.5,
+        }
     )
-    assert game._pre_window_segments and (
-        game._pre_window_segments[-1]["text"] == "Peru"
-    )
+    assert not game._pre_window_segments

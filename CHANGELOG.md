@@ -5,6 +5,20 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-F: pre-window answers require actual delivery playout
+
+A `q_N_delivery` claim is created in `tts_node`, before its audio necessarily
+starts. The old early-answer gate treated that queued claim as if the table
+had already heard the question, so lobby/meta speech between claim and
+playout—or speech in the post-playout discharge gap—could be replayed into
+the answer window.
+
+Delivery registration now opens no answer scope. The framework's real
+`speaking` transition records the playout start, completion records its end,
+and only transcript segments whose captured interval overlaps that audible
+interval may buffer or trigger answer-aborts-read. The old pre-claim backfill
+is retired. Window-open answers are unchanged.
+
 ## 2026-08-09 — M7: model-visible prompt contract matches runtime truth
 
 The host prompt, `lily_begin_round` tool description and voice inventory now

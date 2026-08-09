@@ -284,6 +284,10 @@ def _arm_and_claim(game: LilyGame) -> None:
     ) or True  # structural claim; phrasing irrelevant here
     if game.say_registry.state(f"q_{game.sk.question_number}_delivery") is None:
         game.say_registry.claim(f"q_{game.sk.question_number}_delivery")
+    # Registration alone is not enough: model the actual speaking transition.
+    game._active_delivery_qnum = game.sk.question_number
+    game._active_delivery_started_at = 99.0
+    game._active_delivery_ended_at = None
 
 
 def test_early_buzz_buffers_and_replays_at_window_open():
@@ -323,13 +327,58 @@ def test_no_buffer_without_a_claimed_delivery():
     assert not game._pre_window_segments
 
 
+def test_claimed_but_not_yet_playing_question_cannot_capture_speech():
+    game = _make_game()
+    game.sk.bind_speaker("S1", "Rami")
+    _arm_and_claim(game)
+    game._active_delivery_started_at = None  # queued TTS, not on air
+    seg = {
+        "text": "The Nile",
+        "speaker_label": "S1",
+        "segment_start_time": 100.0,
+        "segment_end_time": 100.5,
+    }
+    assert game.early_answer_check(seg, now=100.5) is False
+    game.buffer_pre_window_answer(seg)
+    assert game._pre_window_segments == []
+    assert game.correct_answer_owns_user_turn("The Nile") is False
+
+
+def test_only_segments_overlapping_the_playout_interval_buffer():
+    game = _make_game()
+    game.sk.bind_speaker("S1", "Rami")
+    _arm_and_claim(game)
+    game._active_delivery_started_at = 100.0
+    game._active_delivery_ended_at = 102.0
+    overlapping = {
+        "text": "The Nile",
+        "speaker_label": "S1",
+        "segment_start_time": 101.5,
+        "segment_end_time": 102.5,
+    }
+    after = {
+        "text": "The Nile",
+        "speaker_label": "S1",
+        "segment_start_time": 102.1,
+        "segment_end_time": 102.6,
+    }
+    game.buffer_pre_window_answer(overlapping)
+    game.buffer_pre_window_answer(after)
+    assert [s["segment_start_time"] for s in game._pre_window_segments] == [
+        101.5
+    ]
+    # A text-only prehook may suppress only while delivery is actively
+    # playing; after playout it cannot turn discharge-gap speech into answer.
+    assert game.correct_answer_owns_user_turn("The Nile") is False
+
+
 def test_buffer_clears_at_arm():
     game = _make_game()
     game.sk.bind_speaker("S1", "Rami")
     _arm_and_claim(game)
     game.buffer_pre_window_answer({
         "text": "stale", "speaker_label": "S1",
-        "segment_start_time": 1.0, "segment_end_time": 2.0,
+        "segment_start_time": 100.0, "segment_end_time": 101.0,
     })
     assert game._pre_window_segments
     game.next_question = dict(NILE_QUESTION)
