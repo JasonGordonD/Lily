@@ -652,9 +652,40 @@ class LilySpeechDeliveryMixin:
     def note_user_turn(self) -> None:
         """Stamp the last user-turn time. A user turn near a cut means the
         room re-engaged on its own — the normal reply path owns the
-        recovery, so the auto-resume watchdog stands down (no double-speak)."""
+        recovery, so the auto-resume watchdog stands down (no double-speak).
+
+        Y7 review F2 (slow-STT corner): when the barge's transcript commits
+        LATER than the 2s VAD window (endpointing max 6s), the cut is
+        misclassified as recoverable and ARMS the re-air gate — then this
+        cancel kills the watchdog and nothing ever consumed the arm, so the
+        next code dispatch (an IDLE_REARM nudge, minutes later) would carry
+        the stale "you were cut short" directive. If a recovery from a
+        recent cut is being cancelled here while its arm is still live, the
+        stand-down cleans up — same single exit as the floor yield and the
+        gated refusal. Scoped by _cut_recovery_armed_at recency so an arm
+        belonging to anything other than the cut being cancelled is left
+        alone. Only the ARM clears here — NOT the address debt: the user
+        turn produces an organic reply, and the debt latch is what keeps
+        code dispatches from jumping in front of that answer until its
+        playout clears it (the designed path)."""
         self._last_user_turn_at = time.monotonic()
+        armed_at = getattr(self, "_cut_recovery_armed_at", 0.0)
+        arm_belongs_to_this_cut = (
+            getattr(self, "_reair_gate_armed", False)
+            and armed_at > 0.0
+            and (self._last_user_turn_at - armed_at)
+            <= lily_config.cut_recovery_grace()
+            + _CUT_RECOVERY_USER_TURN_LOOKBACK
+        )
         self.cancel_cut_recovery()
+        if arm_belongs_to_this_cut:
+            self._reair_gate_armed = False
+            logger.info(
+                "LILY_CUT_RECOVERY | REAIR_ARM_CLEARED | session=%s "
+                "reason=user_reengaged — the room answered the cut itself; "
+                "no live arm may leak to an unrelated dispatch",
+                self.sk.session_id,
+            )
 
     def _floor_yields_recovery(self) -> "str | None":
         """The floor read for the auto-resume: the floor state to yield to,
@@ -764,19 +795,15 @@ class LilySpeechDeliveryMixin:
             # A user turn landed around/after the cut — a genuine barge with
             # content; the normal reply path (re-air-gated fresh) owns it.
             return False
-        if self.hold_blocks_dispatch("cut_recovery", "cut_recovery"):
-            # Y7 / Chain F (GUARD_MAP §8): this dispatch bypasses gated_say,
-            # so the hold every other lane obeys never reached it — a cut
-            # followed by "hang on a sec" auto-resumed straight over the
-            # player's own request for the floor. Same predicate gated_say
-            # uses (mech. 5), read at fire time because the hold is usually
-            # entered DURING the grace window.
-            logger.info(
-                "LILY_CUT_RECOVERY | HELD | session=%s reason=%s — the table "
-                "asked for the floor; no auto-resume",
-                self.sk.session_id, getattr(self, "_hold_reason", None),
-            )
-            return False
+        # Integration note (Y7+Y10): Y7 added a fire-time hold_blocks_dispatch
+        # branch here ("HELD"). It is gone on purpose. In-game, the floor
+        # gate above already yields on FLOOR_HOLD and runs the stand-down;
+        # pre-game, the dispatch proceeds to gated_say whose hold gate
+        # refuses it (chain F is closed, the resume rides the same funnel),
+        # and the GATED path runs the same stand-down. Keeping the fire-time
+        # branch would have returned False WITHOUT the stand-down —
+        # re-opening the stranded-arm leak (Y10 review F3) for pre-game
+        # holds, and logging a second line for the same in-game event.
         if getattr(self, "game_over", False):
             return False
         if getattr(self.sk, "answer_window_open", False):

@@ -5,6 +5,54 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 phase 2 integration: Y7 + Y10 composed, both independently reviewed
+
+Both items implemented by sub-agents in isolated worktrees, each passed
+an independent adversarial review (Y7: PASS with caveats; Y10: PASS
+after three review findings — F1 address-debt dead air, F2 pre-game
+coverage, F3 stranded re-air arm — were fixed and mutation-checked).
+Integration reconciled the two per the Y7 reviewer's conflict map:
+
+1. Y10's gated_say funnel SUPERSEDES Y7's instructed_reply route for
+   trigger_cut_recovery (chain F stays closed); Y7's dispatch-path pin
+   rewritten to hold the surviving invariant (one dispatch path, the
+   shared funnel, no raw bypass).
+2. Y7's fire-time HELD branch removed — dead code in-game (Y10's floor
+   gate yields on hold WITH the stand-down) and harmful pre-game (it
+   returned False without the stand-down, re-opening the stranded-arm
+   leak; gated_say's hold gate + GATED stand-down covers pre-game).
+3. Y7 review F2 (slow-STT corner) closed at integration: a user-turn
+   cancel of a recent cut's recovery now clears that cut's re-air arm
+   (REAIR_ARM_CLEARED reason=user_reengaged) — scoped by armed-at
+   recency, and deliberately NOT releasing the address debt (the organic
+   reply pays it at playout; early release would let code dispatches
+   jump the queue). 3 integration tests added.
+
+Semantics composed (per review): Y7 arms nothing on deliberate barges,
+so Y10's cut_recovery lane fires only for failed/silent-room cuts —
+each item narrows the other.
+
+**Live log lines to watch (from both reviews):**
+- `LILY_INTERRUPT | BARGE_IN_CANCEL` — expected on STOP/MC-abort/
+  cancel_speech cuts near voice, not only human barges.
+- `LILY_CUT_RECOVERY | RESUMED` should drop sharply; one within ~2s of
+  room voice = failed-path (expected) or classification miss.
+- `LILY_FLOOR | RECOVERY_YIELDED` then recurring `WATCHDOG_PAUSED
+  reason=address_unanswered` with no playout = F1 signature (should be
+  impossible now; ADDRESS_DEBT_CLEARED should appear instead).
+- `LILY_INTERRUPT | FALSE_INTERRUPTION resumed=False` — disclosed
+  residual: pause unresumed with no auto-resume backup when voice was
+  inside the window.
+- Absence check: no "cut short" directive text on a dispatch following
+  BARGE_IN_CANCEL.
+- Baseline health: RESUMED must not disappear entirely in sessions with
+  genuine lull cuts — total absence means the counterweight over-fires.
+
+Suite: 2016 → 2078 green (Y7 +20, Y10 +39, integration +3, incl. all
+83 character pins). Mandate numbers: lily_agent.py 14,830 lines; prompt
+~8,880 tokens; main tip `8a295de` → this merge; deployed follows on
+merge (auto-deploy).
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 Y10: the FLOOR-001 counterweight (code-side restraint)
 
 Y11's canon draft found the push mandate is enforced in CODE, not in the

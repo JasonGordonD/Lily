@@ -254,14 +254,19 @@ def test_the_cause_rides_the_existing_vad_wiring():
 
 
 def test_recovery_gained_no_new_dispatch_path():
-    """Chain F pin: Y7 removes dispatches, it does not add one.
-    `trigger_cut_recovery` still routes through exactly one call — the
-    same `instructed_reply` it always used — so no new say-gate bypass
-    entered the codebase with this fix."""
+    """Chain F pin, POST-INTEGRATION FORM. Y7's original pin held
+    `trigger_cut_recovery` to its historical `instructed_reply` route
+    ("no new bypass"); Y10 then closed chain F by routing the resume
+    through gated_say — the shared funnel — which SUPERSEDES that route
+    (the Y7 commit anticipated exactly this). The invariant that
+    survives both: the resume has ONE dispatch path, it is the same
+    funnel every other code-driven turn uses, and no raw bypass
+    remains."""
     src = inspect.getsource(LilyGame.trigger_cut_recovery)
-    assert src.count("instructed_reply") == 1
-    assert "gated_say" not in src
-    assert "generate_reply" not in src
+    assert src.count("self.gated_say(") == 1
+    # Prose in the docstring may NAME the old route; no CALL to it remains.
+    assert "self.instructed_reply(" not in src
+    assert "self.session.generate_reply(" not in src
 
 
 def test_the_arms_are_gated_on_one_cause_call():
@@ -273,3 +278,40 @@ def test_the_arms_are_gated_on_one_cause_call():
     reair = src.index("self.arm_reair_gate()")
     recovery = src.index("_cut_recovery_should_arm")
     assert decide < reair < recovery
+
+
+def test_user_turn_cancel_clears_the_arm_of_a_recent_cut():
+    """Y7 review F2, the slow-STT corner, closed at integration: a barge
+    whose transcript commits after the 2s VAD window misclassifies at cut
+    time (arm set, recovery armed); the committing turn then cancels the
+    watchdog — and previously left the arm live for an unrelated code
+    dispatch minutes later to inherit the stale "cut short" directive.
+    The cancel now clears an arm that belongs to the cut being cancelled."""
+    game = _make_game("y7-f2-corner")
+    game.arm_reair_gate()
+    game._cut_recovery_armed_at = time.monotonic() - 1.0  # recent cut
+    game.note_user_turn()
+    assert game.peek_reair_gate() is False
+
+
+def test_user_turn_cancel_leaves_an_unrelated_arm_alone():
+    """The scope guard: an arm with no recent cut behind it (or from a cut
+    long outside grace+lookback) is not this cancel's to clear."""
+    game = _make_game("y7-f2-scope")
+    game.arm_reair_gate()
+    game._cut_recovery_armed_at = time.monotonic() - 300.0  # ancient
+    game.note_user_turn()
+    assert game.peek_reair_gate() is True
+
+
+def test_user_turn_cancel_never_releases_the_address_debt():
+    """The arm clears but the address latch does NOT: the user turn's own
+    organic reply pays the debt at playout — releasing it here would let
+    code dispatches jump in front of the answer (the latch's whole job)."""
+    game = _make_game("y7-f2-debt")
+    game.arm_reair_gate()
+    game._cut_recovery_armed_at = time.monotonic() - 1.0
+    game._awaiting_address_since = time.monotonic() - 2.0
+    game.note_user_turn()
+    assert game.peek_reair_gate() is False
+    assert game._awaiting_address_since > 0.0
