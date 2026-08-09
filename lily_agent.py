@@ -1128,6 +1128,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             if not payload.get("image_url"):
                 self._glass_image_url = None
                 self._glass_image_at = None
+                self._glass_image_pending_url = None
+                self._glass_image_pending_at = None
         except Exception as e:
             logger.warning("LILY_STATE | metadata publish failed: %s", e)
 
@@ -4787,12 +4789,18 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # dispatch, both of which led the spoken question. Also drops any
         # pre-delivery phase hold via _set_ui_phase above.
         if not steal and self.armed_question is not None:
+            image_url = self.armed_question.get("image_url")
+            if image_url:
+                # B4: arm pending confirm — image_shown must land before
+                # "look at the screen" is speakable.
+                self._glass_image_pending_url = str(image_url)
+                self._glass_image_pending_at = time.monotonic()
             asyncio.ensure_future(
                 self.publish_metadata(
                     self.armed_question.get("prompt", ""),
                     choices=self.armed_question.get("choices"),
                     eliminated=self.eliminated,
-                    image_url=self.armed_question.get("image_url"),
+                    image_url=image_url,
                     category=self.armed_question.get("category"),
                 )
             )
@@ -8666,10 +8674,37 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return
         self._glass_image_url = url
         self._glass_image_at = time.monotonic()
+        self._glass_image_pending_url = None
+        self._glass_image_pending_at = None
         logger.info(
             "LILY_IMAGE | RENDER_CONFIRMED | session=%s url=%s",
             self.sk.session_id, url[:120],
         )
+
+    def picture_on_glass_confirmed(self) -> bool:
+        """True only when image_shown matched the armed question's URL."""
+        armed = getattr(self, "armed_question", None)
+        intended = None
+        if isinstance(armed, dict):
+            intended = armed.get("image_url") or None
+        confirmed = getattr(self, "_glass_image_url", None)
+        return bool(intended and confirmed and confirmed == intended)
+
+    def picture_on_glass_failed(self, *, timeout_s: float = 8.0) -> bool:
+        """True when an intended image was published but never confirmed
+        within timeout_s (honest didn't-land path)."""
+        if self.picture_on_glass_confirmed():
+            return False
+        armed = getattr(self, "armed_question", None)
+        intended = None
+        if isinstance(armed, dict):
+            intended = armed.get("image_url") or None
+        if not intended:
+            return False
+        pending_at = getattr(self, "_glass_image_pending_at", None)
+        if pending_at is None:
+            return False
+        return (time.monotonic() - pending_at) >= timeout_s
 
     def _glass_image_state_line(self) -> str | None:
         """HOTFIX-005 X4: grounded readout of what is CONFIRMED on the glass
@@ -8688,6 +8723,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return (
                 "PICTURE ON GLASS: CONFIRMED up (the frontend reported it "
                 "loaded). Safe to reference the picture."
+            )
+        if intended and self.picture_on_glass_failed():
+            return (
+                "PICTURE ON GLASS: DID NOT LAND — the image was published "
+                "but image_shown never confirmed. Do NOT claim it is on "
+                "screen; say honestly it didn't land and keep going."
             )
         if intended and confirmed != intended:
             return (
@@ -8903,13 +8944,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 # not answer material — they ride along.
                 need_to_know["choices"] = q["choices"]
             if q.get("image_url"):
-                # Picture question: the vocal node needs the FLAG only —
-                # the URL is screen transport (published at delivery),
-                # never speech material.
-                need_to_know["image"] = (
-                    "picture question — the image lands on the screen as "
-                    "you ask; point the table at the screen"
-                )
+                # Picture question: URL is screen transport, never speech.
+                # B4: only invite "look at the screen" after image_shown.
+                if self.picture_on_glass_confirmed():
+                    need_to_know["image"] = (
+                        "picture question — glass CONFIRMED the image "
+                        "loaded; safe to point the table at the screen"
+                    )
+                elif self.picture_on_glass_failed():
+                    need_to_know["image"] = (
+                        "picture question — image DID NOT LAND on glass; "
+                        "do not claim it is on screen"
+                    )
+                else:
+                    need_to_know["image"] = (
+                        "picture question — image published but NOT yet "
+                        "confirmed on glass; do not claim it is up"
+                    )
             extra.append(
                 "NEXT QUESTION (perform it when the table is ready, "
                 "faithfully): " + json.dumps(need_to_know, ensure_ascii=False)
@@ -10873,6 +10924,26 @@ class LilyAgent(Agent):
                 bool(getattr(self._game, "_recognition_dispute", False)),
             )
             full = lily_say_gate.lily_still_checking_rewrite()
+
+        # B4: "look at the screen" / "picture is up" only after image_shown
+        # confirmed the armed URL — not drawn ≠ on screen.
+        if lily_say_gate.lily_false_on_screen_claim(full) and not (
+            self._game.picture_on_glass_confirmed()
+        ):
+            if self._game.picture_on_glass_failed():
+                logger.warning(
+                    "LILY_SAY_GATE | FALSE_ON_SCREEN_REWRITTEN | session=%s "
+                    "reason=didnt_land",
+                    self._game.sk.session_id,
+                )
+                full = lily_say_gate.lily_picture_didnt_land_rewrite()
+            else:
+                logger.warning(
+                    "LILY_SAY_GATE | FALSE_ON_SCREEN_REWRITTEN | session=%s "
+                    "reason=pending_confirm",
+                    self._game.sk.session_id,
+                )
+                full = lily_say_gate.lily_picture_pending_rewrite()
 
         # P0-C: while a recognition dispute needs its why-beat, ban
         # sycophantic "you're right" openers — answer the why, don't agree.
