@@ -239,3 +239,27 @@ jobs:
           AUDEERING_CHILD_HALT_SUSTAINED_N: ${{ vars.AUDEERING_CHILD_HALT_SUSTAINED_N }}
           AUDEERING_CHILD_HALT_ENABLED: ${{ vars.AUDEERING_CHILD_HALT_ENABLED }}
           AUDEERING_CHILD_STEP_UP_ENABLED: ${{ vars.AUDEERING_CHILD_STEP_UP_ENABLED }}
+
+  cache_canary:
+    # Live-fire post-deploy check (HOTFIX-007 Y1b): two real Grok calls
+    # with the production prompt; red when the static prefix stops
+    # cache-hitting. Non-gating — the deploy is already done; this is
+    # the pre-call readiness signal. Push-to-main only (PRs have no key).
+    needs: deploy
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run cache canary
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+        run: python scripts/grok_cache_canary.py
