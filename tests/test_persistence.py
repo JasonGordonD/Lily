@@ -2,6 +2,8 @@
 
 import asyncio
 import hashlib
+import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 import lily_persistence
@@ -283,7 +285,6 @@ def test_rekey_voiceprints_merges_when_resolved_label_already_exists():
                 "speaker_label": "S1",
                 "player_name": "Rami",
                 "speaker_identifiers": ["id-rami-old"],
-                "sample_count": 2,
             },
             {
                 "id": 11,
@@ -291,7 +292,6 @@ def test_rekey_voiceprints_merges_when_resolved_label_already_exists():
                 "speaker_label": "S1",
                 "player_name": "Rami",
                 "speaker_identifiers": ["id-rami-new"],
-                "sample_count": 1,
             },
             {
                 "id": 12,
@@ -299,7 +299,6 @@ def test_rekey_voiceprints_merges_when_resolved_label_already_exists():
                 "speaker_label": "S2",
                 "player_name": "Rhonda",
                 "speaker_identifiers": ["id-rhonda"],
-                "sample_count": 1,
             },
         ],
         "lily_group_prefs": [],
@@ -315,9 +314,39 @@ def test_rekey_voiceprints_merges_when_resolved_label_already_exists():
     assert by_label["S1"]["speaker_identifiers"] == [
         "id-rami-old", "id-rami-new",
     ]
-    assert by_label["S1"]["sample_count"] == 2
+    assert "sample_count" not in by_label["S1"]
     assert by_label["S2"]["group_id"] == resolved
     assert by_label["S2"]["player_name"] == "Rhonda"
+
+    # Safe to rerun after partial-network recovery: no duplicate rows or IDs.
+    asyncio.run(
+        lily_persistence.lily_rekey_group(
+            db, session_id, resolved, session_id
+        )
+    )
+    rerun_rows = db.tables["lily_speaker_voiceprints"]
+    assert [(r["id"], r["speaker_label"]) for r in rerun_rows] == [
+        (10, "S1"),
+        (12, "S2"),
+    ]
+
+
+def test_voiceprint_rekey_uses_only_production_schema_columns():
+    """9337B1: selecting nonexistent sample_count aborted the whole rekey."""
+    source = inspect.getsource(
+        lily_persistence.lily_rekey_speaker_voiceprints
+    )
+    assert "sample_count" not in source
+
+    migration = (
+        Path(__file__).resolve().parent.parent
+        / "migrations"
+        / "001_lily_schema.sql"
+    ).read_text(encoding="utf-8")
+    table = migration.split(
+        "CREATE TABLE IF NOT EXISTS lily_speaker_voiceprints", 1
+    )[1].split(");", 1)[0]
+    assert "sample_count" not in table
 
 
 def test_rekey_group_keeps_voiceprints_on_non_provisional_old_id():

@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at confirmed-identity P0-D start: `main @ 0d667ab`
+Pinned at voiceprint-rekey P0-E1 start: `main @ 0143541`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -50,8 +50,10 @@ Each row is a separate merged PR.
 | P0-A | Answered question dead forever | Result/reveal clears clarify; no final-answer check, window reopen, or re-ask; Freud fixture | Shipped `bb0077c` |
 | P0-B | Sticky global STOP | One STOP freezes game delivery/supply/window until explicit resume | Shipped `377e496` |
 | P0-C | Post-TTS truth | Transcript, TTS and glass share the actual post-transform delivery text | Shipped `0d667ab` |
-| P0-D | Confirmed identity before Q1 | No semantic-name placeholder (`Playing`) can satisfy start gate | **Completed in this change** |
-| P0-E | Voiceprint rekey/identity | Production-schema rekey succeeds; temporary samples quarantine/promote; poisoned rows repaired | Next |
+| P0-D | Confirmed identity before Q1 | No semantic-name placeholder (`Playing`) can satisfy start gate | Shipped `0143541` |
+| P0-E1 | Voiceprint rekey schema | Production-schema rekey succeeds and is idempotent | **Completed in this change** |
+| P0-E2 | Voice identity quarantine/promotion | Temporary samples cannot found a rival identity before canonical match | Next |
+| P0-E3 | Verified identity cleanup | Repair `Playing` rows/group only after code and biometric verification | Queued |
 | P0-F | Pre-window scope | Only speech during actual delivery playout can become an early answer | Queued |
 | P0-G | Meta/progression ownership | Delivery watchdog pauses for intake/meta; responsiveness latch clears; one-emission cut behavior | Queued |
 

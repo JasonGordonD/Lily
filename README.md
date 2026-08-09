@@ -978,6 +978,10 @@ source=... group_id=...` is logged every session, upgrades as
    `lily_speaker_voiceprints`; `LILY_MEMORY | REKEY | table=...`), reloads
    the `[RETURNING TABLE]` memory if no questions have been played, and
    re-fires enrollment so voiceprints land under the resolved id.
+   Voiceprint rekey is schema-exact to migration 001 (`id`, group/label/name,
+   identifier array, timestamps)—`sample_count` belongs only to the separate
+   ECAPA `lily_voice_identity` table. On label collision, target identifiers
+   commit before the provisional row is deleted; reruns are idempotent.
 4. **(d)** `LILY_GROUP_ID` env override, then room name (random per session
    — nothing re-keys on it; the upgrade path exists exactly to escape it).
 
