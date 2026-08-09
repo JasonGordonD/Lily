@@ -45,6 +45,7 @@ import lily_gemini_safety
 # tests/test_web_guardrails.py).
 import lily_imagegen
 import lily_search
+import lily_vision
 
 logger = logging.getLogger("lily_reasoning")
 
@@ -572,30 +573,6 @@ class LilyReasoning:
         appropriate — it supplies no facts of its own."""
         reason = "unknown"
         try:
-            config = genai_types.GenerateContentConfig(
-                thinking_config=genai_types.ThinkingConfig(
-                    thinking_level="low"
-                ),
-                safety_settings=_SAFETY_SETTINGS,
-                max_output_tokens=lily_config.judge_max_output_tokens(),
-                response_mime_type="application/json",
-                response_schema=genai_types.Schema(
-                    type=genai_types.Type.OBJECT,
-                    properties={
-                        "approved": genai_types.Schema(
-                            type=genai_types.Type.BOOLEAN
-                        ),
-                        "reason": genai_types.Schema(
-                            type=genai_types.Type.STRING
-                        ),
-                    },
-                    required=["approved", "reason"],
-                ),
-            )
-            mime = (
-                content_type.split(";", 1)[0].strip().lower()
-                or "image/jpeg"
-            )
             prompt = (
                 "You are a strict content gate for a family-friendly trivia "
                 "game played on a shared screen. Approve this photograph "
@@ -603,25 +580,14 @@ class LilyReasoning:
                 "the actual subject, not a map, diagram, logo, screenshot "
                 "of text, or unrelated scene; (2) it is appropriate for a "
                 "general audience (no nudity, gore, violence, or shock "
-                "content). When unsure, reject. Answer in the JSON schema."
+                "content). When unsure, reject."
             )
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._client.models.generate_content,
-                    model=self._model,
-                    contents=[
-                        genai_types.Part.from_bytes(
-                            data=image_bytes, mime_type=mime
-                        ),
-                        prompt,
-                    ],
-                    config=config,
+            approved, reason = await asyncio.wait_for(
+                lily_vision.lily_classify_image_bytes(
+                    image_bytes, content_type, prompt
                 ),
                 timeout=20.0,
             )
-            verdict = json.loads(getattr(response, "text", "") or "{}")
-            approved = bool(verdict.get("approved"))
-            reason = str(verdict.get("reason", ""))[:300]
             logger.log(
                 logging.INFO if approved else logging.WARNING,
                 "LILY_REASONING | IMAGE_CONTENT_GATE | entity=%r "

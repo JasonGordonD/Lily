@@ -204,6 +204,10 @@ def xai_api_key() -> Optional[str]:
     return _get("XAI_API_KEY")
 
 
+def vision_model() -> str:
+    return "grok-4.5"
+
+
 def exa_api_key() -> Optional[str]:
     return _get("EXA_API_KEY")
 

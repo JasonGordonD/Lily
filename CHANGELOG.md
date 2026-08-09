@@ -5,6 +5,17 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — M5c: vision and image correspondence on Grok 4.5
+
+Player photo analysis, real-entity image approval, arsenal correspondence and
+image-first descriptions now share Grok 4.5 image→text transport. URL and
+byte inputs use the same grounded failure contract; classifiers request
+structured JSON and fail closed.
+
+General/adult image rendering remains on dedicated image models. The vocal
+host receives only verified descriptions/results and never authors visual
+facts.
+
 ## 2026-08-09 — M5b: Tier-2 judge on Grok 4.5
 
 General and adult ambiguous-answer adjudication now share Grok 4.5 at

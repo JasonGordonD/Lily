@@ -36,6 +36,8 @@ says about it.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 from typing import Annotated, Optional
 from urllib.parse import urlparse
@@ -48,7 +50,6 @@ import lily_config
 logger = logging.getLogger("lily_vision")
 
 _XAI_URL = "https://api.x.ai/v1/chat/completions"
-_MODEL = "grok-4.3"  # fleet-standard vision model id
 _DEFAULT_PROMPT = "Describe this image in detail."
 _TIMEOUT_S = 30.0
 
@@ -82,22 +83,36 @@ async def lily_describe_image(
             "reason": "vision provider unconfigured",
         }
     ask = (prompt or "").strip() or _DEFAULT_PROMPT
+    return await _grok_vision_text(url, ask)
 
+
+async def _grok_vision_text(
+    image_url: str, prompt: str, *, json_mode: bool = False
+) -> dict:
+    """One Grok 4.5 image→text call for URLs or data URLs."""
+    api_key = lily_config.xai_api_key()
+    if not api_key:
+        return {
+            "status": "unavailable",
+            "reason": "vision provider unconfigured",
+        }
     payload = {
-        "model": _MODEL,
+        "model": lily_config.vision_model(),
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": ask},
+                    {"type": "text", "text": prompt},
                     {
                         "type": "image_url",
-                        "image_url": {"url": url, "detail": "high"},
+                        "image_url": {"url": image_url, "detail": "high"},
                     },
                 ],
             }
         ],
     }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
     try:
         timeout = aiohttp.ClientTimeout(total=_TIMEOUT_S)
         async with aiohttp.ClientSession(timeout=timeout) as http:
@@ -122,16 +137,55 @@ async def lily_describe_image(
         if not isinstance(text, str) or not text.strip():
             return {"status": "error", "reason": "empty response"}
         logger.info(
-            "LILY_VISION | complete | url=%r chars=%d", url[:120], len(text)
+            "LILY_VISION | complete | model=%s chars=%d",
+            lily_config.vision_model(), len(text),
         )
         return {"status": "ok", "description": text.strip()}
     except asyncio.TimeoutError:
-        logger.warning("LILY_VISION | timeout | url=%r", url[:120])
+        logger.warning("LILY_VISION | timeout")
         return {"status": "error", "reason": f"timeout after {_TIMEOUT_S:.0f}s"}
     except Exception as exc:
         reason = str(exc) or type(exc).__name__
-        logger.warning("LILY_VISION | error | url=%r error=%s", url[:120], reason)
+        logger.warning("LILY_VISION | error | error=%s", reason)
         return {"status": "error", "reason": reason}
+
+
+async def lily_describe_image_bytes(
+    image_bytes: bytes,
+    content_type: str,
+    prompt: str,
+    *,
+    json_mode: bool = False,
+) -> dict:
+    if not image_bytes:
+        return {"status": "error", "reason": "empty image bytes"}
+    mime = (content_type or "image/jpeg").split(";", 1)[0].strip()
+    data_url = (
+        f"data:{mime};base64,"
+        + base64.b64encode(image_bytes).decode("ascii")
+    )
+    return await _grok_vision_text(
+        data_url, prompt, json_mode=json_mode
+    )
+
+
+async def lily_classify_image_bytes(
+    image_bytes: bytes, content_type: str, prompt: str
+) -> tuple[bool, str]:
+    result = await lily_describe_image_bytes(
+        image_bytes, content_type, prompt + "\nReturn JSON: "
+        '{"approved": true|false, "reason": "short reason"}.',
+        json_mode=True,
+    )
+    if result.get("status") != "ok":
+        return False, str(result.get("reason") or "vision unavailable")
+    try:
+        verdict = json.loads(result["description"])
+    except (json.JSONDecodeError, TypeError, KeyError):
+        return False, "vision returned unparseable JSON"
+    return bool(verdict.get("approved")), str(
+        verdict.get("reason") or ""
+    )[:300]
 
 
 @function_tool(
@@ -165,5 +219,7 @@ async def lily_analyze_image(
 __all__ = [
     "lily_analyze_image",
     "lily_describe_image",
+    "lily_describe_image_bytes",
+    "lily_classify_image_bytes",
     "lily_vision_available",
 ]

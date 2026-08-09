@@ -53,6 +53,7 @@ import lily_arsenal
 import lily_arsenal_content
 import lily_arsenal_formats
 import lily_config
+import lily_vision
 
 logger = logging.getLogger("lily_arsenal_gen")
 
@@ -760,13 +761,14 @@ async def lily_author_question(
                 ),
                 max_tokens=2048,
                 timeout=ADULT_AUTHOR_TIMEOUT_SECONDS,
+                model=lily_config.adult_reasoning_model(),
+                effort=lily_config.adult_reasoning_effort(),
             )
-        return await reasoning._generate(
-            reasoning._model,
+        return await reasoning._generate_grok_json(
             instruction,
-            thinking_level="low",
-            response_mime_type="application/json",
-            max_output_tokens=2048,
+            max_tokens=2048,
+            model=lily_config.reasoning_model(),
+            effort=lily_config.reasoning_effort(),
         )
 
     last_err: object = "author returned nothing"
@@ -821,28 +823,7 @@ async def lily_classify_image(
     Fail-closed is still the rule for a genuine error. But a gate that
     cannot look at the register it was written for is not caution, it is a
     bug with a reassuring log line."""
-    import json
-
-    from google.genai import types as genai_types
-
-    import lily_reasoning
-
     try:
-        config = genai_types.GenerateContentConfig(
-            thinking_config=genai_types.ThinkingConfig(thinking_level="low"),
-            safety_settings=lily_reasoning._SAFETY_SETTINGS,
-            max_output_tokens=lily_config.judge_max_output_tokens(),
-            response_mime_type="application/json",
-            response_schema=genai_types.Schema(
-                type=genai_types.Type.OBJECT,
-                properties={
-                    "approved": genai_types.Schema(type=genai_types.Type.BOOLEAN),
-                    "reason": genai_types.Schema(type=genai_types.Type.STRING),
-                },
-                required=["approved", "reason"],
-            ),
-        )
-        mime = (content_type or "image/jpeg").split(";", 1)[0].strip().lower()
         prompt = (
             "You are the content gate for a picture-trivia bank. Approve "
             "this image ONLY if BOTH hold:\n"
@@ -853,20 +834,12 @@ async def lily_classify_image(
             "this image could not reasonably arrive at that answer, reject.\n"
             "When unsure, reject. Answer in the JSON schema."
         )
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                reasoning._client.models.generate_content,
-                model=reasoning._model,
-                contents=[
-                    genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
-                    prompt,
-                ],
-                config=config,
+        return await asyncio.wait_for(
+            lily_vision.lily_classify_image_bytes(
+                image_bytes, content_type, prompt
             ),
             timeout=25.0,
         )
-        verdict = json.loads(getattr(response, "text", "") or "{}")
-        return bool(verdict.get("approved")), str(verdict.get("reason", ""))[:300]
     except Exception as e:
         return False, f"gate error ({type(e).__name__}): {e}"
 
@@ -877,19 +850,12 @@ async def lily_describe_image(
     """Caption the ACTUAL rendered image so the image-first author writes the
     stem about what the model really drew, not the loosely-followed prompt.
 
-    Uses the SAME Gemini vision path as lily_classify_image — the gate
+    Uses the SAME Grok 4.5 vision path as lily_classify_image — the gate
     already sees adult imagery over this path, so a literal description does
     too. Returns None on any error; lily_generate_entry then falls back to
     the generation prompt (never worse than the prior behaviour). Partition-
     agnostic: correspondence matters for every tier, not just adult."""
-    from google.genai import types as genai_types
-
     try:
-        config = genai_types.GenerateContentConfig(
-            thinking_config=genai_types.ThinkingConfig(thinking_level="low"),
-            max_output_tokens=lily_config.judge_max_output_tokens(),
-        )
-        mime = (content_type or "image/jpeg").split(";", 1)[0].strip().lower()
         prompt = (
             "Describe exactly what is visible in this image for a trivia "
             "question writer. Name the main subject, what it is doing, "
@@ -898,19 +864,15 @@ async def lily_describe_image(
             "do not infer intent or add anything that is not visible. Two to "
             "four sentences of plain prose."
         )
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                reasoning._client.models.generate_content,
-                model=reasoning._model,
-                contents=[
-                    genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
-                    prompt,
-                ],
-                config=config,
+        result = await asyncio.wait_for(
+            lily_vision.lily_describe_image_bytes(
+                image_bytes, content_type, prompt
             ),
             timeout=25.0,
         )
-        text = str(getattr(response, "text", "") or "").strip()
+        if result.get("status") != "ok":
+            return None
+        text = str(result.get("description") or "").strip()
         return text or None
     except Exception as e:
         logger.warning(
