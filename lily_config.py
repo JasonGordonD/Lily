@@ -120,6 +120,13 @@ def vocal_effort() -> str:
     return "low"
 
 
+def live_preemptive_enabled() -> bool:
+    """Keep preemptive generation ON during live rounds (P2 volatile-tail
+    split moved the every-turn state churn out of the equivalence check's
+    sight). False restores the G1 lobby-only behavior."""
+    return _get_bool("LILY_LIVE_PREEMPTIVE", True)
+
+
 def prefetch_timeout_seconds() -> float:
     """Per-call wall for question authoring/verification/distractors
     (lily-1C53C6: 30s walls stacked ~90s of dead wait). Keep above the

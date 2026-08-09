@@ -95,7 +95,7 @@ def test_llm_empty_stop_retries_then_raises(monkeypatch):
     )
     agent._game = game
     object.__setattr__(agent, "_llm", None)
-    agent._apply_context_blocks = lambda ctx: None
+    agent._apply_context_blocks = lambda ctx, **kw: None
     agent._thinking_level_for_turn = lambda ctx: "low"
 
     async def _drain():
@@ -140,7 +140,7 @@ def test_prohibited_keyed_delivery_bypasses_model_with_sheet(monkeypatch, caplog
     )
     agent._game = game
     object.__setattr__(agent, "_llm", None)
-    agent._apply_context_blocks = lambda ctx: None
+    agent._apply_context_blocks = lambda ctx, **kw: None
     agent._thinking_level_for_turn = lambda ctx: "low"
 
     async def _drain():
@@ -180,7 +180,7 @@ def test_prohibited_conversation_fails_closed_without_retry(monkeypatch):
     )
     agent._game = game
     object.__setattr__(agent, "_llm", None)
-    agent._apply_context_blocks = lambda ctx: None
+    agent._apply_context_blocks = lambda ctx, **kw: None
     agent._thinking_level_for_turn = lambda ctx: "low"
 
     async def _drain():
@@ -228,7 +228,7 @@ def test_lobby_empty_stop_schedules_one_greet_recover(monkeypatch):
     )
     agent._game = game
     object.__setattr__(agent, "_llm", None)
-    agent._apply_context_blocks = lambda ctx: None
+    agent._apply_context_blocks = lambda ctx, **kw: None
     agent._thinking_level_for_turn = lambda ctx: "low"
 
     async def _scenario():
@@ -277,7 +277,7 @@ def test_lobby_empty_stop_recover_capped(monkeypatch):
     )
     agent._game = game
     object.__setattr__(agent, "_llm", None)
-    agent._apply_context_blocks = lambda ctx: None
+    agent._apply_context_blocks = lambda ctx, **kw: None
     agent._thinking_level_for_turn = lambda ctx: "low"
 
     async def _scenario():
@@ -322,7 +322,7 @@ def test_lobby_empty_stop_skips_recover_after_confirmed_greet(monkeypatch):
     )
     agent._game = game
     object.__setattr__(agent, "_llm", None)
-    agent._apply_context_blocks = lambda ctx: None
+    agent._apply_context_blocks = lambda ctx, **kw: None
     agent._thinking_level_for_turn = lambda ctx: "low"
 
     async def _scenario():
@@ -362,7 +362,7 @@ def test_llm_empty_stop_forces_armed_sheet(monkeypatch):
     )
     agent._game = game
     object.__setattr__(agent, "_llm", None)
-    agent._apply_context_blocks = lambda ctx: None
+    agent._apply_context_blocks = lambda ctx, **kw: None
     agent._thinking_level_for_turn = lambda ctx: "low"
 
     async def _drain():
@@ -396,7 +396,7 @@ def test_llm_empty_stop_recovers_on_retry(monkeypatch):
     )
     agent._game = game
     object.__setattr__(agent, "_llm", None)
-    agent._apply_context_blocks = lambda ctx: None
+    agent._apply_context_blocks = lambda ctx, **kw: None
     agent._thinking_level_for_turn = lambda ctx: "low"
 
     async def _drain():

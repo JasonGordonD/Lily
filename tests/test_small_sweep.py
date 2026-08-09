@@ -107,25 +107,27 @@ def _start_game(game: LilyGame, source: str = "voice") -> None:
     _run(game.start_game(source))
 
 
-def test_start_game_disables_preemptive_generation():
+def test_start_game_keeps_preemptive_on_with_volatile_split():
+    # 2026-08-09: the volatile-tail split moved the every-turn state churn
+    # out of the equivalence check's sight, so live games keep preemptive
+    # ON by default (LILY_LIVE_PREEMPTIVE=false restores the G1 hold —
+    # pinned in test_preemptive_volatile_split.py).
     game = _make_game()
     _start_game(game)
     assert game.game_started is True
-    # set_game_live_preemptive(True) fired: the first recorded call is the
-    # game-live OFF (False = disabled).
-    assert game.agent.calls and game.agent.calls[0] is False
-    assert True not in game.agent.calls
+    assert game.agent.calls and game.agent.calls[0] is True
 
 
-def test_playout_resume_respects_game_live_latch():
-    # The P2 pause/resume pair must not re-enable preemptive mid-game.
+def test_playout_resume_reenables_mid_game_with_split():
+    # 2026-08-09 volatile-tail split: live preemptive is on by default, so
+    # the playout resume re-enables it mid-game too.
     game = _make_game()
     _start_game(game)
     game.agent.calls.clear()
     game._preemptive_paused = True
     game._resume_preemptive()
     assert game._preemptive_paused is False
-    assert game.agent.calls == []  # no True while live
+    assert game.agent.calls == [True]
 
 
 def test_playout_resume_reenables_in_lobby():

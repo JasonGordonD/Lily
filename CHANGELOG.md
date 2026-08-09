@@ -5,6 +5,37 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P2 volatile-tail split: preemptive generation back ON in-game
+
+G1 turned preemptive generation OFF for the whole live game for a sound
+reason: the state block honestly changed on nearly every turn — the
+just-heard utterance lands as an answer-candidate line, the answer window
+flips on the clock, and the temporal-context line is a literal clock — so
+the 1.6.x equivalence check discarded almost every speculative run
+(double LLM cost, zero win). The operator's read was also right: turning
+the feature off traded ~1.5s/turn of hideable LLM latency away instead of
+fixing the invalidation.
+
+The split (the fix lily_temporal_context's docstring always promised):
+
+- `build_state_block_split()` → (stable, volatile). Stable — injected in
+  on_user_turn_completed under the stable item id, equivalence-visible —
+  changes only when the game genuinely moves. Volatile — the clock line,
+  answer window, live candidates — rides a SEPARATE item injected only on
+  per-generation copies (`llm_node`'s `include_volatile=True`), which the
+  equivalence check never sees and every real generation refreshes
+  in place. Full renders stay byte-identical.
+- Live games keep preemptive ON by default; the playout pause/resume pair
+  re-enables it mid-game too. `LILY_LIVE_PREEMPTIVE=false` restores the
+  G1 hold if the live discard rate proves the split insufficient.
+- Speculative runs see volatile state as of ~a beat earlier; verdicts and
+  scoring are unaffected (they ride instructed replies and the committed
+  ledger, never user-turn generations).
+
+Also: `LILY_VOCAL_MODEL` env knob (A/B without redeploy), prefetch walls
+relaxed to 20s/45s and env-tunable. Pinned in
+`tests/test_preemptive_volatile_split.py`; suite 1897 green.
+
 ## 2026-08-09 — device+name amnesia: the staged candidate slammed the name door
 
 Operator escalation (and they were right to be angry): a returning player
