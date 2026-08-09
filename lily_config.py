@@ -130,9 +130,11 @@ def gemini_vision_gate_model() -> str:
 
 
 def assessment_model() -> str:
-    # WS-12 clinical desk: post-session assessment runs on the reasoning
-    # model unless pinned separately.
-    return _get("LILY_ASSESSMENT_MODEL", "gemini-3.1-pro-preview")
+    return "grok-4.5"
+
+
+def assessment_effort() -> str:
+    return "high"
 
 
 def report_deadline_seconds() -> float:

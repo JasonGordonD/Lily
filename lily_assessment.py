@@ -22,8 +22,7 @@ pending-guarded (UPDATE ... WHERE report_status='pending'), so a completed
 assessment is never overwritten by a re-run, matching the write side's
 deliberate omission of these columns.
 
-Runs on the reasoning model (`gemini-3.1-pro-preview`) with its own lazy
-genai.Client — same HTTP-client-isolation rule as lily_reasoning (§11.5).
+Runs offline on Grok 4.5 High; no live-turn latency impact.
 """
 
 import asyncio
@@ -33,19 +32,12 @@ import logging
 import re
 from typing import Awaitable, Callable, Optional
 
-from google import genai as google_genai
-from google.genai import types as genai_types
-
 import lily_config
-import lily_gemini_safety
+import lily_reasoning
 
 logger = logging.getLogger("lily_assessment")
 
 Generate = Callable[[list, dict], Awaitable[dict]]
-
-# Adult-product context (§11.1): same explicit safety settings as the
-# reasoning node — an adult-mode transcript must not mute the desk.
-_SAFETY_SETTINGS = lily_gemini_safety.lily_gemini_safety_settings()
 
 _SYSTEM_INSTRUCTION = (
     "You are the PRMPT clinical desk reviewing one completed Lily trivia "
@@ -77,16 +69,6 @@ def _sweep_limit() -> int:
 
 def _assessment_model() -> str:
     return lily_config.assessment_model()
-
-
-_client: Optional[google_genai.Client] = None
-
-
-def _get_client() -> google_genai.Client:
-    global _client
-    if _client is None:
-        _client = google_genai.Client(api_key=lily_config.google_api_key())
-    return _client
 
 
 class AssessmentParseError(ValueError):
@@ -123,22 +105,17 @@ async def _default_generate(transcript: list, game_stats: dict) -> dict:
         {"transcript": transcript, "game_stats": game_stats},
         ensure_ascii=False, default=str,
     )
-    config = genai_types.GenerateContentConfig(
-        thinking_config=genai_types.ThinkingConfig(thinking_level="low"),
-        safety_settings=_SAFETY_SETTINGS,
-        # Thinking tokens count toward max_output_tokens on Gemini 3.x
-        # (P1 root cause, 2026-07-14) — name a budget wide enough for both.
-        max_output_tokens=4096,
+    reasoning = lily_reasoning.LilyReasoning.__new__(
+        lily_reasoning.LilyReasoning
+    )
+    text = await reasoning._generate_grok_json(
+        prompt,
         system_instruction=_SYSTEM_INSTRUCTION,
-        response_mime_type="application/json",
-    )
-    response = await asyncio.to_thread(
-        _get_client().models.generate_content,
+        max_tokens=4096,
+        timeout=60.0,
         model=_assessment_model(),
-        contents=prompt,
-        config=config,
+        effort=lily_config.assessment_effort(),
     )
-    text = getattr(response, "text", None)
     if not text:
         raise RuntimeError(f"empty candidate from {_assessment_model()}")
     return _parse_assessment_json(text)
