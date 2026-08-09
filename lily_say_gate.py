@@ -474,6 +474,20 @@ class SpeechActRegistry:
             self._owners[key] = new_owner
         return moved
 
+    def keys_for_owner(self, owner: str) -> list[str]:
+        """PENDING claim keys held by one speech/reservation id. Read-only
+        (confirm_owner/release_owner mutate; this only reports). The
+        transition gate (HOTFIX-006 N12) uses it to tell a code-dispatched
+        keyed act — a verdict beat, a standings flourish, the finale —
+        apart from a stray conversational turn narrating the same beat a
+        second time."""
+        if not owner:
+            return []
+        return [
+            key for key, claim_owner in self._owners.items()
+            if claim_owner == owner and self._acts.get(key) == CLAIM_PENDING
+        ]
+
     def confirm_owner(self, owner: str) -> list[str]:
         """Confirm only pending claims performed by one speech handle."""
         confirmed = [

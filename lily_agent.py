@@ -470,6 +470,23 @@ _STALE_CLAIM_SECONDS = 12.0
 _STALE_CLAIM_MAX_RETRIES = 2   # re-dispatches per key before declaring the audio path down
 _STALE_CLAIM_MAX_RECHECKS = 20  # bounded host_speaking re-check loop (no task leak)
 
+# HOTFIX-006 N12: how long a question transition owns its narration. The
+# live contradiction ("That's a point for Chris." / "No points on that one")
+# landed inside ONE beat, and the beat normally closes on its own when the
+# next question is delivered. This bound covers the transitions that have
+# no next delivery — the finale, a stalled supply line — so that talking
+# ABOUT a past ruling later in the session is never mistaken for narrating
+# it a second time. Comfortably longer than a verdict + flourish playout.
+_TRANSITION_NARRATION_WINDOW_SECONDS = 30.0
+
+# HOTFIX-006 N13: spelled roster sizes, for the authoritative-count state
+# field only (the field shows the phrasings the count must appear in, so it
+# has to spell the number the way she would say it).
+_ROSTER_COUNT_WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+}
+
 
 # ---------------------------------------------------------------------------
 # Game director — the non-LLM surface: window timer, adjudication commit,
@@ -604,8 +621,17 @@ class LilyGame:
         # Revealed-question burn (WS-4): ids and normalized-text hashes of
         # questions whose answer has gone to air this session. A burned
         # question can never re-arm and rides the no-repeat draw exclusion.
+        # HOTFIX-006 N8: a reveal in her own conversational lane burns here
+        # too, which is what makes "revealed" a state the steal path can
+        # check at dispatch.
         self._burned_question_ids: set[str] = set()
         self._burned_question_hashes: set[str] = set()
+        # HOTFIX-006 N12: the question-transition journal — qnum -> the
+        # ordered stages (reveal, verdict, next_delivery) that transition
+        # has run, and which question's transition is currently in flight.
+        # One transition, one owner, one narration.
+        self._transition_journal: dict[int, list] = {}
+        self._open_transition_qnum: int | None = None
         self.promoted_categories: list[str] = []
         self._prefetch_task: asyncio.Task | None = None
         self._window_timer: asyncio.Task | None = None
@@ -1665,6 +1691,263 @@ class LilyGame:
             return
         self.trigger_cut_recovery()
 
+    # -- N12: the question transition is ONE journaled event ------------------
+    #
+    # Live (lily-D99BE7, question three, inside a single beat):
+    #   "Chris got it in right on time with Russia! That's a point for Chris."
+    #   "No points on that one — the answer was Russia!"
+    # One committed row (q_8294, Chris, "Russia.", correct, 1 point), two
+    # narrations, opposite verdicts — plus question FOUR delivered by one
+    # lane while the other was still revealing three, and an apology that
+    # doubled because the loop it apologised for was itself two lanes.
+    #
+    # A transition is therefore claimed WHOLE, at the reveal, by one owner,
+    # and its three stages are journaled in order: reveal -> verdict ->
+    # next_delivery. The claim key rides the SpeechActRegistry that already
+    # makes greetings and deliveries idempotent — no parallel mechanism. The
+    # journal is the record the fixtures and the logs read: which lane owns
+    # this transition, which stages have gone to air, and with what words.
+    TRANSITION_STAGES = ("reveal", "verdict", "next_delivery")
+
+    def transition_key(self, qnum: int) -> str:
+        """The say-registry key that makes one question transition one act."""
+        return f"q_{qnum}_transition"
+
+    def _transition_journals(self) -> dict:
+        journals = getattr(self, "_transition_journal", None)
+        if journals is None:
+            journals = self._transition_journal = {}
+        return journals
+
+    def open_question_transition(
+        self, qnum: int, *, owner: str, source: str
+    ) -> bool:
+        """Claim the WHOLE q_{N} transition for one owner. True = the caller
+        owns reveal, verdict and next-delivery for this question; False =
+        another lane already owns it and this narration is suppressed.
+
+        Two independent refusals, because a released claim must not hand a
+        second lane a transition that already spoke: an existing journal for
+        this question, and the claim key itself."""
+        journals = self._transition_journals()
+        if qnum in journals:
+            logger.error(
+                "LILY_TRANSITION | SECOND_LANE_REFUSED | session=%s q=%d "
+                "source=%s stages=%s — this transition is already owned and "
+                "narrated; the second lane does not speak (N12)",
+                self.sk.session_id, qnum, source,
+                ",".join(e["stage"] for e in journals[qnum]),
+            )
+            return False
+        if not self.say_registry.claim(self.transition_key(qnum), owner=owner):
+            logger.error(
+                "LILY_TRANSITION | SECOND_LANE_REFUSED | session=%s q=%d "
+                "source=%s state=%s — transition claim held elsewhere (N12)",
+                self.sk.session_id, qnum, source,
+                self.say_registry.state(self.transition_key(qnum)),
+            )
+            return False
+        journals[qnum] = []
+        self._open_transition_qnum = qnum
+        logger.info(
+            "LILY_TRANSITION | OPEN | session=%s q=%d owner=%s source=%s",
+            self.sk.session_id, qnum, owner, source,
+        )
+        return True
+
+    def journal_transition(
+        self,
+        qnum: int,
+        stage: str,
+        *,
+        owner: str | None = None,
+        detail: dict | None = None,
+    ) -> bool:
+        """Append ONE stage to the q_{N} transition journal. False when the
+        stage is already journaled (a second narration of the same beat) or
+        the caller does not own the transition — both are the N12 defect,
+        and both are logged rather than silently tolerated."""
+        if stage not in self.TRANSITION_STAGES:
+            raise ValueError(f"unknown transition stage: {stage!r}")
+        entries = self._transition_journals().get(qnum)
+        if entries is None:
+            logger.warning(
+                "LILY_TRANSITION | NO_OPEN_TRANSITION | session=%s q=%d "
+                "stage=%s — stage journaled with no transition open",
+                self.sk.session_id, qnum, stage,
+            )
+            return False
+        if any(e["stage"] == stage for e in entries):
+            logger.error(
+                "LILY_TRANSITION | STAGE_DUP | session=%s q=%d stage=%s — "
+                "a second lane tried to narrate a stage this transition has "
+                "already run (N12)",
+                self.sk.session_id, qnum, stage,
+            )
+            return False
+        entries.append({
+            "stage": stage,
+            "owner": owner,
+            "detail": dict(detail or {}),
+            "at": time.monotonic(),
+        })
+        logger.info(
+            "LILY_TRANSITION | STAGE | session=%s q=%d stage=%s owner=%s",
+            self.sk.session_id, qnum, stage, owner,
+        )
+        return True
+
+    def transition_journal(self, qnum: int) -> list:
+        """The journal for one question's transition (empty when none)."""
+        return list(self._transition_journals().get(qnum) or [])
+
+    def transition_stages(self, qnum: int) -> list:
+        """The stages this transition has run, in the order they ran."""
+        return [e["stage"] for e in self.transition_journal(qnum)]
+
+    def transition_narrated(self, qnum: int, stage: str) -> bool:
+        return stage in self.transition_stages(qnum)
+
+    def _transition_entry(self, qnum: int, stage: str) -> dict | None:
+        for entry in self._transition_journals().get(qnum) or []:
+            if entry["stage"] == stage:
+                return entry
+        return None
+
+    def register_transition_narration(
+        self, spoken_text: str, *, speech_id: str | None = None
+    ) -> str | None:
+        """The ONE-NARRATION decision for one outbound spoken turn (called
+        from tts_node, pure decision + journal bind — offline-testable).
+
+          "narration" — this turn IS the transition's narration (first one
+                        through the gate; its words are bound to the beat);
+          "duplicate" — the transition was already narrated by different
+                        words: the caller makes this turn physically silent
+                        (THE contradictory pair — "That's a point for
+                        Chris." then "No points on that one");
+          None        — not a narration of an open transition; speak
+                        normally.
+
+        Narrow on purpose. The turn only counts as a narration when it
+        carries the transitioning question's own answer alongside a verdict
+        cue (lily_verdict_narration), so banter, encouragement and answers
+        to the table are untouched — a false suppression would be a worse
+        defect than the one this fixes."""
+        qnum = getattr(self, "_open_transition_qnum", None)
+        if qnum is None:
+            return None
+        entry = self._transition_entry(qnum, "verdict")
+        if entry is None:
+            # The verdict stage has not run: nothing has been narrated yet,
+            # so this turn cannot be a SECOND narration of it. (Her organic
+            # verdict lands here, and the adjudicate lane detects it
+            # separately via _verdict_already_spoken.)
+            return None
+        if self.transition_narrated(qnum, "next_delivery"):
+            # The beat is OVER — question N+1 is on the air. Talking about
+            # the last ruling now ("did Chris get that one?" — "he did,
+            # Russia, that was his point") is conversation, not a second
+            # narration, and must never be silenced.
+            return None
+        if (
+            time.monotonic() - entry["at"]
+            > _TRANSITION_NARRATION_WINDOW_SECONDS
+        ):
+            # Same reasoning, for the transitions that have no next
+            # delivery (the finale, a stalled supply line): the live
+            # contradiction landed INSIDE one beat. Past a beat's length
+            # she is answering questions about the ruling.
+            return None
+        detail = entry["detail"]
+        text = (spoken_text or "").strip()
+        held = self.say_registry.keys_for_owner(speech_id)
+        verdict_key = detail.get("key")
+        if verdict_key and verdict_key in held:
+            # THE verdict beat of this transition (or its re-air after a
+            # cut/regeneration, which legitimately carries fresh words):
+            # this turn IS the narration, so it binds — never suppressed
+            # by its own earlier binding.
+            detail["narration"] = text
+            detail["narration_speech_id"] = speech_id
+            logger.info(
+                "LILY_TRANSITION | NARRATION_BOUND | session=%s q=%d "
+                "speech=%s", self.sk.session_id, qnum, speech_id,
+            )
+            return "narration"
+        if held:
+            # Another KEYED act of the same lane — the standings flourish,
+            # the finale, the next delivery. Part of this transition by
+            # construction, never a stray second narration of it.
+            return None
+        reveal = self._transition_entry(qnum, "reveal") or {}
+        answer = str((reveal.get("detail") or {}).get("answer") or "")
+        if lily_scorekeeper.lily_verdict_narration(spoken_text, answer) is None:
+            return None
+        bound = detail.get("narration")
+        if not bound:
+            detail["narration"] = text
+            detail["narration_speech_id"] = speech_id
+            logger.info(
+                "LILY_TRANSITION | NARRATION_BOUND | session=%s q=%d "
+                "speech=%s", self.sk.session_id, qnum, speech_id,
+            )
+            return "narration"
+        if bound.strip() == text:
+            return "narration"  # the same turn re-entering the gate
+        logger.error(
+            "LILY_SAY_SUPPRESSED | reason=dup_transition | session=%s q=%d | "
+            "already_narrated=%r | suppressed=%r — one transition, one "
+            "narration (N12)",
+            self.sk.session_id, qnum, bound[:80], text[:80],
+        )
+        return "duplicate"
+
+    def _transition_holds_next_delivery(self, source: str) -> bool:
+        """True when the open transition is NOT ready to release question
+        N+1: its verdict has not been narrated, or that narration has not
+        finished playing out, or the next delivery already ran.
+
+        This is the "she jumped from a question to question and a third
+        question" guard, moved off timing and onto the journal: the next
+        delivery is the LAST stage of the previous question's transition,
+        so no lane can deliver N+1 over a reveal still on the air."""
+        qnum = getattr(self, "_open_transition_qnum", None)
+        if qnum is None:
+            return False  # no transition in flight (skip, game start, nudge)
+        stages = self.transition_stages(qnum)
+        if "next_delivery" in stages:
+            logger.error(
+                "LILY_TRANSITION | DELIVERY_DUP | session=%s q=%d source=%s "
+                "— this transition already delivered the next question; a "
+                "second lane does not deliver it again (N12)",
+                self.sk.session_id, qnum, source,
+            )
+            return True
+        entry = self._transition_entry(qnum, "verdict")
+        if entry is None:
+            logger.warning(
+                "LILY_TRANSITION | DELIVERY_HELD | session=%s q=%d "
+                "source=%s reason=verdict_unnarrated — the previous question "
+                "has not been ruled on yet (N12)",
+                self.sk.session_id, qnum, source,
+            )
+            return True
+        verdict_key = (entry["detail"] or {}).get("key")
+        if (
+            verdict_key
+            and self.say_registry.state(verdict_key)
+            != lily_say_gate.CLAIM_CONFIRMED
+        ):
+            logger.warning(
+                "LILY_TRANSITION | DELIVERY_HELD | session=%s q=%d "
+                "source=%s reason=verdict_airing key=%s — the reveal of the "
+                "previous question is still on the air (N12)",
+                self.sk.session_id, qnum, source, verdict_key,
+            )
+            return True
+        return False
+
     def dispatch_armed_question(self, *, source: str) -> bool:
         """Dispatch one question-only turn after a completed reveal.
 
@@ -1684,9 +1967,14 @@ class LilyGame:
         key = f"q_{self.sk.question_number}_delivery"
         if self.say_registry.state(key) is not None:
             return False
+        # N12: the next delivery is the FINAL stage of the previous
+        # question's transition — it belongs to that beat and cannot
+        # overtake it.
+        if self._transition_holds_next_delivery(source):
+            return False
         self.expect_delivery()
         sheet = self.rendered_armed_question()
-        return self.gated_say(
+        dispatched = self.gated_say(
             None,
             "question_delivery",
             (
@@ -1696,6 +1984,17 @@ class LilyGame:
             ),
             source=source,
         )
+        if dispatched:
+            # The transition closes on its own last stage. A dispatch that
+            # was gated (hold, no live game) journals nothing, so the
+            # legitimate retry still owns the beat.
+            qnum = getattr(self, "_open_transition_qnum", None)
+            if qnum is not None:
+                self.journal_transition(
+                    qnum, "next_delivery",
+                    detail={"source": source, "delivered_q": self.sk.question_number},
+                )
+        return dispatched
 
     def register_delivery_claim(
         self,
@@ -5039,6 +5338,23 @@ class LilyGame:
                 self.sk.session_id, self.sk.question_number,
             )
             return
+        # HOTFIX-006 N8: a REVEALED question cannot open a steal window.
+        # Live: "No worries! The correct answer is Frankenstein" followed
+        # immediately by "Frankenstein! That opens a five-second steal
+        # window for Chris" — a steal offered on the answer she had just
+        # given away. Reveal burns (WS-4), and this is the dispatch seam
+        # where burn is checked, however the steal was arrived at. Ordinary
+        # windows are untouched: a fresh question is never burned, and the
+        # steal mechanic over an UNREVEALED question is unchanged.
+        if steal and self._is_burned(registered):
+            logger.error(
+                "LILY_WINDOW | STEAL_REFUSED_REVEALED | session=%s q=%d "
+                "question_id=%s — the answer has already gone to air; there "
+                "is nothing left to steal (N8)",
+                self.sk.session_id, self.sk.question_number,
+                registered.get("id"),
+            )
+            return
         dur = duration if duration is not None else self._answer_window_duration()
         # N3 invariant 2: the question id is CAPTURED HERE, at window-open,
         # and carried through to the ledger write — never inferred at
@@ -6820,6 +7136,25 @@ class LilyGame:
                 self._apply_addressee_label(key, label, source)
 
             missed = winner_candidate is None
+            # ── N8: REVEAL STATE, READ BEFORE THE STEAL BRANCH ────────────
+            # Live, back to back:
+            #   "No worries! The correct answer is Frankenstein"
+            #   "Frankenstein! That opens a five-second steal window for
+            #    Chris"
+            # The answer was already on the air and a steal window was
+            # offered ON THE REVEALED ANSWER — there was nothing left to
+            # steal, and anyone "stealing" would only be repeating her.
+            # Her own conversational lane can reveal, so reveal state is
+            # read HERE, before any steal decision, and a reveal BURNS the
+            # question through the existing WS-4 burn protocol: burned is
+            # the one-way, already-checked state the steal path (and the
+            # re-arm path, and the late-answer path) all gate on.
+            if (
+                self._reveal_already_on_air(question)
+                and not self._is_burned(question)
+            ):
+                self._burn_question(question, reason="revealed_on_air")
+            question_revealed = self._is_burned(question)
             # Steal needs someone who could actually steal (live 2026-07-15
             # fix): candidates persist through the steal window and judged
             # players are filtered, so with every rostered player already
@@ -6830,10 +7165,23 @@ class LilyGame:
             stealers_exist = any(
                 name not in self._judged_keys for name in self.sk.players
             )
-            if (
+            steal_possible = (
                 missed and ordered and steal_allowed
                 and stealers_exist and not self.game_over
-            ):
+            )
+            if steal_possible and question_revealed:
+                # N8: every steal precondition is met EXCEPT the one that
+                # matters. Fall through to the reveal beat (which the
+                # organic-preempt below keeps from repeating her) and log
+                # the refusal loudly.
+                logger.error(
+                    "LILY_STEAL | REFUSED_REVEALED | session=%s q=%d "
+                    "question_id=%s — the answer is already on the air; a "
+                    "revealed question has nothing left to steal (N8)",
+                    self.sk.session_id, self.sk.question_number,
+                    question.get("id"),
+                )
+            elif steal_possible:
                 # Missed question opens a 5-second steal window.
                 self._stinger(correct=False)
                 self._adjudicating = False
@@ -6851,8 +7199,41 @@ class LilyGame:
                 )
                 return
 
+            # ── N12: THE QUESTION TRANSITION OPENS HERE ───────────────────
+            # Everything from this line to the delivery of question N+1 is
+            # ONE event: reveal, verdict, next-delivery, in that order,
+            # under ONE owner. In lily-D99BE7 it was two: inside one beat
+            # she said "Chris got it in right on time with Russia! That's a
+            # point for Chris." AND "No points on that one — the answer was
+            # Russia!" over a single committed row (q_8294, Chris,
+            # "Russia.", correct, 1 point), and question FOUR was delivered
+            # by one lane while the other was still revealing three —
+            # Rhonda, aloud: "She's getting confused. Like she jumped from
+            # a question to question and a third question." The repair
+            # doubled too, because the loop it apologised for was itself
+            # two lanes.
+            #
+            # The claim key is the mechanism (the same SpeechActRegistry
+            # every other idempotent act uses): the second lane loses the
+            # claim and never narrates.
+            transition_qnum = self.sk.question_number
+            transition_owner = f"transition_{uuid.uuid4().hex}"
+            if not self.open_question_transition(
+                transition_qnum, owner=transition_owner, source="adjudicate"
+            ):
+                return
+
             # Reveal — stinger is the ruling; packet fires on TTS playback.
             self._stinger(correct=winner_candidate is not None)
+            self.journal_transition(
+                transition_qnum, "reveal", owner=transition_owner,
+                detail={
+                    "answer": str(question.get("canonical_answer", "")),
+                    "correct": winner_candidate is not None,
+                    "winner": winner,
+                    "question_id": bound_question_id,
+                },
+            )
             # T4 (PATCH-001): VERDICT-FIRST. The measured live cost of the
             # single long reveal turn was 11–12s from commit to a spoken
             # verdict — long enough that players re-answered ("Saturn"
@@ -6883,6 +7264,19 @@ class LilyGame:
                     "LILY_REVEAL | ORGANIC_PREEMPTED | session=%s q=%d — "
                     "verdict already spoken in her last turn",
                     self.sk.session_id, verdict_qnum,
+                )
+                # N12: the transition's ONE narration is the turn that
+                # already aired — bound here, so any later turn narrating
+                # this same transition is a second narration and loses.
+                self.journal_transition(
+                    transition_qnum, "verdict", owner=transition_owner,
+                    detail={
+                        "key": verdict_key,
+                        "narration": getattr(
+                            self, "_last_assistant_text", ""
+                        ) or "",
+                        "source": "organic",
+                    },
                 )
             reveal_payload = {
                 "correct": winner_candidate is not None,
@@ -6984,6 +7378,19 @@ class LilyGame:
                     verdict_key, "verdict", verdict_instr,
                     source="adjudicate_verdict",
                 )
+                # N12: the verdict stage of THIS transition is now spoken
+                # for. Its narration is bound by the first turn that
+                # reaches the say gate performing it (register_transition_
+                # narration); the second one — the contradiction — is
+                # suppressed there.
+                self.journal_transition(
+                    transition_qnum, "verdict", owner=transition_owner,
+                    detail={
+                        "key": verdict_key,
+                        "narration": None,
+                        "source": "adjudicate_verdict",
+                    },
+                )
                 logger.info(
                     "LILY_VERDICT | COMMIT_TO_DISPATCH_MS | session=%s "
                     "q=%d ms=%.0f",
@@ -6997,7 +7404,11 @@ class LilyGame:
             # future draw, so an echo of the just-revealed answer has no
             # live window to land in — and the idempotency key on
             # apply_score_event backstops any award that still fires.
-            self._burn_question(question, reason="revealed")
+            # (N8: an ORGANIC reveal already burned it above — burning is
+            # one-way, so the guard just keeps the log and the persistence
+            # write to one per question.)
+            if not self._is_burned(question):
+                self._burn_question(question, reason="revealed")
             # Consume the question; round/phase bookkeeping. Capture the
             # question/round numbers NOW — arm_next_question() below
             # advances both, and the say-gate keys must name the question
@@ -7241,6 +7652,39 @@ class LilyGame:
             "it was",
         )
         return any(c in normalized_last for c in cues)
+
+    def _reveal_already_on_air(self, question: dict) -> bool:
+        """HOTFIX-006 N8: has this question's ANSWER already gone out in
+        her own words?
+
+        THE evidence, back to back in the live session:
+            "No worries! The correct answer is Frankenstein"
+            "Frankenstein! That opens a five-second steal window for Chris"
+        The first line is a reveal; the second offered a steal on it.
+
+        Deliberately NOT _verdict_already_spoken (which governs whether the
+        verdict beat is redundant): this decision retires a question, so it
+        carries one extra guard — the QUESTION DELIVERY is never a reveal.
+        A multiple-choice stem carries the correct answer among its options
+        and a picture stem names its subject; reading the question out is
+        not giving the answer away, and mistaking one for the other would
+        kill a legitimate steal window."""
+        last = getattr(self, "_last_assistant_text", "") or ""
+        if not last.strip():
+            return False
+        try:
+            ratio = lily_evaluation.lily_question_spoken_ratio(
+                question.get("prompt", ""), last
+            )
+        except Exception:
+            ratio = 0.0
+        if ratio >= lily_evaluation.QUESTION_SPOKEN_PARAPHRASE_RATIO:
+            # That turn WAS the question (or a recognisable performance of
+            # it), not its answer.
+            return False
+        return lily_scorekeeper.lily_verdict_narration(
+            last, str(question.get("canonical_answer", ""))
+        ) is not None
 
     def _reveal_instructions(
         self,
@@ -8711,12 +9155,46 @@ class LilyGame:
             "EXACTLY the number here. Unsure? Read this field — do not guess."
         )
 
+    def _roster_authority_line(self) -> str | None:
+        """HOTFIX-006 N13: the authoritative ROSTER COUNT as a hard
+        read-only state field — the same shape as the score field above,
+        because it is the same disease. Live: "Whenever you four..."
+        spoken to a table of THREE, in the same breath that correctly
+        named Rami, Rhonda and Chris. She held the names and still
+        GENERATED the number. A count of people is state; state is read."""
+        try:
+            names = list(self.sk.players)
+        except Exception:
+            return None
+        if not names:
+            return None
+        count = len(names)
+        word = _ROSTER_COUNT_WORDS.get(count, str(count))
+        return (
+            "ROSTER — AUTHORITATIVE, READ-ONLY (the enrolled table, the "
+            f"ONLY roster truth): {count} player"
+            f"{'' if count == 1 else 's'} — {', '.join(names)}. NEVER "
+            "compute, estimate, or carry a player count forward from the "
+            "conversation; any count of people you speak ('you "
+            f"{word}', 'the {word} of you', '{word} players') must be "
+            f"EXACTLY {count}. Unsure? Read this field — do not guess."
+        )
+
     def build_state_block(self) -> str:
         block = self.sk.build_state_block()
         extra = []
         score_line = self._score_authority_line()
         if score_line:
             extra.append(score_line)
+        # HOTFIX-006 N13: the roster count rides the same lane as the score
+        # — injected truth, never a computed number. Same never-break,
+        # context-only, leak-filtered contract as every field below.
+        try:
+            roster_line = self._roster_authority_line()
+            if roster_line:
+                extra.append(roster_line)
+        except Exception:
+            pass
         # PATCH-003 P4: field-granular picture-lane truth — claims and
         # refusals about pictures take their verb from THIS read, never
         # from conversational momentum (the dual fabrication: 'pictures
@@ -10747,6 +11225,34 @@ class LilyAgent(Agent):
             )
             return
 
+        # HOTFIX-006 N12 — ONE NARRATION PER TRANSITION. The transition of
+        # a question is claimed whole at the reveal; the first turn through
+        # this gate that performs its verdict IS its narration. A second,
+        # differently-worded narration of the same beat is the live
+        # contradiction ("That's a point for Chris." / "No points on that
+        # one — the answer was Russia!") and is made physically silent —
+        # suppressed, not swallowed, so nothing retries it.
+        transition = self._game.register_transition_narration(
+            full, speech_id=speech_id
+        )
+        if transition == "duplicate":
+            if speech_id:
+                suppressed_ids = getattr(
+                    self._game, "_suppressed_speech_ids", None
+                )
+                if suppressed_ids is None:
+                    self._game._suppressed_speech_ids = set()
+                    suppressed_ids = self._game._suppressed_speech_ids
+                suppressed_ids.add(speech_id)
+                self._game.say_registry.release_owner(speech_id)
+            yield rtc.AudioFrame(
+                data=b"\x00\x00" * 2400,
+                sample_rate=24000,
+                num_channels=1,
+                samples_per_channel=2400,
+            )
+            return
+
         # T3 (PATCH-001, RETIRE_WITH_WS6) — AIR-path dup guard: a verbatim
         # repeat of a recently-PLAYED turn (interleaving ignored; delivery
         # turns exempt — their re-reads are deliberate) never airs again.
@@ -11608,6 +12114,25 @@ async def entrypoint(ctx: JobContext) -> None:
                         "LILY_SCORE | SCORE_DIVERGENCE | session=%s spoken=%s "
                         "ledger=%s — narrated score off-ledger",
                         game.sk.session_id, div["spoken"], div["ledger_values"],
+                    )
+            except Exception:
+                pass
+            # HOTFIX-006 N13: the same safety net for the ROSTER COUNT. Live:
+            # "Whenever you four..." to a table of three, right after naming
+            # all three. The state block injects the authoritative count
+            # (_roster_authority_line); this makes a prevention failure loud
+            # in the session it happens in, exactly as X1 does for scores.
+            try:
+                rdiv = lily_scorekeeper.lily_narrated_roster_count_divergence(
+                    game._last_assistant_text, list(game.sk.players)
+                )
+                if rdiv is not None:
+                    logger.error(
+                        "LILY_ROSTER | ROSTER_DIVERGENCE | session=%s "
+                        "spoken=%s roster=%s names=%s — narrated a player "
+                        "count that is not the enrolled table",
+                        game.sk.session_id, rdiv["spoken"], rdiv["roster"],
+                        ",".join(rdiv["names"]),
                     )
             except Exception:
                 pass

@@ -824,10 +824,14 @@ _VERDICT_CORRECT_CUES = (
 )
 # Miss-side cues. A verdict that NEGATES correctness is not a claim of
 # correctness, however many "right"s it contains ("not quite right").
+# HOTFIX-006 N12 adds the no-points family: the second lane's contradiction
+# in lily-D99BE7 was "No points on that one — the answer was Russia!" over a
+# committed CORRECT row, and nothing in this table matched it.
 _VERDICT_MISS_RE = _re.compile(
     r"\b(?:not\s+quite|nobody\s+(?:got|landed)|no\s+one\s+(?:got|landed)"
     r"|wasn\s?t\s+(?:it|right|correct)|isn\s?t\s+(?:it|right|correct)"
     r"|not\s+(?:it|right|correct)|missed\s+it|off\s+by|afraid\s+not"
+    r"|no\s+(?:points?|score)|zero\s+points?"
     r"|sorry\b)"
 )
 
@@ -880,6 +884,123 @@ def lily_narrated_verdict_divergence(
             "question_id": entry.get("question_id"),
             "ledger_transcript": entry.get("transcript"),
             "utterance_id": entry.get("utterance_id"),
+        }
+    return None
+
+
+def lily_verdict_narration(
+    text: str, canonical_answer: Optional[str] = None
+) -> Optional[str]:
+    """HOTFIX-006 N12: does THIS outbound turn NARRATE a question's verdict?
+
+    Returns "correct", "miss", or None. The caller (the transition gate)
+    uses it to decide whether a turn is a SECOND narration of a transition
+    that has already been narrated once.
+
+    THE evidence, one beat apart in lily-D99BE7 over the same committed
+    row (q_8294, Chris, "Russia.", correct, 1 point):
+
+        "Chris got it in right on time with Russia! That's a point for
+         Chris."                                              -> "correct"
+        "No points on that one — the answer was Russia!"       -> "miss"
+
+    Binding to the QUESTION is what keeps this narrow: when
+    canonical_answer is given, the answer has to appear in the turn, so
+    encouragement, banter and answers to the table ("Nice hustle,
+    Rhonda") are never verdicts. Same shape as LilyGame's
+    _verdict_already_spoken, which asks the question of her PREVIOUS turn;
+    this one is pure, takes any text, and reports which side was
+    narrated — which is how a contradiction becomes visible."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return None
+    if canonical_answer:
+        answer = _normalize_command_text(str(canonical_answer))
+        if not answer or answer not in normalized:
+            return None
+    if _VERDICT_MISS_RE.search(normalized):
+        return "miss"
+    if any(cue in normalized for cue in _VERDICT_CORRECT_CUES):
+        return "correct"
+    # Reveal-shaped without a verdict word: "the answer was Russia" is
+    # still a narration of the ruling (it puts the answer on the air).
+    if _re.search(r"\b(?:the\s+)?answer\s+(?:is|was)\b", normalized):
+        return "miss"
+    if _re.search(r"\bpoint\s+(?:for|to|goes)\b|\bon\s+the\s+board\b", normalized):
+        return "correct"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# HOTFIX-006 N13 — the spoken ROSTER COUNT is read, never computed.
+#
+# Live: "Whenever you four..." spoken to a table of THREE, in the same
+# breath that correctly named Rami, Rhonda and Chris. She had the names and
+# still generated the number. Exactly the HOTFIX-005 X1 disease (narrated
+# 13 against a committed 9): the count is state, and state is READ.
+#
+# The detector below is the X1 safety net's twin — the state block injects
+# the authoritative count (LilyGame._roster_authority_line), and any spoken
+# count that disagrees with the enrolled roster is made loud at ERROR.
+# ---------------------------------------------------------------------------
+
+_ROSTER_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+_ROSTER_NUMBER_PATTERN = (
+    r"(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)"
+)
+# Nouns that make a number something OTHER than a count of people. Without
+# this, "I'll give you three seconds" reads as a roster claim.
+_ROSTER_NOT_PEOPLE = (
+    r"(?!\s+(?:seconds?|minutes?|points?|questions?|rounds?|answers?|"
+    r"options?|choices?|clues?|hints?|guesses|tries|attempts?|letters?|"
+    r"categories|category|of\s+(?:six|ten|those|these|them)))"
+)
+# Only PERSON-COUNT constructions. Each pattern carries exactly one group.
+_ROSTER_COUNT_RES = (
+    # "Whenever you four are ready" — the live line.
+    _re.compile(r"\byou\s+" + _ROSTER_NUMBER_PATTERN + r"\b" + _ROSTER_NOT_PEOPLE),
+    # "the four of you", "all 4 of you", "both of you" handled by the count.
+    _re.compile(_ROSTER_NUMBER_PATTERN + r"\s+of\s+you\b"),
+    # "Four players, three rounds"
+    _re.compile(_ROSTER_NUMBER_PATTERN + r"\s+players?\b"),
+)
+
+
+def lily_narrated_roster_count_divergence(
+    text: str, roster_names: Optional[list]
+) -> Optional[dict]:
+    """HOTFIX-006 N13: ROSTER_DIVERGENCE detector. If Lily's OWN outbound
+    line speaks a COUNT OF PLAYERS that is not the enrolled roster size,
+    the number was generated — return {spoken, roster, names} for an ERROR
+    log. None when no player count is spoken, when the count is right, or
+    when nobody is enrolled yet (an empty roster has no truth to violate).
+
+    Deliberately narrow: only person-count constructions match, and
+    counts of seconds / points / questions / rounds never do. A false flag
+    would poison the telemetry this exists to provide."""
+    if not roster_names:
+        return None
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return None
+    roster = len(roster_names)
+    for pattern in _ROSTER_COUNT_RES:
+        m = pattern.search(normalized)
+        if not m:
+            continue
+        token = m.group(1)
+        spoken = (
+            int(token) if token.isdigit() else _ROSTER_NUMBER_WORDS.get(token)
+        )
+        if spoken is None or spoken == roster:
+            continue
+        return {
+            "spoken": spoken,
+            "roster": roster,
+            "names": list(roster_names),
         }
     return None
 
