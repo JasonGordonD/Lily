@@ -109,7 +109,13 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 # untouched.
 LILY_SYSTEM_PROMPT = (
     (_PROMPTS_DIR / "lily_system.txt").read_text(encoding="utf-8")
-    + lily_audeering_consumers.lily_audeering_rubric_block()
+    # Y1a: the appended rubric is its own addressable section, same as
+    # every section in the file. Both inputs are static files/constants —
+    # the assembled system prompt is byte-identical every turn by
+    # construction (the cacheable prefix, Y1b).
+    + "\n<room_read>\n"
+    + lily_audeering_consumers.lily_audeering_rubric_block().strip("\n")
+    + "\n</room_read>\n"
 )
 LILY_ADULT_LAYER = (_PROMPTS_DIR / "layer_lily_adult.md").read_text(encoding="utf-8")
 _ADULT_LAYER_MARKER = "# ADULT MODE"

@@ -5,6 +5,44 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y1a: system prompt XML-sectioned, assembly pinned static
+
+**Archaeology (mandate rule 0):** the prompt was one flat markdown file
+plus a loader-level rubric append (WO-LILY-AUDEERING-001 Task 3) — no
+prior sectioning attempt existed to consolidate; this is structure over
+existing text, not a new mechanism. **What changed:** prompts/
+lily_system.txt is now nine top-level XML sections in canonical order
+(identity → voice → game_rules → state → tools → memory →
+self_knowledge → tts_guidelines → voice_output; the last two already
+existed as tags and were kept top-level, not nested). One relocation:
+"## HOW A QUESTION RUNS" moved before "## YOUR TABLE STATE" inside
+game_rules so procedure precedes state-legend (static-first ordering,
+Y1's cacheable-prefix goal). All interior directive text byte-preserved —
+Y12's 83 character pins prove no directive changed. prompts/
+layer_lily_adult.md wrapped in `<adult_layer>` (the `# ADULT MODE`
+dedup marker preserved inside). The loader's rubric append now wraps the
+audeering rubric in `<room_read>` so the assembled prompt is fully
+sectioned end-to-end.
+
+**Static-assembly proof (Y1 verify clause):** the assembly is exactly
+static-file text + import-time rubric constant — byte-identical across
+turns by construction. tests/test_prompt_structure.py pins it: sections
+present/balanced/ordered, adult layer tagged with marker intact,
+assembled prompt == file + tagged rubric (the equality IS the stability
+proof), room_read appears exactly once, rebuild == module constant.
+
+**Deletions:** none. **Net addition declared:** structure tags only
+(~40 tag lines across two prompt files) + 6 structure tests; no
+directive text added or removed. Honest cost: assembled prompt grows
+8,400 → ~8,880 tokens (35,533 chars) from tag overhead — the buy is
+addressable sections for the Y12-gated prompt audit and a provably
+static cacheable prefix (Y1b measures the hit rate once Y1c
+instrumentation lands).
+
+Mandate numbers: lily_agent.py 14,699 lines (+comment lines only);
+prompt ~8,880 tokens (was 8,400 — tag overhead, declared above); main
+tip `1e1c192`; deployed `1e1c192`. Suite 1987 → 1992 green.
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 wave 1: Y5 transcript truth (diagnosis inverted), Y11 canon draft
 
 **Y5 archaeology (mandate rule 0):** the mechanism the WO asked for already

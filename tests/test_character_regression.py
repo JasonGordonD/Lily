@@ -152,7 +152,10 @@ def test_prompt_is_substantial_not_a_stub():
     # A truncated/replaced prompt file must not quietly satisfy substring
     # checks against an empty-ish document.
     assert len(_PROMPT) > 10_000
-    assert _PROMPT.lstrip().startswith("# LILY")
+    # Y1a (HOTFIX-007): the prompt is XML-sectioned; the identity header
+    # now sits inside <identity>. Same truncation guard, tagged shape.
+    assert _PROMPT.lstrip().startswith("<identity>")
+    assert "# LILY" in _PROMPT[:200]
 
 
 # ===========================================================================
