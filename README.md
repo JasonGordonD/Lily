@@ -286,7 +286,13 @@ Every model ID below was verified live on the funded keys before wiring.
 
 - **Brain (vocal LLM):** `grok-4.5` for general and adult. Routine host
   turns run `low`; complex turns temporarily use `medium`. Local `chat_ctx`
-  and deterministic state remain authoritative.
+  and deterministic state remain authoritative. Every session sends an
+  opaque, stable `x-grok-conv-id` so xAI routes its Chat Completions to the
+  same prompt-cache server; cache misses remain behaviorally harmless.
+  Static instructions stay at the prefix and volatile state stays at the
+  tail. That tail includes current UTC and exact session elapsed time on
+  every generation, giving Lily time-aware pacing without freezing a
+  timestamp into the cacheable prompt.
 - **Question author/verification/distractors:** `grok-4.5` Responses API.
   General uses `medium`; all adult sub-theme/category/question authoring and
   verification is `high`.

@@ -27,6 +27,7 @@ import lily_reasoning
 from lily_agent import (
     _lily_thinking_level_for_text,
     lily_build_grok_vocal_llm,
+    lily_grok_conversation_id,
 )
 
 
@@ -78,6 +79,22 @@ def test_grok_builder_retains_spoken_turn_token_cap():
     source = inspect.getsource(lily_build_grok_vocal_llm)
     assert "max_completion_tokens" in source
     assert "vocal_max_output_tokens" in source
+
+
+def test_grok_vocal_sets_session_stable_cache_routing_header():
+    conversation_id = lily_grok_conversation_id("lily-private-room-name")
+    llm = lily_build_grok_vocal_llm(
+        model="grok-4.5",
+        effort="low",
+        api_key="xai-test",
+        conversation_id=conversation_id,
+    )
+    assert llm._client.default_headers["x-grok-conv-id"] == conversation_id
+    assert "private-room-name" not in conversation_id
+    assert conversation_id == lily_grok_conversation_id(
+        "lily-private-room-name"
+    )
+    assert conversation_id != lily_grok_conversation_id("another-session")
 
 
 def test_standard_imagegen_is_nano_banana_2_lite():

@@ -31,6 +31,7 @@ from lily_agent import (
     LilyAgent,
     LilyGame,
     _message_text,
+    lily_temporal_context,
 )
 
 
@@ -45,7 +46,7 @@ class _FakeGame:
         self.memory_block = ""
         self.state_text = "scores: none yet"
 
-    def build_state_block(self) -> str:
+    def build_state_block(self, *, now=None) -> str:
         return f"{_STATE_BLOCK_MARKER}\n{self.state_text}"
 
     def note_user_turn(self) -> None:
@@ -114,6 +115,13 @@ def test_changed_state_replaced_then_appended():
     assert "Dave 1" in _message_text(states[0])
     assert ctx.items[-1] is states[0]  # then append fresh at the end
     assert states[0].id == LilyAgent._CTX_ID_STATE  # id stays stable
+
+
+def test_temporal_context_carries_utc_and_session_elapsed():
+    line = lily_temporal_context(1_725_689_600, now=1_725_693_261)
+    assert "current UTC 2024-09-07T07:14:21Z" in line
+    assert "session elapsed 01:01:01 (3661s)" in line
+    assert "do not recite" in line
 
 
 # -- adult layer: add/remove on the sticky flag --------------------------------------

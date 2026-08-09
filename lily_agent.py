@@ -267,11 +267,40 @@ def _lily_short_hash(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:16]
 
 
+def lily_grok_conversation_id(session_id: str) -> str:
+    """Opaque, stable cache-routing id for one live Grok conversation."""
+    digest = hashlib.sha256((session_id or "").encode("utf-8")).hexdigest()[:32]
+    return f"lily-{digest}"
+
+
+def lily_temporal_context(
+    session_started_at: float,
+    *,
+    now: float | None = None,
+) -> str:
+    """Current UTC and session age for the volatile per-generation tail."""
+    current = time.time() if now is None else float(now)
+    started = float(session_started_at or current)
+    elapsed = max(0, int(current - started))
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    utc = datetime.datetime.fromtimestamp(
+        current, tz=datetime.timezone.utc
+    ).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        f"temporal context: current UTC {utc}; session elapsed "
+        f"{hours:02d}:{minutes:02d}:{seconds:02d} ({elapsed}s). "
+        "Use this for time-aware pacing and relative-time questions; do not "
+        "recite the timestamp unless the table asks."
+    )
+
+
 def lily_build_grok_vocal_llm(
     *,
     model: str,
     effort: str,
     api_key: str,
+    conversation_id: str | None = None,
 ):
     """Construct the one Grok vocal transport with a live-safe read budget."""
     if not api_key:
@@ -288,6 +317,11 @@ def lily_build_grok_vocal_llm(
             api_key=api_key,
             base_url="https://api.x.ai/v1",
             max_retries=0,
+            default_headers=(
+                {"x-grok-conv-id": conversation_id}
+                if conversation_id
+                else None
+            ),
             http_client=httpx.AsyncClient(
                 timeout=httpx.Timeout(
                     connect=15.0,
@@ -980,6 +1014,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
         # B3 session report: wall-clock duration baseline.
         self.session_started_at = time.time()
+        # xAI Chat Completions caches exact prompt prefixes automatically.
+        # Sticky routing is provider-recommended; hash the internal session
+        # id so the transport header carries no room/player-readable value.
+        self.grok_conversation_id = lily_grok_conversation_id(
+            self.sk.session_id
+        )
 
         # B1 addressee-label corpus: players awaiting a clarify reply
         # (player_name -> {"row_task": Task|None returning the logged row
@@ -9774,9 +9814,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             f"EXACTLY {count}. Unsure? Read this field — do not guess."
         )
 
-    def build_state_block(self) -> str:
+    def build_state_block(self, *, now: float | None = None) -> str:
         block = self.sk.build_state_block()
-        extra = []
+        extra = [
+            lily_temporal_context(
+                getattr(self, "session_started_at", time.time()),
+                now=now,
+            )
+        ]
         answered_line = self.answered_closed_state_line()
         if answered_line:
             extra.append(answered_line)
@@ -10290,6 +10335,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     model=lily_config.adult_vocal_model(),
                     api_key=key,
                     effort=lily_config.adult_vocal_effort(),
+                    conversation_id=self.grok_conversation_id,
                 )
             except Exception as e:
                 logger.error(
@@ -11548,7 +11594,9 @@ class LilyAgent(Agent):
     _CTX_ID_MEMORY = "lily_ctx_memory_block"
     _CTX_ID_STATE = "lily_ctx_state_block"
 
-    def _apply_context_blocks(self, chat_ctx) -> None:
+    def _apply_context_blocks(
+        self, chat_ctx, *, now: float | None = None
+    ) -> None:
         """Idempotent, deterministic injection of the three system blocks.
         Exact injection semantics preserved from the llm_node era: adult
         layer added/removed on the sticky mode flag, memory block once,
@@ -11625,7 +11673,7 @@ class LilyAgent(Agent):
         # into an outbound turn, tts_node's lily_filter_leaks strips it
         # deterministically by that sentinel.
         state = lily_say_gate.lily_wrap_state_block(
-            self._game.build_state_block()
+            self._game.build_state_block(now=now)
         )
         existing = [
             i for i, m in enumerate(items)
@@ -11698,8 +11746,13 @@ class LilyAgent(Agent):
                 "LILY_CAMERA | frame attach failed — turn proceeds without it"
             )
         try:
-            self._apply_context_blocks(turn_ctx)   # this turn sees FINAL context
-            self._apply_context_blocks(self._chat_ctx)  # next preemptive snapshot too
+            context_now = time.time()
+            self._apply_context_blocks(
+                turn_ctx, now=context_now
+            )  # this turn sees FINAL context
+            self._apply_context_blocks(
+                self._chat_ctx, now=context_now
+            )  # next preemptive snapshot too
         except Exception:
             # An injection failure must never eat the turn (the framework
             # skips the reply if this hook raises).
@@ -13202,6 +13255,7 @@ async def entrypoint(ctx: JobContext) -> None:
         model=lily_config.vocal_model(),
         api_key=lily_config.xai_api_key(),
         effort=lily_config.vocal_effort(),
+        conversation_id=game.grok_conversation_id,
     )
     game._general_llm = general_vocal_llm
     game._adult_llm = (

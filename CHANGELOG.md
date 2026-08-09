@@ -5,6 +5,18 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — M6: Grok prompt-cache routing and temporal context
+
+The vocal Chat Completions client now sends xAI's recommended stable
+`x-grok-conv-id`, derived opaquely per session, so consecutive requests route
+to the same prompt-cache server. Lily remains correct on cache eviction or a
+miss; cached-token metrics continue through the existing session rollup.
+
+Static instructions remain the cacheable prefix while volatile state remains
+at the tail. Every generation now receives current UTC plus exact session
+elapsed time in that tail, enabling time-aware pacing and relative-time
+answers without freezing a timestamp into the system prompt.
+
 ## 2026-08-09 — M5d: post-session assessment on Grok 4.5 High
 
 The offline clinical-desk assessment and reconciliation sweep now use Grok
