@@ -5,6 +5,15 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — B3: Metadata image_url lifecycle
+
+Reveal re-published the prior question's `image_url`, so the picture
+stayed on the glass through verdict / arm N+1 / wrap-up.
+
+**Fix.** Reveal publish clears `image_url` (choices/category intact).
+Empty-image publishes clear `_glass_image_url` confirm. Finale
+`publish_metadata("")` so wrap-up is pictureless.
+
 ## 2026-08-09 — B2: Pictures ON refreshes supply from seeded arsenal
 
 After `media_mode` flipped to pictures, a stale voice-only `next_question`

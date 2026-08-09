@@ -1123,6 +1123,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     room=self.ctx.room.name, metadata=metadata
                 )
             )
+            # B3: empty image_url clears glass confirm so "picture up" cannot
+            # trail a cleared publish (render gate reads this state).
+            if not payload.get("image_url"):
+                self._glass_image_url = None
+                self._glass_image_at = None
         except Exception as e:
             logger.warning("LILY_STATE | metadata publish failed: %s", e)
 
@@ -6697,7 +6702,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     },
                     choices=question.get("choices"),
                     eliminated=self.eliminated,
-                    image_url=question.get("image_url"),
+                    # B3: reveal clears the picture — leaving image_url here
+                    # kept the prior Q on the glass through verdict / arm N+1
+                    # until the next open_window (stale screen).
                     category=question.get("category"),
                 ),
                 self.publish_attributes(),
@@ -8077,6 +8084,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.sk.set_phase("wrapup")
         self.ui_phase = "final"
         await self.publish_attributes()
+        # B3: finale must not leave the last picture on the glass.
+        await self.publish_metadata("")
         if self.supabase is not None and self.identity_persistence_allowed():
             asyncio.ensure_future(lily_persistence.lily_checkpoint(
                 self.supabase, self.sk, final_standings=standings,
