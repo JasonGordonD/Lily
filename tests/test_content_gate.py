@@ -146,14 +146,14 @@ def test_reasoning_gate_fails_closed_on_error(monkeypatch):
 
     node = lily_reasoning.LilyReasoning.__new__(lily_reasoning.LilyReasoning)
 
-    class _BoomClient:
-        class models:
-            @staticmethod
-            def generate_content(**kw):
-                raise RuntimeError("provider down")
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("provider down")
 
-    node._client = _BoomClient()
-    node._model = "test-model"
+    monkeypatch.setattr(
+        lily_reasoning.lily_vision,
+        "lily_classify_image_bytes",
+        _boom,
+    )
     approved, reason = _run(
         node.approve_entity_image(b"bytes", "image/jpeg", "Eiffel Tower")
     )

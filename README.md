@@ -292,7 +292,10 @@ Every model ID below was verified live on the funded keys before wiring.
   verification is `high`.
 - **Tier-2 judge:** `grok-4.5` `medium`, structured and 12s-bounded; it
   proposes correctness only and never commits score.
-- **Multimodal content gate:** temporarily Gemini until its vision migration.
+- **Vision / image correspondence:** `grok-4.5` handles player photo
+  descriptions, web-image approval, arsenal correspondence and image-first
+  captions. It receives URL or base64 image input and returns text/structured
+  verdicts; dedicated image models still render pixels.
 - **Image gen — standard deck:** `gemini-3.1-flash-lite-image` (Nano Banana 2
   Lite; `lily_config.imagegen_model`) on the classic `generate_content` path
   (no Interactions API migration needed).

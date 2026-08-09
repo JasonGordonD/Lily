@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_capabilities
+import lily_config
 import lily_vision
 
 
@@ -46,6 +47,84 @@ def test_missing_key_is_honest_unavailable(monkeypatch):
 def test_key_flips_availability(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "test-key")
     assert lily_vision.lily_vision_available() is True
+
+
+class _VisionResponse:
+    def __init__(self, body):
+        self.status = 200
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def json(self, content_type=None):
+        return self._body
+
+    async def text(self):
+        return ""
+
+
+class _VisionSession:
+    captured = None
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    def post(self, url, json=None, **kwargs):
+        _VisionSession.captured = {"url": url, "body": json}
+        content = (
+            '{"approved":true,"reason":"matches"}'
+            if json.get("response_format")
+            else "A literal image description."
+        )
+        return _VisionResponse({
+            "choices": [{"message": {"content": content}}]
+        })
+
+
+def test_grok_4_5_url_vision_payload(monkeypatch):
+    monkeypatch.setattr(lily_config, "xai_api_key", lambda: "x")
+    monkeypatch.setattr(
+        lily_vision.aiohttp, "ClientSession", _VisionSession
+    )
+    result = _run(
+        lily_vision.lily_describe_image(
+            "https://example.com/image.jpg", "Describe literally."
+        )
+    )
+    assert result == {
+        "status": "ok",
+        "description": "A literal image description.",
+    }
+    body = _VisionSession.captured["body"]
+    assert body["model"] == "grok-4.5"
+    assert body["messages"][0]["content"][1]["image_url"]["detail"] == "high"
+
+
+def test_grok_4_5_bytes_classifier_uses_data_url(monkeypatch):
+    monkeypatch.setattr(lily_config, "xai_api_key", lambda: "x")
+    monkeypatch.setattr(
+        lily_vision.aiohttp, "ClientSession", _VisionSession
+    )
+    approved, reason = _run(
+        lily_vision.lily_classify_image_bytes(
+            b"jpeg-bytes", "image/jpeg", "Does this match?"
+        )
+    )
+    assert approved is True and reason == "matches"
+    body = _VisionSession.captured["body"]
+    image_url = body["messages"][0]["content"][1]["image_url"]["url"]
+    assert image_url.startswith("data:image/jpeg;base64,")
+    assert body["response_format"] == {"type": "json_object"}
 
 
 def test_manifest_carries_image_ingestion_at_v3():
