@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at Grok-assessment M5d start: `main @ c5c7feb`
+Pinned at prompt-cache M6 start: `main @ b55092c`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -101,8 +101,8 @@ failure becomes the sole hotfix ticket.
 | M5a | Question generation/verification/distractors → Grok 4.5 Responses; adult high (shipped `5fc4a83`) |
 | M5b | Tier-2 judge → Grok 4.5 structured verdict (shipped `73e41b5`) |
 | M5c | Vision/image correspondence → Grok 4.5 Vision (shipped `c5c7feb`) |
-| M5d | Post-session assessment → Grok 4.5 High (**completed in this change**) |
-| M6 | Prompt caching + append-only context + per-turn temporal context |
+| M5d | Post-session assessment → Grok 4.5 High (shipped `b55092c`) |
+| M6 | Prompt-cache routing + stable prefix/volatile tail + per-turn temporal context (**completed in this change**) |
 | M7 | Prompt contract correction (`lily_system.txt` + voice inventory) |
 
 ## Durable content workers
