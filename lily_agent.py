@@ -800,6 +800,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._recognition_dispute: bool = False
         self._recognition_dispute_why_answered: bool = False
         self._recognition_why_note: str | None = None
+        # WO-2: bare "yes" after an A-or-B offer must not open round one.
+        self._pending_or_choice_offer: bool = False
+        self._ambiguous_yes_blocks_start: bool = False
         # HOTFIX-005 X12: explain-on-request + verdict-contest conditioning —
         # same one-shot lifecycle as the notes above (context only, leak-
         # filtered, consumed at the turn's playout).
@@ -2337,6 +2340,64 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if not getattr(self, "_recognition_dispute", False):
             return False
         return not getattr(self, "_recognition_dispute_why_answered", False)
+
+    def ambiguous_yes_blocks_start(self) -> bool:
+        """WO-2: bare yes after an A-or-B offer must not open the round."""
+        return bool(getattr(self, "_ambiguous_yes_blocks_start", False))
+
+    def start_blocked_reason(self) -> str | None:
+        """Single choke for kickoff gates. None = start allowed."""
+        if self.recognition_dispute_blocks_start():
+            return "recognition_dispute"
+        if self.ambiguous_yes_blocks_start():
+            return "ambiguous_yes"
+        return None
+
+    def clear_ambiguous_yes_block(self, *, reason: str) -> None:
+        if getattr(self, "_ambiguous_yes_blocks_start", False) or getattr(
+            self, "_pending_or_choice_offer", False
+        ):
+            logger.info(
+                "LILY_STATE | AMBIGUOUS_YES_CLEAR | session=%s reason=%s",
+                getattr(self.sk, "session_id", "?"), reason,
+            )
+        self._ambiguous_yes_blocks_start = False
+        self._pending_or_choice_offer = False
+
+    def note_or_choice_offer(self, spoken_text: str) -> None:
+        """Arm after Lily asks ready-or-waiting / A-or-B (playout path)."""
+        if not spoken_text or getattr(self, "game_started", False):
+            return
+        if lily_scorekeeper.lily_detect_or_choice_offer(spoken_text):
+            self._pending_or_choice_offer = True
+            logger.info(
+                "LILY_STATE | OR_CHOICE_OFFER | session=%s — bare yes will "
+                "not start",
+                getattr(self.sk, "session_id", "?"),
+            )
+
+    def note_user_start_intent(self, text: str, command: str | None) -> None:
+        """Consume an A-or-B pending offer against the user's reply."""
+        if getattr(self, "game_started", False):
+            self.clear_ambiguous_yes_block(reason="game_started")
+            return
+        if command == "start_game":
+            self.clear_ambiguous_yes_block(reason="explicit_start_command")
+            return
+        if not getattr(self, "_pending_or_choice_offer", False):
+            return
+        if lily_scorekeeper.lily_is_bare_affirmative(text):
+            self._ambiguous_yes_blocks_start = True
+            self._pending_or_choice_offer = False
+            logger.info(
+                "LILY_STATE | AMBIGUOUS_YES_BLOCK | session=%s text=%r — "
+                "kickoff locked until explicit start",
+                getattr(self.sk, "session_id", "?"), str(text)[:80],
+            )
+            return
+        # Any non-bare reply consumes the offer without locking (they
+        # answered the choice conversationally).
+        self._pending_or_choice_offer = False
 
     def arm_recognition_dispute(self, *, reason: str) -> None:
         """Open a recognition dispute: inject the why-directive and lock
@@ -4409,6 +4470,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.record_agent_turn(
             spoken_text, act_keys=sorted(confirmed or []), interrupted=False
         )
+        # WO-2: remember A-or-B offers so a following bare yes cannot start.
+        try:
+            self.note_or_choice_offer(spoken_text)
+        except Exception:
+            pass
         # PATCH-002 A4b: her own wait-promise binds her. A turn that just
         # played and said "take your time" enters the hold — no unsolicited
         # turn or delivery until the table speaks (the live "take your
@@ -5433,6 +5499,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._maybe_retry_enrollment(player)
 
         command = result.get("control_command")
+
+        # WO-2: if her last turn was an A-or-B offer, a bare yes must not
+        # open round one — lock kickoff until explicit start language.
+        try:
+            self.note_user_start_intent(text, command)
+        except Exception:
+            pass
 
         # Honesty assist (desync WO Sub-agent C): a player calling out the
         # board/score gets answered from PUBLISHED truth, never guesswork.
@@ -7893,11 +7966,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     async def start_game(self, source: str) -> None:
         if self.game_started:
             return
-        if self.recognition_dispute_blocks_start():
+        blocked = self.start_blocked_reason()
+        if blocked:
             logger.info(
                 "LILY_STATE | START_DEFERRED | session=%s source=%s "
-                "reason=recognition_dispute",
-                self.sk.session_id, source,
+                "reason=%s",
+                self.sk.session_id, source, blocked,
             )
             return
         if self.intake_roundrobin_active():
@@ -7913,6 +7987,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             )
             return
         self.game_started = True
+        # Explicit start won — drop any leftover yes-block / or-offer.
+        self.clear_ambiguous_yes_block(reason=f"start_{source}")
         logger.info("LILY_STATE | GAME_START | session=%s source=%s",
                     self.sk.session_id, source)
         # G1: speculative user-turn runs are dead weight during rounds
@@ -8728,6 +8804,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "recognition_dispute: ACTIVE — lily_begin_round / kickoff / "
                 "category announce blocked until the why-beat lands"
             )
+        if getattr(self, "_ambiguous_yes_blocks_start", False):
+            extra.append(
+                "ambiguous_yes: ACTIVE — their last yes answered an A-or-B "
+                "choice, NOT a start. Do NOT call lily_begin_round. Ask one "
+                "clear confirm or wait for 'let's start' / 'let's play'."
+            )
         # HOTFIX-005 X12: explain-on-request and verdict-contest conditioning
         # — context only, leak-filtered like every note above.
         explain_note = getattr(self, "_explain_request_note", None)
@@ -9245,11 +9327,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         while the table is still mid-conversation."""
         if self.game_started or self.game_over:
             return
-        if self.recognition_dispute_blocks_start():
+        blocked = self.start_blocked_reason()
+        if blocked:
             logger.info(
                 "LILY_STATE | START_DEFERRED | session=%s "
-                "source=auto_after_lobby reason=recognition_dispute",
-                self.sk.session_id,
+                "source=auto_after_lobby reason=%s",
+                self.sk.session_id, blocked,
             )
             return
         if self.intake_roundrobin_active():
@@ -9656,12 +9739,19 @@ class LilyAgent(Agent):
         first ask. No-op if the game is already running."""
         if self._game.game_started:
             return "Already running — the next question is in the state block."
-        if self._game.recognition_dispute_blocks_start():
+        blocked = self._game.start_blocked_reason()
+        if blocked == "recognition_dispute":
             return (
                 "Hold the kickoff — a recognition question is still open. "
                 "Answer WHY the clean-slate / empty claim happened first "
                 "(one sentence from the state note), then follow their lead. "
                 "Do NOT announce a category or say let's kick yet."
+            )
+        if blocked == "ambiguous_yes":
+            return (
+                "That bare yes answered a choice, not a start. Do NOT open "
+                "round one yet. Ask one clear confirm — ready to start the "
+                "game? — or wait for an explicit 'let's start' / 'let's play'."
             )
         intake_hold = (
             "Hold that thought — a name just landed and the intake "
@@ -9674,11 +9764,17 @@ class LilyAgent(Agent):
             return intake_hold
         await self._game.start_game(source="host_tool")
         if not self._game.game_started:
-            if self._game.recognition_dispute_blocks_start():
+            blocked = self._game.start_blocked_reason()
+            if blocked == "recognition_dispute":
                 return (
                     "Hold the kickoff — a recognition question is still open. "
                     "Answer WHY the clean-slate / empty claim happened first, "
                     "then follow their lead."
+                )
+            if blocked == "ambiguous_yes":
+                return (
+                    "That bare yes answered a choice, not a start. Wait for "
+                    "an explicit 'let's start' / 'let's play'."
                 )
             # A bind landed between the gate check above and start_game's
             # own gate — the start deferred (WS-1).

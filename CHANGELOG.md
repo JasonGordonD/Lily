@@ -5,6 +5,22 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-2: Ambiguous yes ≠ start
+
+After Lily offers an A-or-B (ready vs waiting, voice-only vs chase
+pictures, refresher vs start), a bare "yes / yeah / yes I am / yes ma'am"
+answers the choice — it must not open round one.
+
+**Arm.** `note_or_choice_offer` on agent speech finished when
+`lily_detect_or_choice_offer` hits. **Lock.** Bare affirmative via
+`note_user_start_intent` sets `ambiguous_yes` on `start_blocked_reason`.
+**Choke.** `start_game`, lobby auto-start, and `lily_begin_round` all
+defer/refuse until explicit start language (`start_game` command /
+let's start / let's play / dive in). Conversational choice replies
+consume the offer without locking.
+
+No prompt polish. No extracts. Audeering parked.
+
 ## 2026-08-09 — P0: Ban false clean slate + recognition dispute lock
 
 Live trust-killer: returner said it was not their first time; Lily aired
