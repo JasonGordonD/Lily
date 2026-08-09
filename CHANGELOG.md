@@ -5,6 +5,19 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-E2: weak voice identities cannot found rivals
+
+Live `lily-9337B1-331ff234`: the bad `Playing` name-set group failed to
+match the canonical seven-sample Rami centroid, then close-time enrollment
+founded a competing one-sample ECAPA identity.
+
+**Fix.** Every group without an identity checks the global biometric pool
+first. Room-name and name-set-hash groups may only redirect into an existing
+confident match; they can neither found nor reinforce their own centroid.
+Stable participant/env groups may still create a first identity. Existing
+weak self-orphans are excluded from matching so they cannot win by
+self-similarity.
+
 ## 2026-08-09 — P0-E1: voiceprint rekey uses the production schema
 
 Live `lily-9337B1-331ff234`: provisional→resolved voiceprint rekey aborted

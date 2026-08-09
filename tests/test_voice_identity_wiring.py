@@ -78,6 +78,7 @@ def _game(sb):
     g.sk = LilyScorekeeper("vi")
     g.supabase = sb
     g.group_id = "voiceA"
+    g.group_id_source = "participant_metadata"
     g.device_identity_verified = False
     g.forget_state = None
     g._voice_identity_pcm = [0.1, 0.2, 0.3]  # injected probe
@@ -324,6 +325,71 @@ def test_enroll_folds_into_the_identity_the_voice_matches(monkeypatch):
     assert len(rows) == 1, "no rival identity beside the real one"
     assert rows[0]["group_id"] == "grp_real"
     assert rows[0]["sample_count"] == 5, "5th sample, not a new 1-sample orphan"
+
+
+def test_name_set_hash_cannot_found_a_rival_identity(monkeypatch):
+    """9337B1: a bogus `Playing` name hash must never mint sample_count=1."""
+    sb = _FakeSB()
+    _enable(monkeypatch, available=True, embedding=[1.0, 0.0, 0.0])
+    g = _game(sb)
+    g.group_id = "grp_" + "5" * 40
+    g.group_id_source = "name_set_hash"
+    g.identity_persistence_allowed = lambda: True
+
+    assert _run(g._voice_identity_enroll_at_close()) is False
+    assert sb.store[lily_persistence.VOICE_IDENTITY_TABLE] == []
+
+
+def test_name_set_hash_redirects_to_canonical_voice(monkeypatch):
+    sb = _FakeSB()
+    _enable(monkeypatch, available=True, embedding=[1.0, 0.0, 0.0])
+    sb.store[lily_persistence.VOICE_IDENTITY_TABLE] = [{
+        "id": "vi-rami", "group_id": "grp_canonical_rami",
+        "centroid": [1.0, 0.0, 0.0],
+        "sample_count": 7, "model_tag": TAG, "status": "active",
+    }]
+    g = _game(sb)
+    g.group_id = "grp_" + "5" * 40
+    g.group_id_source = "name_set_hash"
+    g.identity_persistence_allowed = lambda: True
+
+    assert _run(g._voice_identity_enroll_at_close()) is True
+    rows = sb.store[lily_persistence.VOICE_IDENTITY_TABLE]
+    assert len(rows) == 1
+    assert rows[0]["group_id"] == "grp_canonical_rami"
+    assert rows[0]["sample_count"] == 8
+
+
+def test_name_set_hash_does_not_reinforce_its_own_orphan(monkeypatch):
+    """An old bug-created self row is excluded from weak-group matching."""
+    sb = _FakeSB()
+    _enable(monkeypatch, available=True, embedding=[1.0, 0.0, 0.0])
+    weak = "grp_" + "5" * 40
+    sb.store[lily_persistence.VOICE_IDENTITY_TABLE] = [
+        {
+            "id": "vi-orphan", "group_id": weak,
+            "centroid": [1.0, 0.0, 0.0],
+            "sample_count": 1, "model_tag": TAG, "status": "active",
+        },
+        {
+            "id": "vi-rami", "group_id": "grp_canonical_rami",
+            "centroid": [0.99, 0.01, 0.0],
+            "sample_count": 7, "model_tag": TAG, "status": "active",
+        },
+    ]
+    g = _game(sb)
+    g.group_id = weak
+    g.group_id_source = "name_set_hash"
+    g.identity_persistence_allowed = lambda: True
+
+    assert _run(g._voice_identity_enroll_at_close()) is True
+    rows = sb.store[lily_persistence.VOICE_IDENTITY_TABLE]
+    orphan = next(row for row in rows if row["group_id"] == weak)
+    canonical = next(
+        row for row in rows if row["group_id"] == "grp_canonical_rami"
+    )
+    assert orphan["sample_count"] == 1
+    assert canonical["sample_count"] == 8
 
 
 def test_a_real_group_id_may_still_found_its_first_centroid(monkeypatch):

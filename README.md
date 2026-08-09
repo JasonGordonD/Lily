@@ -1037,6 +1037,11 @@ than silently shipping device-only recognition. Audio capture is independent
 of the optional audEERING pipeline. The one session match is not consumed
 until enough PCM exists, then runs immediately; close-time enrollment folds
 the session embedding into the running centroid inside the shutdown gate.
+Before creating any first centroid, enrollment checks the global biometric
+pool. Weak `room_name`/`name_set_hash` identities may only redirect into an
+existing confident match; they cannot found or reinforce a rival centroid,
+and their own old orphan row is excluded from matching. Stable
+participant/env provenance may still found a genuinely new identity.
 `forget me` disables further identity persistence for the session, deletes
 the ordinary voiceprints/memory rows, and retires the durable centroid so it
 cannot match again.
