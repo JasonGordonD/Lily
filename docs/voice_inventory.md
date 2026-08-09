@@ -88,6 +88,10 @@ Empty STOP on these paths has **no armed sheet** to force — see
 | Armed question sheet | `LilyGame.rendered_armed_question()` | Strict delivery rewrite; 2nd empty on delivery |
 | MC options | same + `MC_CHOICE_LETTERS` | Delivery with `choices` |
 
+The armed sheet is also the sole fallback for a non-configurable provider
+`PROHIBITED_CONTENT` error when (and only when) `q_N_delivery` was already
+pending. Conversation has no deterministic sheet and fails closed.
+
 ---
 
 ## Say-gate transforms (behavior, not copy)

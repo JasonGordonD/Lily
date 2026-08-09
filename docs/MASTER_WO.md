@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at Gemini-filter M1a start: `main @ b64848c`
+Pinned at provider-block M1b start: `main @ 8c70c19`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -93,8 +93,8 @@ failure becomes the sole hotfix ticket.
 
 | ID | Ticket |
 |---|---|
-| M1a | Every configurable Gemini category `BLOCK_NONE` on every remaining lane (**completed in this change**) |
-| M1b | Deterministic fallback + request observability for non-configurable `PROHIBITED_CONTENT` |
+| M1a | Every configurable Gemini category `BLOCK_NONE` on every remaining lane (shipped `8c70c19`) |
+| M1b | Deterministic fallback + request observability for non-configurable `PROHIBITED_CONTENT` (**completed in this change**) |
 | M2 | LiveKit endpointing → `TurnHandlingOptions`, preserving current detector (shipped `962dd77`) |
 | M3 | Speechmatics `operating_point` → supported `model`, preserving enhanced STT (shipped `b64848c`) |
 | M4 | General/adult vocal → Grok 4.5 with deterministic low/medium effort router |

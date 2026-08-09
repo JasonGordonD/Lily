@@ -34,6 +34,10 @@ sexually explicit and dangerous-content blocking are explicitly
 `BLOCK_NONE` for vocal, reasoning/judge, assessment, image generation and
 grounding/search. `PROHIBITED_CONTENT`/SPII are provider-controlled and are
 handled by deterministic failure paths, not misrepresented as configurable.
+For a keyed question delivery, `PROHIBITED_CONTENT` bypasses the failed model
+and emits the already-vetted `rendered_armed_question()` sheet once; ordinary
+conversation fails closed without retry. The block log carries request/model/
+question IDs and context-component hashes, never raw private prompt contents.
 
 ## Architecture invariants
 
