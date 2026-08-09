@@ -117,13 +117,22 @@ def vocal_effort() -> str:
 
 
 def reasoning_model() -> str:
-    return _get("LILY_REASONING_MODEL", "gemini-3.1-pro-preview")
+    return "grok-4.5"
+
+
+def reasoning_effort() -> str:
+    return "medium"
+
+
+def gemini_vision_gate_model() -> str:
+    """Temporary multimodal gate model until the Grok vision PR."""
+    return "gemini-3.1-pro-preview"
 
 
 def assessment_model() -> str:
     # WS-12 clinical desk: post-session assessment runs on the reasoning
     # model unless pinned separately.
-    return _get("LILY_ASSESSMENT_MODEL", reasoning_model())
+    return _get("LILY_ASSESSMENT_MODEL", "gemini-3.1-pro-preview")
 
 
 def report_deadline_seconds() -> float:
@@ -264,56 +273,13 @@ def adult_vocal_read_timeout() -> float:
 
 
 def adult_reasoning_model() -> str:
-    """Question/verification generation model for the ADULT deck.
-
-    HOTFIX-005 X2: the id is `grok-4.20-multi-agent` (operator-supplied).
-    The former default `grok-4.2` was TRUNCATED and does not exist — it
-    400'd 'Model not found: grok-4.2' every prefetch (the 67s dead-air at
-    14:33). This model speaks the xAI Responses API only (lily_reasoning
-    routes `*-multi-agent` there); Chat Completions returns 400. Generation
-    failures stay visible and fall back to the bank, never silent."""
-    return _get("LILY_ADULT_REASONING_MODEL", "grok-4.20-multi-agent")
+    """Adult sub-theme/category/question author."""
+    return "grok-4.5"
 
 
 def adult_reasoning_effort(override: Optional[str] = None) -> Optional[str]:
-    """Reasoning effort for adult question generation. On
-    grok-4.20-multi-agent this is an AGENT-COUNT dial, not thinking depth:
-    low/medium = 4 agents, high/xhigh = 16 agents (operator docs) — a 4x
-    fan-out on latency AND spend.
-
-    Operator directive 2026-08-08: default raised low -> MEDIUM. Note what
-    this does and does not buy: per the vendor's own mapping low and medium
-    are BOTH 4-agent, so this is not a fan-out change and costs neither
-    latency nor spend — the 4x cliff is at `high`. It is a quality dial
-    inside the same agent budget, which is exactly why it is safe to raise
-    on the same day the vocal lane is being dropped to `low`.
-
-    `xhigh` is ACCEPTED but its exact agent-count/cost mapping is
-    UNCONFIRMED against the vendor (X13 open item) — treat it as ≥16-agent
-    and do not enable it until measured.
-
-    INJECTABLE (operator directive 2026-08-08): `override` lets a CALLER
-    pin the effort for one call instead of every lane reading the same
-    global. That matters because the lanes have genuinely different
-    economics — a live prefetch a player is waiting on wants the cheap
-    tier, while out-of-session corpus building (the arsenal seeding job)
-    can absorb `high` because nobody is waiting on it. An unrecognised
-    override falls through to the configured default rather than raising:
-    a bad string must never take a question lane down. "off" (from either
-    source) disables the parameter entirely, for model ids that reject
-    it."""
-    raw = (override if override is not None else
-           _get("LILY_ADULT_REASONING_EFFORT", "medium")) or ""
-    effort = raw.strip().lower()
-    if effort in ("off", "none", "0"):
-        return None
-    if effort in ("low", "medium", "high", "xhigh"):
-        return effort
-    if override is not None:
-        # Unrecognised injection — fall back to the configured value rather
-        # than silently substituting a tier the operator never chose.
-        return adult_reasoning_effort()
-    return "medium"
+    """Adult authoring is non-negotiably Grok 4.5 high."""
+    return "high"
 
 
 def adult_imagegen_model() -> str:

@@ -143,3 +143,12 @@ def test_base_tier_stays_on_chat_completions(monkeypatch):
     assert cap["body"]["max_tokens"] == 800
     assert cap["body"]["response_format"] == {"type": "json_object"}
     assert cap["body"]["reasoning_effort"] == "high"
+
+
+def test_grok_4_5_uses_responses_with_output_budget(monkeypatch):
+    text, cap = _call(monkeypatch, "grok-4.5")
+    assert text == '{"ok":1}'
+    assert cap["url"] == "https://api.x.ai/v1/responses"
+    assert "input" in cap["body"] and "messages" not in cap["body"]
+    assert cap["body"]["max_output_tokens"] == 800
+    assert cap["body"]["reasoning"] == {"effort": "high"}

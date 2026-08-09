@@ -66,7 +66,7 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 
 def _reasoning_with_queue(seen: list, raws: list[str]) -> LilyReasoning:
-    """LilyReasoning with _generate stubbed to record calls and pop one
+    """LilyReasoning with Grok transport stubbed to record calls and pop one
     canned response per call."""
     r = LilyReasoning.__new__(LilyReasoning)
     r._model = "test-reasoning-model"
@@ -77,7 +77,12 @@ def _reasoning_with_queue(seen: list, raws: list[str]) -> LilyReasoning:
         seen.append({"model": model, "prompt": prompt, **kwargs})
         return queue.pop(0)
 
+    async def _fake_grok(prompt, **kwargs):
+        seen.append({"prompt": prompt, **kwargs})
+        return queue.pop(0)
+
     r._generate = _fake_generate
+    r._generate_grok_json = _fake_grok
     return r
 
 
@@ -141,8 +146,8 @@ def test_bank_question_gets_three_synthesized_distractors_at_prefetch():
     )
     # Synthesis ran on the reasoning node — exactly one call, MC schema.
     assert len(seen) == 1
-    assert seen[0]["model"] == "test-reasoning-model"
-    assert seen[0]["response_mime_type"] == "application/json"
+    assert seen[0]["model"] == "grok-4.5"
+    assert seen[0]["effort"] == "medium"
 
 
 def test_bank_question_freeform_prefetch_never_synthesizes():

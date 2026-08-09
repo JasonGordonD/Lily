@@ -38,6 +38,13 @@ def test_brain_model_is_grok_4_5():
     assert lily_config.vocal_effort() == "low"
 
 
+def test_question_reasoning_models_are_grok_4_5():
+    assert lily_config.reasoning_model() == "grok-4.5"
+    assert lily_config.reasoning_effort() == "medium"
+    assert lily_config.adult_reasoning_model() == "grok-4.5"
+    assert lily_config.adult_reasoning_effort() == "high"
+
+
 def test_vocal_effort_is_low_by_default_contract():
     assert lily_config.vocal_effort() == "low"
 

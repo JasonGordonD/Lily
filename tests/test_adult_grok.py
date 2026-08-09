@@ -54,41 +54,33 @@ def test_adult_model_pins_and_coercions(monkeypatch):
     # slot lost a direct address past the 3.0s budget. Thinking depth is
     # the cheapest thing to give back under contention.
     assert lily_config.adult_vocal_effort() == "low"
-    # HOTFIX-005 X2: grok-4.2 was truncated/nonexistent (400 dead-air) ->
-    # grok-4.20-multi-agent. The 2026-08-08 directive raises question
-    # generation low -> medium: both are 4-agent on the vendor's mapping,
-    # so this buys quality inside the same agent budget and the 4x
-    # fan-out cliff at `high` is untouched.
-    assert lily_config.adult_reasoning_model() == "grok-4.20-multi-agent"
-    assert lily_config.adult_reasoning_effort() == "medium"
+    assert lily_config.adult_reasoning_model() == "grok-4.5"
+    assert lily_config.adult_reasoning_effort() == "high"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "low")
     assert lily_config.adult_vocal_effort() == "low"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "medium")
     assert lily_config.adult_vocal_effort() == "medium"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "garbage")
     assert lily_config.adult_vocal_effort() == "low"
-    # "off" disables sending the parameter (models that reject it).
     monkeypatch.setenv("LILY_ADULT_REASONING_EFFORT", "off")
-    assert lily_config.adult_reasoning_effort() is None
+    assert lily_config.adult_reasoning_effort() == "high"
 
 
-def test_adult_reasoning_effort_is_injectable_per_call(monkeypatch):
-    """The lanes have different economics: a live prefetch a player waits
-    on should not be forced to share one global tier with an
-    out-of-session seeding run that nobody is waiting on."""
+def test_adult_reasoning_effort_is_always_high(monkeypatch):
+    """Adult sub-theme/category/question authorship never downgrades."""
     monkeypatch.delenv("LILY_ADULT_REASONING_EFFORT", raising=False)
-    assert lily_config.adult_reasoning_effort() == "medium"
+    assert lily_config.adult_reasoning_effort() == "high"
     # A caller pins its own tier.
     assert lily_config.adult_reasoning_effort("high") == "high"
-    assert lily_config.adult_reasoning_effort("low") == "low"
+    assert lily_config.adult_reasoning_effort("low") == "high"
     # "off" injects as "send no parameter at all".
-    assert lily_config.adult_reasoning_effort("off") is None
+    assert lily_config.adult_reasoning_effort("off") == "high"
     # An unrecognised injection falls back to the CONFIGURED value rather
     # than silently substituting a tier the operator never chose — and
     # never raises, because a bad string must not take a lane down.
-    assert lily_config.adult_reasoning_effort("turbo") == "medium"
+    assert lily_config.adult_reasoning_effort("turbo") == "high"
     monkeypatch.setenv("LILY_ADULT_REASONING_EFFORT", "low")
-    assert lily_config.adult_reasoning_effort("turbo") == "low"
+    assert lily_config.adult_reasoning_effort("turbo") == "high"
     # Injection still beats the environment.
     assert lily_config.adult_reasoning_effort("high") == "high"
 
@@ -180,11 +172,11 @@ def test_adult_question_generation_routes_to_grok():
     assert "ONLY a JSON object" in r.calls["grok"][0]
 
 
-def test_general_question_generation_stays_on_gemini():
+def test_general_question_generation_routes_to_grok():
     r = _make_reasoning()
     q = _run(r.generate_question("history", 2, "general", []))
-    assert q is not None and q["canonical_answer"] == "no"
-    assert len(r.calls["gemini"]) == 1 and not r.calls["grok"]
+    assert q is not None and q["canonical_answer"] == "yes"
+    assert len(r.calls["grok"]) == 1 and not r.calls["gemini"]
 
 
 def test_adult_verification_routes_to_grok():

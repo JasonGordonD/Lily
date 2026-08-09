@@ -1,10 +1,9 @@
 """
 lily_reasoning.py — LILY background reasoning node.
 
-Runs on `gemini-3.1-pro-preview` via the google-genai SDK with its OWN
-client (spec §11.5: HTTP client isolation — the vocal node's plugin client
-and this client are two separate clients from day one; each genai.Client
-instance owns its own HTTP transport).
+Question authoring/verification/distractors run on Grok 4.5 through xAI's
+Responses API. Gemini remains temporarily isolated for multimodal image
+gating and the not-yet-migrated judge lane.
 
 Responsibilities:
   - Question prefetch (N+1): the next question is generated in the
@@ -62,12 +61,8 @@ _CURRENT_EVENTS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Content GENERATION (categories, questions, round-building) runs at HIGH
-# thinking — operator rule 2026-08-06: generation is never low, quality over
-# latency. Live-verified on gemini-3.1-pro-preview: thinking_level=high with
-# response_schema returns valid structured JSON (finishReason STOP, no body
-# starvation — the old starvation trap was thinking_BUDGET, not level).
-REASONING_THINKING_LEVEL = "high"  # spec §4.4: thinking_level, never thinking_budget
+# Legacy Gemini constants remain only for judge/image-gate migration seams.
+REASONING_THINKING_LEVEL = "high"
 # Tier-2 adjudication of a close/ambiguous player answer is a HIGH-stakes
 # reasoning call (operator rule 2026-08-06: adjudication -> HIGH). The 12s
 # bound in judge() + Tier-1 fallback protects the critical path if a HIGH
@@ -91,6 +86,11 @@ def _lily_is_multi_agent_model(model) -> bool:
     which must use the Responses API instead of Chat Completions."""
     m = str(model or "").lower()
     return "multi-agent" in m or "multi_agent" in m
+
+
+def _lily_uses_responses_api(model) -> bool:
+    m = str(model or "").lower()
+    return _lily_is_multi_agent_model(m) or m.startswith("grok-4.5")
 
 
 def _lily_strip_json_fences(text: str) -> str:
@@ -402,7 +402,8 @@ class LilyReasoning:
         self._client = google_genai.Client(
             api_key=api_key or lily_config.google_api_key()
         )
-        self._model = lily_config.reasoning_model()
+        # Gemini remains only for multimodal image gating until M5c.
+        self._model = lily_config.gemini_vision_gate_model()
         # Judge migration is a separate lane. Vocal may already be Grok;
         # keep Gemini judge transport valid until M5 moves it explicitly.
         self._vocal_model = lily_config.judge_model()
@@ -469,15 +470,13 @@ class LilyReasoning:
         max_tokens: int,
         timeout: float = PREFETCH_TIMEOUT_SECONDS,
         effort: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> str:
-        """ADULT-deck generation transport (owner directive 2026-08-06):
-        xAI Grok chat completions in JSON mode. Gemini's non-overridable
-        PROHIBITED_CONTENT filter refuses adult-deck material on both the
-        generation AND verification legs, so adult questions ride Grok —
-        the fleet's established adult-content provider (vision + adult
-        imagegen already use XAI_API_KEY). Same honest-failure contract
-        as _generate: raises on any failure; the prefetch wrapper turns
-        that into a status note + bank fallback, never silence.
+        """Structured Grok transport for every question/reasoning lane.
+
+        Grok 4.5 and multi-agent models use Responses API; legacy base models
+        retain chat-completions compatibility. Same honest-failure contract
+        as _generate: raises on failure; prefetch falls back visibly.
 
         `effort` is INJECTED per call (operator directive 2026-08-08):
         the lanes have different economics, so a live prefetch a player is
@@ -489,15 +488,15 @@ class LilyReasoning:
             raise RuntimeError(
                 "XAI_API_KEY missing — adult-deck generation unavailable"
             )
-        model = lily_config.adult_reasoning_model()
-        effort = lily_config.adult_reasoning_effort(effort)
+        model = model or lily_config.adult_reasoning_model()
+        effort = effort or lily_config.adult_reasoning_effort()
         # xAI's multi-agent tier (grok-*-multi-agent) does NOT support the
         # Chat Completions endpoint (HTTP 400 "Multi Agent requests are not
         # allowed on chat completions") and rejects `max_tokens`; it speaks
         # the Responses API only. Route by model id so a slot-secret swap to
         # the heavy tier works instead of 400ing. Everything else keeps the
         # chat-completions path (grok-4.2 / grok-4.5 base tiers).
-        if _lily_is_multi_agent_model(model):
+        if _lily_uses_responses_api(model):
             endpoint = "https://api.x.ai/v1/responses"
             # System instruction rides `input` as a system-role turn; the
             # multi-agent model has no response_format, so the JSON contract
@@ -512,6 +511,8 @@ class LilyReasoning:
             body = {"model": model, "input": supply}
             if effort:
                 body["reasoning"] = {"effort": effort}
+            if not _lily_is_multi_agent_model(model):
+                body["max_output_tokens"] = max_tokens
         else:
             endpoint = "https://api.x.ai/v1/chat/completions"
             messages = []
@@ -541,7 +542,7 @@ class LilyReasoning:
                 data = await resp.json()
         text = (
             _lily_extract_responses_text(data)
-            if _lily_is_multi_agent_model(model)
+            if _lily_uses_responses_api(model)
             else _lily_extract_chat_text(data)
         )
         if not (text or "").strip():
@@ -550,7 +551,7 @@ class LilyReasoning:
             "LILY_REASONING | ADULT_GROK_GENERATION | model=%s effort=%s "
             "transport=%s chars=%d",
             model, effort or "-",
-            "responses" if _lily_is_multi_agent_model(model) else "chat",
+            "responses" if _lily_uses_responses_api(model) else "chat",
             len(text),
         )
         return text
@@ -684,24 +685,20 @@ class LilyReasoning:
                     "prefetch — ground the question in one of these, and only "
                     "in what they actually say):\n" + brief
                 )
-        if mode == "adult":
-            # Owner directive 2026-08-06: adult questions generate on Grok
-            # (Gemini's hard filter refuses the material). JSON mode has no
-            # server-side schema — the shape addendum pins the fields and
-            # the defensive parser below covers drift.
-            raw = await self._generate_grok_json(
-                prompt + _GROK_QUESTION_SHAPE_ADDENDUM,
-                max_tokens=lily_config.reasoning_max_output_tokens(),
-            )
-        else:
-            raw = await self._generate(
-                self._model,
-                prompt,
-                REASONING_THINKING_LEVEL,
-                response_mime_type="application/json",
-                response_schema=_QUESTION_RESPONSE_SCHEMA,
-                max_output_tokens=lily_config.reasoning_max_output_tokens(),
-            )
+        raw = await self._generate_grok_json(
+            prompt + _GROK_QUESTION_SHAPE_ADDENDUM,
+            max_tokens=lily_config.reasoning_max_output_tokens(),
+            model=(
+                lily_config.adult_reasoning_model()
+                if mode == "adult"
+                else lily_config.reasoning_model()
+            ),
+            effort=(
+                lily_config.adult_reasoning_effort("high")
+                if mode == "adult"
+                else lily_config.reasoning_effort()
+            ),
+        )
         # Schema mode: the output IS the JSON document — parse it directly.
         parsed: Optional[dict] = None
         try:
@@ -728,10 +725,10 @@ class LilyReasoning:
     async def verify_question(
         self, question: dict, mode: str = "general"
     ) -> tuple[bool, str]:
-        """Verification at prefetch time on the 3.1 Pro node — or on Grok
-        for the adult deck (Gemini's hard filter refuses to even VERIFY
-        adult material; a refused verification would reject every good
-        adult question)."""
+        """Verification at prefetch time on Grok 4.5.
+
+        General runs medium; adult authoring/verification is always high.
+        """
         prompt = _VERIFICATION_PROMPT.format(
             question_json=json.dumps(question, ensure_ascii=False)
         )
@@ -756,20 +753,20 @@ class LilyReasoning:
                     "to check the fact; distrust it if it conflicts with "
                     "strong knowledge):\n" + web_context
                 )
-        if mode == "adult":
-            raw = await self._generate_grok_json(
-                prompt + _GROK_VERDICT_SHAPE_ADDENDUM,
-                max_tokens=lily_config.reasoning_max_output_tokens(),
-            )
-        else:
-            raw = await self._generate(
-                self._model,
-                prompt,
-                REASONING_THINKING_LEVEL,
-                response_mime_type="application/json",
-                response_schema=_VERIFICATION_RESPONSE_SCHEMA,
-                max_output_tokens=lily_config.reasoning_max_output_tokens(),
-            )
+        raw = await self._generate_grok_json(
+            prompt + _GROK_VERDICT_SHAPE_ADDENDUM,
+            max_tokens=lily_config.reasoning_max_output_tokens(),
+            model=(
+                lily_config.adult_reasoning_model()
+                if mode == "adult"
+                else lily_config.reasoning_model()
+            ),
+            effort=(
+                lily_config.adult_reasoning_effort("high")
+                if mode == "adult"
+                else lily_config.reasoning_effort()
+            ),
+        )
         # Schema mode: direct parse first; fence stripping is a defensive
         # last resort. Honest failure stays intact — an unparseable verdict
         # fails verification, never passes silently.
@@ -817,16 +814,14 @@ class LilyReasoning:
             return
         distractors: list[str] = []
         try:
-            raw = await self._generate(
-                self._model,
+            raw = await self._generate_grok_json(
                 _DISTRACTOR_PROMPT.format(
                     prompt=question.get("prompt", ""),
                     canonical_answer=canonical,
                 ),
-                REASONING_THINKING_LEVEL,
-                response_mime_type="application/json",
-                response_schema=_DISTRACTOR_RESPONSE_SCHEMA,
-                max_output_tokens=lily_config.reasoning_max_output_tokens(),
+                max_tokens=lily_config.reasoning_max_output_tokens(),
+                model=lily_config.reasoning_model(),
+                effort=lily_config.reasoning_effort(),
             )
             try:
                 data = json.loads(raw)
