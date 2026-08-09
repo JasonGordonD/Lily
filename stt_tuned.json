@@ -3,13 +3,13 @@
  "source_ws": "WO-LILY-OMNIBUS-003/WS-13",
  "evidence_session": "lily-81BCB0-583a0f16",
  "stack_pins": {
-  "livekit-plugins-speechmatics": "1.6.6",
+  "livekit-plugins-speechmatics": "1.6.8",
   "speechmatics-voice": "0.2.8",
   "speechmatics-rt": "1.1.0"
  },
  "constructor": {
   "language": "en",
-  "operating_point": "enhanced",
+  "model": "enhanced",
   "enable_diarization": true,
   "speaker_active_format": "[{speaker_id}] {text}",
   "speaker_sensitivity": 0.35,

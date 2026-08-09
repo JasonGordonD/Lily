@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at endpointing M2 start: `main @ 669fb88`
+Pinned at Speechmatics-model M3 start: `main @ 962dd77`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -94,8 +94,8 @@ failure becomes the sole hotfix ticket.
 | ID | Ticket |
 |---|---|
 | M1 | Disable every configurable Gemini filter; deterministic fallback for non-configurable `PROHIBITED_CONTENT`; blocked-request observability |
-| M2 | LiveKit endpointing → `TurnHandlingOptions`, preserving current detector (**completed in this change**) |
-| M3 | Speechmatics `operating_point` → supported `model`, preserving enhanced STT |
+| M2 | LiveKit endpointing → `TurnHandlingOptions`, preserving current detector (shipped `962dd77`) |
+| M3 | Speechmatics `operating_point` → supported `model`, preserving enhanced STT (**completed in this change**) |
 | M4 | General/adult vocal → Grok 4.5 with deterministic low/medium effort router |
 | M5 | Reasoning/judge/vision/assessment → Grok 4.5, structured Responses API |
 | M6 | Prompt caching + append-only context + per-turn temporal context |

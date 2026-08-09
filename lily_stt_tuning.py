@@ -3,7 +3,7 @@ lily_stt_tuning.py — STT configuration study + tuned-config artifact
 (WO-LILY-OMNIBUS-003 WS-13, as amended by AMENDMENT-001/-002).
 
 VERIFIED against the pinned installed stack (source read, not docs/training
-data): livekit-plugins-speechmatics 1.6.6, speechmatics-voice 0.2.8,
+data): livekit-plugins-speechmatics 1.6.8, speechmatics-voice 0.2.8,
 speechmatics-rt 1.1.0. Evidence base: session lily-81BCB0-583a0f16
 (2026-08-05, 4-player echo room) — see tests/fixtures/echo_room_81BCB0.json.
 
@@ -67,13 +67,13 @@ LILY_STT_TUNED: dict[str, Any] = {
     "source_ws": "WO-LILY-OMNIBUS-003/WS-13",
     "evidence_session": "lily-81BCB0-583a0f16",
     "stack_pins": {
-        "livekit-plugins-speechmatics": "1.6.6",
+        "livekit-plugins-speechmatics": "1.6.8",
         "speechmatics-voice": "0.2.8",
         "speechmatics-rt": "1.1.0",
     },
     "constructor": {
         "language": "en",
-        "operating_point": "enhanced",
+        "model": "enhanced",
         "enable_diarization": True,
         "speaker_active_format": "[{speaker_id}] {text}",
         # 0.5 (default) minted 3 phantom labels + 1 label-continuity split

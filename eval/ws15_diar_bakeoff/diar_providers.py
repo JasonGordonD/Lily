@@ -44,7 +44,7 @@ class SpeechmaticsIncumbent:
             AsyncClient,
             AudioEncoding,
             AudioFormat,
-            OperatingPoint,
+            Model,
             ServerMessageType,
             SpeakerDiarizationConfig,
             TranscriptionConfig,
@@ -69,7 +69,7 @@ class SpeechmaticsIncumbent:
 
         cfg = TranscriptionConfig(
             language=c.get("language", "en"),
-            operating_point=OperatingPoint.ENHANCED,
+            model=Model.ENHANCED,
             diarization="speaker",
             max_delay=c.get("max_delay", 1.5),
             enable_partials=c.get("include_partials", True),
