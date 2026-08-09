@@ -794,6 +794,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # Its own slot so it can coexist with a state-contradiction note on
         # the same turn; cleared per-turn like _state_note.
         self._returner_honesty_note: str | None = None
+        # P0-1 BE8D8B: persistent for the whole session. A one-shot note can
+        # be consumed by an interrupted greeting; the player's explicit
+        # returner claim cannot. Once true, UNKNOWN/blank may never be
+        # narrated as EMPTY even if the identity probe resolves empty.
+        self._returner_claim_seen: bool = False
         # P0-B/C (live 2026-08-09): recognition dispute after a false
         # clean-slate. Locks start/category kickoff until one grounded
         # why-answer lands.
@@ -2331,8 +2336,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
         Clean-slate / nothing-on-file language is forbidden while the
         voice-identity probe is outstanding, a device candidate is pending,
-        or a memory block already exists. Deterministic UNKNOWN≠EMPTY.
+        a memory block already exists, or the player explicitly asserted
+        prior contact. Deterministic UNKNOWN≠EMPTY; a blank card never
+        disproves the player's memory.
         """
+        if getattr(self, "_returner_claim_seen", False):
+            return False
         if getattr(self, "memory_block", None):
             return False
         if getattr(self, "device_candidate_group_id", None):
@@ -2344,6 +2353,22 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         ) is not None:
             return bool(getattr(self, "_voice_identity_resolved", False))
         return True
+
+    def must_rewrite_false_empty_claim(self, text: str) -> bool:
+        """TTS hard gate for settled-absence claims.
+
+        A forbidden phrase is rewritten whenever identity is unsettled OR
+        this session has an explicit returner claim. The persistent claim
+        bit closes the one-shot-note race from BE8D8B.
+        """
+        if not lily_say_gate.lily_false_clean_slate_claim(text):
+            return False
+        return bool(
+            getattr(self, "_returner_claim_seen", False)
+            or getattr(self, "_returner_honesty_note", None)
+            or getattr(self, "_recognition_dispute", False)
+            or not self.can_claim_empty_memory()
+        )
 
     def recognition_dispute_blocks_start(self) -> bool:
         """P0-B: kickoff locked until the why-beat has landed."""
@@ -5610,12 +5635,21 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # the note conditions the reply toward the honest gap line. When she
         # DOES have grounds (memory/verified), the recognition beats own the
         # turn and this gate stays quiet.
+        returner_claim = lily_scorekeeper.lily_detect_returner_claim(text)
+        if returner_claim:
+            # Persistent session truth, independent of whether this same
+            # utterance also carries a command/media choice. Multi-intent
+            # must never make the identity guard disappear.
+            self._returner_claim_seen = True
+            logger.info(
+                "LILY_MEMORY | RETURNER_CLAIM_SEEN | session=%s player=%s "
+                "text=%r",
+                self.sk.session_id, player, str(text)[:120],
+            )
         if (
-            command is None
-            and not result.get("media_choice")
+            returner_claim
             and not self.memory_block
             and not getattr(self, "device_identity_verified", False)
-            and lily_scorekeeper.lily_detect_returner_claim(text)
         ):
             self._returner_honesty_note = (
                 "[returner-claim honesty — a player just asserted you've met "
@@ -5650,8 +5684,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             )
             # A returner claim while the card looks blank is itself a
             # recognition dispute — lock kickoff until honesty lands.
-            if not self.can_claim_empty_memory():
-                self.arm_recognition_dispute(reason="returner_claim")
+            # can_claim_empty_memory is now always false after this claim.
+            self.arm_recognition_dispute(reason="returner_claim")
 
         # P0-B/C: explicit challenge to a false clean-slate / "why blank?"
         if (
@@ -9057,6 +9091,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "clean slate; say you are still checking / the card is not "
                 "connected yet if asked"
             )
+        if getattr(self, "_returner_claim_seen", False):
+            extra.append(
+                "identity: RETURNER CLAIMED — the player explicitly says "
+                "you have met before. A blank lookup never proves otherwise; "
+                "do not say clean slate / no saved voices / no past games."
+            )
         if getattr(self, "_recognition_dispute", False) and not getattr(
             self, "_recognition_dispute_why_answered", False
         ):
@@ -10967,17 +11007,14 @@ class LilyAgent(Agent):
         # was still outstanding, then the late match proved it wrong.
         # Rewrite whenever absence is not a settled fact — greet/intake
         # included, not only when a returner note is armed.
-        if lily_say_gate.lily_false_clean_slate_claim(full) and (
-            getattr(self._game, "_returner_honesty_note", None)
-            or getattr(self._game, "_recognition_dispute", False)
-            or not self._game.can_claim_empty_memory()
-        ):
+        if self._game.must_rewrite_false_empty_claim(full):
             logger.warning(
                 "LILY_SAY_GATE | FALSE_CLEAN_SLATE_REWRITTEN | session=%s "
-                "probe_out=%s dispute=%s",
+                "probe_out=%s dispute=%s returner_seen=%s",
                 self._game.sk.session_id,
                 self._game.identity_probe_outstanding(),
                 bool(getattr(self._game, "_recognition_dispute", False)),
+                bool(getattr(self._game, "_returner_claim_seen", False)),
             )
             full = lily_say_gate.lily_still_checking_rewrite()
 

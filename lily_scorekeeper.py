@@ -662,6 +662,11 @@ _RETURNER_CLAIM_RE = _re.compile(
     # "we've met / played before", "I played with you before"
     r"|(?:we|i) (?:have |ve |'ve )?(?:met|played)(?: with you)? before"
     r"|(?:we|i) (?:have |ve |'ve )?(?:played|met) (?:with you )?(?:before|last time)"
+    # BE8D8B live regression: "I certainly have been on your table before."
+    # This is an explicit returner assertion even though it avoids
+    # met/played/remember vocabulary.
+    r"|(?:we|i) (?:certainly )?(?:have |ve |'ve )?been "
+    r"(?:on|at) (?:your|this) table before"
     # "we've crossed paths", "we know each other"
     r"|we (?:have |ve |'ve )?crossed paths"
     r"|we know each other"

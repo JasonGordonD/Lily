@@ -306,10 +306,14 @@ machine ran clean; the defects were experiential:
   (`maybe_fire_late_recognition`, once per session) with the refresher
   offer, prefs-usual, and what's-new delta folded in — a late catch is
   a recovery moment, never silent amnesia.
-- **Claimed returner** ("not my first time", no data) is its own
-  greeting state: the gap named honestly ("my table card doesn't have
-  you tonight — new device, maybe") + the refresher offered in the same
-  turn. Never performed amnesia, never claimed recognition.
+- **Claimed returner is persistent session truth.** Phrases including
+  "not my first time" and "I have been at/on your table before" set
+  `_returner_claim_seen` for the whole call. A blank lookup never disproves
+  the player's memory: `can_claim_empty_memory()` stays false and the TTS
+  choke rewrites `clean slate`, `no saved voices`, `no past games`, and
+  equivalent settled-absence claims to the inventory-stable still-checking
+  sheet. Do not guess a cause (device/browser/etc.); believe the player and
+  keep checking.
 - **SAID-ALREADY ledger + variety law.** The scorekeeper tracks praise
   words spent, openers used, and topics already explained (from the
   agent-turn record); the state block carries the ledger and the prompt

@@ -68,6 +68,14 @@ def test_rami_clean_slate_phrases_are_forbidden_claims():
         "tonight is actually a clean slate",
         "nothing on file yet",
         "no saved stats",
+        "no saved voices",
+        "no past games on file",
+        "no prior games",
+        "nothing is saved",
+        (
+            "It looks like we're starting with a completely clean slate "
+            "tonight—no saved voices or past games on file for us yet."
+        ),
     ]:
         assert lily_say_gate.lily_false_clean_slate_claim(text), text
 
@@ -137,6 +145,33 @@ def test_returner_claim_arms_dispute_while_probe_out(monkeypatch):
     assert g.recognition_dispute_blocks_start() is True
     assert g._recognition_why_note is not None
     assert "Answer WHY" in g._recognition_why_note
+
+
+def test_be8d8b_returner_phrase_is_detected():
+    assert lily_scorekeeper.lily_detect_returner_claim(
+        "I certainly have been on your table before. Lily."
+    )
+
+
+def test_returner_claim_persistently_forbids_empty_even_after_empty_resolution(
+    monkeypatch,
+):
+    """BE8D8B: one-shot note may clear; explicit returner truth may not."""
+    monkeypatch.setattr(lily_config, "voice_identity_enabled", lambda: True)
+    g = _game(resolved=True)
+    g._returner_claim_seen = True
+    g._returner_honesty_note = None
+    g._recognition_dispute = False
+    attempted = (
+        "Ah, welcome back! It looks like we're starting with a completely "
+        "clean slate tonight—no saved voices or past games on file for us yet."
+    )
+    assert g.can_claim_empty_memory() is False
+    assert g.must_rewrite_false_empty_claim(attempted) is True
+    aired = lily_say_gate.lily_still_checking_rewrite()
+    assert "still checking" in aired.lower()
+    assert "clean slate" not in aired.lower()
+    assert "no saved voices" not in aired.lower()
 
 
 def test_start_game_blocked_during_dispute():
