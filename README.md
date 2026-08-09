@@ -14,6 +14,9 @@ do-not-touch: no imports, no vendoring).
 Living documentation lives here. Dated work-order and fix entries live in
 [CHANGELOG.md](CHANGELOG.md) — new WO/RFI entries go THERE, not here.
 
+Spoken-surface freeze before any speech/delivery extract:
+[docs/voice_inventory.md](docs/voice_inventory.md).
+
 ## Stack
 
 | Layer | Choice |

@@ -29,6 +29,7 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=False)
 
 from livekit import rtc, api
 from livekit.agents import (
+    APIConnectionError,
     AutoSubscribe,
     InterruptionOptions,
     JobContext,
@@ -225,6 +226,33 @@ def _lily_thinking_level_for_text(text: str) -> str:
     if len(t) > 140 or t.count("?") >= 2:
         return "high"
     return "low"
+
+
+def lily_llm_chunk_signal(chunk) -> tuple[int, int]:
+    """Return ``(text_chars, tool_call_count)`` contributed by one LLM
+    stream chunk. Used by ``llm_node`` to detect empty STOP (no text and
+    no tools) before TTS claims a silence turn. Pure + testable."""
+    if chunk is None:
+        return 0, 0
+    if isinstance(chunk, str):
+        return len(chunk.strip()), 0
+    delta = getattr(chunk, "delta", None)
+    if delta is None:
+        # Some plugins yield ChatChunk with content at top level.
+        content = getattr(chunk, "content", None)
+        tools = getattr(chunk, "tool_calls", None) or []
+        text_n = len(str(content).strip()) if content else 0
+        return text_n, len(tools)
+    content = getattr(delta, "content", None) or ""
+    tools = getattr(delta, "tool_calls", None) or []
+    return len(str(content).strip()), len(tools)
+
+
+def lily_llm_stream_is_empty_stop(text_chars: int, tool_calls: int) -> bool:
+    """True when an LLM stream finished with FinishReason.STOP semantics
+    we care about: no speakable text and no tool calls. Tool-only turns
+    are valid and must not be treated as empty."""
+    return int(text_chars or 0) <= 0 and int(tool_calls or 0) <= 0
 
 
 EVENTS_TOPIC = "lily.events"
@@ -10950,6 +10978,15 @@ class LilyAgent(Agent):
         #    ran, the blocks are current, and this is a no-op.
         # 2. publish_attributes_nowait: last_active_at heartbeat — fires a
         #    network write, mutates no chat context.
+        # 3. Empty STOP intercept (post PR #12 residual P0): Gemini
+        #    FinishReason.STOP with no text and no tools used to reach
+        #    tts_node as silence and burn a turn/handle — fine for the
+        #    armed-question sheet path, lethal for lobby/banter/reveal
+        #    flavor where there is no sheet. Detect here, retry the LLM
+        #    once inline (still streaming when content exists), then
+        #    force the armed sheet or raise APIConnectionError so the
+        #    GENERATION_FAILED path releases claims instead of airing
+        #    dead air. Prompt text is never rewritten.
         self._apply_context_blocks(chat_ctx)
         self._game.publish_attributes_nowait()
 
@@ -10971,8 +11008,8 @@ class LilyAgent(Agent):
             except Exception:
                 _restore = _sentinel
         try:
-            async for chunk in Agent.default.llm_node(
-                self, chat_ctx, tools, model_settings
+            async for chunk in self._llm_node_with_empty_stop_guard(
+                chat_ctx, tools, model_settings
             ):
                 yield chunk
         finally:
@@ -10981,6 +11018,87 @@ class LilyAgent(Agent):
                     _opts.thinking_config = _restore
                 except Exception:
                     pass
+
+    async def _llm_node_with_empty_stop_guard(
+        self, chat_ctx, tools, model_settings
+    ):
+        """Stream the default llm_node; on empty STOP (no text, no tools)
+        retry once, then sheet-or-raise. Contentful streams pass through
+        without buffering — TTFT is unchanged on the healthy path."""
+        text_chars = 0
+        tool_calls = 0
+        async for chunk in Agent.default.llm_node(
+            self, chat_ctx, tools, model_settings
+        ):
+            t_n, tc_n = lily_llm_chunk_signal(chunk)
+            text_chars += t_n
+            tool_calls += tc_n
+            yield chunk
+
+        if not lily_llm_stream_is_empty_stop(text_chars, tool_calls):
+            return
+
+        logger.warning(
+            "LILY_LLM | EMPTY_STOP | session=%s attempt=1 — no text and no "
+            "tools; retrying LLM once before TTS",
+            getattr(self._game.sk, "session_id", "?"),
+        )
+        text_chars = 0
+        tool_calls = 0
+        async for chunk in Agent.default.llm_node(
+            self, chat_ctx, tools, model_settings
+        ):
+            t_n, tc_n = lily_llm_chunk_signal(chunk)
+            text_chars += t_n
+            tool_calls += tc_n
+            yield chunk
+
+        if not lily_llm_stream_is_empty_stop(text_chars, tool_calls):
+            logger.info(
+                "LILY_LLM | EMPTY_STOP_RECOVERED | session=%s chars=%d "
+                "tools=%d",
+                getattr(self._game.sk, "session_id", "?"),
+                text_chars, tool_calls,
+            )
+            return
+
+        # Still empty. Prefer the armed question sheet when one exists so
+        # a delivery turn still reaches the table; otherwise fail the
+        # generation so claims release (GENERATION_FAILED) instead of
+        # tts_node airing silence into lobby/banter.
+        sheet = ""
+        try:
+            game = self._game
+            if (
+                getattr(game, "game_started", False)
+                and getattr(game, "armed_question", None) is not None
+                and not game.sk.answer_window_open
+            ):
+                sheet = (game.rendered_armed_question() or "").strip()
+        except Exception:
+            sheet = ""
+        if sheet:
+            logger.error(
+                "LILY_LLM | EMPTY_STOP_SHEET | session=%s chars=%d — "
+                "forcing armed question sheet after empty LLM",
+                getattr(self._game.sk, "session_id", "?"), len(sheet),
+            )
+            try:
+                self._game.expect_delivery()
+            except Exception:
+                pass
+            yield sheet
+            return
+
+        logger.error(
+            "LILY_LLM | EMPTY_STOP_FAILED | session=%s — raising so the "
+            "speech handle fails closed (claims release; no silent lobby)",
+            getattr(self._game.sk, "session_id", "?"),
+        )
+        raise APIConnectionError(
+            "lily empty STOP: LLM returned no text and no tools after retry",
+            retryable=True,
+        )
 
     def _thinking_level_for_turn(self, chat_ctx) -> str:
         """'high'/'low' for THIS turn from the last user message. Only user

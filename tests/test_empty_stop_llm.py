@@ -1,0 +1,171 @@
+"""Empty STOP intercept (post PR #12 residual P0) + voice-inventory anchors.
+
+LLM FinishReason.STOP with no text and no tools must not reach TTS as
+silence on lobby/banter turns. Pure helpers are covered here; the
+llm_node guard is exercised with a stubbed Agent.default.llm_node.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from livekit.agents import APIConnectionError
+
+import lily_agent
+from lily_agent import (
+    LilyAgent,
+    lily_llm_chunk_signal,
+    lily_llm_stream_is_empty_stop,
+)
+
+
+def test_chunk_signal_counts_plain_text():
+    assert lily_llm_chunk_signal("  hi  ") == (2, 0)
+    assert lily_llm_chunk_signal("   ") == (0, 0)
+    assert lily_llm_chunk_signal(None) == (0, 0)
+
+
+def test_chunk_signal_counts_chat_chunk_delta():
+    delta = SimpleNamespace(content="Jupiter", tool_calls=[])
+    chunk = SimpleNamespace(delta=delta)
+    assert lily_llm_chunk_signal(chunk) == (7, 0)
+
+
+def test_chunk_signal_counts_tool_calls_without_text():
+    tool = SimpleNamespace(name="lily_bind_speaker")
+    delta = SimpleNamespace(content="", tool_calls=[tool])
+    chunk = SimpleNamespace(delta=delta)
+    assert lily_llm_chunk_signal(chunk) == (0, 1)
+    assert not lily_llm_stream_is_empty_stop(0, 1)
+
+
+def test_empty_stop_predicate():
+    assert lily_llm_stream_is_empty_stop(0, 0) is True
+    assert lily_llm_stream_is_empty_stop(1, 0) is False
+    assert lily_llm_stream_is_empty_stop(0, 1) is False
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_llm_empty_stop_retries_then_raises(monkeypatch):
+    """Lobby/organic path: two empty streams → APIConnectionError (fail
+    closed; no silent TTS turn)."""
+    calls = {"n": 0}
+
+    async def _empty_default(agent, chat_ctx, tools, model_settings):
+        calls["n"] += 1
+        if False:  # pragma: no cover — keep async generator shape
+            yield "x"
+
+    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+
+    agent = LilyAgent.__new__(LilyAgent)
+    game = SimpleNamespace(
+        sk=SimpleNamespace(session_id="lily-empty", answer_window_open=False),
+        game_started=False,
+        armed_question=None,
+        publish_attributes_nowait=lambda: None,
+        expect_delivery=lambda: None,
+        rendered_armed_question=lambda: "",
+    )
+    agent._game = game
+    object.__setattr__(agent, "_llm", None)
+    agent._apply_context_blocks = lambda ctx: None
+    agent._thinking_level_for_turn = lambda ctx: "low"
+
+    async def _drain():
+        out = []
+        with pytest.raises(APIConnectionError):
+            async for chunk in agent.llm_node(None, [], None):
+                out.append(chunk)
+        return out
+
+    assert _run(_drain()) == []
+    assert calls["n"] == 2
+
+
+def test_llm_empty_stop_forces_armed_sheet(monkeypatch):
+    """Game delivery path: after two empties, yield the deterministic sheet."""
+    calls = {"n": 0}
+
+    async def _empty_default(agent, chat_ctx, tools, model_settings):
+        calls["n"] += 1
+        if False:  # pragma: no cover
+            yield "x"
+
+    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+
+    agent = LilyAgent.__new__(LilyAgent)
+    expect = {"called": False}
+    game = SimpleNamespace(
+        sk=SimpleNamespace(session_id="lily-sheet", answer_window_open=False),
+        game_started=True,
+        armed_question={
+            "prompt": "Name the largest planet.",
+            "canonical_answer": "Jupiter",
+        },
+        publish_attributes_nowait=lambda: None,
+        expect_delivery=lambda: expect.__setitem__("called", True),
+        rendered_armed_question=lambda: "Name the largest planet.",
+    )
+    agent._game = game
+    object.__setattr__(agent, "_llm", None)
+    agent._apply_context_blocks = lambda ctx: None
+    agent._thinking_level_for_turn = lambda ctx: "low"
+
+    async def _drain():
+        return [chunk async for chunk in agent.llm_node(None, [], None)]
+
+    assert _run(_drain()) == ["Name the largest planet."]
+    assert calls["n"] == 2
+    assert expect["called"] is True
+
+
+def test_llm_empty_stop_recovers_on_retry(monkeypatch):
+    calls = {"n": 0}
+
+    async def _flaky_default(agent, chat_ctx, tools, model_settings):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return
+            yield  # pragma: no cover
+        yield "Hey table — who's ready?"
+
+    monkeypatch.setattr(LilyAgent.default, "llm_node", _flaky_default)
+
+    agent = LilyAgent.__new__(LilyAgent)
+    game = SimpleNamespace(
+        sk=SimpleNamespace(session_id="lily-recover", answer_window_open=False),
+        game_started=False,
+        armed_question=None,
+        publish_attributes_nowait=lambda: None,
+        expect_delivery=lambda: None,
+        rendered_armed_question=lambda: "",
+    )
+    agent._game = game
+    object.__setattr__(agent, "_llm", None)
+    agent._apply_context_blocks = lambda ctx: None
+    agent._thinking_level_for_turn = lambda ctx: "low"
+
+    async def _drain():
+        return [chunk async for chunk in agent.llm_node(None, [], None)]
+
+    assert _run(_drain()) == ["Hey table — who's ready?"]
+    assert calls["n"] == 2
+
+
+def test_voice_inventory_freeze_doc_exists():
+    """Extraction must not start without the freeze catalog on disk."""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "docs" / "voice_inventory.md"
+    text = path.read_text(encoding="utf-8")
+    assert "session_greet" in text
+    assert "q_{N}_delivery" in text
+    assert "Audeering" in text
+    assert "zero string" in text.lower()
