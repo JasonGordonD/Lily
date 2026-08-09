@@ -320,10 +320,59 @@ def lily_detect_pacing_choice(text_normalized: str) -> Optional[str]:
 _START_GAME_RE = _re.compile(
     r"\b(?:"
     r"start the (?:game|quiz|trivia)"
-    r"|let\s?s (?:start|play)"
+    r"|let\s?s (?:start|play|go|begin)"
     r"|start round one"
+    r"|ready to (?:start|begin|play)"
+    r"|dive in"
+    r"|begin (?:the )?(?:game|round|quiz)"
     r")\b"
 )
+
+# Bare affirmatives — must NOT start the game after an A-or-B offer
+# (WO-2: "Yes, I am." after ready-or-waiting).
+_BARE_AFFIRMATIVE_RE = _re.compile(
+    r"^\s*(?:"
+    r"y(?:es|eah|ep|up|a)|yup|sure|ok(?:ay)?|alright|all right"
+    r"|yes(?:,?\s*(?:ma'?am|sir|please|i am|i do|i will))?"
+    r"|yeah(?:,?\s*(?:i am|i do))?"
+    r")\.?\s*$",
+    _re.IGNORECASE,
+)
+
+# Agent offer shapes that make a following bare "yes" ambiguous.
+_OR_CHOICE_OFFER_RE = _re.compile(
+    r"\b(?:"
+    r"ready to (?:dive|jump|start|begin|go).{0,40}\bor\b.{0,40}wait"
+    r"|waiting on anyone"
+    r"|or are you waiting"
+    r"|ready .{0,20}or .{0,30}wait"
+    r"|want .{0,40}\bor\b.{0,40}(?:straight|start|jump|dive|refresher)"
+    r"|refresher.{0,20}\bor\b.{0,20}(?:straight|ready|start)"
+    r"|voice-only.{0,40}\bor\b"
+    r"|keep chasing.{0,40}\bor\b.{0,40}start"
+    r")\b",
+    _re.IGNORECASE,
+)
+
+
+def lily_is_bare_affirmative(text: str) -> bool:
+    """True for a short yes/yeah/yep/okay with no start/play/go payload."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    # Explicit start language always wins — not bare.
+    if _START_GAME_RE.search(normalized):
+        return False
+    raw = (text or "").strip()
+    if len(raw) > 48:
+        return False
+    return bool(_BARE_AFFIRMATIVE_RE.match(raw))
+
+
+def lily_detect_or_choice_offer(text: str) -> bool:
+    """True when Lily's turn offered an A-or-B choice (ready vs waiting,
+    refresher vs start, voice-only vs chase pictures, etc.)."""
+    return bool(_OR_CHOICE_OFFER_RE.search(text or ""))
 
 # "Forget me" — the deletion right (WO-LILY-FORGETME-001). Deterministic,
 # paraphrase-tolerant detection at the command layer, like "back to
