@@ -5,6 +5,16 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-4: Late recognition at seams only
+
+Live `lily-BE8D8B-a19913e2`: recognition landed after Q1 opened and spoke
+"NOW I've got you / refresher / usual" over the Greece question.
+
+**Fix.** Late recognition defers across delivery claim/pending playout,
+open window, adjudication, clarify, host speech, and question transition.
+The pending beat flushes once at the reveal/round-score completion seam,
+before N+1; it never consumes the once-token while blocked.
+
 ## 2026-08-09 — P0-3: Explicit adult consent consumes the gate
 
 Live `lily-BE8D8B-a19913e2`: the player said "above 18," "I'm 43," and

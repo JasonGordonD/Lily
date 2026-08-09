@@ -315,8 +315,11 @@ machine ran clean; the defects were experiential:
   landing on an existing group MID-CALL (name-hash or voiceprint) loads
   memory/prefs/version-stamp and fires one acknowledgment beat
   (`maybe_fire_late_recognition`, once per session) with the refresher
-  offer, prefs-usual, and what's-new delta folded in — a late catch is
-  a recovery moment, never silent amnesia.
+  offer, prefs-usual, and what's-new delta folded in — but only at a safe
+  seam. Delivery claim/pending playout, open answer window, adjudication,
+  clarify, host speech, or question transition sets
+  `late_recognition: DEFERRED`; the reveal/round-score completion seam flushes
+  it before N+1. Recognition never overlays a live question.
 - **Claimed returner is persistent session truth.** Phrases including
   "not my first time" and "I have been at/on your table before" set
   `_returner_claim_seen` for the whole call. A blank lookup never disproves
