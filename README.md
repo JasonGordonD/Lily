@@ -23,11 +23,17 @@ Spoken-surface freeze before any speech/delivery extract:
 |---|---|
 | Framework | `livekit-agents==1.6.8` (plugin family pinned to match; endpointing uses `TurnHandlingOptions.endpointing` with FIXED mode; the LiveKit Turn Detector default remains off) |
 | STT | Speechmatics — `en`, diarization, `model=ENHANCED`; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`): `speaker_sensitivity=0.35`, `prefer_current_speaker=True`, `max_speakers=7`, FIXED turn mode, `ignore_speakers=["__ASSISTANT__"]`, player-name vocab, and StartRecognition `get_speakers`/volume injection. `LilySpeechmaticsSTT` maps the 1.6.8 plugin onto the supported RT `model` property; deprecated `operating_point` never reaches the wire. |
-| Vocal LLM | `gemini-3.5-flash` — every spoken turn; explicit `safety_settings` (adult-product context), `thinking_config={"thinking_level": "low"}`, `max_output_tokens ≥ 600`, default sampling |
+| Vocal LLM | `gemini-3.6-flash` pending Grok 4.5 migration; LOW routine / HIGH complex-turn thinking; configurable safety categories explicitly `BLOCK_NONE` |
 | Reasoning LLM | `gemini-3.1-pro-preview` — background node, own google-genai client (HTTP isolation): question prefetch (N+1) + verification at prefetch time; never speaks |
 | TTS | ElevenLabs v3 via `lily_tts.py` (`/v1/text-to-speech/{voice_id}/stream`; the dialogue endpoint stays off per fleet revert). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`) |
 | VAD | Silero — barge-in enabled; STT is never gated during TTS |
 | Persistence | Supabase (`lily_*` tables), fail-fast init, checkpoint on score change / 60s / key events |
+
+All remaining Gemini lanes share `lily_gemini_safety`: harassment, hate,
+sexually explicit and dangerous-content blocking are explicitly
+`BLOCK_NONE` for vocal, reasoning/judge, assessment, image generation and
+grounding/search. `PROHIBITED_CONTENT`/SPII are provider-controlled and are
+handled by deterministic failure paths, not misrepresented as configurable.
 
 ## Architecture invariants
 

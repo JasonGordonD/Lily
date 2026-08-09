@@ -35,6 +35,7 @@ from typing import Optional
 import httpx
 
 import lily_config
+import lily_gemini_safety
 import lily_images
 
 logger = logging.getLogger("lily_search")
@@ -365,7 +366,12 @@ async def _lily_grounded_generate(
             return client.models.generate_content(
                 model=lily_config.google_grounding_model(),
                 contents=prompt,
-                config=gt.GenerateContentConfig(tools=tools),
+                config=gt.GenerateContentConfig(
+                    tools=tools,
+                    safety_settings=(
+                        lily_gemini_safety.lily_gemini_safety_settings()
+                    ),
+                ),
             )
 
         resp = await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout)

@@ -84,6 +84,7 @@ import lily_say_gate
 import lily_speech_delivery
 import lily_stt_tuning
 from lily_speechmatics import LilySpeechmaticsSTT
+import lily_gemini_safety
 from lily_binding import (
     LilyFragmentAccumulator,
     lily_extract_explicit_name,
@@ -13105,12 +13106,7 @@ async def entrypoint(ctx: JobContext) -> None:
         max_output_tokens=lily_config.vocal_max_output_tokens(),
         # §11.1 CRITICAL: without these, adult mode silently dies
         # (empty candidate, no error).
-        safety_settings=[
-            {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ],
+        safety_settings=lily_gemini_safety.lily_gemini_safety_dicts(),
         api_key=lily_config.google_api_key(),
     )
     game._general_llm = general_vocal_llm
