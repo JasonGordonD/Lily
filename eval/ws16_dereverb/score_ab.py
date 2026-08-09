@@ -82,7 +82,7 @@ async def _decode(pcm16: np.ndarray, api_key: str):
         AsyncClient,
         AudioEncoding,
         AudioFormat,
-        OperatingPoint,
+        Model,
         ServerMessageType,
         SpeakerDiarizationConfig,
         TranscriptionConfig,
@@ -111,7 +111,7 @@ async def _decode(pcm16: np.ndarray, api_key: str):
 
     cfg = TranscriptionConfig(
         language="en",
-        operating_point=OperatingPoint.ENHANCED,
+        model=Model.ENHANCED,
         diarization="speaker",
         max_delay=1.5,
         enable_partials=True,

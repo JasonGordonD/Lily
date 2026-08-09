@@ -145,14 +145,12 @@ def test_artifact_json_matches_module_dict():
 
 def test_tuned_kwargs_construct_a_real_stt():
     """The tuned kwargs must satisfy the installed plugin's validator."""
-    from livekit.plugins.speechmatics import STT as SpeechmaticsSTT
     from livekit.plugins.speechmatics import TurnDetectionMode
-    from speechmatics.voice import OperatingPoint
+    from lily_speechmatics import LilySpeechmaticsSTT
 
     kwargs = lily_stt_tuning.lily_tuned_stt_kwargs()
-    stt = SpeechmaticsSTT(
+    stt = LilySpeechmaticsSTT(
         api_key="test-key",
-        operating_point=OperatingPoint.ENHANCED,
         prefer_current_speaker=True,
         turn_detection_mode=TurnDetectionMode.FIXED,
         **{k: v for k, v in kwargs.items() if k != "prefer_current_speaker"},

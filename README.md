@@ -22,7 +22,7 @@ Spoken-surface freeze before any speech/delivery extract:
 | Layer | Choice |
 |---|---|
 | Framework | `livekit-agents==1.6.8` (plugin family pinned to match; endpointing uses `TurnHandlingOptions.endpointing` with FIXED mode; the LiveKit Turn Detector default remains off) |
-| STT | Speechmatics — `en`, diarization, ENHANCED; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`, full lever audit in the WS-13 close-out table below): `speaker_sensitivity=0.35` (0.5 minted 3 phantoms + 1 continuity split for 4 players in the echo-room evidence session), `prefer_current_speaker=True`, `max_speakers=7` (fixed at construction — table size is unknowable pre-bind; roster-aware cap `lily_max_speakers_for` is WS-8's to apply via the 1.6.6 `Agent.update_options(stt=...)` swap), `ignore_speakers=["__ASSISTANT__"]`, player-name `additional_vocab` at construction when voiceprints exist, StartRecognition wire injection `get_speakers=true` + `audio_filtering_config.volume_threshold` (lily_stt_tuning patch, live-schema-validated) |
+| STT | Speechmatics — `en`, diarization, `model=ENHANCED`; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`): `speaker_sensitivity=0.35`, `prefer_current_speaker=True`, `max_speakers=7`, FIXED turn mode, `ignore_speakers=["__ASSISTANT__"]`, player-name vocab, and StartRecognition `get_speakers`/volume injection. `LilySpeechmaticsSTT` maps the 1.6.8 plugin onto the supported RT `model` property; deprecated `operating_point` never reaches the wire. |
 | Vocal LLM | `gemini-3.5-flash` — every spoken turn; explicit `safety_settings` (adult-product context), `thinking_config={"thinking_level": "low"}`, `max_output_tokens ≥ 600`, default sampling |
 | Reasoning LLM | `gemini-3.1-pro-preview` — background node, own google-genai client (HTTP isolation): question prefetch (N+1) + verification at prefetch time; never speaks |
 | TTS | ElevenLabs v3 via `lily_tts.py` (`/v1/text-to-speech/{voice_id}/stream`; the dialogue endpoint stays off per fleet revert). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`) |
@@ -1359,7 +1359,7 @@ produce exactly the high-variance hypothesis sets where 1-best fails
 alternatives and runs BOTH tiers across the whole set (`lily_nbest.py`).
 
 **Verified plugin behavior** (installed source of
-livekit-plugins-speechmatics 1.6.6 / speechmatics-voice 0.2.8 /
+livekit-plugins-speechmatics 1.6.8 / speechmatics-voice 0.2.8 /
 speechmatics-rt 1.1.0 — read, not recalled):
 
 - **There is NO per-utterance n-best anywhere in the stack.** The voice
@@ -1496,7 +1496,7 @@ of the WS-15 diarization bake-off. Matrix axes for the acoustic sweep:
 | `language` | `en` | keep | product language |
 | `output_locale` | unset | keep unset | no locale need; available |
 | `domain` | unset | keep unset | no domain pack applies to trivia |
-| `operating_point` | ENHANCED | keep | accuracy over latency; only model-selection path at this pin (no `model=` kwarg) |
+| `model` | ENHANCED | keep | accuracy over latency; compatibility subclass maps the plugin’s legacy surface onto the supported RT property without a warning |
 | `turn_detection_mode` | FIXED | keep | `end_of_utterance_mode` kwarg is REMOVED at 1.6.6 (deprecated shim warns); modes are now presets — FIXED/ADAPTIVE/SMART_TURN/EXTERNAL. ADAPTIVE + SMART_TURN require the `speechmatics-voice[smart]` extra (not installed) and flip to client-side forced-EOU; EXTERNAL would double-drive finalize with the session Silero VAD. Room-profile sensor recommends SMART_TURN for high-RT60 rooms — adoption is a WS-8 stream-swap decision |
 | `include_partials` | True | keep | partials feed binding/continuous recognition (`enable_partials` is the deprecated alias, migrated by the plugin shim) |
 | `enable_diarization` | True | keep | multiplayer core |

@@ -56,9 +56,7 @@ from livekit.agents.voice.events import UserInputTranscribedEvent
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.google import LLM as GoogleLLM
 from livekit.plugins.speechmatics import (
-    STT as SpeechmaticsSTT,
     AdditionalVocabEntry,
-    OperatingPoint,
     SpeakerFocusMode,
     SpeakerIdentifier,
     TurnDetectionMode,
@@ -85,6 +83,7 @@ import lily_reasoning
 import lily_say_gate
 import lily_speech_delivery
 import lily_stt_tuning
+from lily_speechmatics import LilySpeechmaticsSTT
 from lily_binding import (
     LilyFragmentAccumulator,
     lily_extract_explicit_name,
@@ -565,7 +564,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.session: AgentSession | None = None
         self.agent: "LilyAgent | None" = None  # set at entrypoint start
         self.background_audio: BackgroundAudioPlayer | None = None
-        self.stt: SpeechmaticsSTT | None = None
+        self.stt: LilySpeechmaticsSTT | None = None
         # P2 preemptive repair: True while a deterministic between-turn
         # instruction speech (reveal/steal/skip/start/mode-revert) is in
         # flight — preemptive generation is paused for those turns.
@@ -12747,7 +12746,7 @@ def lily_stt_config_applied(stt) -> dict:
         return getattr(v, "value", None) or getattr(v, "name", None) or str(v)
 
     return {
-        "operating_point": _name(getattr(opts, "operating_point", None)),
+        "model": str(getattr(stt, "model", "enhanced")),
         "turn_detection_mode": _name(getattr(opts, "turn_detection_mode", None)),
         "max_delay": getattr(opts, "max_delay", None),
         "speaker_sensitivity": getattr(opts, "speaker_sensitivity", None),
@@ -13010,11 +13009,10 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     # --- STT: Speechmatics multi-speaker fleet profile (Part II §1.1) ---
-    # NOTE: livekit-plugins-speechmatics 1.6.6 does not expose a `model=`
-    # kwarg — `operating_point` is the only path to select ENHANCED, and the
-    # SDK-level deprecation warning about `TranscriptionConfig.operating_point`
-    # is emitted from inside the plugin wrapper. Fix requires an upstream
-    # plugin bump; no fleet member has migrated yet. Keep as-is.
+    # livekit-plugins-speechmatics 1.6.8 still exposes only the deprecated
+    # operating_point kwarg. LilySpeechmaticsSTT preserves the plugin surface
+    # but maps ENHANCED onto speechmatics-rt TranscriptionConfig.model, so no
+    # deprecated field reaches the SDK/wire.
     # WS-13: constructor values come from the tuned artifact
     # (lily_stt_tuning.LILY_STT_TUNED — rationale per lever in the README
     # STT stack table). speaker_sensitivity 0.5 -> 0.35: the echo-room
@@ -13042,8 +13040,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # delete the WHOLE table), so it can never mute a session by
     # misconfiguration. Default off (see lily_config.stt_focus_mode).
     _focus_kwargs = lily_stt_focus_kwargs(known_speakers)
-    stt = SpeechmaticsSTT(
-        operating_point=OperatingPoint.ENHANCED,
+    stt = LilySpeechmaticsSTT(
         prefer_current_speaker=True,  # [VERIFY live] rapid answer collisions
         turn_detection_mode=TurnDetectionMode.FIXED,
         additional_vocab=[
@@ -13064,8 +13061,7 @@ async def entrypoint(ctx: JobContext) -> None:
     def _rebuild_stt(max_speakers_override: int):
         _retuned = lily_stt_tuning.lily_tuned_stt_kwargs()
         _retuned["max_speakers"] = max_speakers_override
-        return SpeechmaticsSTT(
-            operating_point=OperatingPoint.ENHANCED,
+        return LilySpeechmaticsSTT(
             prefer_current_speaker=True,
             turn_detection_mode=TurnDetectionMode.FIXED,
             additional_vocab=[

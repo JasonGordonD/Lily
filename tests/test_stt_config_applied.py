@@ -17,14 +17,14 @@ os.environ.setdefault("SPEECHMATICS_API_KEY", "test-key")
 import lily_agent
 import lily_stt_tuning
 from livekit.plugins.speechmatics import (
-    STT, OperatingPoint, TurnDetectionMode, SpeakerFocusMode, SpeakerIdentifier,
+    TurnDetectionMode, SpeakerFocusMode, SpeakerIdentifier,
 )
+from lily_speechmatics import LilySpeechmaticsSTT
 
 
 def _build(**extra):
     tuned = lily_stt_tuning.lily_tuned_stt_kwargs()
-    return STT(
-        operating_point=OperatingPoint.ENHANCED,
+    return LilySpeechmaticsSTT(
         prefer_current_speaker=True,
         turn_detection_mode=TurnDetectionMode.FIXED,
         **extra,
@@ -37,7 +37,7 @@ def test_applied_reflects_intended_tuned_values():
     applied = lily_agent.lily_stt_config_applied(stt)
     tuned = lily_stt_tuning.lily_tuned_stt_kwargs()
     # The tuned levers actually reached the wire (no ghost).
-    assert applied["operating_point"] in ("enhanced", "OperatingPoint.ENHANCED")
+    assert applied["model"] == "enhanced"
     assert applied["prefer_current_speaker"] is True
     if "max_speakers" in tuned:
         assert applied["max_speakers"] == tuned["max_speakers"]

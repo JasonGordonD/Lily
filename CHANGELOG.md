@@ -5,6 +5,17 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Speechmatics `operating_point` deprecation removed
+
+Production warned that `TranscriptionConfig.operating_point` will be removed.
+The LiveKit 1.6.8 plugin still exposes only that legacy constructor field.
+
+**Fix.** `LilySpeechmaticsSTT` preserves the plugin’s diarization, FIXED
+turn mode and tuning surface, but hands the RT SDK
+`TranscriptionConfig.model=Model.ENHANCED` with no `operating_point` on the
+wire. Runtime/eval paths and the tuned artifact now use the supported model
+property; tests assert no deprecation warning.
+
 ## 2026-08-09 — LiveKit endpointing deprecation removed
 
 Production warned that top-level `min_endpointing_delay` /
