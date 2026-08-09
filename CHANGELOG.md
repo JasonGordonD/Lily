@@ -5,6 +5,32 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — device+name amnesia: the staged candidate slammed the name door
+
+Operator escalation (and they were right to be angry): a returning player
+on the SAME device, saying their OWN name, stayed unrecognized forever on
+any deploy without the ECAPA voice deps. The ordering was absurd — a
+stated name ALONE opened the recognition door
+(`maybe_recognize_by_stated_name`), but a staged device candidate
+unconditionally slammed that door shut and left promotion waiting on
+voice verification alone, which without the embedder can never arrive.
+Device history + a name ON that history is strictly stronger evidence
+than the name alone.
+
+- The staged-candidate guard now checks the stated name against the
+  staged file's `player_names`: a match promotes exactly as weakly as the
+  name-only door (`device_plus_name`, verified=False — the biometric
+  still runs and still outranks it, N5 preserved). A name NOT on the
+  staged file keeps the quarantine: a stranger on a shared device stays a
+  fresh table.
+- The missing-embedder warm failure is now a loud ERROR naming the
+  install (`requirements-voice-identity.txt` + migrations/021) instead of
+  an info-level shrug while Lily visibly forgets returning players.
+
+Pinned in `tests/test_name_stated_recognition.py` (promote-on-match,
+quarantine-on-stranger; all prior weakness fixtures unchanged). Suite
+1889 green.
+
 ## 2026-08-09 — the empty glass transcript: P0-C's silent casualty
 
 Live report: the transcript panel sat open and completely EMPTY through a

@@ -8442,9 +8442,25 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         async def _warm() -> None:
             try:
                 ok = await lily_voice_embedder.lily_warm_voice_embedder()
-                logger.info(
-                    "LILY_VOICE_ID | EMBEDDER_WARM | loaded=%s (off-loop)", ok
-                )
+                if ok:
+                    logger.info(
+                        "LILY_VOICE_ID | EMBEDDER_WARM | loaded=True (off-loop)"
+                    )
+                else:
+                    # A misconfiguration must be LOUD, not a shrug: the
+                    # feature is enabled, the deploy can't run it, and the
+                    # visible symptom is Lily forgetting returning players
+                    # (live 2026-08-09 complaint). Say exactly what to do.
+                    logger.error(
+                        "LILY_VOICE_ID | EMBEDDER_UNAVAILABLE | voice "
+                        "recognition is DISABLED this session — cross-device "
+                        "memory cannot match and a staged device candidate "
+                        "can only promote via the vendor-label or stated-"
+                        "name doors. Install requirements-voice-identity.txt "
+                        "in the deploy image (and apply migrations/021), or "
+                        "set LILY_VOICE_IDENTITY_ENABLED=false to make this "
+                        "degraded mode an explicit choice."
+                    )
             except Exception as e:
                 logger.warning("LILY_VOICE_ID | EMBEDDER_WARM_FAILED | %s", e)
 
@@ -8835,6 +8851,38 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if self.memory_block or getattr(self, "device_identity_verified", False):
             return False
         if getattr(self, "device_candidate_group_id", None):
+            # 2026-08-09 amnesia fix: a STAGED device candidate used to slam
+            # this door shut unconditionally — promotion then waited on
+            # voice verification alone, and on a deploy without the ECAPA
+            # deps (or before the vendor labels resolve) that wait was
+            # FOREVER. Absurd ordering: a stated name ALONE opened the door
+            # below, but device-match PLUS the same stated name stayed
+            # quarantined. When the stated name is on the staged file, the
+            # combined evidence (this device's own history + a matching
+            # name) promotes exactly as WEAKLY as the name-only door:
+            # verified=False, so the biometric still runs and still
+            # outranks it (N5 direction preserved). A name NOT on the
+            # staged file keeps the quarantine — a stranger on a shared
+            # device stays a fresh table.
+            staged_names = {
+                str(n).strip().casefold()
+                for n in (
+                    getattr(self, "_device_candidate_memory", None) or {}
+                ).get("player_names") or []
+                if str(n).strip()
+            }
+            if name.casefold() in staged_names:
+                logger.info(
+                    "LILY_MEMORY | NAME_DOOR_DEVICE_MATCH | session=%s "
+                    "name=%s group=%s — stated name is on this device's "
+                    "staged file; promoting weakly (voice still outranks)",
+                    self.sk.session_id, name,
+                    self.device_candidate_group_id,
+                )
+                await self._promote_device_candidate(
+                    "device_plus_name", verified=False
+                )
+                return True
             return False
         if self.group_id_source in _STRONG_GROUP_SOURCES:
             return False
