@@ -5640,6 +5640,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self, "_age_consent_confirmed", False
         ) and lily_scorekeeper.lily_detect_age_consent(text):
             self._age_consent_confirmed = True
+            self.mark_setup_applied("consent")
             logger.info(
                 "LILY_ADULT_GATE | AGE_CONSENT_DETECTED | session=%s text=%r",
                 self.sk.session_id, str(text)[:80],
@@ -9255,6 +9256,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 + ". Do NOT call lily_begin_round or announce a category. "
                 "Use the matching setup tools; then confirm ready."
             )
+        if getattr(self, "_age_consent_confirmed", False):
+            extra.append(
+                "adult_consent: CONFIRMED this session — do NOT ask for "
+                "18+ confirmation again."
+            )
         if getattr(self, "_user_speaking", False):
             extra.append(
                 "floor: USER SPEAKING — do not call lily_begin_round or "
@@ -10056,14 +10062,12 @@ class LilyAgent(Agent):
                 "not retry this tool tonight."
             )
         architect = lily_config.architect_mode()
-        # HOTFIX-004 Defect 1: the model's flag is NOT sufficient on its own
-        # — the live failure entered on "Should I verify?" because the model
-        # set confirmed_all_18_plus=true for a question. Entry now also
-        # requires a DETERMINISTIC explicit-consent utterance actually heard
-        # this session (lily_detect_age_consent, latched in on_transcript_event).
-        # Both must hold; architect (deployment-authenticated) still overrides.
+        # HOTFIX-004 / P0-3: the deterministic spoken latch is the authority.
+        # A model boolean alone can never enter ("Should I verify?" remains
+        # false), but once the real utterance latched, a false/missing model
+        # flag must not force the player through the ceremony again.
         age_consent_heard = getattr(self._game, "_age_consent_confirmed", False)
-        if not architect and not (confirmed_all_18_plus and age_consent_heard):
+        if not architect and not age_consent_heard:
             logger.warning(
                 "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
                 "reason=age_confirmation_required | model_flag=%s "
@@ -10075,9 +10079,7 @@ class LilyAgent(Agent):
                 "Adult mode is NOT enabled yet. Ask every player directly: "
                 "'Please confirm out loud that you are 18 or older and want "
                 "the grown-up deck.' Wait for an explicit spoken YES from the "
-                "table — a question like 'should I verify?' is NOT consent. "
-                "Call this tool again with confirmed_all_18_plus=true only "
-                "after every player gives an explicit verbal yes."
+                "table — a question like 'should I verify?' is NOT consent."
             )
         if architect:
             logger.warning(
@@ -10115,7 +10117,9 @@ class LilyAgent(Agent):
         # question is flushed (the live "powerhouse of the cell" defect)
         # and the adult deck starts drawing immediately.
         self._game.flush_for_mode_switch(source="enter_adult")
-        self._game.mark_setup_applied("adult", "consent")
+        getattr(self._game, "mark_setup_applied", lambda *_: None)(
+            "adult", "consent"
+        )
         # flush_for_mode_switch already published nowait; a second awaited
         # publish only delayed the tool result / follow-up turn.
         self._game.publish_attributes_nowait()
@@ -10184,7 +10188,9 @@ class LilyAgent(Agent):
         )
         self._game.publish_attributes_nowait()
         if flip == "on" or flip == "already_on":
-            self._game.mark_setup_applied("heat", "pictures")
+            getattr(self._game, "mark_setup_applied", lambda *_: None)(
+                "heat", "pictures"
+            )
             return (
                 f"Adult image intensity is now {level.upper()} — sticky for "
                 "this session until they change it or say back to normal. "

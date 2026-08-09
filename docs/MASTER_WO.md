@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at P0-2 start: `main @ aa5afb6`
+Pinned at P0-3 start: `main @ 148e9ac`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -35,9 +35,9 @@ Execution is strictly top-to-bottom; each row is its own merged PR.
 | ID | Ticket | Done when | Status |
 |---|---|---|---|
 | P0-1 | False clean slate impossible | Returner/unsettled cannot air clean slate, no saved voices, or no past games; exact 22:03 fixture | Shipped `aa5afb6` |
-| P0-2 | Multi-intent before start | Voice + adult + pictures + consent + play are parsed before any Round One; setup blocks start until committed | **Completed in this change** |
-| P0-3 | Explicit 18+ consumes gate | Clear 18+/age/birth-year text latches consent; no same-session re-ask without cause | Next |
-| P0-4 | Late recognition seam only | Never fires over claimed delivery, open window, adjudication, or mid-question | Queued |
+| P0-2 | Multi-intent before start | Voice + adult + pictures + consent + play are parsed before any Round One; setup blocks start until committed | Shipped `148e9ac` |
+| P0-3 | Explicit 18+ consumes gate | Clear 18+/age/birth-year text latches consent; no same-session re-ask without cause | **Completed in this change** |
+| P0-4 | Late recognition seam only | Never fires over claimed delivery, open window, adjudication, or mid-question | Next |
 | P0-5 | One start owner | No "Round" debris/free kickoff while setup is pending; one keyed start | Queued |
 
 ## Epic A — live proof after P0

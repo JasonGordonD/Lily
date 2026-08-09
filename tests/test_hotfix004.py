@@ -9,6 +9,7 @@ Defect 2: a queued adult question re-aired after an apology + commitment not
 """
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -62,7 +63,31 @@ def test_explicit_affirmatives_are_consent():
         assert lily_detect_age_consent(t) is True, t
 
 
-# -- Defect 1: the agent gate requires BOTH flag and heard-consent ------------
+def test_be8d8b_explicit_age_and_birth_year_are_consent():
+    for t in [
+        "I am explicitly acknowledging out loud that I'm above 18 years old.",
+        "I'm 43.",
+        "I was born in 1983.",
+        (
+            "I am explicitly acknowledging out loud that I'm above 18 "
+            "years old. I'm 43 and I'm born in 1983."
+        ),
+    ]:
+        assert lily_detect_age_consent(t) is True, t
+
+
+def test_minor_or_ambiguous_boundary_birth_year_never_consents():
+    current_year = datetime.now(timezone.utc).year
+    for t in [
+        "I'm 17.",
+        f"I was born in {current_year - 16}.",
+        # Month/day unknown at the exact 18-year boundary.
+        f"I was born in {current_year - 18}.",
+    ]:
+        assert lily_detect_age_consent(t) is False, t
+
+
+# -- Defect 1: heard consent is the deterministic authority -------------------
 
 
 def _game(mode="general"):
