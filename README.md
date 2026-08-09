@@ -318,11 +318,14 @@ Every model ID below was verified live on the funded keys before wiring.
 From the 2026-08-04 solo-probe fixture (`lily-CC9E19-19c2b804`) — the
 machine ran clean; the defects were experiential:
 
-- **Both sides of the call persist.** Lily's own turns (post-say-gate
-  final text, recorded at PLAYOUT so a swallowed turn never counts as
-  said) write to `lily_transcripts` as `speaker_label='LILY'` rows (the
-  `speaker_name` slot carries the primary speech-act key) and interleave
-  into the session report. Interrupted turns carry `…[cut off]`.
+- **Both sides of the call persist from post-TTS truth.** `tts_node` binds
+  the exact final text after honesty rewrites, strict question-sheet
+  substitution, clipping and punctuation to the concrete SpeechHandle.
+  Playout completion consumes that value for both the RTC client transcript
+  and `lily_transcripts` (`speaker_label='LILY'`; `speaker_name` carries the
+  primary act key). RoomIO’s pre-TTS agent text output is disabled, so glass,
+  audio and transcript cannot show different Lily sentences. Interrupted
+  turns carry the transformed text plus `…[cut off]`.
 - **Recognition is continuous, not a door-check.** A group resolution
   landing on an existing group MID-CALL (name-hash or voiceprint) loads
   memory/prefs/version-stamp and fires one acknowledgment beat

@@ -100,6 +100,11 @@ Owned by `lily_say_gate.py` — extract with tests, do not retune casually:
 - Mirror / repeat / paraphrase flags (mostly log-only; regen gate on re-air)
 - Hold / question-pending / no-live-game dispatch blocks
 
+The output of these transforms is the transcript authority. `tts_node` binds
+the final value to the SpeechHandle; playout completion publishes/persists
+that value. RoomIO pre-TTS agent transcription is disabled so a strict sheet
+rewrite or suppression cannot leave raw model prose in the client transcript.
+
 ---
 
 ## Prompt / personality (do not move casually)

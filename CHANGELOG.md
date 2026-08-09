@@ -5,6 +5,20 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-C: transcript equals post-TTS truth
+
+Live `lily-9337B1-331ff234`: a `q_6_delivery` conversational model turn was
+strictly rewritten to the Caesar sheet for TTS/glass, while the transcript
+kept the original conversation. The false-clean-slate guard produced the
+opposite split: raw text appeared in transcript while audio used the honesty
+sheet.
+
+**Fix.** `tts_node` now binds its exact final post-transform text to the
+speech handle. Playout completion consumes that text for Supabase and a
+single manual RTC transcription; RoomIO’s pre-TTS agent text output is
+disabled. Rewrites, clipping and punctuation therefore share one transcript
+truth with TTS.
+
 ## 2026-08-09 — P0-B: STOP is global and sticky
 
 Live `lily-9337B1-331ff234`: “stop the quiz” entered a temporary hold, then

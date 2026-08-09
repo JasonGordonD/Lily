@@ -596,6 +596,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # air — its retry must not be dup-suppressed.
         self._playout_started_ids: set = set()
         self._stale_retry_counts: dict = {}
+        # P0-C 9337B1: tts_node can replace model prose with a deterministic
+        # sheet (or an honesty rewrite). Preserve the exact post-transform
+        # text per handle so every transcript records what reached TTS.
+        self._post_tts_text_by_speech_id: dict[str, str] = {}
         # Set by the entrypoint BEFORE session.start so on_enter knows
         # whether to greet (session_greet) or rejoin (session_rejoin).
         self.reconnected = False
@@ -1965,6 +1969,100 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if not getattr(self, "_late_recognition_pending", False):
             return False
         return self.maybe_fire_late_recognition()
+
+    def note_post_tts_text(self, speech_id: str | None, text: str) -> None:
+        """Bind the exact final TTS input to one speech handle."""
+        if not speech_id:
+            return
+        mapping = getattr(self, "_post_tts_text_by_speech_id", None)
+        if mapping is None:
+            mapping = self._post_tts_text_by_speech_id = {}
+        mapping[speech_id] = (text or "").strip()
+        while len(mapping) > 32:
+            mapping.pop(next(iter(mapping)))
+
+    def consume_post_tts_text(
+        self, speech_id: str | None, fallback: str
+    ) -> str:
+        """Return and consume the text that actually entered TTS."""
+        if not speech_id:
+            return (fallback or "").strip()
+        mapping = getattr(self, "_post_tts_text_by_speech_id", None) or {}
+        final = mapping.pop(speech_id, None)
+        if final is None:
+            return (fallback or "").strip()
+        if final != (fallback or "").strip():
+            logger.warning(
+                "LILY_TRANSCRIPT | POST_TTS_REWRITE | session=%s "
+                "speech_id=%s raw=%r final=%r",
+                self.sk.session_id, speech_id,
+                (fallback or "")[:160], final[:160],
+            )
+        return final
+
+    def publish_agent_transcription_nowait(
+        self, text: str, *, speech_id: str | None, interrupted: bool
+    ) -> None:
+        """Publish one final RTC transcript from authoritative TTS text.
+
+        Default RoomIO agent text output is disabled; otherwise the client
+        sees the pre-TTS model prose and this corrected transcript as two
+        different Lily turns.
+        """
+        clean = (text or "").strip()
+        if not clean:
+            return
+        ctx = getattr(self, "ctx", None)
+        room = getattr(ctx, "room", None)
+        participant = getattr(room, "local_participant", None)
+        if participant is None:
+            return
+        publications = getattr(participant, "track_publications", {}) or {}
+        track_sid = ""
+        for publication in publications.values():
+            if getattr(publication, "kind", None) == rtc.TrackKind.KIND_AUDIO:
+                track_sid = str(getattr(publication, "sid", "") or "")
+                if track_sid:
+                    break
+        if not track_sid:
+            logger.warning(
+                "LILY_TRANSCRIPT | PUBLISH_SKIPPED | session=%s "
+                "speech_id=%s reason=no_audio_track",
+                self.sk.session_id, speech_id,
+            )
+            return
+        value = clean + (" …[cut off]" if interrupted else "")
+        segment_id = speech_id or f"lily-{uuid.uuid4().hex}"
+
+        async def _publish() -> None:
+            try:
+                await participant.publish_transcription(
+                    rtc.Transcription(
+                        participant_identity=participant.identity,
+                        track_sid=track_sid,
+                        segments=[
+                            rtc.TranscriptionSegment(
+                                id=segment_id,
+                                text=value,
+                                start_time=0,
+                                end_time=0,
+                                language="en",
+                                final=True,
+                            )
+                        ],
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "LILY_TRANSCRIPT | PUBLISH_FAILED | session=%s "
+                    "speech_id=%s error=%s",
+                    self.sk.session_id, speech_id, exc,
+                )
+
+        try:
+            asyncio.get_running_loop().create_task(_publish())
+        except RuntimeError:
+            pass
 
     def record_agent_turn(
         self, text: str, *, act_keys: list, interrupted: bool
@@ -4950,6 +5048,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             (getattr(self, "_delivery_speech_acts", None) or {}).pop(
                 speech_id, None
             )
+        spoken_text = self.consume_post_tts_text(speech_id, spoken_text)
         if interrupted or suppressed:
             released = (
                 self.say_registry.release_owner(speech_id)
@@ -5008,6 +5107,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # played — it belongs in the record, marked. A suppressed turn
             # never reached air and is not recorded as said.
             if interrupted:
+                self.publish_agent_transcription_nowait(
+                    spoken_text,
+                    speech_id=speech_id,
+                    interrupted=True,
+                )
                 self.record_agent_turn(
                     spoken_text, act_keys=[], interrupted=True
                 )
@@ -5029,6 +5133,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # Task 0 (RECOGNITION-VARIETY): BOTH sides of the call persist.
         # Recording at playout completion means the record holds what the
         # room actually heard — never a dispatched-but-swallowed turn.
+        self.publish_agent_transcription_nowait(
+            spoken_text,
+            speech_id=speech_id,
+            interrupted=False,
+        )
         self.record_agent_turn(
             spoken_text, act_keys=sorted(confirmed or []), interrupted=False
         )
@@ -12204,6 +12313,11 @@ class LilyAgent(Agent):
         if full[-1] not in ".!?":
             full += "."
 
+        # P0-C: this is the exact text handed to TTS after every rewrite,
+        # clip and strict delivery substitution. Playout completion consumes
+        # it for both RTC and durable transcripts.
+        self._game.note_post_tts_text(speech_id, full)
+
         async def _replay():
             yield full
 
@@ -13716,6 +13830,10 @@ async def entrypoint(ctx: JobContext) -> None:
             audio_input=AudioInputOptions(
                 noise_cancellation=lily_noise_cancellation_options(),
             ),
+            # P0-C: RoomIO otherwise publishes the pre-TTS model stream.
+            # Lily publishes one final transcription after playout from the
+            # exact post-transform text that entered TTS.
+            text_output=False,
         ),
     )
 

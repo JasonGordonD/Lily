@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_say_gate
+import lily_agent
 from lily_agent import Agent, LilyAgent, LilyGame
 from lily_scorekeeper import LilyScorekeeper
 
@@ -298,3 +299,54 @@ def test_tts_node_preserves_audio_tags_and_flush_period():
     # Bracket audio tags survive; backticks stripped; the punctuation-flush
     # guard appends the terminal period.
     assert captured == ["[excited] Ten points."]
+
+
+def test_tts_node_records_exact_post_transform_text(monkeypatch):
+    agent = LilyAgent.__new__(LilyAgent)
+    game = _make_game()
+    agent._game = game
+    agent._empty_retry_pending = False
+    monkeypatch.setattr(lily_agent, "_current_speech_id", lambda: "speech-1")
+
+    captured = _drive_tts_node(
+        agent, "**Correct!** *Sarah* takes it \U0001F389"
+    )
+
+    assert captured == ["Correct! Sarah takes it."]
+    assert game.consume_post_tts_text(
+        "speech-1", "raw model text"
+    ) == "Correct! Sarah takes it."
+
+
+def test_strict_sheet_rewrite_is_the_recorded_tts_truth(monkeypatch):
+    agent = LilyAgent.__new__(LilyAgent)
+    game = _make_game()
+    agent._game = game
+    agent._empty_retry_pending = False
+    game.game_started = True
+    game.sk.question_number = 6
+    game.armed_question = {
+        "id": "q6",
+        "prompt": (
+            "Assassinated on the Ides of March, who was this Roman dictator?"
+        ),
+    }
+    game._delivery_speech_acts = {"speech-q6": "question_delivery"}
+    game._pending_delivery_qnum = 6
+    game._active_delivery_qnum = None
+    game._mc_delivery_qnum = None
+    game._delivery_stop_sticky = False
+    monkeypatch.setattr(
+        lily_agent, "_current_speech_id", lambda: "speech-q6"
+    )
+
+    captured = _drive_tts_node(
+        agent,
+        "The quiz is stopped. What would you like to do next?",
+    )
+
+    expected = game.armed_question["prompt"]
+    assert captured == [expected]
+    assert game.consume_post_tts_text(
+        "speech-q6", "The quiz is stopped."
+    ) == expected
