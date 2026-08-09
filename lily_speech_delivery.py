@@ -298,6 +298,23 @@ class LilySpeechDeliveryMixin:
         delivery_key = f"q_{self.sk.question_number}_delivery"
         if self.say_registry.owner_of(delivery_key) == speech_id:
             self.mark_stem_aired(self.sk.question_number)
+            # THE QUESTION IS NOW AUDIBLE — so it belongs on the glass and
+            # in the group's burn ledger. Both used to wait for the delivery
+            # to FINISH, which a barged delivery never does: live
+            # 2026-08-08 `lily-2C489B` sat on the lobby screen for seven
+            # minutes with a signed image URL in hand, and burned the
+            # arsenal entry anyway. Airing is the honest seam for both —
+            # the room has heard it, whether or not she got to the end.
+            # Never raises into the speech path: this runs at the exact
+            # moment audio starts, and a screen publish is not permitted to
+            # take a spoken turn down with it.
+            try:
+                self.publish_question_to_glass(reason="playout_started")
+                self.record_question_asked(reason="playout_started")
+            except Exception as e:
+                logger.warning(
+                    "LILY_STATE | GLASS_AT_AIR_FAILED | %s", e
+                )
 
     def expect_delivery(self) -> None:
         """Arm the structural delivery flag: the next outbound spoken turn

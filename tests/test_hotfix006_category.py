@@ -404,6 +404,16 @@ def test_the_asked_ledger_records_the_category_of_the_served_question():
 
     assert game.asked_history, "nothing was registered"
     assert game.asked_history[-1]["category"] == "Cape Cod"
+    # The durable row is written when the question goes to AIR, not at arm
+    # (2026-08-09, barge-in WO): a question the table never heard must not
+    # be spent forever. N2's contract is about WHAT the row carries, which
+    # is unchanged — so drive the question to air and read the row. The
+    # write is ensure_future'd, so it needs a loop alive past the call.
+    async def _air():
+        game.record_question_asked(reason="test_air")
+        await asyncio.sleep(0.05)
+
+    asyncio.run(_air())
     assert sb.asked_rows, "no lily_asked_history row was written"
     assert sb.asked_rows[-1]["category"] == "Cape Cod"
 

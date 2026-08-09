@@ -1239,6 +1239,52 @@ async def lily_enroll_voiceprints(
         return False
 
 
+async def lily_groups_for_player_name(
+    supabase: SupabaseClient,
+    player_name: str,
+) -> list:
+    """Every group whose stored memory lists `player_name`, most recent
+    first. Used by the NAME-STATED recognition door.
+
+    Live 2026-08-08 `lily-2C489B`: recognition landed 3m31s and sixteen
+    player turns after the greeting, because the only door open was the
+    biometric — and the biometric was behind a cold ECAPA load. The player
+    had said "My name is Rami" at twenty-two seconds, and by then a
+    four-win regular's whole file was one indexed query away.
+
+    A name is WEAKER evidence than a voice and this returns candidates, not
+    a verdict: the caller acts only on an unambiguous single match, and the
+    matcher's later verdict still outranks it. `player_names` is a text[]
+    with a GIN index (migration 007), so `contains` is the cheap path.
+    Returns [] on any failure — recognition is never load-bearing."""
+    name = str(player_name or "").strip()
+    if supabase is None or not name:
+        return []
+    seen: list = []
+    try:
+        for variant in dict.fromkeys(
+            (name, name.lower(), name.capitalize(), name.title())
+        ):
+            rows = await asyncio.to_thread(
+                lambda v=variant: supabase.table("lily_memories")
+                .select("group_id, played_at")
+                .contains("player_names", [v])
+                .order("played_at", desc=True)
+                .limit(20)
+                .execute()
+            )
+            for row in rows.data or []:
+                gid = row.get("group_id")
+                if gid and gid not in seen:
+                    seen.append(gid)
+    except Exception as e:
+        logger.warning(
+            "LILY_MEMORY | NAME_LOOKUP_FAILED | name=%s error=%s", name, e
+        )
+        return []
+    return seen
+
+
 async def lily_load_voiceprints_by_players(
     supabase: SupabaseClient,
     player_names: list,
@@ -1383,6 +1429,12 @@ async def lily_upsert_voice_identity(
             "sample_count": int(sample_count),
             "model_tag": model_tag,
             "status": "active",
+            # updated_at has a DEFAULT but no trigger and was never written
+            # on update, so it froze at insert and reported a voiceprint as
+            # untouched for days while its sample_count climbed 4 -> 7. A
+            # freshness column that only ever shows creation time is worse
+            # than no column: it reads as "enrollment has stopped".
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         if existing.data:
             row_id = existing.data[0]["id"]

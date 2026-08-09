@@ -452,6 +452,15 @@ _STRONG_GROUP_SOURCES = (
     "voice_identity_match",   # ECAPA centroid match — the one that works
 )
 
+# Sources whose LABEL survives promotion. Strong sources plus the weak ones
+# that still deserve honest provenance in the ledger: promotion used to
+# coerce anything non-strong to "voiceprint_match", which would have filed
+# a name-stated recognition as a biometric one — inventing evidence that
+# never existed, in the one table an operator reads to debug recognition.
+_KNOWN_GROUP_SOURCES = _STRONG_GROUP_SOURCES + (
+    "name_stated",           # the player said a name this group's file knows
+)
+
 
 # ---------------------------------------------------------------------------
 # Regeneration directives (WS-3, WO-LILY-OMNIBUS-003 + AMENDMENT-001).
@@ -506,6 +515,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     # constructed instance) read sane state; __init__ re-declares them with
     # the full contract comments.
     _phase_hold: str | None = None
+    # Per-question one-shots for the two things that now fire at AIR rather
+    # than at window-open: the glass publish and the durable burn row.
+    _glass_published_qnum: int | None = None
+    _durable_asked_qnum: int | None = None
     # Self-knowledge Task 3: a lagged returning table's delta rode the
     # greeting; the stamp persists after the greet confirms.
     _whats_new_pending: bool = False
@@ -1939,11 +1952,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # so last-turn-only matching missed all of them. Short turns are
         # exempt (an honest "Nice one!" may legitimately recur).
         prior_turns = getattr(self.sk, "agent_turns", None) or []
-        if (
-            not interrupted
-            and len(clean) >= 15
-            and clean in prior_turns[-6:]
-        ):
+        # The `interrupted` exemption used to live here, on the reasoning
+        # that a cut turn "partially played and belongs in the record,
+        # marked". The first one does. The FOURTH does not.
+        #
+        # Live 2026-08-08 `lily-2C489B`, with every copy marked cut off:
+        #   "Great to meet you, Rami! Are you flying solo tonight…"  x4
+        #   the burlesque delivery                                   x3
+        #   "Yeah"                                                   x3
+        # Each re-air was cut by his next sentence and re-recorded, and
+        # because record_agent_turn feeds sk.agent_turns — which IS her
+        # conversational context — she then read her own line back four
+        # times and said it again. "Okay, now you're repeating yourself."
+        #
+        # In a game built on shouting over the host, an exemption for cut
+        # turns is an exemption for the common case. One record per
+        # distinct line; the repeats are the same cut, not new speech.
+        if len(clean) >= 15 and clean in prior_turns[-6:]:
             logger.warning(
                 "LILY_TURNS | DUP_TURN_SKIPPED | path=record | session=%s "
                 "— verbatim repeat of a recent recorded turn, not recorded",
@@ -2278,7 +2303,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         )
         return False
 
-    async def _promote_device_candidate(self, trigger: str) -> None:
+    async def _promote_device_candidate(
+        self, trigger: str, *, verified: bool = True
+    ) -> None:
+        """`verified=False` promotes the memory WITHOUT closing identity.
+
+        The name-stated door (below) resolves a returner off something they
+        said, which is weaker than a voice. Setting device_identity_verified
+        there would have latched the session shut and permanently blocked
+        the ECAPA matcher — the exact shape of N5, where one misheard name
+        outranked a biometric with twelve games behind it. So the name path
+        hands over the memory and leaves the door open behind it."""
         candidate = self.device_candidate_group_id
         if not candidate:
             return
@@ -2296,7 +2331,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # provenance an operator needs to debug exactly this class of
         # problem. Both remain strong sources; only the label changes.
         await self.upgrade_group_id(
-            candidate, trigger if trigger in _STRONG_GROUP_SOURCES
+            candidate, trigger if trigger in _KNOWN_GROUP_SOURCES
             else "voiceprint_match"
         )
         merged_prefs = staged_prefs
@@ -2305,7 +2340,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.memory_block = block
         self.memory_total_games = int(memory.get("total_games") or 0)
         self.memory_player_names = list(memory.get("player_names") or [])
-        self.device_identity_verified = True
+        if verified:
+            self.device_identity_verified = True
         self.device_candidate_group_id = None
         self.device_candidate_source = None
         self._device_candidate_memory = None
@@ -4538,6 +4574,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # lily-16A9AE ledger could say WHICH questions were served but not
         # what round they belonged to, so a narrated Cape Cod round and a
         # real one were indistinguishable in the only durable record.
+        # The IN-SESSION mirror stays at arm: it exists so this session's
+        # own draws are excluded from the next draw, and that must be true
+        # the instant a question is in hand.
         self.asked_history.append({
             "question_id": self.armed_question.get("id"),
             "question_text_hash": lily_bank.lily_question_text_hash(
@@ -4546,11 +4585,15 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             "canonical_answer": self.armed_question.get("canonical_answer"),
             "category": self.armed_question.get("category"),
         })
-        if self.supabase is not None:
-            asyncio.ensure_future(lily_bank.lily_record_asked(
-                self.supabase, self.group_id, dict(self.armed_question),
-                self.sk.session_id,
-            ))
+        # The DURABLE burn does NOT. It moved to playout start
+        # (record_question_asked, wired from note_playout_started): a
+        # question the table never heard must not be spent forever.
+        # Live 2026-08-08 `lily-2C489B` wrote arsenal entry 861712c7 to
+        # lily_asked_history at 22:48:55, twenty seconds before the
+        # delivery began and three cut attempts before it gave up — the
+        # session played zero questions and consumed one anyway.
+        self._durable_asked_qnum = None
+        self._glass_published_qnum = None
         self._armed_speech_misses = 0
         self._pending_delivery_qnum = None  # stale delivery intent dies at arm
         self._active_delivery_qnum = None
@@ -5044,27 +5087,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._active_delivery_started_at = None
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
-        # THE screen-sync publish (voice/glass sync fix): the question
-        # reaches the glass here — at the delivery turn's playout
-        # completion, exactly when answers go live — never at arm or
-        # dispatch, both of which led the spoken question. Also drops any
-        # pre-delivery phase hold via _set_ui_phase above.
-        if not steal and self.armed_question is not None:
-            image_url = self.armed_question.get("image_url")
-            if image_url:
-                # B4: arm pending confirm — image_shown must land before
-                # "look at the screen" is speakable.
-                self._glass_image_pending_url = str(image_url)
-                self._glass_image_pending_at = time.monotonic()
-            asyncio.ensure_future(
-                self.publish_metadata(
-                    self.armed_question.get("prompt", ""),
-                    choices=self.armed_question.get("choices"),
-                    eliminated=self.eliminated,
-                    image_url=image_url,
-                    category=self.armed_question.get("category"),
-                )
-            )
+        # Screen sync: idempotent backstop. The publish normally already
+        # happened at playout START (publish_question_to_glass, wired from
+        # note_playout_started) — this covers the paths that open a window
+        # without a delivery turn ever airing, and is a no-op when the
+        # question is already on the glass.
+        if not steal:
+            self.publish_question_to_glass(reason="window_open")
+            # Same backstop for the burn: a window that opened without a
+            # delivery playout (near-miss confirm, reconnect replay) still
+            # means the table heard the question.
+            self.record_question_asked(reason="window_open")
         self._start_bed()
         if self._window_timer and not self._window_timer.done():
             self._window_timer.cancel()
@@ -7979,6 +8012,71 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.maybe_fire_late_recognition()
         self.fire_enrollment("group_id_upgrade")
 
+    async def maybe_recognize_by_stated_name(self, player_name: str) -> bool:
+        """A returner who SAYS their name must not wait on a biometric.
+
+        Live 2026-08-08 `lily-2C489B`: the player said "My name is Rami" at
+        twenty-two seconds. Recognition landed at 3m31s — SIXTEEN player
+        turns later — because the only door open was the ECAPA matcher, and
+        the matcher was behind a cold model load. In between he said "I have
+        met you a million times", "you still don't remember me", and "I just
+        told you my name. You forgot my name already." The information was
+        in the room the whole time; nothing was listening for it.
+
+        This is a WEAK door and is built like one:
+          - it needs an UNAMBIGUOUS single group for the name — two tables
+            with a Rami resolve to neither, because merging two families'
+            histories is worse than being slow;
+          - it does not set device_identity_verified, so the ECAPA matcher
+            still runs and its verdict still outranks this one;
+          - "name_stated" is deliberately absent from _STRONG_GROUP_SOURCES,
+            so a later biometric may overwrite it (N5 in the correct
+            direction: voice beats name, never the reverse).
+
+        Returns True when memory was promoted."""
+        name = (player_name or "").strip()
+        if not name or self.supabase is None:
+            return False
+        # Post-forget, recognition stays shut (WO-LILY-FORGETME-001).
+        if not self.identity_persistence_allowed():
+            return False
+        # Already known, already resolving, or already bound by something
+        # stronger — this door has nothing to add.
+        if self.memory_block or getattr(self, "device_identity_verified", False):
+            return False
+        if getattr(self, "device_candidate_group_id", None):
+            return False
+        if self.group_id_source in _STRONG_GROUP_SOURCES:
+            return False
+        try:
+            groups = await lily_persistence.lily_groups_for_player_name(
+                self.supabase, name
+            )
+        except Exception as e:
+            logger.warning("LILY_MEMORY | NAME_DOOR_FAILED | %s", e)
+            return False
+        groups = [g for g in groups if g and g != self.group_id]
+        if len(groups) != 1:
+            if len(groups) > 1:
+                logger.info(
+                    "LILY_MEMORY | NAME_DOOR_AMBIGUOUS | name=%s groups=%d — "
+                    "declining to guess which table this is",
+                    name, len(groups),
+                )
+            return False
+        candidate = groups[0]
+        staged = await self.stage_device_candidate(candidate, "name_stated")
+        if not staged:
+            return False
+        logger.info(
+            "LILY_MEMORY | NAME_DOOR_OPENED | session=%s name=%s group=%s — "
+            "recognised off a stated name; the voice matcher still runs and "
+            "still outranks this",
+            self.sk.session_id, name, candidate,
+        )
+        await self._promote_device_candidate("name_stated", verified=False)
+        return True
+
     async def resolve_group_identity(self, trigger: str) -> None:
         """Re-resolve the group id once the roster has stabilized (game
         start). Only runs when the current id is weak (room-random or a
@@ -8799,6 +8897,92 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         logger.info(
             "LILY_PACE | session=%s pace=%s tts_rate_applied=%s",
             self.sk.session_id, value, applied_to_voice,
+        )
+        return True
+
+    def record_question_asked(self, *, reason: str) -> bool:
+        """Write the DURABLE burn row — once the question has actually gone
+        to air. Idempotent per question.
+
+        `lily_asked_history` is the group's permanent no-repeat ledger: a
+        row there means "this table has played this question". Writing it at
+        ARM made that a lie in the one direction that costs content — a
+        question drawn and then never delivered was spent forever. The
+        picture arsenal makes the cost concrete: entries are generated,
+        gated and paid for, and `lily-2C489B` burned one to serve nobody."""
+        armed = getattr(self, "armed_question", None)
+        supabase = getattr(self, "supabase", None)
+        if armed is None or supabase is None:
+            return False
+        qnum = self.sk.question_number
+        if getattr(self, "_durable_asked_qnum", None) == qnum:
+            return False
+        self._durable_asked_qnum = qnum
+        asyncio.ensure_future(lily_bank.lily_record_asked(
+            supabase, getattr(self, "group_id", None), dict(armed),
+            self.sk.session_id,
+        ))
+        logger.info(
+            "LILY_BURN | RECORDED | session=%s q=%d id=%s reason=%s",
+            self.sk.session_id, qnum, armed.get("id"), reason,
+        )
+        return True
+
+    def publish_question_to_glass(self, *, reason: str) -> bool:
+        """Put the armed question — and its picture — on the glass.
+
+        THE DEADLOCK THIS BREAKS (live 2026-08-08 `lily-2C489B`). Two
+        separate gates both bound on the delivery turn's playout COMPLETING:
+        the published phase (`_phase_hold`, pinned to "lobby" at arm) and
+        this metadata publish (moved to window-open so the screen could
+        never lead the voice). A barged delivery completes neither. So:
+
+          arm 22:48:55 -> delivery cut at 22:49:37, 22:49:47, 22:50:05
+          -> window never opens -> phase stays "lobby", image_url never
+          published -> the player stares at "START THE QUESTIONS" while
+          she describes a burlesque photograph -> he interrupts to say the
+          picture isn't there -> the delivery is cut again.
+
+        His reason for interrupting WAS the thing the interruption
+        prevented from being fixed. Seven minutes, zero questions played,
+        and the arsenal entry burned. Barge-in is the steady state of this
+        game, not an error path, so nothing the player can see may be
+        gated on the host getting an uninterrupted run at a sentence.
+
+        The screen still never LEADS the voice: this fires when the
+        delivery turn's audio starts airing, so the question appears as
+        the room begins hearing it. Idempotent per question — the
+        window-open path calls it again as a backstop and it no-ops."""
+        armed = getattr(self, "armed_question", None)
+        if armed is None:
+            return False
+        qnum = self.sk.question_number
+        if getattr(self, "_glass_published_qnum", None) == qnum:
+            return False
+        self._glass_published_qnum = qnum
+        image_url = armed.get("image_url")
+        if image_url:
+            # B4: arm the pending confirm — image_shown must land before
+            # "look at the screen" is speakable. Armed HERE now, because
+            # this is when the image is actually on its way to the client.
+            self._glass_image_pending_url = str(image_url)
+            self._glass_image_pending_at = time.monotonic()
+        # Drop the pre-delivery lobby hold: the question is airing, so the
+        # board is no longer ahead of the voice.
+        self._phase_hold = None
+        self.publish_attributes_nowait()
+        asyncio.ensure_future(
+            self.publish_metadata(
+                armed.get("prompt", ""),
+                choices=armed.get("choices"),
+                eliminated=getattr(self, "eliminated", None) or [],
+                image_url=image_url,
+                category=armed.get("category"),
+            )
+        )
+        logger.info(
+            "LILY_STATE | GLASS_PUBLISHED | session=%s q=%d reason=%s image=%s",
+            self.sk.session_id, qnum, reason, "yes" if image_url else "no",
         )
         return True
 
@@ -9709,6 +9893,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         """Post-bind side effects: pending open-floor award, max_speakers
         bump, bind event, attribute publish."""
         self._last_bind_at = time.time()
+        # NAME-STATED RECOGNITION. The moment a name is bound is the moment
+        # the room has told us who it is; a table whose file lists that name
+        # should not then sit through three and a half minutes of biometric
+        # warm-up being called a stranger. Fire-and-forget — recognition is
+        # never allowed to block the bind or the turn.
+        try:
+            asyncio.get_running_loop().create_task(
+                self.maybe_recognize_by_stated_name(player_name)
+            )
+        except RuntimeError:
+            pass  # no loop (unit fixtures drive bind_speaker synchronously)
         note = ""
         pending = self._pending_unbound_award
         if pending and pending["speaker_label"] == speaker_label:

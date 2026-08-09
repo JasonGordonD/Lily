@@ -24,10 +24,25 @@ linked. Nothing here ever raises into a session.
 
 import collections
 import logging
+import os
 import threading
 from typing import Optional
 
 logger = logging.getLogger("lily_voice_embedder")
+
+# WHERE THE BAKED MODEL LIVES. The Dockerfile downloads ECAPA at build time
+# so a live session never fetches it — but it was being written to
+# /tmp/lily-ecapa, and /tmp is routinely mounted as tmpfs by the container
+# runtime, which SHADOWS the baked copy and silently restores the cold
+# download to the critical path. Live 2026-08-08 lily-2C489B: recognition
+# landed 3m31s and SIXTEEN player turns after the greeting, while the
+# player was saying "I have met you a million times", "you still don't
+# remember me", "I just told you my name". The model was not slow to
+# compare — it was slow to EXIST.
+#
+# /app is the image's own working directory: baked at build, never
+# shadowed at runtime, writable by the appuser that runs the agent.
+ECAPA_SAVEDIR = os.environ.get("LILY_ECAPA_SAVEDIR", "/app/.cache/lily-ecapa")
 
 # Expected embedding dimension for the pinned model (ecapa-192). A model
 # returning another dim is rejected so a misconfigured image can't poison
@@ -129,13 +144,27 @@ def _load_model():
             return _model
         _load_attempted = True
         try:
+            # OFFLINE BY DEFAULT. `from_hparams` reaches Hugging Face to
+            # resolve the revision even when every file is already cached,
+            # so a cold or throttled network turns "load a local model"
+            # into an unbounded wait sitting directly in front of
+            # recognition. The baked image has the files; forbid the
+            # round-trip rather than hope it is fast. Overridable for the
+            # image build itself (LILY_ECAPA_ALLOW_FETCH=1), which is the
+            # one moment a fetch is correct.
+            if os.environ.get("LILY_ECAPA_ALLOW_FETCH") != "1":
+                os.environ.setdefault("HF_HUB_OFFLINE", "1")
+                os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
             # Imported here, not at module top: the dep is image-only.
             from speechbrain.inference.speaker import EncoderClassifier
             _model = EncoderClassifier.from_hparams(
                 source="speechbrain/spkrec-ecapa-voxceleb",
-                savedir="/tmp/lily-ecapa",
+                savedir=ECAPA_SAVEDIR,
             )
-            logger.info("LILY_VOICE_EMBEDDER | ECAPA loaded")
+            logger.info(
+                "LILY_VOICE_EMBEDDER | ECAPA loaded | savedir=%s offline=%s",
+                ECAPA_SAVEDIR, os.environ.get("HF_HUB_OFFLINE", "0"),
+            )
         except Exception as e:
             _model = None
             logger.info(

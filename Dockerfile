@@ -55,6 +55,19 @@ RUN python -c "from livekit.plugins.silero import VAD; VAD.load()"
 
 # Fail the image build if durable voice identity cannot load, and bake the
 # ECAPA model into the image so the first live session never downloads it.
-RUN python -c "import lily_voice_embedder as v; assert v.lily_voice_embedder_available()"
+#
+# LILY_ECAPA_ALLOW_FETCH=1 is set for THIS LAYER ONLY — the build is the one
+# moment a Hugging Face fetch is correct. At runtime the module defaults to
+# HF_HUB_OFFLINE so loading the baked model can never become a network wait.
+# The savedir is /app/.cache/lily-ecapa, not /tmp: a tmpfs-mounted /tmp
+# shadows anything baked there, which put the cold download back in front of
+# recognition (live 2026-08-08: recognition 3m31s and 16 turns late).
+RUN LILY_ECAPA_ALLOW_FETCH=1 python -c "import lily_voice_embedder as v; assert v.lily_voice_embedder_available()"
+
+# Prove the baked model loads with the network forbidden — exactly the
+# runtime path. A build that can only load ECAPA while online has not
+# actually baked it, and would fail open into a multi-minute session stall.
+RUN HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+    python -c "import lily_voice_embedder as v; assert v.lily_voice_embedder_available()"
 
 CMD ["python", "lily_agent.py", "start"]
