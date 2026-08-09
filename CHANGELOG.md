@@ -5,6 +5,17 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — One-owner delivery: near-miss confirms, no re-read
+
+Gun 3 (`NUDGE_NEAR_MISS`): table already heard a ≥0.9 similarity Q, then
+`question_nudge` full re-read → double question. Same trap via
+`UNDELIVERED_REFIRE` when ratio was already high.
+
+**Fix.** `force_confirm_delivery_heard` claims+confirms `q_N_delivery` and
+opens the window. Window-fallback and undelivered reconcile take that path
+when ratio ≥ 0.9 — no sheet re-air. README: delivery re-fire triage table
+(`source=` → gun).
+
 ## 2026-08-09 — B4: image_shown speak gate
 
 Not drawn ≠ on screen. TTS rewrites "look at the screen" / "picture is
