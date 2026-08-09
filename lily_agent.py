@@ -1911,10 +1911,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             "'wait — Rami! NOW I've got you: reigning champion, four "
             "wins.' Own the late catch lightly ('took me a second'); "
             "never pretend you knew all along, and never apologize in a "
-            "spiral. Then fold in, same breath or the next, what a "
-            "recognized returner would have gotten at the door: no "
-            "walkthrough — offer ONCE 'want a refresher on the options, "
-            "or straight in?' and respect the answer."
+            "spiral. THEN STOP AND LET THEM ANSWER. This turn is the "
+            "acknowledgment and at most ONE offer ('want a refresher on "
+            "the options, or straight in?') — it does NOT contain a "
+            "question from the game, and it does not answer its own offer. "
+            "Asking someone what they want and then telling them is worse "
+            "than never asking."
             + self.prefs_offer_instruction()
             + self.whats_new_instruction()
         )
@@ -2590,13 +2592,31 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     def unowned_kickoff_must_suppress(
         self, text: str, delivery_result: str | None
     ) -> bool:
-        """P0-5: kickoff words may air only with q_N_delivery ownership."""
-        if not lily_say_gate.lily_unowned_kickoff_fragment(text):
-            return False
-        return delivery_result not in (
+        """P0-5: kickoff words may air only with q_N_delivery ownership.
+
+        WIDENED 2026-08-09 to the QUESTION ITSELF, which is the thing P0-5
+        was really protecting. Live `lily-2C489B` 22:49:15: one turn carried
+        the recognition beat, the offer "want a quick refresher on the
+        options, or straight in?", AND the question — she asked him what he
+        wanted and answered it herself in the same breath. He said so:
+        "you asked me if I want a refresher. You didn't give me a chance to
+        speak." A turn that does not own the delivery may not speak the
+        armed question; the offer then has to wait for a reply, because
+        nothing else can fill the silence with the question."""
+        owns_delivery = delivery_result in (
             "claimed_structural",
             "claimed_core_sentence",
         )
+        if owns_delivery:
+            return False
+        if lily_say_gate.lily_unowned_kickoff_fragment(text):
+            return True
+        # Same predicate the delivery path already uses to decide whether a
+        # turn presented the armed question — asked here of a turn that has
+        # no right to present it.
+        if self.armed_question is None or self.sk.answer_window_open:
+            return False
+        return self._delivery_text_matches_armed(text or "")
 
     def clear_ambiguous_yes_block(self, *, reason: str) -> None:
         if getattr(self, "_ambiguous_yes_blocks_start", False) or getattr(
@@ -4730,7 +4750,32 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 )
                 delivery_key = f"q_{self.sk.question_number}_delivery"
                 if delivery_key in released:
-                    self.expect_delivery()
+                    # THE LOOP THIS BREAKS. A cut delivery released its
+                    # claim and re-armed for another full read of the whole
+                    # sheet, which the next sentence cut again. Live
+                    # 2026-08-08 `lily-2C489B`: three identical re-reads
+                    # (22:49:37 / 22:49:47 / 22:50:05), each dying on the
+                    # same word, window never opened, question never asked.
+                    #
+                    # Silence used to be treated as worse than asking
+                    # twice. In a game where the table talks over the host
+                    # by design, that trade is inverted: re-reading is what
+                    # produces the mess. Once the question sentence has
+                    # actually reached the room, the table HAS it — confirm
+                    # and open the window. Re-arming is only for a delivery
+                    # that never got the question out.
+                    # `interrupted` ONLY. A suppressed turn produced no
+                    # audio at all (the #3418 Lisa-ghost signature: claim
+                    # registered at dispatch, nothing ever aired), so it
+                    # can never have put the question in the room —
+                    # confirming it there would re-open the ghost-window
+                    # hole this codebase already closed.
+                    if interrupted and self.delivery_reached_the_table(
+                        spoken_text
+                    ):
+                        pass  # table has the question; window already open
+                    else:
+                        self.expect_delivery()
             # Regeneration gate (WS-3): the act just cut/suppressed will
             # re-dispatch — arm the gate so the retry is spoken fresh, not
             # replayed. An interrupted turn partially aired (a re-air is

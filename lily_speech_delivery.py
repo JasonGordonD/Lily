@@ -31,9 +31,11 @@ _REGEN_REAIR_DIRECTIVE = (
     "rather than your earlier wording."
 )
 _REGEN_DELIVERY_DIRECTIVE = (
-    "\n\nYou were cut short mid-question. Deliver it cleanly this time — the "
-    "question and every option exactly as written, in one unbroken beat, "
-    "straight to the read with no restart preamble."
+    "\n\nYou were cut short mid-question and the table still does not have "
+    "it. Pick up from where you broke off rather than starting the whole "
+    "thing again — the part they already heard does not need saying twice. "
+    "Get the question sentence itself out, and the options if there are "
+    "any, then stop."
 )
 
 # Cut-recovery directive (WO-LILY-STREAM-INTEGRITY-002 WS-3). Rides the
@@ -71,6 +73,15 @@ _CUT_RECOVERY_USER_TURN_LOOKBACK = 2.0
 # below the observed wedge; a long turn MID-playout is protected twice —
 # by the playout-started ledger and by the host_speaking recheck.
 # ---------------------------------------------------------------------------
+
+# How many times one question may be re-read after being cut off before it
+# goes back to supply. Live `lily-2C489B` read the same question three
+# times — 22:49:37, 22:49:47, 22:50:05 — each cut on the same word, because
+# the player was interrupting to say the picture wasn't on screen. The
+# re-air path re-armed on every interrupt with no cap. Two is a real second
+# chance; a fourth read of a question the room keeps talking over is the
+# host losing an argument with the table.
+_DELIVERY_MAX_CUT_REAIRS = 2
 
 _STALE_CLAIM_SECONDS = 12.0
 _STALE_CLAIM_MAX_RETRIES = 2   # re-dispatches per key before declaring the audio path down
@@ -368,6 +379,44 @@ class LilySpeechDeliveryMixin:
             in normalized
             for choice in choices
         )
+
+    def delivery_reached_the_table(self, spoken_text: str) -> bool:
+        """Did this cut delivery still put the question in the room?
+
+        Reuses `_delivery_text_matches_armed` — the predicate that already
+        decides whether a turn presented the armed question and all its
+        options. No new similarity rule; the existing one just never got
+        asked at the one moment it mattered, the interrupt.
+
+        Also carries the BOUND. Three identical re-reads of one question
+        (live `lily-2C489B`, 22:49:37 / 22:49:47 / 22:50:05, each cut on
+        the same word) is not recovery, it is a loop with no exit. Past the
+        cap the question goes back to supply through the path that already
+        exists for a delivery that never aired."""
+        qnum = self.sk.question_number
+        if self._delivery_text_matches_armed(spoken_text or ""):
+            logger.info(
+                "LILY_WINDOW | CUT_AFTER_QUESTION_AIRED | session=%s q=%d — "
+                "the table has the question; confirming instead of re-reading",
+                self.sk.session_id, qnum,
+            )
+            return self.force_confirm_delivery_heard(reason="cut_after_air")
+        cuts = getattr(self, "_delivery_cuts", None)
+        if cuts is None or getattr(self, "_delivery_cuts_qnum", None) != qnum:
+            cuts, self._delivery_cuts_qnum = 0, qnum
+        cuts += 1
+        self._delivery_cuts = cuts
+        if cuts < _DELIVERY_MAX_CUT_REAIRS:
+            return False  # re-arm: they genuinely have not heard it yet
+        logger.error(
+            "LILY_WINDOW | DELIVERY_CUT_EXHAUSTED | session=%s q=%d cuts=%d "
+            "— the room talks over every read of this one; returning it to "
+            "supply rather than reading it a fourth time",
+            self.sk.session_id, qnum, cuts,
+        )
+        self.say_registry.release(f"q_{qnum}_delivery")
+        self._release_armed_question_to_supply()
+        return True
 
     def arm_reair_gate(self) -> None:
         """Mark that the act just cut/suppressed will re-dispatch as a
