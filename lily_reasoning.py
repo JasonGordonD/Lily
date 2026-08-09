@@ -403,7 +403,9 @@ class LilyReasoning:
             api_key=api_key or lily_config.google_api_key()
         )
         self._model = lily_config.reasoning_model()
-        self._vocal_model = lily_config.vocal_model()
+        # Judge migration is a separate lane. Vocal may already be Grok;
+        # keep Gemini judge transport valid until M5 moves it explicitly.
+        self._vocal_model = lily_config.judge_model()
 
     async def _generate(
         self,

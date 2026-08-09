@@ -107,12 +107,13 @@ def google_api_key_present() -> bool:
 
 
 def vocal_model() -> str:
-    # gemini-3.6-flash (operator-directed upgrade 2026-08-06): 1M ctx,
-    # function-calling + structured outputs + thinking, text-mode via the
-    # LiveKit google plugin (NOT Gemini Live). Live-verified: chat + tool
-    # call status:ok on the funded GOOGLE_API_KEY. Image gen is a SEPARATE
-    # pin (imagegen_model) — 3.6-flash does NOT do image generation.
-    return _get("LILY_VOCAL_MODEL", "gemini-3.6-flash")
+    """Front-facing host model for every deck."""
+    return "grok-4.5"
+
+
+def vocal_effort() -> str:
+    """Routine voice stays fast; llm_node escalates complex turns to medium."""
+    return "low"
 
 
 def reasoning_model() -> str:
@@ -159,6 +160,11 @@ def judge_max_output_tokens() -> int:
     IS latency-relevant (mid-window / reveal path), but its verdict JSON
     is small — a middle default covers thinking + verdict."""
     return max(600, _get_int("LILY_JUDGE_MAX_OUTPUT_TOKENS", 1024))
+
+
+def judge_model() -> str:
+    """Temporary Gemini judge pin until the dedicated Grok judge PR."""
+    return "gemini-3.6-flash"
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +217,7 @@ def adult_vocal_model() -> str:
     session's vocal LLM swaps to xAI Grok (the fleet's established
     adult-content provider: vision + adult imagegen already ride
     XAI_API_KEY) and swaps back on every adult exit."""
-    return _get("LILY_ADULT_VOCAL_MODEL", "grok-4.5")
+    return _get("LILY_ADULT_VOCAL_MODEL", vocal_model())
 
 
 def adult_vocal_effort() -> str:
@@ -231,7 +237,9 @@ def adult_vocal_effort() -> str:
     character lives in the prompt and the voice, not in the extra tokens.
     Set LILY_ADULT_VOCAL_EFFORT=medium or =high to restore depth once the
     slot has headroom. Anything else coerces to low."""
-    effort = (_get("LILY_ADULT_VOCAL_EFFORT", "low") or "").lower()
+    effort = (
+        _get("LILY_ADULT_VOCAL_EFFORT", vocal_effort()) or ""
+    ).lower()
     return effort if effort in ("low", "medium", "high") else "low"
 
 

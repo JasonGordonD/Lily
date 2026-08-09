@@ -2,8 +2,7 @@
 brain/image model pins, thinking-level policy, and image provider routing.
 
 Operator-directed swaps (override the fleet no-model-pin rule for these):
-  - brain (vocal) -> gemini-3.6-flash (text-mode via the LiveKit google
-    plugin, NOT Gemini Live); live-verified chat + tool call.
+  - brain (vocal) -> grok-4.5 through the xAI/OpenAI-compatible plugin.
   - standard-deck image gen -> gemini-3.1-flash-lite-image (Nano Banana 2
     Lite); live-verified via generate_content.
   - adult-deck image gen -> xAI grok-imagine-image (Gemini refuses adult).
@@ -25,14 +24,49 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import lily_config
 import lily_imagegen
 import lily_reasoning
-from lily_agent import _lily_thinking_level_for_text
+from lily_agent import (
+    _lily_thinking_level_for_text,
+    lily_build_grok_vocal_llm,
+)
 
 
 # -- model pins ----------------------------------------------------------------
 
 
-def test_brain_model_is_gemini_3_6_flash():
-    assert lily_config.vocal_model() == "gemini-3.6-flash"
+def test_brain_model_is_grok_4_5():
+    assert lily_config.vocal_model() == "grok-4.5"
+    assert lily_config.vocal_effort() == "low"
+
+
+def test_vocal_effort_is_low_by_default_contract():
+    assert lily_config.vocal_effort() == "low"
+
+
+def test_grok_vocal_requires_xai_key():
+    try:
+        lily_build_grok_vocal_llm(
+            model="grok-4.5", effort="low", api_key=""
+        )
+        raise AssertionError("missing XAI key must fail")
+    except RuntimeError as exc:
+        assert "XAI_API_KEY" in str(exc)
+
+
+def test_entrypoint_uses_grok_for_general_vocal():
+    from lily_agent import entrypoint
+
+    source = inspect.getsource(entrypoint)
+    assert "lily_build_grok_vocal_llm(" in source
+    assert "api_key=lily_config.xai_api_key()" in source
+    assert "GoogleLLM(" not in source
+
+
+def test_grok_builder_retains_spoken_turn_token_cap():
+    from lily_agent import lily_build_grok_vocal_llm
+
+    source = inspect.getsource(lily_build_grok_vocal_llm)
+    assert "max_completion_tokens" in source
+    assert "vocal_max_output_tokens" in source
 
 
 def test_standard_imagegen_is_nano_banana_2_lite():
@@ -99,7 +133,8 @@ def test_llm_node_escalation_is_guarded_and_restores():
     src = inspect.getsource(LilyAgent.llm_node)
     assert "_thinking_level_for_turn" in src
     assert "finally" in src
-    assert "thinking_config" in src
+    assert "reasoning_effort" in src
+    assert '"medium"' in src
 
 
 # -- image provider routing ----------------------------------------------------

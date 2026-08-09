@@ -5,6 +5,18 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — M4: one Grok 4.5 vocal host
+
+General vocal moved from Gemini 3.6 Flash to Grok 4.5, joining the adult
+lane on one provider/model. Routine turns run `low`; disputes, ambiguity,
+multi-intent and meta turns escalate to `medium` for that turn, then restore.
+
+The existing adult prompt layer remains the register switch; an optional
+adult model/effort override still works. The xAI client keeps the 30s read
+backstop, zero SDK retries, and Lily’s spoken-turn token cap. General
+adjudication remains on its explicit Gemini judge model until the separate
+reasoning/judge migration.
+
 ## 2026-08-09 — M1b: deterministic `PROHIBITED_CONTENT` fallback
 
 In `lily-9337B1-331ff234`, a post-STOP curated-bank `question_nudge` spent
