@@ -512,6 +512,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     # RECOGNITION-VARIETY Task 1: the mid-session recognition catch-up
     # acknowledgment fires at most once per session.
     _late_recognition_fired: bool = False
+    _late_recognition_pending: bool = False
     # RECOGNITION-VARIETY fixture Q5: answers spoken while the delivery
     # turn is still playing out (window not yet open) buffer here and
     # replay at window open — the "no early buzz-ins" v1 concession cost
@@ -1803,7 +1804,39 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
 
 
-    def maybe_fire_late_recognition(self) -> None:
+    def late_recognition_blocked_reason(self) -> str | None:
+        """Return the live beat that makes recognition speech unsafe."""
+        if self.sk.answer_window_open:
+            return "answer_window_open"
+        if getattr(self, "_adjudicating", False):
+            return "adjudicating"
+        if getattr(self, "_question_transitioning", False):
+            return "question_transitioning"
+        if getattr(self, "pending_clarify", None):
+            return "pending_clarify"
+        if getattr(self.sk, "host_speaking", False):
+            return "host_speaking"
+        if getattr(self, "_active_delivery_qnum", None) is not None:
+            return "delivery_active"
+        if getattr(self, "_pending_delivery_qnum", None) is not None:
+            return "delivery_pending"
+        armed = getattr(self, "armed_question", None)
+        registry = getattr(self, "say_registry", None)
+        if armed is not None and registry is not None:
+            key = f"q_{self.sk.question_number}_delivery"
+            claim = registry.state(key)
+            answered = False
+            try:
+                answered = self.question_already_answered(
+                    self.sk.question_number
+                )
+            except Exception:
+                pass
+            if claim is not None and not answered:
+                return f"delivery_claim_{claim}"
+        return None
+
+    def maybe_fire_late_recognition(self) -> bool:
         """WO-LILY-RECOGNITION-VARIETY-001 Task 1 — the catch-up path.
 
         Fires when group resolution lands on an EXISTING group AFTER the
@@ -1817,12 +1850,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         the fast path — if the greeting hasn't gone out yet, the greeting
         itself acts on the memory and this stays silent."""
         if not self.memory_block or self._late_recognition_fired:
-            return
+            return False
         # P5: recognized AT the greet — the door already caught them; the
         # late beat is a duplicate and is killed for the session.
         if getattr(self, "_recognized_at_greet", False):
             self._late_recognition_fired = True
-            return
+            self._late_recognition_pending = False
+            return False
         # getattr: test harnesses build LilyGame via __new__.
         registry = getattr(self, "say_registry", None)
         greeted = (
@@ -1830,19 +1864,20 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             and registry.state("session_greet") is not None
         )
         if not greeted and not getattr(self, "game_started", False):
-            return  # door path: greeting_instructions will act on it
-        # P5: never fire OVER an open exchange — an open answer window or a
-        # pending clarify is a live beat. Defer (don't consume the once);
-        # the next transcript event past the seam re-invokes this and fires
-        # it at the seam.
-        if self.sk.answer_window_open or getattr(self, "pending_clarify", None):
+            return False  # door path: greeting_instructions will act on it
+        # P0-4 BE8D8B: never fire over delivery/window/adjudication. Keep a
+        # pending bit and flush it only at an explicit between-question seam.
+        blocked = self.late_recognition_blocked_reason()
+        if blocked:
+            self._late_recognition_pending = True
             logger.info(
-                "LILY_MEMORY | LATE_RECOGNITION_DEFERRED | session=%s — "
-                "open exchange; holding for the next seam",
-                self.sk.session_id,
+                "LILY_MEMORY | LATE_RECOGNITION_DEFERRED | session=%s "
+                "reason=%s — holding for between-question seam",
+                self.sk.session_id, blocked,
             )
-            return
+            return False
         self._late_recognition_fired = True
+        self._late_recognition_pending = False
         # Stored 'usual' honored for the remainder: apply stored pacing
         # only when this session hasn't spoken its own choice.
         try:
@@ -1875,6 +1910,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self.sk.session_id, getattr(self, "group_id", None), names or "-",
         )
         self.instructed_reply(ack)
+        return True
+
+    def flush_late_recognition_at_seam(self) -> bool:
+        """Emit a deferred recognition beat only when the game is between Qs."""
+        if not getattr(self, "_late_recognition_pending", False):
+            return False
+        return self.maybe_fire_late_recognition()
 
     def record_agent_turn(
         self, text: str, *, act_keys: list, interrupted: bool
@@ -4757,6 +4799,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             for key in confirmed
         )
         if transition_complete:
+            # P0-4: this is the explicit between-question seam. A recognition
+            # match that landed during delivery/window/adjudication gets ONE
+            # beat here, before N+1 dispatch. Return so it cannot stack over
+            # the next question; the idle watchdog owns subsequent delivery.
+            if self.flush_late_recognition_at_seam():
+                return
             # Normal questions advance after their single verdict/reveal
             # beat. Round boundaries advance only after the separately keyed
             # standings flourish; q_N_verdict deliberately does not satisfy
@@ -9233,6 +9281,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "identity: RETURNER CLAIMED — the player explicitly says "
                 "you have met before. A blank lookup never proves otherwise; "
                 "do not say clean slate / no saved voices / no past games."
+            )
+        if getattr(self, "_late_recognition_pending", False):
+            extra.append(
+                "late_recognition: DEFERRED — a live question owns the floor. "
+                "Do not mention recognition/refresher/usual until the engine "
+                "releases it at the between-question seam."
             )
         if getattr(self, "_recognition_dispute", False) and not getattr(
             self, "_recognition_dispute_why_answered", False

@@ -31,6 +31,7 @@ def _make_game():
     game.prefs = {}
     game.game_started = True
     game._late_recognition_fired = False
+    game._late_recognition_pending = False
     game._recognized_at_greet = False
     game.pending_clarify = {}
     game.instructed_replies = []
@@ -56,11 +57,13 @@ def test_late_beat_defers_over_an_open_window():
     game.maybe_fire_late_recognition()
     assert game.instructed_replies == []  # held for a seam
     assert game._late_recognition_fired is False  # NOT consumed — will retry
-    # Window closes → the next invocation fires it, once.
+    assert game._late_recognition_pending is True
+    # Window closes → the explicit seam flush fires it, once.
     game.sk.close_answer_window()
-    game.maybe_fire_late_recognition()
+    game.flush_late_recognition_at_seam()
     assert len(game.instructed_replies) == 1
     assert game._late_recognition_fired is True
+    assert game._late_recognition_pending is False
     game.maybe_fire_late_recognition()
     assert len(game.instructed_replies) == 1  # exactly once
 
@@ -70,6 +73,31 @@ def test_late_beat_fires_once_at_a_seam_on_real_transition():
     game.maybe_fire_late_recognition()
     assert len(game.instructed_replies) == 1
     assert "MID-SESSION" in game.instructed_replies[0]
+
+
+def test_be8d8b_late_recognition_defers_over_delivery_claim():
+    game = _make_game()
+    game.sk.question_number = 1
+    game.armed_question = {"id": "q1", "prompt": "Greece?"}
+    game.say_registry.claim("q_1_delivery", owner="speech-q1")
+
+    game.maybe_fire_late_recognition()
+
+    assert game.instructed_replies == []
+    assert game._late_recognition_fired is False
+    assert game._late_recognition_pending is True
+    assert game.late_recognition_blocked_reason() == "delivery_claim_pending"
+
+
+def test_late_recognition_defers_during_adjudication():
+    game = _make_game()
+    game._adjudicating = True
+
+    game.maybe_fire_late_recognition()
+
+    assert game.instructed_replies == []
+    assert game._late_recognition_pending is True
+    assert game.late_recognition_blocked_reason() == "adjudicating"
 
 
 # -- P10 lint: stacked questions -----------------------------------------------
