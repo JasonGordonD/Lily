@@ -5,6 +5,19 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-E1: voiceprint rekey uses the production schema
+
+Live `lily-9337B1-331ff234`: provisional→resolved voiceprint rekey aborted
+with PostgreSQL `42703` because it selected
+`lily_speaker_voiceprints.sample_count`. That column exists only on
+`lily_voice_identity`; the failure stranded one `Playing` row and later
+enrollment wrote another.
+
+**Fix.** Rekey selects/updates only the migration-001 voiceprint columns,
+merges identifier lists into the resolved row before deleting the provisional
+row, and is safe to rerun without duplicate rows. Tests assert the production
+migration contract directly.
+
 ## 2026-08-09 — P0-D: confirmed identity before Q1
 
 Live `lily-9337B1-331ff234`: “not my first time playing with you” was

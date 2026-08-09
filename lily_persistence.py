@@ -1699,7 +1699,7 @@ async def lily_rekey_speaker_voiceprints(
             lambda: supabase.table("lily_speaker_voiceprints")
             .select(
                 "id, speaker_label, player_name, speaker_identifiers, "
-                "sample_count, updated_at"
+                "updated_at"
             )
             .eq("group_id", old_group_id)
             .execute()
@@ -1718,8 +1718,7 @@ async def lily_rekey_speaker_voiceprints(
             existing_res = await asyncio.to_thread(
                 lambda label=label: supabase.table("lily_speaker_voiceprints")
                 .select(
-                    "id, speaker_label, player_name, speaker_identifiers, "
-                    "sample_count"
+                    "id, speaker_label, player_name, speaker_identifiers"
                 )
                 .eq("group_id", new_group_id)
                 .eq("speaker_label", label)
@@ -1749,10 +1748,6 @@ async def lily_rekey_speaker_voiceprints(
                 # and the resolved row does not.
                 if row.get("player_name") and not existing.get("player_name"):
                     patch["player_name"] = row["player_name"]
-                old_samples = int(row.get("sample_count") or 0)
-                new_samples = int(existing.get("sample_count") or 0)
-                if old_samples or new_samples:
-                    patch["sample_count"] = max(old_samples, new_samples)
                 existing_id = existing.get("id")
                 if existing_id is not None:
                     await asyncio.to_thread(
