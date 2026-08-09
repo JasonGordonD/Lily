@@ -3424,6 +3424,44 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         not."""
         return not self._stuck_delivery_present()
 
+    def force_confirm_delivery_heard(
+        self, *, reason: str, ratio: float | None = None
+    ) -> bool:
+        """One-owner near-miss: the table already heard Q; do not re-read.
+
+        Claims + confirms `q_N_delivery` if needed, then opens the answer
+        window. Used when spoken/prompt ratio ≥ 0.9 but the structural
+        claim missed — Gun 3 (NUDGE_NEAR_MISS) and Gun 1 false undelivered.
+        Returns True when the window path was taken.
+        """
+        if self.armed_question is None or self.sk.answer_window_open:
+            return False
+        if self._adjudicating or getattr(self, "_question_transitioning", False):
+            return False
+        qnum = self.sk.question_number
+        if self.question_already_answered(qnum):
+            return False
+        key = f"q_{qnum}_delivery"
+        state = self.say_registry.state(key)
+        if state is None:
+            self.say_registry.claim(key, owner=f"near_miss:{reason}")
+            state = self.say_registry.state(key)
+        if state == lily_say_gate.CLAIM_PENDING:
+            self.say_registry.confirm(key)
+        elif state != lily_say_gate.CLAIM_CONFIRMED:
+            return False
+        self._armed_speech_misses = 0
+        self._undelivered_ticks = 0
+        self._undelivered_refires = 0
+        logger.warning(
+            "LILY_WINDOW | NEAR_MISS_CONFIRM | session=%s q=%d reason=%s "
+            "ratio=%s — delivery confirmed without re-read; opening window",
+            self.sk.session_id, qnum, reason,
+            f"{ratio:.2f}" if ratio is not None else "?",
+        )
+        self.open_window_after_discharge()
+        return True
+
     def reconcile_undelivered_claim(self) -> str:
         """One watchdog tick's reconciliation of the armed question's
         delivery (called from _idle_watchdog when armed with a closed
@@ -3502,6 +3540,19 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if self._undelivered_ticks < self._undelivered_reconcile_ticks():
             return "idle"
         self._undelivered_ticks = 0
+        # Near-miss: table already heard a high-similarity performance —
+        # confirm + open, never UNDELIVERED_REFIRE the same Q again.
+        last_ratio = float(getattr(self, "_last_armed_speech_ratio", 0.0) or 0.0)
+        if last_ratio >= 0.9:
+            logger.warning(
+                "LILY_WATCHDOG | UNDELIVERED_NEAR_MISS | session=%s q=%d "
+                "ratio=%.2f — confirming delivery without re-air",
+                self.sk.session_id, qnum, last_ratio,
+            )
+            self.force_confirm_delivery_heard(
+                reason="undelivered_near_miss", ratio=last_ratio,
+            )
+            return "confirmed"
         if getattr(self, "_undelivered_refires", 0) < UNDELIVERED_MAX_REFIRES:
             self._undelivered_refires += 1
             # Drop a stale never-played claim so the re-dispatched delivery
@@ -4578,6 +4629,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             ratio = lily_evaluation.lily_question_spoken_ratio(
                 self.armed_question.get("prompt", ""), spoken_text
             )
+            self._last_armed_speech_ratio = ratio
             logger.info(
                 "LILY_WINDOW | RATIO | session=%s q=%d ratio=%.2f | telemetry",
                 self.sk.session_id, self.sk.question_number, ratio,
@@ -4624,21 +4676,25 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 self.sk.session_id, self.sk.question_number, ratio,
                 WINDOW_FALLBACK_AGENT_TURNS,
             )
+            # Remember ratio for undelivered reconcile (near-miss must not
+            # re-air after the table already heard the Q).
+            self._last_armed_speech_ratio = ratio
             if ratio >= 0.9:
-                # 2026-08-06 log audit (session 05AAC9 q=2, ratio=1.00):
-                # a near-verbatim performance that the strict claim
-                # matcher rejected means the table likely hears the
-                # question TWICE (organic + nudged sheet-read). Capture
-                # exactly what was spoken vs armed so the matcher gap is
-                # diagnosable from the log alone.
+                # Gun 3 fix: high-similarity turn already aired the Q but
+                # the structural claim missed — confirm + open, do NOT
+                # full re-read (live double-question class).
                 logger.warning(
                     "LILY_WINDOW | NUDGE_NEAR_MISS | session=%s q=%d "
-                    "ratio=%.2f — high-similarity turn did NOT register "
-                    "a delivery claim | spoken=%r | armed=%r",
+                    "ratio=%.2f — confirming delivery without re-read | "
+                    "spoken=%r | armed=%r",
                     self.sk.session_id, self.sk.question_number, ratio,
                     (spoken_text or "")[:220],
                     str((self.armed_question or {}).get("prompt", ""))[:180],
                 )
+                self.force_confirm_delivery_heard(
+                    reason="nudge_near_miss", ratio=ratio,
+                )
+                return
             self.expect_delivery()
             self.gated_say(
                 None,

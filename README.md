@@ -62,6 +62,8 @@ Spoken-surface freeze before any speech/delivery extract:
   deliveries (stem + options). Freeform deliveries and verdict-plus-next
   stacks clip at the first `?`. Undelivered-delivery re-fires wait for
   table quiet (`LILY_UNDELIVERED_REFIRE_QUIET_SECONDS`) before re-asking.
+  **Near-miss (≥0.9 spoken/prompt ratio) confirms delivery and opens the
+  window — it does not full re-read the same Q** (`force_confirm_delivery_heard`).
 - **Two-tier adjudication:** Tier-1 conservative fuzzy/phonetic match against
   `acceptable_answers` (uncertainty escalates, never rejects); Tier-2 is one
   non-spoken LLM call that judges against the supplied canonical answer only — it
@@ -384,7 +386,31 @@ entrypoint) — both dispatch the same instructions under `session_greet`,
 so the loser of the race is silent; a reconnect uses its own
 `session_rejoin` key and never trips `session_greet`. Keyless dispatches
 (steal window, skip, mode reverts, the prefetch nudge, game start) still
-log `LILY_SAY` for the audit trail.
+log `LILY_SAY` for the audit trail. Note: `key=None` on `question_nudge`
+bypasses the dup key — barge release of a pending claim also reopens the
+door (see triage table below).
+
+### Delivery re-fire triage (double question / double congrats)
+
+Silence was treated as worse than a second ask — several watchdogs can
+re-speak the same `q_N`. Grep the bad minute for `source=` on
+`LILY_SAY` / `LILY_WATCHDOG` / `LILY_WINDOW`:
+
+| Log / source | Gun |
+|---|---|
+| `UNDELIVERED_REFIRE` / `source=undelivered_reconcile` | Watchdog thinks Q never aired |
+| `IDLE_REARM` / `source=idle_watchdog` | Idle re-arm nudge |
+| `DELIVERY_NUDGE` / `NUDGE_NEAR_MISS` / `source=window_fallback` | Claim missed after organic ask |
+| `NEAR_MISS_CONFIRM` / `UNDELIVERED_NEAR_MISS` | Fixed path: confirm + open, **no** re-read |
+| `source=post_reveal` | Legitimate N+1 |
+| Barge `RELEASED` then another delivery/verdict | Re-air after interrupt |
+| Two `act=verdict` same `q_N_reveal` | Organic+code or key released |
+| `COMMIT_FAILED` / praise without `record_result` | Score path |
+
+**Near-miss contract (≥0.9 spoken/prompt):** `force_confirm_delivery_heard`
+claims+confirms `q_N_delivery` and opens the window — never dispatches a
+full sheet re-read. Open symbols: `reconcile_undelivered_claim`,
+`on_agent_speech_finished` (nudge), `adjudicate` (verdict), `record_result`.
 
 **Stale-claim recovery (WO-LILY-HOTFIX-001).** The 08-06 P0 exposed a
 third lifecycle state with no exit: claimed, never played, never failed.
