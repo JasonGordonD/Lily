@@ -5,6 +5,16 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — LiveKit endpointing deprecation removed
+
+Production warned that top-level `min_endpointing_delay` /
+`max_endpointing_delay` will be removed in v2.0.
+
+**Fix.** The same 0.6s/6.0s bounds now live under
+`TurnHandlingOptions(endpointing=EndpointingOptions(mode="fixed", ...))`.
+FIXED turn detection and adaptive interruption behavior are unchanged; this
+does not enable the LiveKit Turn Detector default.
+
 ## 2026-08-09 — P0-E3: retire the `Playing` identity poison
 
 After the binding/rekey/quarantine fixes, production evidence showed the

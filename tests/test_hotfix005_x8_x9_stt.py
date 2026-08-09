@@ -123,3 +123,14 @@ def test_min_endpointing_delay_raised(monkeypatch):
 def test_max_endpointing_delay_default_pinned(monkeypatch):
     monkeypatch.delenv("LILY_STT_MAX_ENDPOINTING_DELAY", raising=False)
     assert lily_config.stt_max_endpointing_delay() == 6.0
+
+
+def test_entrypoint_uses_non_deprecated_turn_handling_endpointing():
+    import inspect
+    import lily_agent
+
+    source = inspect.getsource(lily_agent.entrypoint)
+    assert "endpointing=EndpointingOptions(" in source
+    assert "mode=\"fixed\"" in source
+    assert "min_endpointing_delay=" not in source
+    assert "max_endpointing_delay=" not in source

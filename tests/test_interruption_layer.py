@@ -131,6 +131,7 @@ def test_session_resolves_false_interruption_contract():
     framework-layer end of the fragment-storm loop."""
     from livekit.agents import (
         AgentSession,
+        EndpointingOptions,
         InterruptionOptions,
         TurnHandlingOptions,
     )
@@ -139,6 +140,11 @@ def test_session_resolves_false_interruption_contract():
         # AgentSession needs a running loop (suite-order safe).
         return AgentSession(
             turn_handling=TurnHandlingOptions(
+                endpointing=EndpointingOptions(
+                    mode="fixed",
+                    min_delay=lily_config.stt_min_endpointing_delay(),
+                    max_delay=lily_config.stt_max_endpointing_delay(),
+                ),
                 interruption=InterruptionOptions(
                     min_words=1,
                     min_duration=lily_config.interruption_min_duration(),
@@ -158,6 +164,10 @@ def test_session_resolves_false_interruption_contract():
     assert opts["min_words"] == 1
     assert opts["min_duration"] == 0.25
     assert session.interruption_detection == "adaptive"
+    endpointing = session.options.endpointing
+    assert endpointing["mode"] == "fixed"
+    assert endpointing["min_delay"] == 0.6
+    assert endpointing["max_delay"] == 6.0
 
 
 def test_short_quiz_answers_can_interrupt(monkeypatch):

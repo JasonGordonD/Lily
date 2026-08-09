@@ -21,7 +21,7 @@ Spoken-surface freeze before any speech/delivery extract:
 
 | Layer | Choice |
 |---|---|
-| Framework | `livekit-agents==1.6.6` (plugin family pinned to match; upgraded from 1.6.4 under WO-LILY-OMNIBUS-003 WS-0 with the full migration audit below; JRVS stays the fleet 1.6.4 reference install) |
+| Framework | `livekit-agents==1.6.8` (plugin family pinned to match; endpointing uses `TurnHandlingOptions.endpointing` with FIXED mode; the LiveKit Turn Detector default remains off) |
 | STT | Speechmatics — `en`, diarization, ENHANCED; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`, full lever audit in the WS-13 close-out table below): `speaker_sensitivity=0.35` (0.5 minted 3 phantoms + 1 continuity split for 4 players in the echo-room evidence session), `prefer_current_speaker=True`, `max_speakers=7` (fixed at construction — table size is unknowable pre-bind; roster-aware cap `lily_max_speakers_for` is WS-8's to apply via the 1.6.6 `Agent.update_options(stt=...)` swap), `ignore_speakers=["__ASSISTANT__"]`, player-name `additional_vocab` at construction when voiceprints exist, StartRecognition wire injection `get_speakers=true` + `audio_filtering_config.volume_threshold` (lily_stt_tuning patch, live-schema-validated) |
 | Vocal LLM | `gemini-3.5-flash` — every spoken turn; explicit `safety_settings` (adult-product context), `thinking_config={"thinking_level": "low"}`, `max_output_tokens ≥ 600`, default sampling |
 | Reasoning LLM | `gemini-3.1-pro-preview` — background node, own google-genai client (HTTP isolation): question prefetch (N+1) + verification at prefetch time; never speaks |

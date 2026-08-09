@@ -355,7 +355,7 @@ def false_interruption_timeout() -> float:
 
 def stt_min_endpointing_delay() -> float:
     """HOTFIX-005 X9: minimum silence the session waits before committing a
-    user turn (LiveKit endpointing `min_endpointing_delay`, framework
+    user turn (`TurnHandlingOptions.endpointing.min_delay`, framework
     default 0.5s).
 
     The runtime named both the defect and its remedy live at 14:33:18:
@@ -372,7 +372,7 @@ def stt_min_endpointing_delay() -> float:
 
 def stt_max_endpointing_delay() -> float:
     """HOTFIX-005 X9: the ceiling on the endpointing wait (LiveKit
-    `max_endpointing_delay`, framework default 6.0s). Pinned explicitly so
+    `TurnHandlingOptions.endpointing.max_delay`, default 6.0s). Pinned explicitly so
     the min-floor raise above can never be read as also loosening the
     ceiling; the ceiling is unchanged from the framework default."""
     return _get_float("LILY_STT_MAX_ENDPOINTING_DELAY", 6.0)

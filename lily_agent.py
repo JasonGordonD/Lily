@@ -32,6 +32,7 @@ from livekit.agents import (
     APIConnectionError,
     APIConnectOptions,
     AutoSubscribe,
+    EndpointingOptions,
     InterruptionOptions,
     JobContext,
     RunContext,
@@ -13152,9 +13153,14 @@ async def entrypoint(ctx: JobContext) -> None:
         # ("consider raising min_delay in the endpointing options to
         # accommodate a slow stt", 14:33:18). Ceiling pinned to the framework
         # default; set together with the Speechmatics max_delay (STT-001).
-        min_endpointing_delay=lily_config.stt_min_endpointing_delay(),
-        max_endpointing_delay=lily_config.stt_max_endpointing_delay(),
         turn_handling=TurnHandlingOptions(
+            endpointing=EndpointingOptions(
+                # Preserve the existing FIXED behavior; this is an API
+                # migration, not a Turn Detector/default-mode change.
+                mode="fixed",
+                min_delay=lily_config.stt_min_endpointing_delay(),
+                max_delay=lily_config.stt_max_endpointing_delay(),
+            ),
             interruption=InterruptionOptions(
                 min_words=1,
                 min_duration=lily_config.interruption_min_duration(),
