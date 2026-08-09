@@ -5,6 +5,18 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-2: Multi-intent setup before start
+
+Live `lily-BE8D8B-a19913e2`: "I want to play" won the LLM/tool race while
+the player was still speaking an 18-second voice + adult + pictures + heat +
+age setup turn. A general-picture Q started before setup landed.
+
+**Fix.** A non-exclusive parser records every setup intent before command
+dispatch. `start_blocked_reason()` now blocks on `user_speaking` and
+`setup_pending`. Voice/adult/picture/heat jobs clear only after successful
+tool/state mutations; adult-picture setup cannot activate the general image
+partition. State block lists pending jobs and forbids Round One.
+
 ## 2026-08-09 — P0-1: False clean slate impossible after returner claim
 
 Live regression `lily-BE8D8B-a19913e2`: "I certainly have been on your

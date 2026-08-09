@@ -57,7 +57,18 @@ Spoken-surface freeze before any speech/delivery extract:
   after a false clean-slate / empty-memory claim until one grounded why-beat
   lands; (2) `ambiguous_yes` after an A-or-B offer (ready vs waiting, etc.)
   when the table answers with a bare "yes" / "yes I am" — that answers the
-  choice, not a start. Explicit start language clears the yes-lock.
+  choice, not a start; (3) `setup_pending` while requested voice/adult/media/
+  heat/consent jobs are incomplete; (4) `user_speaking` while VAD says the
+  player is still talking. Explicit start language clears only the yes-lock;
+  it never skips setup.
+- **Multi-intent setup is non-exclusive and precedes Round One.**
+  `lily_parse_lobby_setup_intents()` extracts start, voice, adult, pictures,
+  heat, and age-presence from the same final before any start dispatch.
+  Requested jobs enter a setup ledger and clear only after their real state
+  mutation succeeds. Adult+picture setup does not draw from the general
+  partition while adult/heat tools are pending. The state block lists pending
+  jobs and forbids `lily_begin_round`; VAD blocks the split-final race where
+  "I want to play" is followed immediately by a longer setup utterance.
 - **Outbound speech yields after the first question** except for MC
   deliveries (stem + options). Freeform deliveries and verdict-plus-next
   stacks clip at the first `?`. Undelivered-delivery re-fires wait for

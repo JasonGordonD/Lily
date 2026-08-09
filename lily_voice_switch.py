@@ -192,6 +192,20 @@ async def lily_switch_voice(
         preset,
         target_voice_id,
     )
+    # P0-2: voice setup is complete only after the live TTS mutation
+    # succeeds. Reach the current LilyAgent without importing lily_agent
+    # (avoids a cycle) and clear its game-level setup job.
+    session = getattr(context, "session", None)
+    current_agent = (
+        getattr(session, "current_agent", None)
+        or getattr(session, "agent", None)
+        if session is not None
+        else None
+    )
+    game = getattr(current_agent, "_game", None)
+    mark_applied = getattr(game, "mark_setup_applied", None)
+    if callable(mark_applied):
+        mark_applied("voice")
     return f"switched to {preset}. next turn will use the new voice."
 
 
