@@ -5,6 +5,18 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-D: confirmed identity before Q1
+
+Live `lily-9337B1-331ff234`: “not my first time playing with you” was
+misread as player name `Playing`; that synthetic roster row unlocked Round
+One and later poisoned voiceprint, centroid, memory and standings.
+
+**Fix.** Conversational fallback tokens no longer authorize durable binding.
+Only direct self-identification (“my name is / call me / this is”), a bare
+name, or a biometric name label can bind. Evidence persists beyond the 2s
+fragment window and outranks tool arguments. Production kickoff now blocks
+with `identity_unconfirmed` until one confirmed player exists.
+
 ## 2026-08-09 — P0-C: transcript equals post-TTS truth
 
 Live `lily-9337B1-331ff234`: a `q_6_delivery` conversational model turn was

@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lily_binding import (
     LilyFragmentAccumulator,
+    lily_extract_explicit_name,
     lily_extract_name,
     lily_extract_name_from_fragments,
     lily_is_valid_name,
@@ -50,11 +51,27 @@ def test_stopwords_not_names():
 def test_game_vocabulary_not_names():
     """Expanded stopword list carries the game vocabulary."""
     for phrase in (
-        "Play!", "start", "Ready", "question", "Trivia",
+        "Play!", "playing", "start", "Ready", "question", "Trivia",
         "team", "Skip", "pass", "let's play trivia",
         "ready to start the game",
     ):
         assert lily_extract_name(phrase) is None, phrase
+
+
+def test_9337b1_returner_sentence_never_extracts_playing_as_name():
+    text = (
+        "No, Lily. It's not my first time playing with you tonight. "
+        "And I'm on my own."
+    )
+    assert lily_extract_name(text) is None
+    assert lily_extract_explicit_name(text) is None
+
+
+def test_explicit_name_extractor_requires_self_identification_or_bare_name():
+    assert lily_extract_explicit_name("My name is Rami.") == "Rami"
+    assert lily_extract_explicit_name("You should call me Rami.") == "Rami"
+    assert lily_extract_explicit_name("Rami.") == "Rami"
+    assert lily_extract_explicit_name("We are playing tonight.") is None
 
 
 def test_is_valid_name():

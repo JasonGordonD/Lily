@@ -86,7 +86,7 @@ import lily_speech_delivery
 import lily_stt_tuning
 from lily_binding import (
     LilyFragmentAccumulator,
-    lily_extract_name_from_fragments,
+    lily_extract_explicit_name,
     lily_is_valid_name,
 )
 from lily_reasoning import LilyReasoning
@@ -571,6 +571,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._preemptive_paused = False
 
         self.fragments = LilyFragmentAccumulator()
+        # P0-D 9337B1: only direct self-identification (or a biometric name
+        # label) may create a durable roster row. Persist evidence beyond the
+        # 2s fragment window so LLM/tool latency cannot erase it.
+        self._confirmed_name_evidence: dict[str, str] = {}
+        self._identity_required_before_start = True
         self.rounds_total = lily_config.rounds_total()
         self.sk.questions_per_round = lily_config.questions_per_round()
         self.sk.rounds_total = self.rounds_total
@@ -2604,6 +2609,27 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         """Requested lobby setup not yet committed in code."""
         return set(getattr(self, "_setup_pending", set()) or set())
 
+    def note_confirmed_name_evidence(
+        self, speaker_label: str, player_name: str
+    ) -> None:
+        label = (speaker_label or "").strip().strip("[]")
+        name = (player_name or "").strip()
+        if not label or not lily_is_valid_name(name):
+            return
+        evidence = getattr(self, "_confirmed_name_evidence", None)
+        if evidence is None:
+            evidence = self._confirmed_name_evidence = {}
+        evidence[label] = name
+        logger.info(
+            "LILY_BIND | NAME_EVIDENCE | session=%s label=%s name=%s",
+            self.sk.session_id, label, name,
+        )
+
+    def confirmed_name_for_label(self, speaker_label: str) -> str | None:
+        label = (speaker_label or "").strip().strip("[]")
+        evidence = getattr(self, "_confirmed_name_evidence", None) or {}
+        return evidence.get(label)
+
     def mark_setup_applied(self, *jobs: str) -> None:
         """Clear setup jobs only after their real state mutation succeeds."""
         pending = getattr(self, "_setup_pending", None)
@@ -2716,6 +2742,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return "recognition_dispute"
         if self.ambiguous_yes_blocks_start():
             return "ambiguous_yes"
+        if (
+            getattr(self, "_identity_required_before_start", False)
+            and self.sk.roster_size() < 1
+        ):
+            return "identity_unconfirmed"
         if getattr(self, "_user_speaking", False):
             return "user_speaking"
         if self.pending_setup_jobs():
@@ -9694,6 +9725,16 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "question. Only an explicit resume/continue command clears "
                 "this state."
             )
+        if (
+            getattr(self, "_identity_required_before_start", False)
+            and not getattr(self, "game_started", False)
+            and self.sk.roster_size() < 1
+        ):
+            extra.append(
+                "identity_intake: REQUIRED — no player has confirmed a name. "
+                "Ask one short 'what should I call you?', wait for their own "
+                "answer, bind it, and do not start Round One yet."
+            )
         score_line = self._score_authority_line()
         if score_line:
             extra.append(score_line)
@@ -10619,19 +10660,35 @@ class LilyAgent(Agent):
         """
         label = (speaker_label or "").strip().strip("[]")
         name = (player_name or "").strip()
-        if not lily_is_valid_name(name):
-            # Fragmented-STT fallback: extract from the speaker's 2-second
-            # accumulated fragment window.
-            extracted = lily_extract_name_from_fragments(
-                self._game.fragments, label
+        evidence = self._game.confirmed_name_for_label(label)
+        if evidence is None:
+            # Compatibility fallback for a tool call racing the transcript
+            # event's evidence write; still explicit-only, never the broad
+            # conversational-token extractor.
+            combined = self._game.fragments.combined(label)
+            evidence = lily_extract_explicit_name(combined)
+            if evidence:
+                self._game.note_confirmed_name_evidence(label, evidence)
+        biometric_named_label = (
+            bool(label)
+            and not re.fullmatch(r"S\d+|UU", label)
+            and lily_is_valid_name(label)
+            and label.lower() == name.lower()
+        )
+        if evidence:
+            # The player's own words outrank a model-proposed tool argument.
+            name = evidence
+        elif not biometric_named_label:
+            return (
+                f"Could not bind {label}: no explicit name was confirmed "
+                "for this voice. Ask 'what should I call you?' and wait for "
+                "their own name before binding or starting."
             )
-            if extracted:
-                name = extracted
-            else:
-                return (
-                    f"Could not bind {label}: {player_name!r} does not look "
-                    "like a name. Ask again naturally."
-                )
+        if not lily_is_valid_name(name):
+            return (
+                f"Could not bind {label}: {name!r} does not look like a "
+                "confirmed player name."
+            )
         # Known-name STT snap (live 2026-07-15, the "Romney" class): if the
         # heard name is almost certainly a garbled spelling of a name this
         # group's memory already knows, bind the REMEMBERED spelling —
@@ -10940,6 +10997,12 @@ class LilyAgent(Agent):
                 "The game is STOPPED. Do not open Round One or deliver a "
                 "question. Wait for an explicit resume/continue command."
             )
+        if blocked == "identity_unconfirmed":
+            return (
+                "Hold kickoff — no player has confirmed a name yet. Ask "
+                "'what should I call you?', bind that explicit answer, then "
+                "start. Do not treat a conversational word as a name."
+            )
         if blocked == "recognition_dispute":
             return (
                 "Hold the kickoff — a recognition question is still open. "
@@ -10981,6 +11044,11 @@ class LilyAgent(Agent):
                 return (
                     "The game is STOPPED. Wait for an explicit resume "
                     "before any question."
+                )
+            if blocked == "identity_unconfirmed":
+                return (
+                    "Hold kickoff — get and bind one explicit player name "
+                    "before Round One."
                 )
             if blocked == "recognition_dispute":
                 return (
@@ -13345,7 +13413,14 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         # Fragment accumulator (name extraction) sits BELOW the gate —
         # quarantined stale text never feeds intake name guesses.
-        game.fragments.add(speaker_label or "UU", text)
+        combined_name_fragments = game.fragments.add(
+            speaker_label or "UU", text
+        )
+        explicit_name = lily_extract_explicit_name(combined_name_fragments)
+        if explicit_name:
+            game.note_confirmed_name_evidence(
+                speaker_label or "UU", explicit_name
+            )
         # Intake choreography (self-knowledge WO Task 4): pre-game only,
         # a timestamp overlap between two different voices feeds the
         # ordering-repair note — diarization binding degrades exactly

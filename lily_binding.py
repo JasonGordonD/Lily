@@ -55,8 +55,9 @@ _STOPWORDS = {
     "way", "try", "trying", "start", "stop", "run", "running",
     "mode", "real", "ready", "please", "thanks", "thank",
     # Game vocabulary (Lily extension)
-    "play", "question", "trivia", "team", "skip", "pass",
+    "play", "playing", "question", "trivia", "team", "skip", "pass",
     "game", "round", "point", "points", "answer",
+    "you", "tonight",
 }
 
 _INTRODUCER_RE = re.compile(
@@ -118,6 +119,32 @@ def lily_extract_name(raw: str) -> Optional[str]:
     for token in tokens:
         if lily_is_valid_name(token):
             return token.capitalize()
+    return None
+
+
+def lily_extract_explicit_name(raw: str) -> Optional[str]:
+    """Extract only direct self-identification, never conversational nouns.
+
+    Accepted: introducer forms ("my name is Rami", "call me Rami") or a
+    bare one-token name. This is the durable-binding provenance gate.
+    """
+    text = _strip_diarization_tag(raw or "").strip()
+    if not text:
+        return None
+    tokens_raw = text.split()
+    if (
+        len(tokens_raw) > 1
+        and tokens_raw[0].rstrip(",").lower() in RESERVED_AGENT_NAMES
+    ):
+        text = " ".join(tokens_raw[1:]).lstrip(", ")
+    match = _INTRODUCER_RE.search(text)
+    if match:
+        candidate = match.group(1).strip()
+        if lily_is_valid_name(candidate):
+            return candidate.capitalize()
+    bare = re.fullmatch(r"\s*([a-zA-Z][a-zA-Z'\-]*)[.!?]?\s*", text)
+    if bare and lily_is_valid_name(bare.group(1)):
+        return bare.group(1).capitalize()
     return None
 
 

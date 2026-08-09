@@ -59,8 +59,11 @@ Spoken-surface freeze before any speech/delivery extract:
   when the table answers with a bare "yes" / "yes I am" — that answers the
   choice, not a start; (3) `setup_pending` while requested voice/adult/media/
   heat/consent jobs are incomplete; (4) `user_speaking` while VAD says the
-  player is still talking. Explicit start language clears only the yes-lock;
-  it never skips setup.
+  player is still talking; (5) `identity_unconfirmed` until at least one
+  voice supplies a direct self-identification/bare name or arrives under a
+  verified biometric name label. A conversational token such as `Playing`
+  cannot create a roster row or unlock Q1. Explicit start language clears
+  only the yes-lock; it never skips setup or identity.
 - **Multi-intent setup is non-exclusive and precedes Round One.**
   `lily_parse_lobby_setup_intents()` extracts start, voice, adult, pictures,
   heat, and age-presence from the same final before any start dispatch.
