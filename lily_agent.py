@@ -10685,6 +10685,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 )
                 return False
             self._adult_llm = llm
+            # Y1c: the freshly built adult transport gets the same per-call
+            # cache accounting as the general node.
+            wire = getattr(self, "_llm_metrics_wire", None)
+            if wire is not None:
+                try:
+                    wire(llm)
+                except Exception:
+                    pass
         try:
             update(llm=llm)
         except Exception as e:
@@ -13802,6 +13810,20 @@ async def entrypoint(ctx: JobContext) -> None:
     # end-of-turn) delays double as WO-LILY-STT-001 Q2's incoming-quality
     # signals.
     session_metrics = lily_metrics.LilyMetricsCollector()
+
+    # HOTFIX-007 Y1c: per-call cache accounting off the LLM COMPONENT's
+    # `metrics_collected` (first-class at 1.6.8 — the U3(b) deprecation is
+    # only on the AgentSession-level subscription, still avoided). Only the
+    # per-call LLMMetrics carries prompt_cached_tokens, the number that
+    # proves whether the Y1a static prefix actually cache-hits at Grok.
+    def _wire_llm_metrics(llm) -> None:
+        llm.on(
+            "metrics_collected",
+            lambda m: session_metrics.collect_llm_call(m),
+        )
+
+    _wire_llm_metrics(general_vocal_llm)
+    game._llm_metrics_wire = _wire_llm_metrics
 
     @session.on("session_usage_updated")
     def _on_session_usage(ev) -> None:

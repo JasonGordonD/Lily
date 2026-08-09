@@ -5,6 +5,34 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y1c: per-call LLM cache metrics (measure before touching)
+
+**Archaeology (mandate rule 0):** U3(b) built LilyMetricsCollector on the
+blessed surfaces (per-turn ChatMessage.metrics + session_usage_updated) —
+but the per-turn report carries NO token counts and the usage rollup is
+cumulative-only, so nothing could answer "did THIS call cache-hit?" The
+per-call LLMMetrics (prompt_cached_tokens, ttft, request_id, speech_id)
+is emitted by the LLM COMPONENT's `metrics_collected` — first-class at
+1.6.8; the deprecation U3(b) dodged is only the AgentSession-level
+subscription, which stays avoided (pinned by test). **What changed:**
+`collect_llm_call()` folds into the EXISTING collector (no new module, no
+new layer); one INFO line per call (`LILY_METRICS | LLM_CALL |
+request/speech/ttft_ms/prompt/cached/hit%/completion/cancelled`); summary
+gains an `llm_cache` block (calls, totals, hit rate, per-call TTFT
+p50/p95) in the session report + heartbeat. Wired on the general vocal
+node at session build and on the adult transport at swap-in.
+
+**Why it gates everything after it:** Y1b's claim (static prefix →
+prefix-cache hits at Grok) and Y2's settle-vs-volatile-split decision
+both close on these numbers, per the mandate's "measurement closes on
+traces/metrics, never transcript rows."
+
+**Deletions:** none. **Net addition declared:** one collector method +
+summary block + 2 wires + 5 tests. Suite 1992 → 1997 green.
+
+Mandate numbers: lily_agent.py 14,724 lines; prompt ~8,880 tokens; main
+tip `1e1c192`; deployed `1e1c192`.
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 Y1a: system prompt XML-sectioned, assembly pinned static
 
 **Archaeology (mandate rule 0):** the prompt was one flat markdown file

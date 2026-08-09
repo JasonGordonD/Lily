@@ -1,0 +1,88 @@
+"""Y1c (WO-LILY-HOTFIX-007) — per-call LLM cache metrics, pinned.
+
+Y1's verify clause requires "cache hit rate logged per call" so the Y1a
+static-prefix restructure can be MEASURED, not asserted. The per-turn
+MetricsReport (blessed U3(b) surface) carries no token counts; only the
+LLM component's per-call LLMMetrics has prompt_cached_tokens. The
+component-level `metrics_collected` event is first-class at 1.6.8 — the
+deprecation the U3(b) audit flagged is the AgentSession-level
+subscription, which stays avoided (pinned below).
+"""
+
+import inspect
+import logging
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import lily_agent
+from lily_metrics import LilyMetricsCollector
+
+
+def _call(prompt, cached, completion=50, ttft=1.2, request_id="req_1"):
+    return SimpleNamespace(
+        prompt_tokens=prompt,
+        prompt_cached_tokens=cached,
+        completion_tokens=completion,
+        ttft=ttft,
+        request_id=request_id,
+        speech_id="speech_1",
+        cancelled=False,
+    )
+
+
+def test_cache_hit_rate_and_totals():
+    c = LilyMetricsCollector()
+    c.collect_llm_call(_call(10000, 8000, ttft=1.0))
+    c.collect_llm_call(_call(10000, 0, ttft=3.0))
+    cache = c.summary()["llm_cache"]
+    assert cache["calls"] == 2
+    assert cache["prompt_tokens"] == 20000
+    assert cache["cached_tokens"] == 8000
+    assert cache["cache_hit_rate"] == 0.4
+    assert cache["calls_with_cache_hit"] == 1
+    assert cache["ttft_ms_p50"] == 1000.0
+    assert cache["ttft_ms_p95"] == 3000.0
+
+
+def test_per_call_log_line_carries_the_numbers(caplog):
+    c = LilyMetricsCollector()
+    with caplog.at_level(logging.INFO, logger="lily_metrics"):
+        c.collect_llm_call(_call(9000, 8100, ttft=0.9, request_id="req_x"))
+    line = next(r.message for r in caplog.records if "LLM_CALL" in r.message)
+    assert "request=req_x" in line
+    assert "prompt=9000" in line
+    assert "cached=8100" in line
+    assert "hit=90.0%" in line
+    assert "ttft_ms=900.0" in line
+
+
+def test_no_calls_means_no_llm_cache_section():
+    assert "llm_cache" not in LilyMetricsCollector().summary()
+
+
+def test_garbage_never_raises():
+    c = LilyMetricsCollector()
+    c.collect_llm_call(None)
+    c.collect_llm_call(object())
+    c.collect_llm_call({"prompt_tokens": "not_a_number"})
+    # The object() call folds as a zero-token call; nothing raised is the pin.
+    assert c.summary().get("llm_cache", {}).get("cached_tokens", 0) == 0
+
+
+def test_wiring_is_component_level_on_both_transports():
+    """Source pins: the general node is wired at session build, the adult
+    node at swap-in, and the DEPRECATED session-level subscription is still
+    never used."""
+    src = inspect.getsource(lily_agent)
+    assert src.count('_wire_llm_metrics(general_vocal_llm)') == 1
+    # Adult swap-in re-uses the same wire via the game handle.
+    assert '_llm_metrics_wire' in src
+    enter_src = inspect.getsource(lily_agent.LilyGame.enter_adult_vocal)
+    assert '_llm_metrics_wire' in enter_src
+    # U3(b) stays honored: no AgentSession-level metrics subscription.
+    assert 'session.on("metrics_collected"' not in src
+    assert "session.on('metrics_collected'" not in src

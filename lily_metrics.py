@@ -64,6 +64,16 @@ class LilyMetricsCollector:
         self._turns = 0
         # Cumulative usage (latest session_usage_updated snapshot)
         self._usage = None
+        # Per-CALL LLM cache accounting (HOTFIX-007 Y1c). Distinct from the
+        # per-turn report above: a turn can hide several calls (preemptive
+        # regenerations, tool follow-ups), and only the per-call LLMMetrics
+        # carries prompt_cached_tokens — the number that says whether the
+        # Y1a static prefix is actually being served from Grok's cache.
+        self._llm_calls = 0
+        self._llm_prompt_tokens = 0
+        self._llm_cached_tokens = 0
+        self._llm_calls_with_hit = 0
+        self._llm_call_ttft = []
 
     def collect_turn(self, report) -> None:
         """Fold one ChatMessage.metrics (a MetricsReport dict; total=False so
@@ -97,6 +107,41 @@ class LilyMetricsCollector:
             self._turns += 1
         except Exception as e:
             logger.warning("LILY_METRICS | TURN_SKIPPED | %s", e)
+
+    def collect_llm_call(self, m) -> None:
+        """Fold one per-call LLMMetrics from the LLM COMPONENT's
+        `metrics_collected` event (HOTFIX-007 Y1c). The component-level
+        event is first-class at 1.6.8 — the deprecation the U3(b) audit
+        flagged is only on AgentSession.on("metrics_collected"), which we
+        still avoid. Emits one INFO line per call so a live session's log
+        answers "is the prompt prefix cache-hitting?" without a redeploy."""
+        if m is None:
+            return
+        try:
+            g = m.get if isinstance(m, dict) else (
+                lambda k, d=None: getattr(m, k, d)
+            )
+            prompt = int(g("prompt_tokens") or 0)
+            cached = int(g("prompt_cached_tokens") or 0)
+            completion = int(g("completion_tokens") or 0)
+            ttft = g("ttft")
+            self._llm_calls += 1
+            self._llm_prompt_tokens += prompt
+            self._llm_cached_tokens += cached
+            if cached > 0:
+                self._llm_calls_with_hit += 1
+            if isinstance(ttft, (int, float)) and ttft > 0:
+                self._llm_call_ttft.append(ttft)
+            hit = (100.0 * cached / prompt) if prompt else 0.0
+            logger.info(
+                "LILY_METRICS | LLM_CALL | request=%s speech=%s ttft_ms=%s "
+                "prompt=%d cached=%d hit=%.1f%% completion=%d cancelled=%s",
+                g("request_id") or "-", g("speech_id") or "-",
+                _ms(ttft) if isinstance(ttft, (int, float)) else "-",
+                prompt, cached, hit, completion, bool(g("cancelled")),
+            )
+        except Exception as e:
+            logger.warning("LILY_METRICS | LLM_CALL_SKIPPED | %s", e)
 
     def collect_session_usage(self, usage) -> None:
         """Store the latest `session_usage_updated` rollup. `usage` is an
@@ -163,4 +208,18 @@ class LilyMetricsCollector:
             }
         if self._usage is not None:
             out["usage"] = self._usage
+        if self._llm_calls:
+            cache = {
+                "calls": self._llm_calls,
+                "prompt_tokens": self._llm_prompt_tokens,
+                "cached_tokens": self._llm_cached_tokens,
+                "cache_hit_rate": round(
+                    self._llm_cached_tokens / self._llm_prompt_tokens, 4
+                ) if self._llm_prompt_tokens else 0.0,
+                "calls_with_cache_hit": self._llm_calls_with_hit,
+            }
+            if self._llm_call_ttft:
+                cache["ttft_ms_p50"] = _ms(_pct(self._llm_call_ttft, 50))
+                cache["ttft_ms_p95"] = _ms(_pct(self._llm_call_ttft, 95))
+            out["llm_cache"] = cache
         return out
