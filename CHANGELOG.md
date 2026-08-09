@@ -5,6 +5,229 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 wave-1 review: findings fixed (nothing waved through)
+
+Independent adversarial review of the five wave-1 commits (b0da435,
+46b2f42, 76dc872, 32eb2d6, 377f69d) against the installed framework
+source. Verdicts: Y1a/Y1c/Y2/Y3 PASS (Y1a's byte-preservation and the
+Y1c framework claims re-verified independently); **Y4 FAILED as a
+reliable gate** and is fixed here:
+
+**HIGH (fixed):** LLMMetrics.speech_id is None at emit time — the
+framework's sibling subscriber on the SAME emitter stamps it in place,
+and rtc.EventEmitter keeps subscribers in a set, so ordering vs Lily's
+handler was an address-hash coin flip: ~50% of sessions would have
+silently produced NO per-turn grouping (indistinguishable from "no
+multi-call turns"). Fix: `collect_llm_call_soon` defers the fold one
+event-loop tick (call_soon runs after the whole emit pass, so the stamp
+always lands first); race reproduced and pinned in test.
+
+**MEDIUM (covered + documented):** the Y2 `invalidated` counter sees
+only the equivalence-mismatch warning — the framework's ~8 other
+preemptive-discard sites (interruptions, pauses) are silent. That is
+the RIGHT number for the settle-vs-split decision (it isolates
+context-churn invalidation), and the interrupt-path waste now surfaces
+separately as `cancelled_calls` in the llm_cache block. Docstring
+states the full contract.
+
+**LOW (fixed):** all-empty payloads no longer fold as zero-token calls
+(denominator inflation). **LOW (documented):** `used` reads 0 at the
+production INFO log level — decision closes on `invalidated` +
+`cancelled_calls`, which are always counted. **Nit (recorded):**
+b0da435's message says "nine sections"; 7 were added, 2 pre-existed.
+
+**Deletions:** none. Suite 2008 → 2011 green.
+
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y3: conversation history bounded (framework truncate, wired)
+
+**Archaeology (mandate rule 0):** nothing anywhere trimmed the chat
+context — a long session grew the prompt without limit (live evidence:
+134,357 input tokens against 42,368 cached; the operator's "why is it
+115k for a trivia agent"). The framework already ships the mechanism —
+`ChatContext.truncate(max_items=)` keeps the tail, drops orphaned
+function-call items, re-adds the first instruction message — and
+`_apply_context_blocks`' own comment has promised since the anchor fix
+that its blocks get "re-inserted if history trimming ever drops it".
+Y3 is therefore a WIRE, not a mechanism: `_trim_history()` calls the
+framework's truncate under hysteresis watermarks
+(LILY_HISTORY_TRIM_HIGH=120 items → trim to LILY_HISTORY_TRIM_LOW=60;
+0 disables), invoked in on_user_turn_completed on BOTH the turn context
+and the preemptive snapshot, BEFORE block injection (source-order
+pinned).
+
+**Why hysteresis:** a trim slides the provider's cacheable prefix, so it
+must fire rarely in big steps — never per turn. The one-turn preemptive
+invalidation a trim causes is expected and visible in the Y2 counter;
+the token ceiling it buys is visible in the Y1c per-call prompt_tokens.
+Durable truth (memory block, state block, asked-history ledger, scores)
+rides system blocks and the DB — only conversational color ages out.
+
+**Deletions:** none. **Net addition declared:** one method + 2 hook
+lines + 2 config accessors + deploy forwarding + 6 tests (real
+ChatContext fixtures; block re-insertion proven). Suite 2002 → 2008
+green.
+
+Mandate numbers: lily_agent.py 14,765 lines; prompt ~8,880 tokens; main
+tip `1e1c192`; deployed `1e1c192`.
+
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y4 measurement gate: round-trips per spoken turn
+
+**Archaeology (mandate rule 0):** Y1c's per-call log already tags each
+vocal LLM call with its speech_id; nothing aggregated it, so "how many
+serialized calls hide inside one spoken turn" (Y4's target: tool
+follow-ups, regenerations) still needed hand-grepping. The AUTHORING
+lane (lily_reasoning: generate/verify/judge over aiohttp + genai) is a
+different pipeline off the vocal path and is already budget-instrumented
+(prefetch timeout/total-budget) — Y4's serialized-micro-call concern is
+the VOCAL turn, measured here. **What changed:** collect_llm_call groups
+calls by speech_id (bounded, 200 turns); the `llm_cache` summary block
+gains calls_per_turn_p50 / calls_per_turn_max /
+turns_with_multiple_calls. **Deletions:** none. **Net addition
+declared:** ~12 lines in the existing method + 1 test. Suite 2001 →
+2002 green.
+
+With this, ALL THREE phase-1 measurement gates are live: Y1b cache hit
+rate (per call), Y2 invalidation count, Y4 round-trips per turn. The
+next live session on this build closes the Y2/Y3/Y4 design decisions on
+numbers, per the mandate.
+
+Mandate numbers: lily_agent.py 14,725 lines; prompt ~8,880 tokens; main
+tip `1e1c192`; deployed `1e1c192`.
+
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y2 measurement gate: preemptive-outcome counters
+
+**Archaeology (mandate rule 0):** the framework itself already announces
+both preemptive outcomes on its own logger (agent_activity →
+`livekit.agents`): "preemptive generation invalidated ..." at WARNING
+(always emitted) and "using preemptive generation" at DEBUG. Nothing in
+Lily counted them, so the invalidation RATE — the number the Y2
+settle-vs-volatile-split decision closes on — was unmeasurable without
+grepping deploy logs by hand. **What changed:** `attach_preemptive_tap()`
+adds a logging.Filter to that exact logger (no private API, no
+monkeypatch; a Filter observes records and never alters/suppresses them),
+folding counts into the existing collector; summary gains a `preemptive`
+block ({used, invalidated}); each invalidation also logs
+`LILY_METRICS | PREEMPTIVE_INVALIDATED | total=N`. **Honest limit,
+declared:** `used` populates only when the deploy log level allows DEBUG
+— `invalidated` (the decision number) is WARNING and always counted. A
+test pins the matched strings against the INSTALLED framework source so a
+rewording upstream fails loudly instead of the counter reading zero
+forever.
+
+**Decision protocol this enables (Y2):** run the next live session on
+this build, read `invalidated` + the Y1c `llm_cache` hit rate. If
+invalidations are ~0, the volatile-tail split already settled the
+context and Y2's settle-at-turn-boundary variant is unnecessary; if
+they're material, the settle variant gets built and the split DELETED
+per the mandate (one mechanism, not two).
+
+**Deletions:** none. **Net addition declared:** one collector method +
+one wire line + 4 tests. Suite 1997 → 2001 green.
+
+Mandate numbers: lily_agent.py 14,725 lines (14,721 at Y1c — the prior
+entry said 14,724, miscounted by 3); prompt ~8,880 tokens; main tip
+`1e1c192`; deployed `1e1c192`.
+
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y1c: per-call LLM cache metrics (measure before touching)
+
+**Archaeology (mandate rule 0):** U3(b) built LilyMetricsCollector on the
+blessed surfaces (per-turn ChatMessage.metrics + session_usage_updated) —
+but the per-turn report carries NO token counts and the usage rollup is
+cumulative-only, so nothing could answer "did THIS call cache-hit?" The
+per-call LLMMetrics (prompt_cached_tokens, ttft, request_id, speech_id)
+is emitted by the LLM COMPONENT's `metrics_collected` — first-class at
+1.6.8; the deprecation U3(b) dodged is only the AgentSession-level
+subscription, which stays avoided (pinned by test). **What changed:**
+`collect_llm_call()` folds into the EXISTING collector (no new module, no
+new layer); one INFO line per call (`LILY_METRICS | LLM_CALL |
+request/speech/ttft_ms/prompt/cached/hit%/completion/cancelled`); summary
+gains an `llm_cache` block (calls, totals, hit rate, per-call TTFT
+p50/p95) in the session report + heartbeat. Wired on the general vocal
+node at session build and on the adult transport at swap-in.
+
+**Why it gates everything after it:** Y1b's claim (static prefix →
+prefix-cache hits at Grok) and Y2's settle-vs-volatile-split decision
+both close on these numbers, per the mandate's "measurement closes on
+traces/metrics, never transcript rows."
+
+**Deletions:** none. **Net addition declared:** one collector method +
+summary block + 2 wires + 5 tests. Suite 1992 → 1997 green.
+
+Mandate numbers: lily_agent.py 14,724 lines; prompt ~8,880 tokens; main
+tip `1e1c192`; deployed `1e1c192`.
+
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y1a: system prompt XML-sectioned, assembly pinned static
+
+**Archaeology (mandate rule 0):** the prompt was one flat markdown file
+plus a loader-level rubric append (WO-LILY-AUDEERING-001 Task 3) — no
+prior sectioning attempt existed to consolidate; this is structure over
+existing text, not a new mechanism. **What changed:** prompts/
+lily_system.txt is now nine top-level XML sections in canonical order
+(identity → voice → game_rules → state → tools → memory →
+self_knowledge → tts_guidelines → voice_output; the last two already
+existed as tags and were kept top-level, not nested). One relocation:
+"## HOW A QUESTION RUNS" moved before "## YOUR TABLE STATE" inside
+game_rules so procedure precedes state-legend (static-first ordering,
+Y1's cacheable-prefix goal). All interior directive text byte-preserved —
+Y12's 83 character pins prove no directive changed. prompts/
+layer_lily_adult.md wrapped in `<adult_layer>` (the `# ADULT MODE`
+dedup marker preserved inside). The loader's rubric append now wraps the
+audeering rubric in `<room_read>` so the assembled prompt is fully
+sectioned end-to-end.
+
+**Static-assembly proof (Y1 verify clause):** the assembly is exactly
+static-file text + import-time rubric constant — byte-identical across
+turns by construction. tests/test_prompt_structure.py pins it: sections
+present/balanced/ordered, adult layer tagged with marker intact,
+assembled prompt == file + tagged rubric (the equality IS the stability
+proof), room_read appears exactly once, rebuild == module constant.
+
+**Deletions:** none. **Net addition declared:** structure tags only
+(~40 tag lines across two prompt files) + 6 structure tests; no
+directive text added or removed. Honest cost: assembled prompt grows
+8,400 → ~8,880 tokens (35,533 chars) from tag overhead — the buy is
+addressable sections for the Y12-gated prompt audit and a provably
+static cacheable prefix (Y1b measures the hit rate once Y1c
+instrumentation lands).
+
+Mandate numbers: lily_agent.py 14,699 lines (+comment lines only);
+prompt ~8,880 tokens (was 8,400 — tag overhead, declared above); main
+tip `1e1c192`; deployed `1e1c192`. Suite 1987 → 1992 green.
+
+## 2026-08-09 — WO-LILY-HOTFIX-007 wave 1: Y5 transcript truth (diagnosis inverted), Y11 canon draft
+
+**Y5 archaeology (mandate rule 0):** the mechanism the WO asked for already
+exists and is correct by construction — the one-question yield clip runs in
+tts_node BEFORE synthesis, the clipped text binds to the speech handle
+(note_post_tts_text), that exact text synthesizes, and playout consumes the
+binding for both transcripts (P0-C). What failed was OBSERVABILITY: the
+consume log was named `POST_TTS_REWRITE`, which reads as post-hoc
+falsification when it in fact corrects the record TOWARD the TTS input
+(the "raw" it replaces is the model's pre-clip prose, which never aired).
+That name sent a day of transcript analysis the wrong way. Renamed to
+`RECORD_BOUND_TO_TTS_INPUT` (info level, with lengths). The audio-vs-record
+divergence in the evidence session is therefore most plausibly Y6
+cross-turn interleaving (audio of turn A read against the DB row of
+re-asked turn B) — flagged for re-verification against speech_ids + audio.
+**Deletions:** none — the claimed post-hoc rewrite path does not exist as
+diagnosed. **Net addition:** tests only (tests/test_transcript_truth.py:
+source-order pin trim→bind→synthesis; record==TTS-input; one-shot binding;
+fallback). **Documented limit (Y7's scope):** with text_output=False there
+is no transcript synchronizer, so no text source knows the aired portion
+of an INTERRUPTED turn — "…[cut off]" is the honest partial-airing marker;
+audio stays the only ground truth there.
+
+**Y11:** docs/HOST_CANON_DRAFT.md — host-first canon draft around the
+approved spine, explicit PRESERVED section (wit/warmth/timing/callbacks/
+v3 audio tags quoted from the live prompt), and a 7-row conflict table.
+Key finding: the push mandate lives mostly in CODE, not the prompt
+(responsiveness budget 3.0s, the M1 silence gate, speak-by-default) —
+FLOOR-001's restraint counterweight remains unbuilt (Y10). DRAFT —
+operator approval required; nothing installed.
+
+Mandate numbers: lily_agent.py 14,659 → 14,670 lines (log rename +
+contract comment); prompt 8,400 tokens unchanged; suite 1900 → 1904.
+
 ## 2026-08-09 — lily-A070E8: the name-fix death spiral and the repeat storm
 
 Live 11:03 UTC. STT heard "Robin" for Rami; the fix exchange then bound

@@ -109,7 +109,13 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 # untouched.
 LILY_SYSTEM_PROMPT = (
     (_PROMPTS_DIR / "lily_system.txt").read_text(encoding="utf-8")
-    + lily_audeering_consumers.lily_audeering_rubric_block()
+    # Y1a: the appended rubric is its own addressable section, same as
+    # every section in the file. Both inputs are static files/constants —
+    # the assembled system prompt is byte-identical every turn by
+    # construction (the cacheable prefix, Y1b).
+    + "\n<room_read>\n"
+    + lily_audeering_consumers.lily_audeering_rubric_block().strip("\n")
+    + "\n</room_read>\n"
 )
 LILY_ADULT_LAYER = (_PROMPTS_DIR / "layer_lily_adult.md").read_text(encoding="utf-8")
 _ADULT_LAYER_MARKER = "# ADULT MODE"
@@ -2165,10 +2171,20 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if final is None:
             return (fallback or "").strip()
         if final != (fallback or "").strip():
-            logger.warning(
-                "LILY_TRANSCRIPT | POST_TTS_REWRITE | session=%s "
-                "speech_id=%s raw=%r final=%r",
+            # Y5 (WO-LILY-HOTFIX-007): this is NOT a post-hoc rewrite of
+            # aired speech — it is the record being bound TO the exact text
+            # that entered TTS (P0-C), after every pre-synthesis clip and
+            # substitution. The old tag POST_TTS_REWRITE read as
+            # falsification and sent a whole day of transcript analysis
+            # the wrong way; the raw text here is the model's PRE-clip
+            # prose, which never aired. The record follows aired truth by
+            # construction: clip (tts_node) -> note_post_tts_text ->
+            # synthesis of that same text -> this consume at playout.
+            logger.info(
+                "LILY_TRANSCRIPT | RECORD_BOUND_TO_TTS_INPUT | session=%s "
+                "speech_id=%s raw_len=%d final_len=%d raw=%r final=%r",
                 self.sk.session_id, speech_id,
+                len((fallback or "").strip()), len(final),
                 (fallback or "")[:160], final[:160],
             )
         return final
@@ -10669,6 +10685,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 )
                 return False
             self._adult_llm = llm
+            # Y1c: the freshly built adult transport gets the same per-call
+            # cache accounting as the general node.
+            wire = getattr(self, "_llm_metrics_wire", None)
+            if wire is not None:
+                try:
+                    wire(llm)
+                except Exception:
+                    pass
         try:
             update(llm=llm)
         except Exception as e:
@@ -12042,6 +12066,43 @@ class LilyAgent(Agent):
             )
         )
 
+    def _trim_history(self, chat_ctx) -> None:
+        """Y3 (HOTFIX-007): bound conversation-history growth. Archaeology:
+        nothing ever trimmed the chat context — a long session grew the
+        prompt without limit (live: 134k input tokens on a trivia game).
+        The framework already ships the mechanism (ChatContext.truncate:
+        keeps the tail, drops orphaned function calls, re-adds the first
+        instruction message) — this is a WIRE to it, not a new layer.
+
+        Hysteresis by design: trimming slides the provider's cacheable
+        prefix, so it fires in rare big steps (high -> low watermarks),
+        never per turn. The injected system blocks (adult/memory/state)
+        are re-inserted by _apply_context_blocks immediately after every
+        trim site, exactly as its comment always promised. The one-turn
+        preemptive invalidation a trim causes is expected and visible in
+        the Y2 counter."""
+        high = lily_config.history_trim_high()
+        if high <= 0:
+            return  # disabled
+        truncate = getattr(chat_ctx, "truncate", None)
+        items = _chat_items(chat_ctx)
+        if not callable(truncate) or len(items) <= high:
+            return
+        low = min(lily_config.history_trim_low(), high)
+        before = len(items)
+        try:
+            truncate(max_items=low)
+        except Exception:
+            logger.exception(
+                "LILY_CTX | HISTORY_TRIM_FAILED — turn proceeds untrimmed"
+            )
+            return
+        logger.info(
+            "LILY_CTX | HISTORY_TRIMMED | items %d -> %d (high=%d low=%d) — "
+            "one preemptive invalidation expected this turn",
+            before, len(_chat_items(chat_ctx)), high, low,
+        )
+
     # -- node overrides ------------------------------------------------------------
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
@@ -12101,6 +12162,11 @@ class LilyAgent(Agent):
             )
         try:
             context_now = time.time()
+            # Y3: trim BEFORE block injection so a trim can never drop a
+            # block that was just injected; both ctxs trim on the same
+            # watermarks so the next equivalence check compares like shapes.
+            self._trim_history(turn_ctx)
+            self._trim_history(self._chat_ctx)
             self._apply_context_blocks(
                 turn_ctx, now=context_now
             )  # this turn sees FINAL context
@@ -12643,6 +12709,20 @@ class LilyAgent(Agent):
         ):
             self._reair_regen_pending = True
             speech_id = _current_speech_id()
+            # Guard-map chain D fix (HOTFIX-007): this early return never
+            # airs, so the handle MUST be marked suppressed — otherwise it
+            # finishes "clean" and records its never-aired text into
+            # agent_turns/transcripts as said, polluting her context and
+            # the dedupe lint window (the falsified-record path that made
+            # zero of 34 live duplicates reachable by either guard).
+            if speech_id:
+                suppressed_ids = getattr(
+                    self._game, "_suppressed_speech_ids", None
+                )
+                if suppressed_ids is None:
+                    self._game._suppressed_speech_ids = set()
+                    suppressed_ids = self._game._suppressed_speech_ids
+                suppressed_ids.add(speech_id)
             released = (
                 self._game.say_registry.release_owner(speech_id)
                 if speech_id
@@ -12684,6 +12764,16 @@ class LilyAgent(Agent):
             # exempt (a barged question is re-read verbatim on purpose).
             self._reair_regen_pending = False
             speech_id = _current_speech_id()
+            # Guard-map chain D fix: mark suppressed so the silent turn is
+            # never recorded as said (see the regen-gate note above).
+            if speech_id:
+                suppressed_ids = getattr(
+                    self._game, "_suppressed_speech_ids", None
+                )
+                if suppressed_ids is None:
+                    self._game._suppressed_speech_ids = set()
+                    suppressed_ids = self._game._suppressed_speech_ids
+                suppressed_ids.add(speech_id)
             released = (
                 self._game.say_registry.release_owner(speech_id)
                 if speech_id
@@ -13762,6 +13852,28 @@ async def entrypoint(ctx: JobContext) -> None:
     # end-of-turn) delays double as WO-LILY-STT-001 Q2's incoming-quality
     # signals.
     session_metrics = lily_metrics.LilyMetricsCollector()
+
+    # HOTFIX-007 Y1c: per-call cache accounting off the LLM COMPONENT's
+    # `metrics_collected` (first-class at 1.6.8 — the U3(b) deprecation is
+    # only on the AgentSession-level subscription, still avoided). Only the
+    # per-call LLMMetrics carries prompt_cached_tokens, the number that
+    # proves whether the Y1a static prefix actually cache-hits at Grok.
+    def _wire_llm_metrics(llm) -> None:
+        # collect_llm_call_soon, not collect_llm_call: the framework's
+        # sibling subscriber stamps speech_id onto the event in place, and
+        # emitter subscriber order is a coin flip — the deferred fold
+        # always sees the stamp (wave-1 review, HIGH finding).
+        llm.on(
+            "metrics_collected",
+            lambda m: session_metrics.collect_llm_call_soon(m),
+        )
+
+    _wire_llm_metrics(general_vocal_llm)
+    game._llm_metrics_wire = _wire_llm_metrics
+    # Y2 measurement gate: count the framework's preemptive-invalidation
+    # warnings (and, when debug is on, the used-lines) off its own logger.
+    # The settle-vs-volatile-split decision closes on this number.
+    session_metrics.attach_preemptive_tap()
 
     @session.on("session_usage_updated")
     def _on_session_usage(ev) -> None:

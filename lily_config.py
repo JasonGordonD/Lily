@@ -141,6 +141,23 @@ def prefetch_total_budget_seconds() -> float:
     return max(10.0, _get_float("LILY_PREFETCH_TOTAL_BUDGET_SECONDS", 45.0))
 
 
+def history_trim_high() -> int:
+    """Conversation-history watermark (HOTFIX-007 Y3): when the chat
+    context exceeds this many items, it is trimmed down to
+    history_trim_low(). Hysteresis on purpose — trimming slides the
+    provider's cacheable prefix, so it must fire RARELY (big steps), not
+    every turn. 0 disables trimming entirely."""
+    return max(0, _get_int("LILY_HISTORY_TRIM_HIGH", 120))
+
+
+def history_trim_low() -> int:
+    """Item count a trim reduces the history TO. Durable truth (memory
+    block, state block, asked-history no-repeat ledger) rides system
+    blocks and the DB — the conversational tail only needs recent
+    color."""
+    return max(10, _get_int("LILY_HISTORY_TRIM_LOW", 60))
+
+
 def reasoning_model() -> str:
     return "grok-4.5"
 

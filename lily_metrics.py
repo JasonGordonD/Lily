@@ -25,6 +25,7 @@ Duck-typed and fully defensive — a missing key or unexpected shape is
 skipped, never raised, so a metrics hiccup can't touch a live session.
 """
 
+import asyncio
 import logging
 
 logger = logging.getLogger("lily_metrics")
@@ -64,6 +65,28 @@ class LilyMetricsCollector:
         self._turns = 0
         # Cumulative usage (latest session_usage_updated snapshot)
         self._usage = None
+        # Per-CALL LLM cache accounting (HOTFIX-007 Y1c). Distinct from the
+        # per-turn report above: a turn can hide several calls (preemptive
+        # regenerations, tool follow-ups), and only the per-call LLMMetrics
+        # carries prompt_cached_tokens — the number that says whether the
+        # Y1a static prefix is actually being served from Grok's cache.
+        self._llm_calls = 0
+        self._llm_prompt_tokens = 0
+        self._llm_cached_tokens = 0
+        self._llm_calls_with_hit = 0
+        self._llm_cancelled = 0
+        self._llm_call_ttft = []
+        # Preemptive-generation outcomes (HOTFIX-007 Y2 measurement gate).
+        # Counted off the framework's own log lines via a Filter tap —
+        # "invalidated" is a WARNING (always emitted); "using" is DEBUG, so
+        # `used` only populates when the deploy log level allows debug.
+        # The Y2 settle-vs-split decision closes on `invalidated`.
+        self._preemptive_used = 0
+        self._preemptive_invalidated = 0
+        # Round-trips per spoken turn (HOTFIX-007 Y4 measurement gate):
+        # calls grouped by speech_id — >1 means tool follow-ups / regens
+        # serialized inside one turn. Bounded ring of recent speech ids.
+        self._llm_calls_by_speech = {}  # insertion-ordered; oldest evicted
 
     def collect_turn(self, report) -> None:
         """Fold one ChatMessage.metrics (a MetricsReport dict; total=False so
@@ -97,6 +120,114 @@ class LilyMetricsCollector:
             self._turns += 1
         except Exception as e:
             logger.warning("LILY_METRICS | TURN_SKIPPED | %s", e)
+
+    def collect_llm_call_soon(self, m) -> None:
+        """Fold one per-call LLMMetrics, DEFERRED one event-loop tick
+        (wave-1 review finding, HIGH): the framework's own subscriber on
+        the same emitter stamps speech_id onto the event IN PLACE
+        (agent_activity._on_metrics_collected), and rtc.EventEmitter keeps
+        subscribers in a SET — whether our handler runs before or after
+        the stamp is an address-hash coin flip (~50% of sessions would
+        silently lose all per-turn grouping). call_soon runs after the
+        whole emit pass, so the stamp always lands first. Falls back to an
+        immediate fold when no loop is running (tests, teardown)."""
+        try:
+            asyncio.get_running_loop().call_soon(self.collect_llm_call, m)
+        except RuntimeError:
+            self.collect_llm_call(m)
+
+    def collect_llm_call(self, m) -> None:
+        """Fold one per-call LLMMetrics from the LLM COMPONENT's
+        `metrics_collected` event (HOTFIX-007 Y1c). The component-level
+        event is first-class at 1.6.8 — the deprecation the U3(b) audit
+        flagged is only on AgentSession.on("metrics_collected"), which we
+        still avoid. Emits one INFO line per call so a live session's log
+        answers "is the prompt prefix cache-hitting?" without a redeploy."""
+        if m is None:
+            return
+        try:
+            g = m.get if isinstance(m, dict) else (
+                lambda k, d=None: getattr(m, k, d)
+            )
+            prompt = int(g("prompt_tokens") or 0)
+            cached = int(g("prompt_cached_tokens") or 0)
+            completion = int(g("completion_tokens") or 0)
+            ttft = g("ttft")
+            # An all-empty payload is not a call (review finding: garbage
+            # objects were folding as zero-token calls, inflating the
+            # denominator).
+            if not (prompt or cached or completion or g("request_id")):
+                return
+            self._llm_calls += 1
+            if g("cancelled"):
+                # Speculative/interrupted work thrown away after reaching
+                # a first token — the interrupt-path waste the preemptive
+                # `invalidated` counter structurally cannot see.
+                self._llm_cancelled += 1
+            self._llm_prompt_tokens += prompt
+            self._llm_cached_tokens += cached
+            if cached > 0:
+                self._llm_calls_with_hit += 1
+            if isinstance(ttft, (int, float)) and ttft > 0:
+                self._llm_call_ttft.append(ttft)
+            speech = g("speech_id")
+            if speech:
+                by = self._llm_calls_by_speech
+                by[speech] = by.get(speech, 0) + 1
+                while len(by) > 200:
+                    by.pop(next(iter(by)))
+            hit = (100.0 * cached / prompt) if prompt else 0.0
+            logger.info(
+                "LILY_METRICS | LLM_CALL | request=%s speech=%s ttft_ms=%s "
+                "prompt=%d cached=%d hit=%.1f%% completion=%d cancelled=%s",
+                g("request_id") or "-", g("speech_id") or "-",
+                _ms(ttft) if isinstance(ttft, (int, float)) else "-",
+                prompt, cached, hit, completion, bool(g("cancelled")),
+            )
+        except Exception as e:
+            logger.warning("LILY_METRICS | LLM_CALL_SKIPPED | %s", e)
+
+    def attach_preemptive_tap(self, logger_name: str = "livekit.agents"):
+        """Count the framework's preemptive-generation outcomes off its own
+        log records (HOTFIX-007 Y2 measurement gate). A logging.Filter on
+        the EXACT logger agent_activity logs through — no framework private
+        API touched, nothing monkeypatched, and a Filter cannot flood or
+        reformat anything (it only observes records already being logged).
+
+        Reliability contract, stated honestly (wave-1 review): "preemptive
+        generation invalidated" is a WARNING and is always counted — but it
+        covers ONLY the equivalence-mismatch path at turn commit, which is
+        exactly the number the Y2 settle-vs-split decision needs. The
+        framework's ~8 other _cancel_preemptive_generation sites
+        (interruptions, pauses, agent switch) discard silently; that
+        interrupt-path waste shows up instead as cancelled_calls in the
+        llm_cache block. "using preemptive generation" is DEBUG and only
+        counts when the deploy log level allows debug records (at the
+        production INFO level it reads 0). Returns the filter so a
+        caller/test can detach it."""
+        collector = self
+
+        class _PreemptiveOutcomeFilter(logging.Filter):
+            def filter(self, record):
+                try:
+                    msg = record.getMessage()
+                    if "preemptive generation invalidated" in msg:
+                        collector._preemptive_invalidated += 1
+                        logger.warning(
+                            "LILY_METRICS | PREEMPTIVE_INVALIDATED | "
+                            "total=%d — speculative reply discarded at turn "
+                            "commit (context/transcript/tools changed)",
+                            collector._preemptive_invalidated,
+                        )
+                    elif "using preemptive generation" in msg:
+                        collector._preemptive_used += 1
+                except Exception:
+                    pass
+                return True
+
+        f = _PreemptiveOutcomeFilter()
+        logging.getLogger(logger_name).addFilter(f)
+        return f
 
     def collect_session_usage(self, usage) -> None:
         """Store the latest `session_usage_updated` rollup. `usage` is an
@@ -163,4 +294,31 @@ class LilyMetricsCollector:
             }
         if self._usage is not None:
             out["usage"] = self._usage
+        if self._llm_calls:
+            cache = {
+                "calls": self._llm_calls,
+                "prompt_tokens": self._llm_prompt_tokens,
+                "cached_tokens": self._llm_cached_tokens,
+                "cache_hit_rate": round(
+                    self._llm_cached_tokens / self._llm_prompt_tokens, 4
+                ) if self._llm_prompt_tokens else 0.0,
+                "calls_with_cache_hit": self._llm_calls_with_hit,
+                "cancelled_calls": self._llm_cancelled,
+            }
+            if self._llm_call_ttft:
+                cache["ttft_ms_p50"] = _ms(_pct(self._llm_call_ttft, 50))
+                cache["ttft_ms_p95"] = _ms(_pct(self._llm_call_ttft, 95))
+            if self._llm_calls_by_speech:
+                per_turn = list(self._llm_calls_by_speech.values())
+                cache["calls_per_turn_p50"] = _pct(per_turn, 50)
+                cache["calls_per_turn_max"] = max(per_turn)
+                cache["turns_with_multiple_calls"] = sum(
+                    1 for n in per_turn if n > 1
+                )
+            out["llm_cache"] = cache
+        if self._preemptive_used or self._preemptive_invalidated:
+            out["preemptive"] = {
+                "used": self._preemptive_used,
+                "invalidated": self._preemptive_invalidated,
+            }
         return out
