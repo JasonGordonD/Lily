@@ -37,6 +37,7 @@ from google.genai import types as genai_types
 
 import lily_config
 import lily_evaluation
+import lily_gemini_safety
 # Web tools + image pipeline (WO-LILY-OMNIBUS-002): lily_search and
 # lily_imagegen are REASONING-NODE-ONLY — this module is their one legal
 # consumer seam. The vocal node (lily_agent) must never import them; web
@@ -136,24 +137,7 @@ def _lily_extract_responses_text(data) -> str:
 
 # Adult-product context (§11.1): explicit safety settings on every call —
 # an unconfigured node goes mute mid-innuendo-round with zero diagnostics.
-_SAFETY_SETTINGS = [
-    genai_types.SafetySetting(
-        category=genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    genai_types.SafetySetting(
-        category=genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    genai_types.SafetySetting(
-        category=genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    genai_types.SafetySetting(
-        category=genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-]
+_SAFETY_SETTINGS = lily_gemini_safety.lily_gemini_safety_settings()
 
 # Structured output (2026-07-14 P1 fix: QUESTION_PARSE_FAILED -> PREFETCH_FAILED):
 # every generation/verification call pins BOTH response_mime_type="application/json"

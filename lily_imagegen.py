@@ -51,6 +51,7 @@ from google import genai as google_genai
 from google.genai import types as genai_types
 
 import lily_config
+import lily_gemini_safety
 import lily_images
 import lily_search
 
@@ -397,11 +398,16 @@ async def lily_generate_image_bytes(
         return await _generate_image_bytes_xai(styled, model=model)
     mdl = model or lily_config.imagegen_model()
     clamped = clamp_and_log(aspect_ratio)
-    config = None
-    if clamped != "auto":
-        config = genai_types.GenerateContentConfig(
-            image_config=genai_types.ImageConfig(aspect_ratio=clamped)
+    config_kwargs = {
+        "safety_settings": (
+            lily_gemini_safety.lily_gemini_safety_settings()
         )
+    }
+    if clamped != "auto":
+        config_kwargs["image_config"] = genai_types.ImageConfig(
+            aspect_ratio=clamped
+        )
+    config = genai_types.GenerateContentConfig(**config_kwargs)
     client = google_genai.Client(api_key=api_key or lily_config.google_api_key())
     response = await asyncio.wait_for(
         asyncio.to_thread(

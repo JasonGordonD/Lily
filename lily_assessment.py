@@ -37,6 +37,7 @@ from google import genai as google_genai
 from google.genai import types as genai_types
 
 import lily_config
+import lily_gemini_safety
 
 logger = logging.getLogger("lily_assessment")
 
@@ -44,24 +45,7 @@ Generate = Callable[[list, dict], Awaitable[dict]]
 
 # Adult-product context (§11.1): same explicit safety settings as the
 # reasoning node — an adult-mode transcript must not mute the desk.
-_SAFETY_SETTINGS = [
-    genai_types.SafetySetting(
-        category=genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    genai_types.SafetySetting(
-        category=genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    genai_types.SafetySetting(
-        category=genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    genai_types.SafetySetting(
-        category=genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-]
+_SAFETY_SETTINGS = lily_gemini_safety.lily_gemini_safety_settings()
 
 _SYSTEM_INSTRUCTION = (
     "You are the PRMPT clinical desk reviewing one completed Lily trivia "

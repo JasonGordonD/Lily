@@ -5,6 +5,18 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — M1a: every configurable Gemini filter is non-blocking
+
+While the Grok migration proceeds, Gemini remains on several lanes. Vocal,
+reasoning and assessment already used `BLOCK_NONE`, but general image
+generation and Google grounding/search omitted safety settings.
+
+**Fix.** One shared policy now supplies `BLOCK_NONE` for harassment, hate,
+sexually explicit and dangerous content to every remaining Gemini text/image
+request. Runtime tests audit vocal, reasoning, judge/assessment, image and
+grounding call sites. Provider-controlled `PROHIBITED_CONTENT` remains a
+separate deterministic-fallback ticket.
+
 ## 2026-08-09 — Speechmatics `operating_point` deprecation removed
 
 Production warned that `TranscriptionConfig.operating_point` will be removed.
