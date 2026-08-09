@@ -8157,9 +8157,19 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         partition. 'mix' draws from whichever adult partition still has a
         pair this group has not seen."""
         if getattr(self, "supabase", None) is None:
+            logger.warning(
+                "LILY_SUPPLY | PICTURE_DRAW | id=none url=no mode=%s "
+                "reason=no_supabase",
+                supply_mode,
+            )
             return None
         group_id = getattr(self, "group_id", None)
         if not group_id:
+            logger.warning(
+                "LILY_SUPPLY | PICTURE_DRAW | id=none url=no mode=%s "
+                "reason=no_group_id",
+                supply_mode,
+            )
             return None
         intensity = getattr(self.sk, "adult_image_intensity", "suggestive")
         partitions = lily_arsenal.lily_partitions_for(supply_mode, intensity)
@@ -8185,14 +8195,32 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 signed = await lily_images.lily_arsenal_image_url(
                     self.supabase, q.get("image_storage_path")
                 )
-                if signed:
-                    q["image_url"] = signed
+                qid = q.get("id") or q.get("arsenal_id") or "?"
+                if not signed:
+                    logger.warning(
+                        "LILY_SUPPLY | PICTURE_DRAW | id=%s url=no mode=%s "
+                        "partition=%s reason=sign_failed — skip row, try next",
+                        qid, supply_mode, partition,
+                    )
+                    continue
+                q["image_url"] = signed
                 self._kick_arsenal_replenish(partition, supply_mode, intensity)
+                logger.info(
+                    "LILY_SUPPLY | PICTURE_DRAW | id=%s url=yes mode=%s "
+                    "partition=%s",
+                    qid, supply_mode, partition,
+                )
                 return q
         # Every candidate partition came up empty. This is the exact moment
         # the 2026-08-07 session hit — a player asking for picture trivia
         # against a shelf with nothing on it — and it must never again pass
         # in silence. WARN here, then fall to the next supply rung.
+        logger.warning(
+            "LILY_SUPPLY | PICTURE_DRAW | id=none url=no mode=%s "
+            "partitions=%s — arsenal empty for group; fall through to live "
+            "generation. Seed: python3 -m lily_arsenal_seed --partition all",
+            supply_mode, ",".join(partitions),
+        )
         logger.warning(
             "ARSENAL_LOW | partitions=%s group=%s — no ready entry for this "
             "group; falling through to live generation. Seed the bank: "
@@ -8527,6 +8555,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.sk.set_media_mode("pictures")
         self._pending_picture_on_offer = False
         self.publish_attributes_nowait()
+        # Drop stale voice-only prefetch so the arsenal rung can stock the
+        # next Q (B2: mode ON with a bank full of ready rows must not keep
+        # serving a pre-flip text next_question).
+        self._refresh_supply_for_pictures_on(source=source)
         if announce:
             self.gated_say(
                 None, "media_mode",
@@ -8542,6 +8574,47 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self.sk.session_id, source,
         )
         return "on"
+
+    def _refresh_supply_for_pictures_on(self, *, source: str) -> None:
+        """Invalidate pictureless prefetch after media_mode flips to pictures.
+
+        Lobby/auto-start often fills next_question under voice_only;
+        start_prefetch early-returns while that row sits, so the arsenal
+        never runs. Clear pictureless next_question, cancel in-flight
+        prefetch, and relaunch. Does not touch an already-armed in-window
+        question (that arm finishes as text; the following slot draws).
+        """
+        nq = getattr(self, "next_question", None)
+        url = str((nq or {}).get("image_url") or "")
+        if url.startswith(("http://", "https://")):
+            return
+        logger.info(
+            "LILY_SUPPLY | PICTURE_REFRESH | session=%s source=%s "
+            "dropped_prefetched=%s",
+            self.sk.session_id, source, (nq or {}).get("id"),
+        )
+        self.next_question = None
+        task = getattr(self, "_prefetch_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._prefetch_task = None
+        if getattr(self, "_prefetch_stall_ticks", None) is not None:
+            self._prefetch_stall_ticks = 0
+        if getattr(self, "game_over", False):
+            return
+        # Unit harnesses call try_activate_pictures outside an event loop;
+        # clearing next_question is enough — live entrypoints always have a
+        # loop and will prefetch on the next tick / start_game.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            logger.info(
+                "LILY_SUPPLY | PICTURE_REFRESH | session=%s source=%s "
+                "prefetch_deferred=no_loop",
+                self.sk.session_id, source,
+            )
+            return
+        self.start_prefetch()
 
     def note_picture_on_offer(self, spoken_text: str) -> None:
         """Arm when Lily offers to switch pictures on while still voice_only."""

@@ -5,6 +5,16 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — B2: Pictures ON refreshes supply from seeded arsenal
+
+After `media_mode` flipped to pictures, a stale voice-only `next_question`
+blocked prefetch (`start_prefetch` early-return), so the stocked arsenal
+never drew. Signing failure could also leave a storage path as `image_url`.
+
+**Fix.** `try_activate_pictures` drops pictureless prefetch and relaunches
+supply. `_arsenal_picture_draw` requires a signed http(s) URL before
+return; logs `LILY_SUPPLY | PICTURE_DRAW | id= url=yes|no mode=`.
+
 ## 2026-08-09 — Pictures: flip media_mode when the bank is ready
 
 Live (`lily-E66E1B`): adult + "pictures in mixed mode" set heat to `mix`

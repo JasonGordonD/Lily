@@ -399,7 +399,7 @@ def test_agent_draw_none_without_group_or_pipeline(monkeypatch):
     assert _run(g2._arsenal_picture_draw("general")) is None
 
 
-def test_agent_arsenal_rung_serves_with_no_generator_present():
+def test_agent_arsenal_rung_serves_with_no_generator_present(monkeypatch):
     """Binding A, enforced: the arsenal rung has NO generation dependency.
     The game has no `.reasoning` at all and the draw still serves from the
     seeded pool — proof the delivery path never reaches generation."""
@@ -414,7 +414,14 @@ def test_agent_arsenal_rung_serves_with_no_generator_present():
     game.supabase = sb
     game.group_id = "g1"
     game.asked_history = []
+    game._kick_arsenal_replenish = lambda *a, **k: None
+
+    async def fake_sign(_sb, path):
+        return f"https://signed.example/{path}"
+
+    monkeypatch.setattr("lily_images.lily_arsenal_image_url", fake_sign)
     # Deliberately NO game.reasoning attribute.
     q = _run(game._arsenal_picture_draw("general"))
     assert q is not None
+    assert str(q.get("image_url", "")).startswith("https://")
     assert q["image_source"] == "arsenal"
