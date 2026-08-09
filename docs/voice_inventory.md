@@ -1,7 +1,7 @@
 # Lily voice inventory (freeze)
 
-**Frozen at:** `638dd71` (post PR #12 / HOTFIX-006 baseline)  
-**Purpose:** catalog every spoken surface before any `speech/delivery` extract.
+**Contract baseline:** `main @ f52788b` (M7 start)
+**Purpose:** catalog every spoken surface and runtime prompt authority.
 Do **not** rewrite copy in the same change that moves code. This file is the
 inventory contract: when extracting modules, strings and act names below
 must stay byte-stable unless a dedicated personality PR says otherwise.
@@ -117,6 +117,19 @@ rewrite or suppression cannot leave raw model prose in the client transcript.
   (Lily host prompt + `<tts_guidelines>` + `<voice_output>` + room-read rubric)
 - Per-dispatch `instructions=` blobs inside `gated_say` / `instructed_reply`
   callers — **inventory by act**, edit only in personality PRs
+- Function-tool docstrings are model-visible instructions too. In particular,
+  `lily_begin_round` must agree with the identity/start gates: at least one
+  confirmed bound name and clear start language; no laugh/energy/bare-yes
+  kickoff.
+- The volatile state tail is authoritative for scores, roster, question
+  fields, media/render truth, current UTC and session elapsed time. It never
+  exposes a canonical answer before the reveal/adjudication path.
+- Custom-category speech reads only the tool result plus registration ledger;
+  zero registered questions means a refusal, never "building it now."
+- Picture speech distinguishes request/draw from frontend render:
+  `image_shown` is the only on-screen confirmation.
+- Sticky STOP permits one acknowledgment, then no game-lane promise or act
+  until explicit resume/continue.
 
 SAID-ALREADY ledger: scorekeeper + state-block injection; variety law is
 prompt + lint, not a second copy bank.

@@ -1,10 +1,10 @@
 # LILY — Multi-Player Voice Trivia Host
 
 Lily hosts live trivia nights for 2–6 people sharing one room and one microphone.
-She knows who is speaking (real-time diarization), addresses players by name, scores
-per player, adjudicates who answered first, generates her own questions on the fly,
-and runs an opt-in, consent-gated 18+ mode. One agent, one prompt file plus one
-additive adult layer, one game-state object.
+Real-time diarization supplies best-effort speaker labels; confirmed binding turns
+those labels into names. She scores per player, adjudicates who answered first,
+generates her own questions on the fly, and runs an opt-in, consent-gated 18+ mode.
+One agent, one prompt file plus one additive adult layer, one game-state object.
 
 Built from the PRMPT fleet's paid-for lessons: Lovebirds' production one-mic
 diarization, name binding, voiceprint persistence, TTS wrapper and its bug fixes —
@@ -200,6 +200,11 @@ fabricated one. The mechanisms:
   intake is conducted round-robin with per-bind acknowledgment; lobby
   voice-overlap triggers the ordering repair via a state note reusing
   the H1 overlap epsilon; solo tables get zero protocol theater).
+  Model-visible prompt and tool contracts also mirror deterministic
+  authorities: speaker labels are not identity; one confirmed name precedes
+  Q1; a custom round is claimed only after registration; canonical answers
+  stay off the ambient state tail; `image_shown` alone proves render; and
+  sticky STOP blocks game speech until explicit resume.
 - **Mirror lint** (`lily_say_gate.lily_mirror_flag`, log-only v1):
   tts_node logs `LILY_SAY | MIRROR_FLAG | pattern=...` when a turn
   OPENS with a known flattery/echo pattern — drift is measurable in
@@ -228,9 +233,10 @@ reach it.
   `_prefetch_inner` reads (`category = self._category_for_round(rnd)`,
   passed straight to `reasoning.prefetch_question(category=...)`) now
   carries the requested topic. The stale prefetched question (drawn on
-  the old category) is dropped and re-issued; a beat-to-build is covered
-  by an honest "putting your round together" status note — never a
-  denial. Adult mode redirects to the general deck rather than crossing
+  the old category) is dropped and re-issued. Speech claims the round only
+  after its questions are registered; zero registrations produce a plain
+  refusal, never an invented "putting it together" promise. Adult mode
+  redirects to the general deck rather than crossing
   the deck-identity firewall (an adult question must never wear a custom
   label). Manifest entry `custom_category` (v5), option line "Any topic,
   on the fly".

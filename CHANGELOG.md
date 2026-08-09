@@ -5,6 +5,21 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — M7: model-visible prompt contract matches runtime truth
+
+The host prompt, `lily_begin_round` tool description and voice inventory now
+agree with deterministic gates. Speaker labels are best-effort rather than
+identity; one confirmed bound name precedes Q1; clear start language—not a
+laugh, room energy or ambiguous yes—authorizes the host tool; explicit age
+statements consume consent without a repeat prompt.
+
+Custom rounds are claimed only after registration, ambient state no longer
+claims to expose canonical answers, UTC/session age is documented as volatile
+context, and picture speech requires `image_shown` before any on-screen claim.
+STOP now has one prompt-level acknowledgment followed by silence from the game
+lane until explicit resume. Board-sync language cannot invent which side is
+ahead.
+
 ## 2026-08-09 — M6: Grok prompt-cache routing and temporal context
 
 The vocal Chat Completions client now sends xAI's recommended stable
