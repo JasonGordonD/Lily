@@ -794,6 +794,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # Its own slot so it can coexist with a state-contradiction note on
         # the same turn; cleared per-turn like _state_note.
         self._returner_honesty_note: str | None = None
+        # P0-B/C (live 2026-08-09): recognition dispute after a false
+        # clean-slate. Locks start/category kickoff until one grounded
+        # why-answer lands.
+        self._recognition_dispute: bool = False
+        self._recognition_dispute_why_answered: bool = False
+        self._recognition_why_note: str | None = None
         # HOTFIX-005 X12: explain-on-request + verdict-contest conditioning —
         # same one-shot lifecycle as the notes above (context only, leak-
         # filtered, consumed at the turn's playout).
@@ -2306,6 +2312,58 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # A device candidate already staged means recognition is in flight
         # by another route; either way the question is open, not closed.
         return True
+
+    def can_claim_empty_memory(self) -> bool:
+        """P0-A: True only when absence of memory is a *settled* fact.
+
+        Clean-slate / nothing-on-file language is forbidden while the
+        voice-identity probe is outstanding, a device candidate is pending,
+        or a memory block already exists. Deterministic UNKNOWN≠EMPTY.
+        """
+        if getattr(self, "memory_block", None):
+            return False
+        if getattr(self, "device_candidate_group_id", None):
+            return False
+        if self.identity_probe_outstanding():
+            return False
+        if lily_config.voice_identity_enabled() and getattr(
+            self, "supabase", None
+        ) is not None:
+            return bool(getattr(self, "_voice_identity_resolved", False))
+        return True
+
+    def recognition_dispute_blocks_start(self) -> bool:
+        """P0-B: kickoff locked until the why-beat has landed."""
+        if not getattr(self, "_recognition_dispute", False):
+            return False
+        return not getattr(self, "_recognition_dispute_why_answered", False)
+
+    def arm_recognition_dispute(self, *, reason: str) -> None:
+        """Open a recognition dispute: inject the why-directive and lock
+        start. Idempotent while already open."""
+        already = bool(getattr(self, "_recognition_dispute", False))
+        self._recognition_dispute = True
+        if not already:
+            self._recognition_dispute_why_answered = False
+        self._recognition_why_note = (
+            "[recognition dispute — a player challenged your clean-slate / "
+            "empty-memory claim or asked WHY you spoke as if the record were "
+            "final. Answer WHY in ONE sentence from this note before anything "
+            "else. Grounded cause: your first identity/memory check looked "
+            "empty and the protocol treated UNKNOWN as 'nothing on file' "
+            "instead of 'still loading.' That was a bug in how you talk "
+            "before the match finishes — not the player. Ban openers like "
+            "'you\\'re right' / 'you\\'re completely right'. No category "
+            "announce, no 'let\\'s kick', no lily_begin_round until this "
+            "why-beat lands. Then follow their lead (refresher / start only "
+            "when they ask).]"
+        )
+        logger.info(
+            "LILY_HONESTY | RECOGNITION_DISPUTE | session=%s reason=%s "
+            "why_answered=%s",
+            getattr(self.sk, "session_id", "?"), reason,
+            getattr(self, "_recognition_dispute_why_answered", False),
+        )
 
     def greeting_instructions(self) -> str:
         """The fresh-room landing line (single source of truth — both the
@@ -4377,6 +4435,19 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # RECOGNITION-HONESTY: same one-shot lifecycle — the returner-claim
         # conditioning serviced this turn; a fresh claim re-sets it.
         self._returner_honesty_note = None
+        # P0-C: a confirmed (non-suppressed) turn while a why-note was armed
+        # counts as the why-beat landing — unlock kickoff for when he asks.
+        if (
+            not (interrupted or suppressed)
+            and getattr(self, "_recognition_why_note", None)
+            and getattr(self, "_recognition_dispute", False)
+        ):
+            self._recognition_dispute_why_answered = True
+            logger.info(
+                "LILY_HONESTY | RECOGNITION_WHY_ANSWERED | session=%s",
+                self.sk.session_id,
+            )
+        self._recognition_why_note = None
         # HOTFIX-005 X12: the explain restatement and the contest re-check
         # each serviced this turn — one-shot, consumed here. A fresh explain
         # or contest utterance next turn re-arms.
@@ -5426,6 +5497,18 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "text=%r — ungrounded, honesty gate armed",
                 self.sk.session_id, player, str(text)[:120],
             )
+            # A returner claim while the card looks blank is itself a
+            # recognition dispute — lock kickoff until honesty lands.
+            if not self.can_claim_empty_memory():
+                self.arm_recognition_dispute(reason="returner_claim")
+
+        # P0-B/C: explicit challenge to a false clean-slate / "why blank?"
+        if (
+            command is None
+            and not result.get("media_choice")
+            and lily_scorekeeper.lily_detect_recognition_dispute(text)
+        ):
+            self.arm_recognition_dispute(reason="clean_slate_challenge")
 
         # HOTFIX-005 X12(1): explain-on-request. A player asking for the
         # ACTIVE question to be restated in plain words (operator asked twice
@@ -7810,6 +7893,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     async def start_game(self, source: str) -> None:
         if self.game_started:
             return
+        if self.recognition_dispute_blocks_start():
+            logger.info(
+                "LILY_STATE | START_DEFERRED | session=%s source=%s "
+                "reason=recognition_dispute",
+                self.sk.session_id, source,
+            )
+            return
         if self.intake_roundrobin_active():
             # WS-1: every begin_round path (tool, voice, UI, auto-start)
             # converges here — while the intake round-robin is still
@@ -8621,6 +8711,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         returner_note = getattr(self, "_returner_honesty_note", None)
         if returner_note:
             extra.append(returner_note)
+        why_note = getattr(self, "_recognition_why_note", None)
+        if why_note:
+            extra.append(why_note)
+        # P0-A: while the probe is outstanding, identity absence is UNKNOWN.
+        if self.identity_probe_outstanding():
+            extra.append(
+                "identity: STILL CHECKING — do not claim empty memory or "
+                "clean slate; say you are still checking / the card is not "
+                "connected yet if asked"
+            )
+        if getattr(self, "_recognition_dispute", False) and not getattr(
+            self, "_recognition_dispute_why_answered", False
+        ):
+            extra.append(
+                "recognition_dispute: ACTIVE — lily_begin_round / kickoff / "
+                "category announce blocked until the why-beat lands"
+            )
         # HOTFIX-005 X12: explain-on-request and verdict-contest conditioning
         # — context only, leak-filtered like every note above.
         explain_note = getattr(self, "_explain_request_note", None)
@@ -9138,6 +9245,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         while the table is still mid-conversation."""
         if self.game_started or self.game_over:
             return
+        if self.recognition_dispute_blocks_start():
+            logger.info(
+                "LILY_STATE | START_DEFERRED | session=%s "
+                "source=auto_after_lobby reason=recognition_dispute",
+                self.sk.session_id,
+            )
+            return
         if self.intake_roundrobin_active():
             # WS-1: a name just landed — the round-robin is still growing.
             # start_game carries the same gate (it is the choke point for
@@ -9542,6 +9656,13 @@ class LilyAgent(Agent):
         first ask. No-op if the game is already running."""
         if self._game.game_started:
             return "Already running — the next question is in the state block."
+        if self._game.recognition_dispute_blocks_start():
+            return (
+                "Hold the kickoff — a recognition question is still open. "
+                "Answer WHY the clean-slate / empty claim happened first "
+                "(one sentence from the state note), then follow their lead. "
+                "Do NOT announce a category or say let's kick yet."
+            )
         intake_hold = (
             "Hold that thought — a name just landed and the intake "
             "round-robin is still going. Finish collecting names "
@@ -9553,6 +9674,12 @@ class LilyAgent(Agent):
             return intake_hold
         await self._game.start_game(source="host_tool")
         if not self._game.game_started:
+            if self._game.recognition_dispute_blocks_start():
+                return (
+                    "Hold the kickoff — a recognition question is still open. "
+                    "Answer WHY the clean-slate / empty claim happened first, "
+                    "then follow their lead."
+                )
             # A bind landed between the gate check above and start_game's
             # own gate — the start deferred (WS-1).
             return intake_hold
@@ -10454,20 +10581,42 @@ class LilyAgent(Agent):
                 len(raw) - len(full),
             )
 
-        # A claimed returner with an unresolved card must never be told no
-        # recorded game exists. The old model did exactly that despite the
-        # context law. Rewrite the denial to the only grounded statement.
-        if (
+        # A claimed returner / unsettled identity must never be told no
+        # recorded game / clean slate exists. Live 2026-08-09: organic
+        # intake asserted "no saved stats… clean slate" while the probe
+        # was still outstanding, then the late match proved it wrong.
+        # Rewrite whenever absence is not a settled fact — greet/intake
+        # included, not only when a returner note is armed.
+        if lily_say_gate.lily_false_clean_slate_claim(full) and (
             getattr(self._game, "_returner_honesty_note", None)
-            and lily_say_gate.lily_false_clean_slate_claim(full)
+            or getattr(self._game, "_recognition_dispute", False)
+            or not self._game.can_claim_empty_memory()
         ):
             logger.warning(
-                "LILY_SAY_GATE | RETURNER_DENIAL_REWRITTEN | session=%s",
+                "LILY_SAY_GATE | FALSE_CLEAN_SLATE_REWRITTEN | session=%s "
+                "probe_out=%s dispute=%s",
+                self._game.sk.session_id,
+                self._game.identity_probe_outstanding(),
+                bool(getattr(self._game, "_recognition_dispute", False)),
+            )
+            full = lily_say_gate.lily_still_checking_rewrite()
+
+        # P0-C: while a recognition dispute needs its why-beat, ban
+        # sycophantic "you're right" openers — answer the why, don't agree.
+        if (
+            getattr(self._game, "_recognition_dispute", False)
+            and not getattr(self._game, "_recognition_dispute_why_answered", False)
+            and lily_say_gate.lily_mirror_flag(full)
+        ):
+            logger.warning(
+                "LILY_SAY_GATE | DISPUTE_SYCOPHANCY_REWRITTEN | session=%s",
                 self._game.sk.session_id,
             )
             full = (
-                "I believe you. My table card hasn't connected yet, so I "
-                "won't pretend this is your first night. What's your name?"
+                "Because my first check looked empty and I treated that as "
+                "final instead of still loading — that was wrong on my "
+                "protocol. What do you want next — a refresher, or shall "
+                "we wait?"
             )
 
         # Asking obligates listening. This used to be telemetry-only, so the

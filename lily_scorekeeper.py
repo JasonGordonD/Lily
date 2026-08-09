@@ -650,6 +650,34 @@ def lily_detect_returner_claim(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Recognition dispute (live 2026-08-09 Rami session): after a false clean
+# slate, "why did you say blank / still pulling?" must lock kickoff until
+# one honest why-answer lands. Deterministic; not trivia-content.
+# ---------------------------------------------------------------------------
+
+_RECOGNITION_DISPUTE_RE = _re.compile(
+    r"\b(?:"
+    r"why (?:did|do|would) you (?:say|tell|claim|call)"
+    r"|why .{0,40}(?:clean slate|blank|nothing on file|no stats|no record|empty)"
+    r"|how come (?:you )?(?:said|say|told)"
+    r"|you said .{0,40}(?:clean slate|blank|nothing|no stats|empty|first)"
+    r"|why didn t you say (?:you were )?still"
+    r"|still (?:pulling|loading|checking)"
+    r"|why .{0,20}(?:protocol|determin)"
+    r")\b"
+)
+
+
+def lily_detect_recognition_dispute(text: str) -> bool:
+    """True when the player challenges a false empty-memory / clean-slate
+    claim or asks why she spoke as if the record were final."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    return bool(_RECOGNITION_DISPUTE_RE.search(normalized))
+
+
+# ---------------------------------------------------------------------------
 # Media-mode spoken choice (WO-LILY-OMNIBUS-002 sub-agent K) — the lobby
 # offer: voice_only (default) or pictures. Same deterministic,
 # punctuation/fragment-proof command-layer pattern as the sticky commands
