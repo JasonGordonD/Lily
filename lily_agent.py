@@ -13824,6 +13824,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     _wire_llm_metrics(general_vocal_llm)
     game._llm_metrics_wire = _wire_llm_metrics
+    # Y2 measurement gate: count the framework's preemptive-invalidation
+    # warnings (and, when debug is on, the used-lines) off its own logger.
+    # The settle-vs-volatile-split decision closes on this number.
+    session_metrics.attach_preemptive_tap()
 
     @session.on("session_usage_updated")
     def _on_session_usage(ev) -> None:

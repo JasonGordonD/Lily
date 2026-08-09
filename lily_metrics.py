@@ -74,6 +74,13 @@ class LilyMetricsCollector:
         self._llm_cached_tokens = 0
         self._llm_calls_with_hit = 0
         self._llm_call_ttft = []
+        # Preemptive-generation outcomes (HOTFIX-007 Y2 measurement gate).
+        # Counted off the framework's own log lines via a Filter tap —
+        # "invalidated" is a WARNING (always emitted); "using" is DEBUG, so
+        # `used` only populates when the deploy log level allows debug.
+        # The Y2 settle-vs-split decision closes on `invalidated`.
+        self._preemptive_used = 0
+        self._preemptive_invalidated = 0
 
     def collect_turn(self, report) -> None:
         """Fold one ChatMessage.metrics (a MetricsReport dict; total=False so
@@ -142,6 +149,42 @@ class LilyMetricsCollector:
             )
         except Exception as e:
             logger.warning("LILY_METRICS | LLM_CALL_SKIPPED | %s", e)
+
+    def attach_preemptive_tap(self, logger_name: str = "livekit.agents"):
+        """Count the framework's preemptive-generation outcomes off its own
+        log records (HOTFIX-007 Y2 measurement gate). A logging.Filter on
+        the EXACT logger agent_activity logs through — no framework private
+        API touched, nothing monkeypatched, and a Filter cannot flood or
+        reformat anything (it only observes records already being logged).
+
+        Reliability contract, stated honestly: "preemptive generation
+        invalidated" is a WARNING and is always counted; "using preemptive
+        generation" is DEBUG and is only counted when the deployment log
+        level allows debug records to be created. Returns the filter so a
+        caller/test can detach it."""
+        collector = self
+
+        class _PreemptiveOutcomeFilter(logging.Filter):
+            def filter(self, record):
+                try:
+                    msg = record.getMessage()
+                    if "preemptive generation invalidated" in msg:
+                        collector._preemptive_invalidated += 1
+                        logger.warning(
+                            "LILY_METRICS | PREEMPTIVE_INVALIDATED | "
+                            "total=%d — speculative reply discarded at turn "
+                            "commit (context/transcript/tools changed)",
+                            collector._preemptive_invalidated,
+                        )
+                    elif "using preemptive generation" in msg:
+                        collector._preemptive_used += 1
+                except Exception:
+                    pass
+                return True
+
+        f = _PreemptiveOutcomeFilter()
+        logging.getLogger(logger_name).addFilter(f)
+        return f
 
     def collect_session_usage(self, usage) -> None:
         """Store the latest `session_usage_updated` rollup. `usage` is an
@@ -222,4 +265,9 @@ class LilyMetricsCollector:
                 cache["ttft_ms_p50"] = _ms(_pct(self._llm_call_ttft, 50))
                 cache["ttft_ms_p95"] = _ms(_pct(self._llm_call_ttft, 95))
             out["llm_cache"] = cache
+        if self._preemptive_used or self._preemptive_invalidated:
+            out["preemptive"] = {
+                "used": self._preemptive_used,
+                "invalidated": self._preemptive_invalidated,
+            }
         return out

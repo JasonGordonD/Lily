@@ -5,6 +5,40 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y2 measurement gate: preemptive-outcome counters
+
+**Archaeology (mandate rule 0):** the framework itself already announces
+both preemptive outcomes on its own logger (agent_activity →
+`livekit.agents`): "preemptive generation invalidated ..." at WARNING
+(always emitted) and "using preemptive generation" at DEBUG. Nothing in
+Lily counted them, so the invalidation RATE — the number the Y2
+settle-vs-volatile-split decision closes on — was unmeasurable without
+grepping deploy logs by hand. **What changed:** `attach_preemptive_tap()`
+adds a logging.Filter to that exact logger (no private API, no
+monkeypatch; a Filter observes records and never alters/suppresses them),
+folding counts into the existing collector; summary gains a `preemptive`
+block ({used, invalidated}); each invalidation also logs
+`LILY_METRICS | PREEMPTIVE_INVALIDATED | total=N`. **Honest limit,
+declared:** `used` populates only when the deploy log level allows DEBUG
+— `invalidated` (the decision number) is WARNING and always counted. A
+test pins the matched strings against the INSTALLED framework source so a
+rewording upstream fails loudly instead of the counter reading zero
+forever.
+
+**Decision protocol this enables (Y2):** run the next live session on
+this build, read `invalidated` + the Y1c `llm_cache` hit rate. If
+invalidations are ~0, the volatile-tail split already settled the
+context and Y2's settle-at-turn-boundary variant is unnecessary; if
+they're material, the settle variant gets built and the split DELETED
+per the mandate (one mechanism, not two).
+
+**Deletions:** none. **Net addition declared:** one collector method +
+one wire line + 4 tests. Suite 1997 → 2001 green.
+
+Mandate numbers: lily_agent.py 14,725 lines (14,721 at Y1c — the prior
+entry said 14,724, miscounted by 3); prompt ~8,880 tokens; main tip
+`1e1c192`; deployed `1e1c192`.
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 Y1c: per-call LLM cache metrics (measure before touching)
 
 **Archaeology (mandate rule 0):** U3(b) built LilyMetricsCollector on the
