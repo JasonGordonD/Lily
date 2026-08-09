@@ -780,6 +780,18 @@ LILY_BACKCHANNELS: frozenset = frozenset({
     "come on", "wait", "what", "really", "nice", "cool", "haha", "lol",
 })
 
+# Procedural imperatives spoken AT the host or the table about the RUN OF
+# PLAY, not about the trivia fact. Live RM_qs6YeUdkV7or: Rami's "Go." was
+# recorded as the q_1 ANSWER_CANDIDATE while his real "Okay. It's Jupiter."
+# arrived later — N9 fixed the utterance binding, but "Go." should never
+# have entered the candidate set. Same class: "Continue.", "Next.",
+# "Start again.", "Go ahead." Answer-surface override upstream still wins,
+# so a question whose canonical answer is literally "Go" stays scoreable.
+LILY_PROCEDURAL_IMPERATIVES: frozenset = frozenset({
+    "go", "continue", "next", "next question", "start again", "start over",
+    "go ahead", "keep going", "carry on", "go on", "move on",
+})
+
 # ---------------------------------------------------------------------------
 # Meta-speech (WO-LILY-HOTFIX-006 N4) — the open window admits ANSWER-SHAPED
 # utterances only.
@@ -853,6 +865,10 @@ _GAME_TALK_RE = re.compile(
     r"|\byou(?:'re|r| are)?\s+"
     r"(?:telling|told|saying|said|asking|asked|giving|gave|reading|read|"
     r"pointing|point|skipping|skipped|confusing|repeating)\b"
+    # "you guys said it loud" — table correcting the host about attribution
+    r"|\byou\s+guys\s+(?:said|saying|told|telling|read|reading)\b"
+    # spotlight complaint without a clean interrogative mark
+    r"|\bpoint(?:ed|ing)?\s+at\s+me\b"
     # the table declaring the floor / the topic (the clarification class)
     r"|\bwe(?:'re| are| were)\s+"
     r"(?:talking|discussing|arguing|having|not\s+talking|in\s+the\s+middle)\b"
@@ -913,9 +929,19 @@ def lily_meta_speech_utterance(text: str) -> Optional[str]:
         pass
 
     # -- a question asked, not an answer given ---------------------------
-    if "?" in normalized and (
-        _INTERROGATIVE_WH_RE.search(normalized)
-        or _INTERROGATIVE_ADDRESS_RE.search(normalized)
+    # STT routinely drops the terminal "?" ("Why did you point at me" with
+    # no mark). Require a host/table ADDRESS shape before treating a
+    # mark-less wh-clause as interrogative, so a hedged closest-number
+    # guess ("how many states") stays adjudicable.
+    has_wh = bool(_INTERROGATIVE_WH_RE.search(normalized))
+    has_address = bool(_INTERROGATIVE_ADDRESS_RE.search(normalized))
+    if "?" in normalized and (has_wh or has_address):
+        return LILY_META_INTERROGATIVE
+    if has_wh and has_address:
+        return LILY_META_INTERROGATIVE
+    if re.search(
+        r"\bwhy\s+(?:did|do|are|is|would|can'?t|don'?t|does)\s+you\b",
+        normalized,
     ):
         return LILY_META_INTERROGATIVE
 
@@ -956,6 +982,8 @@ def lily_non_answer_utterance(
         return None
     if norm in LILY_BACKCHANNELS:
         return "backchannel"
+    if norm in LILY_PROCEDURAL_IMPERATIVES:
+        return "procedural"
     for name in roster_names or []:
         if norm == lily_normalize_answer(str(name)):
             return "bare_name"

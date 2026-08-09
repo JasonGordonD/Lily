@@ -180,6 +180,21 @@ def test_pending_claim_never_played_refires():
     assert game._undelivered_refires == 1
 
 
+def test_refire_holds_while_table_is_still_talking():
+    # An interrupted delivery with recent user speech must not re-ask on
+    # top of the banter (RM_qs6 / RM_VYp6 undelivered-refire loops).
+    game = _make_game()
+    _arm(game, GHOST_Q1)
+    key = _delivery_key(game)
+    game.say_registry.claim(key)
+    game._last_user_turn_at = time.monotonic()  # just spoke
+    # Even past the reconcile tick threshold, recent talk keeps it idle.
+    for _ in range(game._undelivered_reconcile_ticks() + 2):
+        assert game.reconcile_undelivered_claim() == "idle"
+    assert game._undelivered_refires == 0
+    assert game.say_registry.state(key) == lily_say_gate.CLAIM_PENDING
+
+
 def test_undelivered_no_claim_refires():
     # Armed and in asked_history, delivery never dispatched, fully silent
     # (no finished agent turn ever advances the nudge machinery).

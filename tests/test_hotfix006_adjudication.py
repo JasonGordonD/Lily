@@ -414,6 +414,42 @@ def test_genuine_short_answers_still_score():
         ) is None, f"{text!r} stopped being answer-shaped"
 
 
+def test_procedural_go_is_never_an_answer_candidate():
+    """RM_qs6YeUdkV7or: Rami's "Go." claimed the q_1 candidate slot while
+    his real "Okay. It's Jupiter." arrived later. Procedural imperatives
+    are not answer-shaped."""
+    q = {
+        "id": "q_1052",
+        "prompt": "Recognizable by a raging storm known as the Great Red "
+                  "Spot, name our solar system's largest planet.",
+        "canonical_answer": "Jupiter",
+        "acceptable_answers": ["jupiter"],
+    }
+    for text in ("Go.", "Continue.", "Next question.", "Go ahead."):
+        assert lily_evaluation.lily_non_answer_utterance(
+            text, q, ["Rami", "Rhonda", "Chris"]
+        ) == "procedural", text
+
+    game = _make_game("lily-go")
+    game.sk.bind_speaker("S1", "Rami")
+    _arm(game, q)
+    now = time.time()
+    game.sk.open_answer_window(duration=30.0, now=now)
+    result = _final(game, "Go.", "S1", now + 1)
+    assert result.get("candidate_recorded") is not True
+    assert result.get("non_answer") == "procedural"
+    assert not game.sk.answer_candidates
+
+
+def test_interrogative_without_question_mark_is_meta_speech():
+    """STT often drops the terminal '?'. Host-addressed wh-clauses must
+    still be meta-speech."""
+    text = "Why did you point at me I wasn't even listening"
+    assert lily_evaluation.lily_non_answer_utterance(
+        text, Q_CAPE_COD, ["Rami", "Rhonda"]
+    ) is not None
+
+
 def test_murmured_answer_inside_a_complaint_still_scores():
     """The answer-surface override is what keeps N4 conservative: a real
     answer buried in a complaint-heavy turn is still an answer."""
@@ -994,9 +1030,11 @@ def test_ordinary_play_is_never_filtered_as_meta_speech():
 
 
 def test_the_audit_row_survives_a_pre_ddl_database(monkeypatch):
-    """lily_answers.utterance_id is a new column. Until the DDL lands the
-    insert fails and is retried without the optional keys — the row is
-    never lost (same fail-soft contract the cause column shipped under)."""
+    """lily_answers.utterance_id / cause are new columns. Until the DDL
+    lands the insert fails and is retried with optional keys stripped
+    one at a time — the row is never lost, and a mixed-migration
+    environment (one column present, the other not) keeps whichever
+    column the database already accepts."""
     attempts: list[dict] = []
 
     class _Table:
@@ -1022,7 +1060,12 @@ def test_the_audit_row_survives_a_pre_ddl_database(monkeypatch):
         "correct", 1, 1, cause="answer", utterance_id="u-jupiter",
     ))
 
-    assert len(attempts) == 2
+    assert len(attempts) == 3
     assert attempts[0]["utterance_id"] == "u-jupiter"
-    assert "utterance_id" not in attempts[1]
-    assert attempts[1]["transcript"] == "Okay. It's Jupiter."
+    assert "cause" in attempts[0]
+    # First retry drops cause; utterance_id still rejected on a pre-024 DB.
+    assert "cause" not in attempts[1]
+    assert attempts[1]["utterance_id"] == "u-jupiter"
+    # Second retry drops utterance_id; the base row lands.
+    assert "utterance_id" not in attempts[2]
+    assert attempts[2]["transcript"] == "Okay. It's Jupiter."

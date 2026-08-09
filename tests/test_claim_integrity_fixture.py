@@ -300,8 +300,9 @@ def test_auto_start_defers_while_intake_roundrobin_grows(caplog):
 
 
 def test_auto_start_fires_once_intake_settles():
-    # Names stopped landing: the settle window elapsed, the next
-    # per-segment auto-start check starts the game exactly as before.
+    # Names stopped landing AND the lobby went quiet: the settle window
+    # elapsed, the quiet-after-last-user-turn gate is satisfied, and the
+    # next per-segment auto-start check starts the game.
     game = _make_game(game_started=False)
     _stub_start_dependencies(game)
     game.sk.bind_speaker("Rami", "Rami")
@@ -309,6 +310,12 @@ def test_auto_start_fires_once_intake_settles():
     game.next_question = dict(GHOST_Q1)
     game._last_bind_at = time.time() - (
         lily_config.intake_settle_seconds() + 5.0
+    )
+    game.session_started_at = time.time() - (
+        lily_config.auto_start_lobby_grace_seconds() + 5.0
+    )
+    game._last_user_turn_at = time.monotonic() - (
+        lily_config.auto_start_quiet_seconds() + 5.0
     )
 
     async def scenario():
@@ -318,6 +325,30 @@ def test_auto_start_fires_once_intake_settles():
 
     _run(scenario(), game)
     assert game.game_started is True
+
+
+def test_auto_start_holds_while_lobby_still_talking():
+    # Grace + intake settle pass, but a user turn just landed — banter is
+    # still live, so auto-start must defer (RM_VYp6 mid-fact-collection).
+    game = _make_game(game_started=False)
+    _stub_start_dependencies(game)
+    game.sk.bind_speaker("Rami", "Rami")
+    game.sk.bind_speaker("S1", "Chris")
+    game.next_question = dict(GHOST_Q1)
+    game._last_bind_at = time.time() - (
+        lily_config.intake_settle_seconds() + 5.0
+    )
+    game.session_started_at = time.time() - (
+        lily_config.auto_start_lobby_grace_seconds() + 5.0
+    )
+    game._last_user_turn_at = time.monotonic()  # just spoke
+
+    async def scenario():
+        game._maybe_auto_start_after_lobby()
+        await _drain()
+
+    _run(scenario(), game)
+    assert game.game_started is False
 
 
 def test_begin_round_tool_holds_while_intake_grows():
