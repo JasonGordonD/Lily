@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at P0-5 start: `main @ 1f2ccef`
+Pinned at answered-question P0-A start: `main @ 61d2b29`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -27,6 +27,7 @@ the completing PR.
 | `lily-191313-cdd7c84b` | Original false-slate trust-killer |
 | `lily-E66E1B-babe62dc` | Honesty pass post-P0; pictures mode gap |
 | `lily-BE8D8B-a19913e2` | 22:03 regression: returner phrase missed; false slate; multi-intent lost; general Q started; late recognition over open Q; consent re-asked |
+| `lily-9337B1-331ff234` | Q3 scored/revealed then stale clarify/re-ask; STOP released by follow-up speech; Q5/Q6 continued; glass/TTS diverged from transcript; `Playing` voice identity persisted |
 
 ## Epic P0 — BE8D8B live fire
 
@@ -38,7 +39,21 @@ Execution is strictly top-to-bottom; each row is its own merged PR.
 | P0-2 | Multi-intent before start | Voice + adult + pictures + consent + play are parsed before any Round One; setup blocks start until committed | Shipped `148e9ac` |
 | P0-3 | Explicit 18+ consumes gate | Clear 18+/age/birth-year text latches consent; no same-session re-ask without cause | Shipped `eee74ca` |
 | P0-4 | Late recognition seam only | Never fires over claimed delivery, open window, adjudication, or mid-question | Shipped `1f2ccef` |
-| P0-5 | One start owner | No "Round" debris/free kickoff while setup is pending; one keyed start | **Completed in this change** |
+| P0-5 | One start owner | No "Round" debris/free kickoff while setup is pending; one keyed start | Shipped `72fd25c` |
+
+## Epic P0 — 9337B1 client fire
+
+Each row is a separate merged PR.
+
+| ID | Ticket | Done when | Status |
+|---|---|---|---|
+| P0-A | Answered question dead forever | Result/reveal clears clarify; no final-answer check, window reopen, or re-ask; Freud fixture | **Completed in this change** |
+| P0-B | Sticky global STOP | One STOP freezes game delivery/supply/window until explicit resume | Next |
+| P0-C | Post-TTS truth | Transcript, TTS and glass share the actual post-transform delivery text | Queued |
+| P0-D | Confirmed identity before Q1 | No semantic-name placeholder (`Playing`) can satisfy start gate | Queued |
+| P0-E | Voiceprint rekey/identity | Production-schema rekey succeeds; temporary samples quarantine/promote; poisoned rows repaired | Queued |
+| P0-F | Pre-window scope | Only speech during actual delivery playout can become an early answer | Queued |
+| P0-G | Meta/progression ownership | Delivery watchdog pauses for intake/meta; responsiveness latch clears; one-emission cut behavior | Queued |
 
 ## Epic A — live proof after P0
 
@@ -72,13 +87,35 @@ failure becomes the sole hotfix ticket.
 | C3 | Single verdict key; no double congrats |
 | C4 | Delivery lifecycle single owner; watchdogs advance state only |
 
+## Platform migration track (after lifecycle P0s)
+
+| ID | Ticket |
+|---|---|
+| M1 | Disable every configurable Gemini filter; deterministic fallback for non-configurable `PROHIBITED_CONTENT`; blocked-request observability |
+| M2 | LiveKit endpointing → `TurnHandlingOptions`, preserving current detector |
+| M3 | Speechmatics `operating_point` → supported `model`, preserving enhanced STT |
+| M4 | General/adult vocal → Grok 4.5 with deterministic low/medium effort router |
+| M5 | Reasoning/judge/vision/assessment → Grok 4.5, structured Responses API |
+| M6 | Prompt caching + append-only context + per-turn temporal context |
+| M7 | Prompt contract correction (`lily_system.txt` + voice inventory) |
+
+## Durable content workers
+
+| ID | Ticket |
+|---|---|
+| W1 | Durable arsenal worker with leases, heartbeat, partition depth and retries |
+| W2 | Claude Opus 4.7 general image/category author; deterministic prompt compiler |
+| W3 | **All adult sub-theme/category/arsenal authoring: Grok 4.5 High only** |
+| W4 | Dedicated renderer + Grok 4.5 Vision correspondence/alt-description review |
+| W5 | Start-of-session image draw/sign/preload; visible only at owned delivery |
+| W6 | Grok/Opus whole-pack category builder, persistent bank and provenance |
+| W7 | Duplicate-question complaint detector + semantic auditor + bank quarantine |
+
 ## Later / parked
 
-- D1 schema-safe writes; D2 session audit pull; persistence work only from
-  observed failures.
-- Structural extracts only when P0+A+C are boringly green.
-- Audeering, default Turn Detector, prompt polish, model fallback, and
-  multi-agent hosting remain out of scope.
+- D1 universal schema-safe reads/writes; D2 session audit pull.
+- Structural extracts only when lifecycle and live proof are boringly green.
+- Audeering and the LiveKit Turn Detector default remain parked.
 
 ## Greppable live tails
 

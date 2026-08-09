@@ -3884,6 +3884,56 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return True
         return False
 
+    def question_is_terminal(self, qnum: int) -> bool:
+        """True once adjudication owns the question.
+
+        Unlike question_already_answered(), this deliberately ignores a
+        merely-recorded candidate: clarify is still legal while the window
+        is open. note_answer_heard() is the terminal boundary.
+        """
+        answered = getattr(self, "_answered_questions", None) or set()
+        return qnum in answered
+
+    def answered_closed_state_line(self) -> str | None:
+        qnum = self.sk.question_number
+        if not self.question_is_terminal(qnum):
+            return None
+        return (
+            f"answered_closed: q{qnum} DONE — the result/reveal owns this "
+            "question. Do not clarify an older fragment, ask for a final "
+            "answer, reopen its window, or re-ask it. Move to the next "
+            "question or yield."
+        )
+
+    def clear_pending_clarify_for_question(
+        self, qnum: int, *, reason: str
+    ) -> list[str]:
+        """Kill every clarify tied to a question that became terminal."""
+        pending_all = getattr(self, "pending_clarify", None) or {}
+        cleared: list[str] = []
+        for player, pending in list(pending_all.items()):
+            pending_qnum = (pending or {}).get("question_number")
+            # Legacy/in-flight entries predate question_number; they can only
+            # belong to the current question and must die at this boundary.
+            if pending_qnum is not None and pending_qnum != qnum:
+                continue
+            pending_all.pop(player, None)
+            cleared.append(player)
+
+        key = f"q_{qnum}_clarify"
+        owner = self.say_registry.owner_of(key)
+        if self.say_registry.release(key):
+            self.cancel_speech(owner, reason="question_answered")
+        if cleared or owner:
+            logger.warning(
+                "LILY_CLARIFY | CLEARED | session=%s q=%d players=%s "
+                "reason=%s",
+                self.sk.session_id, qnum,
+                ",".join(sorted(cleared)) or "-",
+                reason,
+            )
+        return cleared
+
     def note_answer_heard(self, qnum: int) -> None:
         """T2 marking point: adjudication is starting (answer_heard) —
         every outstanding delivery attempt for this question is now
@@ -3892,6 +3942,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if answered is None:
             answered = self._answered_questions = set()
         answered.add(qnum)
+        self.clear_pending_clarify_for_question(
+            qnum, reason="answer_heard"
+        )
         self.invalidate_deliveries_for(qnum)
 
     def invalidate_deliveries_for(self, qnum: int) -> None:
@@ -5611,6 +5664,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self._clarify_fired_questions = set()
             self._session_clarify_count = 0
         qnum = self.sk.question_number
+        if self.question_is_terminal(qnum):
+            logger.warning(
+                "LILY_CLARIFY | SUPPRESSED | session=%s q=%d player=%s "
+                "reason=question_terminal",
+                self.sk.session_id, qnum, player,
+            )
+            return
         if qnum in self._clarify_fired_questions:
             return
         if self._session_clarify_count >= lily_config.clarify_max_per_session():
@@ -5625,7 +5685,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self.sk.session_id, qnum, player, similarity,
             tier1_threshold, prior_state, self._session_clarify_count,
         )
-        self.mark_pending_clarify(player)
+        if not self.mark_pending_clarify(player):
+            return
         self.gated_say(
             f"q_{qnum}_clarify",
             "clarify_question",
@@ -5672,6 +5733,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self._clarify_fired_questions = set()
             self._session_clarify_count = 0
         qnum = self.sk.question_number
+        if self.question_is_terminal(qnum):
+            logger.warning(
+                "LILY_CLARIFY | SUPPRESSED | session=%s q=%d player=%s "
+                "reason=question_terminal",
+                self.sk.session_id, qnum, player,
+            )
+            return False
         if qnum in self._clarify_fired_questions:
             return False
         if self._session_clarify_count >= lily_config.clarify_max_per_session():
@@ -5687,7 +5755,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             nbest.get("mean_word_confidence"), nbest.get("word_count", 0),
             self._session_clarify_count,
         )
-        self.mark_pending_clarify(player)
+        if not self.mark_pending_clarify(player):
+            return False
         self.gated_say(
             f"q_{qnum}_clarify",
             "clarify_question",
@@ -5703,11 +5772,19 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         )
         return True
 
-    def mark_pending_clarify(self, player_name: str) -> None:
+    def mark_pending_clarify(self, player_name: str) -> bool:
         """The clarify moment (lily_log_clarify tool): mark the player
         pending-clarify, emit the `clarify` packet, and log the clarified
         utterance row with agent_action=clarified. The player's NEXT
         finalized segment resolves the label (explicit ground truth)."""
+        qnum = self.sk.question_number
+        if self.question_is_terminal(qnum):
+            logger.warning(
+                "LILY_CLARIFY | SUPPRESSED | session=%s q=%d player=%s "
+                "reason=question_terminal",
+                self.sk.session_id, qnum, player_name,
+            )
+            return False
         # The utterance being clarified: their committed answer candidate
         # if one exists, else their most recent transcript-buffer line.
         cand = self.sk.answer_candidates.get(player_name)
@@ -5735,12 +5812,16 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             row_task = asyncio.ensure_future(
                 lily_persistence.lily_log_addressee(self.supabase, row)
             )
-        self.pending_clarify[player_name] = {"row_task": row_task}
+        self.pending_clarify[player_name] = {
+            "row_task": row_task,
+            "question_number": qnum,
+        }
         self.send_event_nowait("clarify", {"name": player_name})
         logger.info(
             "LILY_CLARIFY | PENDING | session=%s player=%s utterance=%r",
             self.sk.session_id, player_name, (clarified_text or "")[:80],
         )
+        return True
 
     def _resolve_clarify(self, player_name: str, reply_text: str) -> None:
         """The clarified player's next finalized segment: parse the reply
@@ -5748,6 +5829,15 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         label_source=explicit_clarify, then clear pending."""
         pending = self.pending_clarify.pop(player_name, None)
         if pending is None:
+            return
+        pending_qnum = pending.get("question_number")
+        if pending_qnum is not None and self.question_is_terminal(pending_qnum):
+            logger.warning(
+                "LILY_CLARIFY | STALE_REPLY_IGNORED | session=%s q=%d "
+                "player=%s reply=%r",
+                self.sk.session_id, pending_qnum, player_name,
+                reply_text[:80],
+            )
             return
         label = lily_addressee.lily_parse_clarify_reply(reply_text)
         logger.info(
@@ -9342,6 +9432,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     def build_state_block(self) -> str:
         block = self.sk.build_state_block()
         extra = []
+        answered_line = self.answered_closed_state_line()
+        if answered_line:
+            extra.append(answered_line)
         score_line = self._score_authority_line()
         if score_line:
             extra.append(score_line)
@@ -10350,10 +10443,24 @@ class LilyAgent(Agent):
                 "the game hasn't started. Call lily_begin_round first, "
                 "then ask the player to clarify."
             )
+        qnum = self._game.sk.question_number
+        if (
+            self._game.question_is_terminal(qnum)
+            or not self._game.sk.answer_window_open
+            or getattr(self._game, "_adjudicating", False)
+        ):
+            return (
+                f"Clarify refused — question {qnum} is already closed. "
+                "Do not ask for a final answer and do not re-ask it; move "
+                "to the next question or yield."
+            )
         name = (player_name or "").strip()
         if name not in self._game.sk.players:
             return f"No rostered player named {name!r} — clarify not logged."
-        self._game.mark_pending_clarify(name)
+        if not self._game.mark_pending_clarify(name):
+            return (
+                f"Clarify refused — question {qnum} is already terminal."
+            )
         return (
             f"Clarify logged for {name}. Their next reply settles it — "
             "no follow-up tool call needed."

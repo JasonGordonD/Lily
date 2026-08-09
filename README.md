@@ -666,6 +666,11 @@ Every tool that emits game-event packets on a live round carries the same
 `game_started=True` gate as `lily_award_bonus`, refusing with an
 LLM-readable recovery path ("call lily_begin_round first"), never a
 silent no-op: `lily_award_bonus` and `lily_log_clarify`.
+Clarify has a second, stricter lifetime gate: it is legal only while the
+current answer window is live and adjudication has not made the question
+terminal. At `note_answer_heard`, pending/in-flight clarification is cancelled;
+after result/reveal, the tool refuses and the state block forbids final-answer
+checks or re-asking that question.
 `lily_bind_speaker`'s `player_bind` packet is a roster event, not a game
 outcome — binding is core lobby behavior and stays ungated, per the tool
 gating principle above (as does `lily_note_fact`, deliberately, and the
