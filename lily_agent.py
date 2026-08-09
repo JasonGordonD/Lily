@@ -256,6 +256,24 @@ def lily_llm_stream_is_empty_stop(text_chars: int, tool_calls: int) -> bool:
     return int(text_chars or 0) <= 0 and int(tool_calls or 0) <= 0
 
 
+def lily_spine_line(
+    *,
+    phase: str,
+    q: int | str | None,
+    delivery: str,
+    window: str,
+    hold: str,
+    supply: str,
+) -> str:
+    """One-line operability spine: phase / q / delivery / window / hold /
+    supply. Pure + testable; logged as ``LILY_SPINE``."""
+    return (
+        f"LILY_SPINE | phase={phase or '-'} q={q if q is not None else '-'} "
+        f"delivery={delivery or '-'} window={window or '-'} "
+        f"hold={hold or '-'} supply={supply or '-'}"
+    )
+
+
 EVENTS_TOPIC = "lily.events"
 
 # Contract-note packet-kind spellings for the `event` discriminator alias
@@ -949,6 +967,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "last_active_at": str(int(time.time())),
             }
             await self.ctx.room.local_participant.set_attributes(attrs)
+            self.log_spine()
         except Exception as e:
             logger.warning("LILY_STATE | attribute publish failed: %s", e)
 
@@ -961,6 +980,58 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         except RuntimeError:
             return
         loop.create_task(self.publish_attributes())
+
+    def spine_fields(self) -> dict:
+        """Snapshot the operability spine for logs / tests."""
+        sk = self.sk
+        phase = getattr(self, "_phase_hold", None) or getattr(self, "ui_phase", None) or "-"
+        q = getattr(sk, "question_number", None)
+        pending = getattr(self, "_pending_delivery_qnum", None)
+        active = getattr(self, "_active_delivery_qnum", None)
+        if pending is not None:
+            delivery = f"pending:{pending}"
+        elif active is not None:
+            delivery = f"active:{active}"
+        elif getattr(self, "armed_question", None) is not None:
+            delivery = "armed"
+        else:
+            delivery = "none"
+        if getattr(sk, "answer_window_open", False):
+            window = "steal" if getattr(self, "_steal_window", False) else "open"
+        else:
+            window = "closed"
+        if getattr(self, "_hold_active", False):
+            hold = "stop"
+        elif getattr(self, "_question_pending", False):
+            hold = "q_pending"
+        else:
+            hold = "clear"
+        if not getattr(self, "game_started", False):
+            supply = "lobby"
+        elif getattr(self, "game_over", False):
+            supply = "over"
+        elif self.next_question_ready():
+            supply = "ready"
+        else:
+            supply = "stall"
+        return {
+            "phase": str(phase),
+            "q": q,
+            "delivery": delivery,
+            "window": window,
+            "hold": hold,
+            "supply": supply,
+        }
+
+    def log_spine(self) -> str:
+        """Emit ``LILY_SPINE`` once per distinct snapshot (deduped)."""
+        fields = self.spine_fields()
+        line = lily_spine_line(**fields)
+        if getattr(self, "_last_spine_line", None) == line:
+            return line
+        self._last_spine_line = line
+        logger.info("%s", line)
+        return line
 
     def next_question_ready(self) -> bool:
         """WS-6 seam predicate (published as the `next_question_ready`
