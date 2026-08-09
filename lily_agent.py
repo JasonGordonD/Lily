@@ -583,6 +583,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # Set by the entrypoint BEFORE session.start so on_enter knows
         # whether to greet (session_greet) or rejoin (session_rejoin).
         self.reconnected = False
+        # F1: empty-STOP fail-closed in lobby schedules at most one keyed
+        # opener re-dispatch (session_greet / session_rejoin). Cap prevents
+        # a mute death spiral of greets×N.
+        self._empty_stop_lobby_recover_count = 0
 
         self.next_question: dict | None = None      # prefetched N+1
         self.armed_question: dict | None = None     # in state block, awaiting ask
@@ -10294,6 +10298,12 @@ class LilyAgent(Agent):
             yield sheet
             return
 
+        # F1: fail-closed is correct for the empty handle, but two empties
+        # at cold open used to leave the room mute (checkers: "broken
+        # agent"). Schedule one inventory-keyed opener re-dispatch before
+        # raising — existing session_greet / session_rejoin copy only.
+        self._maybe_schedule_lobby_empty_stop_recover()
+
         logger.error(
             "LILY_LLM | EMPTY_STOP_FAILED | session=%s — raising so the "
             "speech handle fails closed (claims release; no silent lobby)",
@@ -10303,6 +10313,81 @@ class LilyAgent(Agent):
             "lily empty STOP: LLM returned no text and no tools after retry",
             retryable=True,
         )
+
+    def _maybe_schedule_lobby_empty_stop_recover(self) -> bool:
+        """F1 — after empty STOP fail-closed pre-game, re-open the night
+        once via gated_say. Returns True when a recover task was armed.
+
+        Caps at one attempt. Skips when the opener already CONFIRMED (later
+        lobby banter empties must not re-greet). Uses the inventory key
+        only — no new copy. One-emission vs cut recovery: keyed release on
+        GENERATION_FAILED does not arm cut recovery; this recover is the
+        sole second attempt for the opener.
+        """
+        game = self._game
+        if getattr(game, "game_started", False):
+            return False
+        if int(getattr(game, "_empty_stop_lobby_recover_count", 0) or 0) >= 1:
+            return False
+
+        if getattr(game, "reconnected", False):
+            key, act = "session_rejoin", "rejoin"
+            instructions_fn = getattr(game, "rejoin_instructions", None)
+        else:
+            key, act = "session_greet", "greet"
+            instructions_fn = getattr(game, "greeting_instructions", None)
+        if not callable(instructions_fn):
+            return False
+
+        registry = getattr(game, "say_registry", None)
+        if registry is not None:
+            try:
+                if registry.state(key) == lily_say_gate.CLAIM_CONFIRMED:
+                    return False
+            except Exception:
+                pass
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        game._empty_stop_lobby_recover_count = (
+            int(getattr(game, "_empty_stop_lobby_recover_count", 0) or 0) + 1
+        )
+        attempt = game._empty_stop_lobby_recover_count
+        session_id = getattr(getattr(game, "sk", None), "session_id", "?")
+
+        async def _recover() -> None:
+            # Let GENERATION_FAILED release the failed handle's claim so
+            # gated_say can re-claim (dup would otherwise suppress).
+            await asyncio.sleep(0.15)
+            try:
+                if registry is not None and registry.state(key) == (
+                    lily_say_gate.CLAIM_PENDING
+                ):
+                    registry.release(key)
+                logger.error(
+                    "LILY_LLM | EMPTY_STOP_LOBBY_RECOVER | session=%s "
+                    "key=%s attempt=%d — re-dispatching opener after "
+                    "empty STOP fail-closed",
+                    session_id, key, attempt,
+                )
+                game.gated_say(
+                    key,
+                    act,
+                    instructions_fn(),
+                    source="empty_stop_lobby_recover",
+                )
+            except Exception as e:
+                logger.exception(
+                    "LILY_LLM | EMPTY_STOP_LOBBY_RECOVER_FAILED | "
+                    "session=%s key=%s — %s",
+                    session_id, key, e,
+                )
+
+        loop.create_task(_recover())
+        return True
 
     def _thinking_level_for_turn(self, chat_ctx) -> str:
         """'high'/'low' for THIS turn from the last user message. Only user

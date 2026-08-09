@@ -5,6 +5,16 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — F1: Lobby empty-STOP opener recover
+
+Fail-closed on empty LLM STOP is correct for the dead handle, but two
+empties at cold open left the room mute (checkers: broken agent). After
+`EMPTY_STOP_FAILED`, schedule **one** inventory-keyed `session_greet`
+(or `session_rejoin`) re-dispatch via `gated_say` — existing instructions
+only, no new copy. Cap = 1; skip when the opener is already CONFIRMED.
+Log `EMPTY_STOP_LOBBY_RECOVER`. Does not arm a second cut-recovery path
+(keyed release already owns re-dispatch).
+
 ## 2026-08-09 — Spine log (`LILY_SPINE`)
 
 One operability line on each distinct glass publish:

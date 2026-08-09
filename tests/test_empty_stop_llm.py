@@ -72,6 +72,9 @@ def test_llm_empty_stop_retries_then_raises(monkeypatch):
         publish_attributes_nowait=lambda: None,
         expect_delivery=lambda: None,
         rendered_armed_question=lambda: "",
+        # No opener recover surface — schedule is a no-op; raise still fires.
+        _empty_stop_lobby_recover_count=0,
+        reconnected=False,
     )
     agent._game = game
     object.__setattr__(agent, "_llm", None)
@@ -87,6 +90,150 @@ def test_llm_empty_stop_retries_then_raises(monkeypatch):
 
     assert _run(_drain()) == []
     assert calls["n"] == 2
+
+
+def test_lobby_empty_stop_schedules_one_greet_recover(monkeypatch):
+    """F1: cold open empty STOP fail-closed re-dispatches session_greet once."""
+    import lily_say_gate
+
+    async def _empty_default(agent, chat_ctx, tools, model_settings):
+        if False:  # pragma: no cover
+            yield "x"
+
+    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+
+    agent = LilyAgent.__new__(LilyAgent)
+    said = []
+    registry = lily_say_gate.SpeechActRegistry()
+    registry.claim("session_greet", owner="failed_speech")
+
+    game = SimpleNamespace(
+        sk=SimpleNamespace(session_id="lily-lobby-recover", answer_window_open=False),
+        game_started=False,
+        armed_question=None,
+        reconnected=False,
+        _empty_stop_lobby_recover_count=0,
+        say_registry=registry,
+        publish_attributes_nowait=lambda: None,
+        expect_delivery=lambda: None,
+        rendered_armed_question=lambda: "",
+        greeting_instructions=lambda: "Hi, I'm Lily — you host trivia.",
+        rejoin_instructions=lambda: "lost you a second",
+        gated_say=lambda key, act, instructions, source: (
+            said.append(
+                {"key": key, "act": act, "instructions": instructions, "source": source}
+            )
+            or True
+        ),
+    )
+    agent._game = game
+    object.__setattr__(agent, "_llm", None)
+    agent._apply_context_blocks = lambda ctx: None
+    agent._thinking_level_for_turn = lambda ctx: "low"
+
+    async def _scenario():
+        with pytest.raises(APIConnectionError):
+            async for _ in agent.llm_node(None, [], None):
+                pass
+        await asyncio.sleep(0.25)
+        return said
+
+    assert _run(_scenario()) == [
+        {
+            "key": "session_greet",
+            "act": "greet",
+            "instructions": "Hi, I'm Lily — you host trivia.",
+            "source": "empty_stop_lobby_recover",
+        }
+    ]
+    assert game._empty_stop_lobby_recover_count == 1
+    assert registry.state("session_greet") is None  # released before re-dispatch
+
+
+def test_lobby_empty_stop_recover_capped(monkeypatch):
+    """Second empty STOP in the same lobby does not greet again."""
+    import lily_say_gate
+
+    async def _empty_default(agent, chat_ctx, tools, model_settings):
+        if False:  # pragma: no cover
+            yield "x"
+
+    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+
+    agent = LilyAgent.__new__(LilyAgent)
+    said = []
+    game = SimpleNamespace(
+        sk=SimpleNamespace(session_id="lily-lobby-cap", answer_window_open=False),
+        game_started=False,
+        armed_question=None,
+        reconnected=False,
+        _empty_stop_lobby_recover_count=1,  # already recovered once
+        say_registry=lily_say_gate.SpeechActRegistry(),
+        publish_attributes_nowait=lambda: None,
+        expect_delivery=lambda: None,
+        rendered_armed_question=lambda: "",
+        greeting_instructions=lambda: "Hi, I'm Lily — you host trivia.",
+        gated_say=lambda *a, **k: said.append(True) or True,
+    )
+    agent._game = game
+    object.__setattr__(agent, "_llm", None)
+    agent._apply_context_blocks = lambda ctx: None
+    agent._thinking_level_for_turn = lambda ctx: "low"
+
+    async def _scenario():
+        with pytest.raises(APIConnectionError):
+            async for _ in agent.llm_node(None, [], None):
+                pass
+        await asyncio.sleep(0.25)
+        return said
+
+    assert _run(_scenario()) == []
+    assert game._empty_stop_lobby_recover_count == 1
+
+
+def test_lobby_empty_stop_skips_recover_after_confirmed_greet(monkeypatch):
+    """Once she opened the night, later lobby empties must not re-greet."""
+    import lily_say_gate
+
+    async def _empty_default(agent, chat_ctx, tools, model_settings):
+        if False:  # pragma: no cover
+            yield "x"
+
+    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+
+    agent = LilyAgent.__new__(LilyAgent)
+    said = []
+    registry = lily_say_gate.SpeechActRegistry()
+    registry.claim("session_greet", owner="ok")
+    registry.confirm("session_greet")
+
+    game = SimpleNamespace(
+        sk=SimpleNamespace(session_id="lily-lobby-open", answer_window_open=False),
+        game_started=False,
+        armed_question=None,
+        reconnected=False,
+        _empty_stop_lobby_recover_count=0,
+        say_registry=registry,
+        publish_attributes_nowait=lambda: None,
+        expect_delivery=lambda: None,
+        rendered_armed_question=lambda: "",
+        greeting_instructions=lambda: "Hi, I'm Lily — you host trivia.",
+        gated_say=lambda *a, **k: said.append(True) or True,
+    )
+    agent._game = game
+    object.__setattr__(agent, "_llm", None)
+    agent._apply_context_blocks = lambda ctx: None
+    agent._thinking_level_for_turn = lambda ctx: "low"
+
+    async def _scenario():
+        with pytest.raises(APIConnectionError):
+            async for _ in agent.llm_node(None, [], None):
+                pass
+        await asyncio.sleep(0.25)
+        return said
+
+    assert _run(_scenario()) == []
+    assert game._empty_stop_lobby_recover_count == 0
 
 
 def test_llm_empty_stop_forces_armed_sheet(monkeypatch):
