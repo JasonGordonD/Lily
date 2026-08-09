@@ -378,7 +378,7 @@ def test_buffer_clears_at_arm():
     _arm_and_claim(game)
     game.buffer_pre_window_answer({
         "text": "stale", "speaker_label": "S1",
-        "segment_start_time": 1.0, "segment_end_time": 2.0,
+        "segment_start_time": 100.0, "segment_end_time": 101.0,
     })
     assert game._pre_window_segments
     game.next_question = dict(NILE_QUESTION)
