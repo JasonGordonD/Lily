@@ -290,8 +290,9 @@ Every model ID below was verified live on the funded keys before wiring.
 - **Question author/verification/distractors:** `grok-4.5` Responses API.
   General uses `medium`; all adult sub-theme/category/question authoring and
   verification is `high`.
-- **Tier-2 judge and multimodal content gate:** temporarily Gemini until
-  their own migration PRs; they no longer share the vocal model setting.
+- **Tier-2 judge:** `grok-4.5` `medium`, structured and 12s-bounded; it
+  proposes correctness only and never commits score.
+- **Multimodal content gate:** temporarily Gemini until its vision migration.
 - **Image gen — standard deck:** `gemini-3.1-flash-lite-image` (Nano Banana 2
   Lite; `lily_config.imagegen_model`) on the classic `generate_content` path
   (no Interactions API migration needed).

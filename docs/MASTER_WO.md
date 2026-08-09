@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at Grok-reasoning M5a start: `main @ 050d690`
+Pinned at Grok-judge M5b start: `main @ 5fc4a83`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -98,8 +98,8 @@ failure becomes the sole hotfix ticket.
 | M2 | LiveKit endpointing → `TurnHandlingOptions`, preserving current detector (shipped `962dd77`) |
 | M3 | Speechmatics `operating_point` → supported `model`, preserving enhanced STT (shipped `b64848c`) |
 | M4 | General/adult vocal → Grok 4.5 with deterministic low/medium effort router (shipped `050d690`) |
-| M5a | Question generation/verification/distractors → Grok 4.5 Responses; adult high (**completed in this change**) |
-| M5b | Tier-2 judge → Grok 4.5 structured verdict |
+| M5a | Question generation/verification/distractors → Grok 4.5 Responses; adult high (shipped `5fc4a83`) |
+| M5b | Tier-2 judge → Grok 4.5 structured verdict (**completed in this change**) |
 | M5c | Vision/image correspondence → Grok 4.5 Vision |
 | M5d | Post-session assessment → Grok 4.5 High |
 | M6 | Prompt caching + append-only context + per-turn temporal context |

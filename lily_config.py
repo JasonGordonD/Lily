@@ -172,8 +172,11 @@ def judge_max_output_tokens() -> int:
 
 
 def judge_model() -> str:
-    """Temporary Gemini judge pin until the dedicated Grok judge PR."""
-    return "gemini-3.6-flash"
+    return "grok-4.5"
+
+
+def judge_effort() -> str:
+    return "medium"
 
 
 # ---------------------------------------------------------------------------

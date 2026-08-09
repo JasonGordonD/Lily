@@ -404,8 +404,6 @@ class LilyReasoning:
         )
         # Gemini remains only for multimodal image gating until M5c.
         self._model = lily_config.gemini_vision_gate_model()
-        # Judge migration is a separate lane. Vocal may already be Grok;
-        # keep Gemini judge transport valid until M5 moves it explicitly.
         self._vocal_model = lily_config.judge_model()
 
     async def _generate(
@@ -1069,43 +1067,18 @@ class LilyReasoning:
         2026-07-15 04:05 stall class) — the caller treats TimeoutError as
         judge-unavailable and rules on Tier-1 alone.
 
-        `adult` routes the judge to the SAME provider the deck is already
-        speaking on. It used to run unconditionally on the Gemini vocal
-        model, including mid-adult-session, which meant a close call on an
-        adult question sent that content to the one provider the session
-        had already swapped AWAY from for being unable to handle it.
-        _SAFETY_SETTINGS sets BLOCK_NONE on the four settable categories,
-        but PROHIBITED_CONTENT is not one of them — that non-overridable
-        filter is the entire reason adult_vocal_model exists. So the judge
-        was blocked, the 12s bound fired, and adjudication silently
-        degraded to Tier-1: up to twelve seconds of stall per close call,
-        on the adult deck only, with weaker rulings to show for it. Same
-        failure class as the recorded 'four blocked generations, ~58s of
-        retry stall'.
-
-        Judge-never-invents discipline is unchanged either way: the model
+        Grok 4.5 owns general and adult Tier-2 verdicts through one structured
+        transport. Judge-never-invents discipline is unchanged: the model
         rules on what was SAID against the supplied answer set, and
         supplies no facts of its own."""
-        if adult and lily_config.xai_api_key():
-            # Grok speaks JSON here through the same adult transport the
-            # question lane uses. Its own timeout still nests inside the
-            # 12s bound below, so the stall ceiling is unchanged.
-            return await asyncio.wait_for(
-                self._generate_grok_json(
-                    user_prompt,
-                    system_instruction=system_instructions,
-                    max_tokens=lily_config.judge_max_output_tokens(),
-                    timeout=12.0,
-                ),
-                timeout=12.0,
-            )
         return await asyncio.wait_for(
-            self._generate(
-                self._vocal_model,
+            self._generate_grok_json(
                 user_prompt,
-                JUDGE_THINKING_LEVEL,
                 system_instruction=system_instructions,
-                max_output_tokens=lily_config.judge_max_output_tokens(),
+                max_tokens=lily_config.judge_max_output_tokens(),
+                timeout=12.0,
+                model=lily_config.judge_model(),
+                effort=lily_config.judge_effort(),
             ),
             timeout=12.0,
         )

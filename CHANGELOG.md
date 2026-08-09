@@ -5,6 +5,13 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — M5b: Tier-2 judge on Grok 4.5
+
+General and adult ambiguous-answer adjudication now share Grok 4.5 at
+`medium` effort through the structured Responses transport. The 12s bound and
+Tier-1 fail-closed behavior remain unchanged; the model proposes a verdict
+and the scorekeeper remains the only score writer.
+
 ## 2026-08-09 — M5a: question reasoning on Grok 4.5
 
 Question generation, verification and multiple-choice distractor synthesis

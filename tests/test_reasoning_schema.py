@@ -139,14 +139,13 @@ def test_verify_question_sets_grok_model_effort_and_budget():
     assert seen["max_tokens"] == lily_config.reasoning_max_output_tokens()
 
 
-def test_judge_uses_vocal_model_and_judge_budget():
+def test_judge_uses_grok_model_effort_and_judge_budget():
     seen: dict = {}
     r = _reasoning_with_stub(seen, '{"verdict": "correct"}')
     _run(r.judge("system", "prompt"))
-    assert seen["model"] == "test-vocal-model"
-    assert seen["max_output_tokens"] == lily_config.judge_max_output_tokens()
-    # The judge contract lives in lily_evaluation — no response_schema here.
-    assert "response_schema" not in seen
+    assert seen["model"] == "grok-4.5"
+    assert seen["effort"] == "medium"
+    assert seen["max_tokens"] == lily_config.judge_max_output_tokens()
 
 
 # -- parse path: schema-mode primary, defensive fallback ---------------------------
