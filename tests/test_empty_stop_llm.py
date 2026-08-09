@@ -12,11 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from livekit.agents import APIConnectionError
+from livekit.agents import APIConnectionError, APIStatusError
 
 import lily_agent
 from lily_agent import (
     LilyAgent,
+    lily_is_prohibited_content_error,
     lily_llm_chunk_signal,
     lily_llm_stream_is_empty_stop,
 )
@@ -46,6 +47,22 @@ def test_empty_stop_predicate():
     assert lily_llm_stream_is_empty_stop(0, 0) is True
     assert lily_llm_stream_is_empty_stop(1, 0) is False
     assert lily_llm_stream_is_empty_stop(0, 1) is False
+
+
+def _prohibited_error():
+    return APIStatusError(
+        '{"block_reason":"PROHIBITED_CONTENT","safety_ratings":null}',
+        status_code=-1,
+        retryable=False,
+        request_id="req-prohibited-1",
+    )
+
+
+def test_prohibited_content_predicate_is_specific():
+    assert lily_is_prohibited_content_error(_prohibited_error())
+    assert not lily_is_prohibited_content_error(
+        APIStatusError("rate limited", status_code=429)
+    )
 
 
 def _run(coro):
@@ -90,6 +107,89 @@ def test_llm_empty_stop_retries_then_raises(monkeypatch):
 
     assert _run(_drain()) == []
     assert calls["n"] == 2
+
+
+def test_prohibited_keyed_delivery_bypasses_model_with_sheet(monkeypatch, caplog):
+    calls = {"n": 0}
+
+    async def _blocked(agent, chat_ctx, tools, model_settings):
+        calls["n"] += 1
+        raise _prohibited_error()
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(LilyAgent.default, "llm_node", _blocked)
+    agent = LilyAgent.__new__(LilyAgent)
+    expect = {"called": False}
+    game = SimpleNamespace(
+        sk=SimpleNamespace(
+            session_id="lily-blocked-sheet",
+            question_number=4,
+            answer_window_open=False,
+        ),
+        game_started=True,
+        armed_question={
+            "id": "q_8291",
+            "category": "academic",
+            "prompt": "Who wrote Frankenstein?",
+        },
+        _pending_delivery_qnum=4,
+        _delivery_stop_sticky=False,
+        publish_attributes_nowait=lambda: None,
+        expect_delivery=lambda: expect.__setitem__("called", True),
+        rendered_armed_question=lambda: "Who wrote Frankenstein?",
+    )
+    agent._game = game
+    object.__setattr__(agent, "_llm", None)
+    agent._apply_context_blocks = lambda ctx: None
+    agent._thinking_level_for_turn = lambda ctx: "low"
+
+    async def _drain():
+        return [chunk async for chunk in agent.llm_node(None, [], None)]
+
+    with caplog.at_level("ERROR"):
+        assert _run(_drain()) == ["Who wrote Frankenstein?"]
+    assert calls["n"] == 1
+    assert expect["called"] is True
+    joined = "\n".join(record.message for record in caplog.records)
+    assert "request_id=req-prohibited-1" in joined
+    assert "q=q_8291" in joined
+    assert "PROHIBITED_CONTENT_SHEET" in joined
+
+
+def test_prohibited_conversation_fails_closed_without_retry(monkeypatch):
+    calls = {"n": 0}
+
+    async def _blocked(agent, chat_ctx, tools, model_settings):
+        calls["n"] += 1
+        raise _prohibited_error()
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(LilyAgent.default, "llm_node", _blocked)
+    agent = LilyAgent.__new__(LilyAgent)
+    game = SimpleNamespace(
+        sk=SimpleNamespace(
+            session_id="lily-blocked-chat",
+            question_number=0,
+            answer_window_open=False,
+        ),
+        game_started=False,
+        armed_question=None,
+        _pending_delivery_qnum=None,
+        _delivery_stop_sticky=False,
+        publish_attributes_nowait=lambda: None,
+    )
+    agent._game = game
+    object.__setattr__(agent, "_llm", None)
+    agent._apply_context_blocks = lambda ctx: None
+    agent._thinking_level_for_turn = lambda ctx: "low"
+
+    async def _drain():
+        with pytest.raises(APIStatusError):
+            async for _ in agent.llm_node(None, [], None):
+                pass
+
+    _run(_drain())
+    assert calls["n"] == 1
 
 
 def test_lobby_empty_stop_schedules_one_greet_recover(monkeypatch):

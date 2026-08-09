@@ -16,6 +16,7 @@ own HTTP client).
 
 import asyncio
 import datetime
+import hashlib
 import json
 import logging
 import re
@@ -31,6 +32,7 @@ from livekit import rtc, api
 from livekit.agents import (
     APIConnectionError,
     APIConnectOptions,
+    APIStatusError,
     AutoSubscribe,
     EndpointingOptions,
     InterruptionOptions,
@@ -257,6 +259,15 @@ def lily_llm_stream_is_empty_stop(text_chars: int, tool_calls: int) -> bool:
     we care about: no speakable text and no tool calls. Tool-only turns
     are valid and must not be treated as empty."""
     return int(text_chars or 0) <= 0 and int(tool_calls or 0) <= 0
+
+
+def lily_is_prohibited_content_error(error: BaseException) -> bool:
+    """Provider's non-configurable block class (not configurable SAFETY)."""
+    return "PROHIBITED_CONTENT" in str(error or "").upper()
+
+
+def _lily_short_hash(value: str) -> str:
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:16]
 
 
 def lily_spine_line(
@@ -11776,13 +11787,35 @@ class LilyAgent(Agent):
         without buffering — TTFT is unchanged on the healthy path."""
         text_chars = 0
         tool_calls = 0
-        async for chunk in Agent.default.llm_node(
-            self, chat_ctx, tools, model_settings
-        ):
-            t_n, tc_n = lily_llm_chunk_signal(chunk)
-            text_chars += t_n
-            tool_calls += tc_n
-            yield chunk
+        try:
+            async for chunk in Agent.default.llm_node(
+                self, chat_ctx, tools, model_settings
+            ):
+                t_n, tc_n = lily_llm_chunk_signal(chunk)
+                text_chars += t_n
+                tool_calls += tc_n
+                yield chunk
+        except APIStatusError as exc:
+            if not lily_is_prohibited_content_error(exc):
+                raise
+            self._log_prohibited_content(exc, chat_ctx, tools)
+            sheet = self._blocked_delivery_sheet()
+            if sheet:
+                logger.error(
+                    "LILY_LLM | PROHIBITED_CONTENT_SHEET | session=%s "
+                    "q=%d chars=%d — bypassing blocked model with vetted "
+                    "deterministic delivery",
+                    self._game.sk.session_id,
+                    self._game.sk.question_number,
+                    len(sheet),
+                )
+                self._game.expect_delivery()
+                yield sheet
+                return
+            # Non-delivery conversation has no deterministic truth sheet.
+            # Preserve the provider's non-retryable failure so the speech
+            # handle releases/suppresses; never retry into a storm.
+            raise
 
         if not lily_llm_stream_is_empty_stop(text_chars, tool_calls):
             return
@@ -11794,13 +11827,31 @@ class LilyAgent(Agent):
         )
         text_chars = 0
         tool_calls = 0
-        async for chunk in Agent.default.llm_node(
-            self, chat_ctx, tools, model_settings
-        ):
-            t_n, tc_n = lily_llm_chunk_signal(chunk)
-            text_chars += t_n
-            tool_calls += tc_n
-            yield chunk
+        try:
+            async for chunk in Agent.default.llm_node(
+                self, chat_ctx, tools, model_settings
+            ):
+                t_n, tc_n = lily_llm_chunk_signal(chunk)
+                text_chars += t_n
+                tool_calls += tc_n
+                yield chunk
+        except APIStatusError as exc:
+            if not lily_is_prohibited_content_error(exc):
+                raise
+            self._log_prohibited_content(exc, chat_ctx, tools)
+            sheet = self._blocked_delivery_sheet()
+            if sheet:
+                logger.error(
+                    "LILY_LLM | PROHIBITED_CONTENT_SHEET | session=%s "
+                    "q=%d chars=%d — deterministic delivery after retry block",
+                    self._game.sk.session_id,
+                    self._game.sk.question_number,
+                    len(sheet),
+                )
+                self._game.expect_delivery()
+                yield sheet
+                return
+            raise
 
         if not lily_llm_stream_is_empty_stop(text_chars, tool_calls):
             logger.info(
@@ -11853,6 +11904,62 @@ class LilyAgent(Agent):
         raise APIConnectionError(
             "lily empty STOP: LLM returned no text and no tools after retry",
             retryable=True,
+        )
+
+    def _blocked_delivery_sheet(self) -> str:
+        game = self._game
+        if (
+            not getattr(game, "game_started", False)
+            or getattr(game, "_delivery_stop_sticky", False)
+            or getattr(game, "armed_question", None) is None
+            or game.sk.answer_window_open
+            or getattr(game, "_pending_delivery_qnum", None)
+            != game.sk.question_number
+        ):
+            return ""
+        return (game.rendered_armed_question() or "").strip()
+
+    def _log_prohibited_content(self, exc, chat_ctx, tools) -> None:
+        system_parts: list[str] = []
+        state_parts: list[str] = []
+        conversation_parts: list[str] = []
+        for item in _chat_items(chat_ctx):
+            text = _message_text(item)
+            role = str(getattr(item, "role", "") or "")
+            conversation_parts.append(f"{role}:{text}")
+            if role == "system":
+                system_parts.append(text)
+                if _STATE_BLOCK_MARKER in text:
+                    state_parts.append(text)
+        tool_names = []
+        for tool in tools or []:
+            info = getattr(tool, "info", None)
+            name = (
+                getattr(info, "name", None)
+                or getattr(tool, "name", None)
+                or type(tool).__name__
+            )
+            tool_names.append(str(name))
+        armed = getattr(self._game, "armed_question", None) or {}
+        llm = getattr(self, "llm", None)
+        model = (
+            getattr(llm, "model", None)
+            or getattr(getattr(llm, "_opts", None), "model", None)
+            or "unknown"
+        )
+        logger.error(
+            "LILY_LLM | PROHIBITED_CONTENT | session=%s model=%s "
+            "request_id=%s q=%s category=%s system_hash=%s state_hash=%s "
+            "conversation_hash=%s tools_hash=%s",
+            self._game.sk.session_id,
+            model,
+            getattr(exc, "request_id", None) or "-",
+            armed.get("id") or "-",
+            armed.get("category") or "-",
+            _lily_short_hash("\n".join(system_parts)),
+            _lily_short_hash("\n".join(state_parts)),
+            _lily_short_hash("\n".join(conversation_parts)),
+            _lily_short_hash("|".join(sorted(tool_names))),
         )
 
     def _maybe_schedule_lobby_empty_stop_recover(self) -> bool:

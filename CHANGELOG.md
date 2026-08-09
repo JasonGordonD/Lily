@@ -5,6 +5,19 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — M1b: deterministic `PROHIBITED_CONTENT` fallback
+
+In `lily-9337B1-331ff234`, a post-STOP curated-bank `question_nudge` spent
+11.2s in Gemini and failed non-retryably with opaque
+`PROHIBITED_CONTENT` (request `9392c0887a68`).
+
+**Fix.** A blocked turn with an explicit pending delivery intent bypasses the
+model and emits the already-vetted deterministic question sheet exactly
+once. Blocked conversation has no invented fallback and fails closed without
+retry. Every event logs model/request/question/category plus hashes of system,
+state, conversation and tool components for provider escalation without
+logging raw private context.
+
 ## 2026-08-09 — M1a: every configurable Gemini filter is non-blocking
 
 While the Grok migration proceeds, Gemini remains on several lanes. Vocal,
