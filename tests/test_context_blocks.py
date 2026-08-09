@@ -49,6 +49,11 @@ class _FakeGame:
     def build_state_block(self, *, now=None) -> str:
         return f"{_STATE_BLOCK_MARKER}\n{self.state_text}"
 
+    def build_state_block_split(self, *, now=None):
+        # Mirrors the real split: stable = the marker block; the volatile
+        # tail only ever reaches per-generation copies.
+        return self.build_state_block(now=now), "volatile: tail"
+
     def note_user_turn(self) -> None:
         # WS-3 cut-recovery: on_user_turn_completed stamps user-turn recency
         # here so a real barge stands the auto-resume watchdog down.

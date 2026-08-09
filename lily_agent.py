@@ -1377,10 +1377,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # full __init__ attribute set.
         if self._preemptive_paused and self.agent is not None:
             self._preemptive_paused = False
-            if not (
+            game_live = (
                 getattr(self, "game_started", False)
                 and not getattr(self, "game_over", False)
-            ):
+            )
+            # 2026-08-09 volatile-tail split: live games run preemptive by
+            # default again, so the resume re-enables it mid-game too —
+            # unless LILY_LIVE_PREEMPTIVE restores the G1 hold.
+            if (not game_live) or lily_config.live_preemptive_enabled():
                 self.agent.set_preemptive_generation(True)
 
     def set_game_live_preemptive(self, live: bool) -> None:
@@ -1397,13 +1401,22 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         and a dead LLM call each, zero realized latency win. 1.6.6 has no
         pre-snapshot injection hook (on_preemptive_generation copies
         agent.chat_ctx synchronously inside AudioRecognition), so the
-        supported lever is the agent-level live-read enabled flag."""
+        supported lever is the agent-level live-read enabled flag.
+
+        2026-08-09 UPDATE (P2 volatile-tail split): the every-turn
+        invalidators — the clock line, answer window and live candidates —
+        now ride a per-generation volatile item the equivalence check
+        never sees, so an ordinary turn boundary keeps the speculative run
+        valid and in-game preemptive is worth its cost again. Live games
+        therefore keep preemptive ON by default; LILY_LIVE_PREEMPTIVE=false
+        restores the G1 behavior if the discard rate proves otherwise."""
         if self.agent is None:
             return
-        self.agent.set_preemptive_generation(not live)
+        enabled = (not live) or lily_config.live_preemptive_enabled()
+        self.agent.set_preemptive_generation(enabled)
         logger.info(
             "LILY_STATE | PREEMPTIVE_%s | session=%s (game %s)",
-            "OFF" if live else "ON", self.sk.session_id,
+            "ON" if enabled else "OFF", self.sk.session_id,
             "live" if live else "not live",
         )
 
@@ -10093,13 +10106,48 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         )
 
     def build_state_block(self, *, now: float | None = None) -> str:
+        """Full render — historical shape (sk block, temporal line, extras)."""
         block = self.sk.build_state_block()
         extra = [
             lily_temporal_context(
                 getattr(self, "session_started_at", time.time()),
                 now=now,
             )
-        ]
+        ] + self._state_extra_lines(now=now)
+        if extra:
+            block += "\n" + "\n".join(extra)
+        return block
+
+    def build_state_block_split(
+        self, *, now: float | None = None
+    ) -> tuple[str, str]:
+        """(stable, volatile) for the P2 volatile-tail split.
+
+        stable  — everything the preemptive equivalence check may see:
+                  changes only when the game genuinely moves.
+        volatile — the per-generation tail (clock/session-age line, answer
+                  window, live candidates): honest but changing on nearly
+                  every in-game turn, which is exactly what forced
+                  preemptive OFF for the whole live game (G1). Injected
+                  per-generation only, so it can never invalidate a
+                  speculative run."""
+        stable = self.sk.build_state_block_stable()
+        extras = self._state_extra_lines(now=now)
+        if extras:
+            stable += "\n" + "\n".join(extras)
+        volatile = "\n".join(
+            [
+                lily_temporal_context(
+                    getattr(self, "session_started_at", time.time()),
+                    now=now,
+                )
+            ]
+            + self.sk.volatile_state_lines()
+        )
+        return stable, volatile
+
+    def _state_extra_lines(self, *, now: float | None = None) -> list:
+        extra = []
         answered_line = self.answered_closed_state_line()
         if answered_line:
             extra.append(answered_line)
@@ -10406,9 +10454,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     "player demand — you may mention these): "
                     + ", ".join(self.promoted_categories)
                 )
-        if extra:
-            block += "\n" + "\n".join(extra)
-        return block
+        return extra
 
     # -- burn protocol (say-gate WO §1) ------------------------------------------
 
@@ -11872,9 +11918,11 @@ class LilyAgent(Agent):
     _CTX_ID_ADULT = "lily_ctx_adult_layer"
     _CTX_ID_MEMORY = "lily_ctx_memory_block"
     _CTX_ID_STATE = "lily_ctx_state_block"
+    _CTX_ID_STATE_VOLATILE = "lily_ctx_state_volatile"
 
     def _apply_context_blocks(
-        self, chat_ctx, *, now: float | None = None
+        self, chat_ctx, *, now: float | None = None,
+        include_volatile: bool = False,
     ) -> None:
         """Idempotent, deterministic injection of the three system blocks.
         Exact injection semantics preserved from the llm_node era: adult
@@ -11951,20 +11999,47 @@ class LilyAgent(Agent):
         # ambient state as a user/assistant item). If any of it echoes
         # into an outbound turn, tts_node's lily_filter_leaks strips it
         # deterministically by that sentinel.
-        state = lily_say_gate.lily_wrap_state_block(
-            self._game.build_state_block(now=now)
+        # P2 volatile-tail split (2026-08-09): the equivalence-visible
+        # injection carries the STABLE state only. The volatile tail
+        # (clock, answer window, live candidates) — the lines that changed
+        # on nearly every in-game turn and forced preemptive OFF for the
+        # whole live game (G1) — rides a separate item injected ONLY on
+        # per-generation copies (include_volatile=True from llm_node),
+        # which the preemptive check never sees.
+        stable_text, volatile_text = self._game.build_state_block_split(
+            now=now
         )
+        state = lily_say_gate.lily_wrap_state_block(stable_text)
         existing = [
             i for i, m in enumerate(items)
             if getattr(m, "role", None) == "system"
             and _STATE_BLOCK_MARKER in _message_text(m)
         ]
         if len(existing) == 1 and _message_text(items[existing[0]]) == state:
+            pass  # unchanged block stays put — the equivalence check passes
+        else:
+            for i in reversed(existing):
+                items.pop(i)
+            items.append(
+                ChatMessage(
+                    id=self._CTX_ID_STATE, role="system", content=[state]
+                )
+            )
+        if not include_volatile:
             return
-        for i in reversed(existing):
+        volatile = lily_say_gate.lily_wrap_state_block(volatile_text)
+        stale = [
+            i for i, m in enumerate(items)
+            if getattr(m, "id", None) == self._CTX_ID_STATE_VOLATILE
+        ]
+        for i in reversed(stale):
             items.pop(i)
         items.append(
-            ChatMessage(id=self._CTX_ID_STATE, role="system", content=[state])
+            ChatMessage(
+                id=self._CTX_ID_STATE_VOLATILE,
+                role="system",
+                content=[volatile],
+            )
         )
 
     # -- node overrides ------------------------------------------------------------
@@ -12064,7 +12139,7 @@ class LilyAgent(Agent):
         #    force the armed sheet or raise APIConnectionError so the
         #    GENERATION_FAILED path releases claims instead of airing
         #    dead air. Prompt text is never rewritten.
-        self._apply_context_blocks(chat_ctx)
+        self._apply_context_blocks(chat_ctx, include_volatile=True)
         self._game.publish_attributes_nowait()
 
         # Adaptive vocal depth: Grok stays LOW for routine host reflexes and

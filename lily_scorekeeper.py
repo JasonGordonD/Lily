@@ -3092,7 +3092,41 @@ class LilyScorekeeper:
     # -- state block ---------------------------------------------------------
 
     def build_state_block(self, now: Optional[float] = None) -> str:
-        """Compact state block injected before each Lily turn."""
+        """Compact state block injected before each Lily turn. Full render —
+        byte-identical to the historical shape: stable lines with the
+        volatile window/candidate lines in their historical mid-block
+        position."""
+        pre, post = self._stable_state_lines(now=now)
+        return "\n".join(pre + self.volatile_state_lines(now=now) + post)
+
+    def build_state_block_stable(self, now: Optional[float] = None) -> str:
+        """The state block WITHOUT the per-turn volatile lines (answer
+        window + candidates). This is what the preemptive-generation
+        equivalence check may see: it changes only when the game genuinely
+        moves (phase, scores, question), so a speculative run across an
+        ordinary turn boundary stays valid (P2 volatile-tail split)."""
+        pre, post = self._stable_state_lines(now=now)
+        return "\n".join(pre + post)
+
+    def volatile_state_lines(self, now: Optional[float] = None) -> list:
+        """The per-turn volatile tail: answer window state + live answer
+        candidates. Injected per-generation only (llm_node copy) — never
+        into the persistent context the preemptive check compares."""
+        window = "open" if self.is_window_open(now=now) else "closed"
+        lines = [
+            f"answer_window={window} candidates={len(self.answer_candidates)}"
+        ]
+        if self.answer_candidates:
+            for c in self.ordered_candidates():
+                who = c["player"] or f"unbound voice {c['speaker_label']}"
+                lines.append(f"  answered: {who}: {c['text']!r}")
+        return lines
+
+    def _stable_state_lines(
+        self, now: Optional[float] = None
+    ) -> tuple[list, list]:
+        """(pre, post): the stable lines before and after the volatile
+        window/candidate chunk, preserving the historical full-block order."""
         lines = ["[GAME STATE]"]
         # question is shown WITHIN-ROUND (1..questions_per_round): the raw
         # cumulative count rendered against per-round size ("question=7/6")
@@ -3144,18 +3178,13 @@ class LilyScorekeeper:
             # vocal node only via the reveal-time instructed reply, and
             # the Tier-2 judge gets it in its dedicated call.
             lines.append(f"current_question: {q.get('prompt', '-')!r}")
-        window = "open" if self.is_window_open(now=now) else "closed"
-        lines.append(f"answer_window={window} candidates={len(self.answer_candidates)}")
-        if self.answer_candidates:
-            for c in self.ordered_candidates():
-                who = c["player"] or f"unbound voice {c['speaker_label']}"
-                lines.append(f"  answered: {who}: {c['text']!r}")
+        post = []
         if self.unrostered_labels:
             labels = ", ".join(sorted(self.unrostered_labels))
-            lines.append(f"unbound voices heard: {labels}")
+            post.append(f"unbound voices heard: {labels}")
         for note in self.status_notes:
-            lines.append(f"note: {note}")
-        return "\n".join(lines)
+            post.append(f"note: {note}")
+        return lines, post
 
     # -- checkpoint snapshot ---------------------------------------------------
 
