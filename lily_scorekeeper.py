@@ -493,6 +493,26 @@ _STOP_ADDRESSED_RE = _re.compile(
     rf"|(?:{_STOP_WORD})\b[\s,.!]*\b(?:lily|lilly|lil)\b"
 )
 _STOP_NEGATION_RE = _re.compile(r"\b(?:do not|dont|don t|please dont|never)\s+st")
+_QUIT_GAME_RE = _re.compile(
+    r"\b(?:"
+    r"stop (?:the )?(?:quiz|game|trivia)"
+    r"|quit (?:the )?(?:quiz|game|trivia)"
+    r"|end (?:the )?(?:quiz|game|trivia)"
+    r"|i (?:do not|don t|dont) want to play anymore"
+    r"|i m done (?:playing|with (?:the )?(?:quiz|game|trivia))"
+    r")\b"
+)
+_RESUME_GAME_RE = _re.compile(
+    r"^(?:lily )?(?:"
+    r"resume(?: the (?:quiz|game|trivia))?"
+    r"|continue(?: the (?:quiz|game|trivia))?"
+    r"|keep (?:going|playing)"
+    r"|go on"
+    r"|next question"
+    r"|start (?:the (?:quiz|game|trivia) )?again"
+    r"|let s (?:resume|continue|keep playing)"
+    r")(?: please)?$"
+)
 
 
 def lily_detect_stop(text: str, *, solo: bool = False) -> bool:
@@ -503,9 +523,25 @@ def lily_detect_stop(text: str, *, solo: bool = False) -> bool:
     normalized = _normalize_command_text(text)
     if not normalized or _STOP_NEGATION_RE.search(normalized):
         return False
+    if _QUIT_GAME_RE.search(normalized):
+        return True
     if _STOP_ADDRESSED_RE.search(normalized):
         return True
     return bool(solo and _STOP_CORE_RE.search(normalized))
+
+
+def lily_detect_resume_game(text: str) -> bool:
+    """True only for an explicit whole-utterance resume after sticky STOP."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    if _re.search(
+        r"\b(?:do not|don t|dont|not yet|never)\b.{0,20}"
+        r"\b(?:resume|continue|start|go on|next question)\b",
+        normalized,
+    ):
+        return False
+    return bool(_RESUME_GAME_RE.match(normalized))
 
 
 # ---------------------------------------------------------------------------

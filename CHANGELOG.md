@@ -5,6 +5,18 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-B: STOP is global and sticky
+
+Live `lily-9337B1-331ff234`: “stop the quiz” entered a temporary hold, then
+the next complaint released it. Q5/Q6 armed after STOP; a question nudge hit
+Gemini safety, and Q6 later opened/scored meta speech.
+
+**Fix.** STOP now sets a persistent game-delivery latch, session-retires
+armed/prefetched questions, cancels prefetch/window/delivery/early-answer
+state, clears the glass, and freezes every game-plane owner. Conversation may
+continue, but only an explicit resume/continue command clears the latch.
+Repeated STOP does not repeat the acknowledgment.
+
 ## 2026-08-09 — P0-A: answered/revealed question is dead forever
 
 Live `lily-9337B1-331ff234`: Q3 ("Sigmund Freud") committed and revealed,

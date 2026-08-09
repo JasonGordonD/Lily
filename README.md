@@ -75,6 +75,12 @@ Spoken-surface freeze before any speech/delivery extract:
   playout directly—no empty retry/re-air. A full keyed/organic question
   delivery remains legal; its `q_N_delivery` claim is the sole Round One
   speech owner.
+- **STOP is a sticky game-delivery freeze.** Addressed STOP, “stop the
+  quiz/game,” and “I don’t want to play anymore” cancel/retire the armed and
+  prefetched questions, close the window, clear delivery/early-answer state,
+  and freeze watchdog/prefetch/game acts. Follow-up conversation does not
+  resume the game; only an explicit whole-turn “resume/continue/next question”
+  clears the latch. Temporary “take your time” holds remain user-releasable.
 - **Outbound speech yields after the first question** except for MC
   deliveries (stem + options). Freeform deliveries and verdict-plus-next
   stacks clip at the first `?`. Undelivered-delivery re-fires wait for
