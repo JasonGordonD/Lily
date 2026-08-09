@@ -614,8 +614,24 @@ def auto_start_lobby_grace_seconds() -> float:
     """Wall-clock grace inside the lobby before the auto-start safety net
     is allowed to fire. Long enough for names + one lobby fact per player;
     short enough that a table that never touches the UI start button still
-    reaches question one."""
-    return _get_float("LILY_AUTO_START_LOBBY_GRACE_SECONDS", 60.0)
+    reaches question one. Lived sessions that auto-started mid-banter
+    (RM_qs6YeUdkV7or / RM_VYp6bgALNC4L) also require
+    ``auto_start_quiet_seconds`` of silence after the last user turn."""
+    return _get_float("LILY_AUTO_START_LOBBY_GRACE_SECONDS", 90.0)
+
+
+def auto_start_quiet_seconds() -> float:
+    """How long the lobby must be quiet (no user finals) before the
+    auto-start safety net may fire.
+
+    Wall-clock grace alone is not enough: a multi-player lobby keeps
+    talking past the grace window — collecting facts, correcting names,
+    teasing the host — and the net used to flip the game on under that
+    chatter (RM_qs6YeUdkV7or elapsed≈72s with active banter; the next
+    session auto-started while Rami was still asking Lily to collect
+    lobby facts). Quiet-after-last-user-turn is the missing settle
+    signal: if anyone is still speaking, the table is not ready."""
+    return _get_float("LILY_AUTO_START_QUIET_SECONDS", 20.0)
 
 
 def intake_settle_seconds() -> float:
@@ -626,6 +642,19 @@ def intake_settle_seconds() -> float:
     22:48 evidence session started between two introductions and turned
     an intake acknowledgment into q_1_delivery."""
     return _get_float("LILY_INTAKE_SETTLE_SECONDS", 20.0)
+
+
+def undelivered_refire_quiet_seconds() -> float:
+    """How long after the most recent user turn the undelivered-delivery
+    watchdog must wait before re-asking an armed question.
+
+    Re-firing into active side chatter (the table talking over an
+    interrupted delivery) is what produced the live re-ask loops: claim
+    released on interrupt → table keeps talking → watchdog re-dispatches
+    the same question → more interrupt → limbo. Holding the re-fire until
+    the room goes quiet lets a real answer land, or lets the host finish
+    a natural recovery, without stacking another copy of the sheet."""
+    return _get_float("LILY_UNDELIVERED_REFIRE_QUIET_SECONDS", 8.0)
 
 
 def undelivered_reconcile_seconds() -> float:

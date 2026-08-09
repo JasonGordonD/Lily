@@ -5,6 +5,49 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Live-session repair: lobby control, answer shape, delivery
+
+Sessions `RM_qs6YeUdkV7or` and `RM_VYp6bgALNC4L`: the table watched Lily
+auto-start mid-banter, treat "Go." / spotlight complaints as answers,
+stack questions, re-ask over side chatter, and lose a voiceprint rekey
+on a returning group. Acoustic addressee (`AUDEERING_API_KEY`) is parked.
+
+**Auto-start will not fire under active lobby talk.** Grace alone was not
+enough — both rooms flipped into game mode while players were still
+collecting facts / correcting names. Default lobby grace is now 90s, and
+a new quiet-after-last-user-turn gate (`LILY_AUTO_START_QUIET_SECONDS`,
+default 20s) plus a host-speaking hold keep the safety net off until the
+table actually settles. Explicit `lily_begin_round` / UI start are
+unchanged.
+
+**Procedural imperatives and mark-less host questions are not answers.**
+`"Go."`, `"Continue."`, `"Next question."`, `"Go ahead."` join the
+non-answer filter as `procedural`. Interrogatives aimed at the host no
+longer require a terminal `?` (STT drops them), and game-talk patterns
+cover `"you guys said…"` / `"pointed at me"`. Answer-surface override
+still wins, so a murmured real answer inside a complaint keeps scoring.
+
+**Stacked freeform questions yield; undelivered re-fires wait for quiet.**
+Only MC deliveries (stem + options) stay exempt from
+`lily_yield_after_first_question` — verdict-plus-next-question stacks and
+freeform deliveries clip at the first `?`. The undelivered-delivery
+watchdog holds re-asks while the table is mid-turn
+(`LILY_UNDELIVERED_REFIRE_QUIET_SECONDS`, default 8s).
+
+**Empty Gemini completions force the armed sheet.** A second consecutive
+empty/junk TTS candidate during an armed delivery speaks
+`rendered_armed_question()` instead of leaving dead air
+(`FinishReason.STOP` class from RM_qs6).
+
+**Voiceprint rekey merges on label conflict.** Upgrading a provisional
+session/name-hash id onto an existing `grp_*` that already has `S1`
+merges identifiers and deletes the provisional row instead of
+`REKEY_FAILED` on the unique `(group_id, speaker_label)` constraint.
+
+**`lily_answers.cause` / `utterance_id` strip one optional column at a
+time.** A mixed-migration database keeps whichever column has already
+landed. Operators should still apply `migrations/024_lily_answers_utterance_binding.sql`.
+
 ## 2026-08-08 — Live-session repair: memory, honesty, latency, and the voiceprint
 
 Session `lily-1D27C8` (14:56 local): a returning operator was greeted as a

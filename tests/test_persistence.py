@@ -251,6 +251,7 @@ def test_rekey_group_moves_voiceprints_for_name_set_hash_ids():
         "lily_asked_history": [{"group_id": hash_id, "session_id": "room-1"}],
         "lily_speaker_voiceprints": [
             {
+                "id": 1,
                 "group_id": hash_id,
                 "speaker_label": "S1",
                 "player_name": "Sarah",
@@ -264,6 +265,59 @@ def test_rekey_group_moves_voiceprints_for_name_set_hash_ids():
     )
     assert db.tables["lily_sessions"][0]["group_id"] == "grp_device_uuid"
     assert db.tables["lily_speaker_voiceprints"][0]["group_id"] == "grp_device_uuid"
+
+
+def test_rekey_voiceprints_merges_when_resolved_label_already_exists():
+    """RM_qs6YeUdkV7or: upgrading onto an existing grp_* that already has
+    S1 must merge, not fail with a unique-constraint error."""
+    session_id = "lily-D99BE7-69362716"
+    resolved = "grp_f76e6116016497ba9245cd40f80a83dd14f8f50a"
+    db = _SupabaseDB({
+        "lily_sessions": [{"session_id": session_id, "group_id": session_id}],
+        "lily_group_facts": [],
+        "lily_asked_history": [],
+        "lily_speaker_voiceprints": [
+            {
+                "id": 10,
+                "group_id": resolved,
+                "speaker_label": "S1",
+                "player_name": "Rami",
+                "speaker_identifiers": ["id-rami-old"],
+                "sample_count": 2,
+            },
+            {
+                "id": 11,
+                "group_id": session_id,
+                "speaker_label": "S1",
+                "player_name": "Rami",
+                "speaker_identifiers": ["id-rami-new"],
+                "sample_count": 1,
+            },
+            {
+                "id": 12,
+                "group_id": session_id,
+                "speaker_label": "S2",
+                "player_name": "Rhonda",
+                "speaker_identifiers": ["id-rhonda"],
+                "sample_count": 1,
+            },
+        ],
+        "lily_group_prefs": [],
+    })
+    asyncio.run(
+        lily_persistence.lily_rekey_group(db, session_id, resolved, session_id)
+    )
+    rows = db.tables["lily_speaker_voiceprints"]
+    by_label = {r["speaker_label"]: r for r in rows}
+    assert set(by_label) == {"S1", "S2"}
+    assert by_label["S1"]["group_id"] == resolved
+    assert by_label["S1"]["id"] == 10  # kept the resolved row
+    assert by_label["S1"]["speaker_identifiers"] == [
+        "id-rami-old", "id-rami-new",
+    ]
+    assert by_label["S1"]["sample_count"] == 2
+    assert by_label["S2"]["group_id"] == resolved
+    assert by_label["S2"]["player_name"] == "Rhonda"
 
 
 def test_rekey_group_keeps_voiceprints_on_non_provisional_old_id():

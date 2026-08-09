@@ -178,19 +178,26 @@ class _FakeGame:
         elapsed_s: float,
         game_started: bool = False,
         game_over: bool = False,
+        quiet_for_s: float = 30.0,
+        host_speaking: bool = False,
+        has_user_turn: bool = True,
     ) -> None:
         self.roster_size = roster_size
         self.next_question_ready = next_question_ready
         self.elapsed_s = elapsed_s
         self.game_started = game_started
         self.game_over = game_over
+        self.quiet_for_s = quiet_for_s
+        self.host_speaking = host_speaking
+        self.has_user_turn = has_user_turn
         self.start_calls = 0
         self.prefetch_calls = 0
 
     def _try_auto_start(
         self,
         min_players: int = 2,
-        grace_s: float = 60.0,
+        grace_s: float = 90.0,
+        quiet_s: float = 20.0,
     ) -> None:
         if self.game_started or self.game_over:
             return
@@ -201,11 +208,17 @@ class _FakeGame:
             return
         if self.elapsed_s < grace_s:
             return
+        if not self.has_user_turn:
+            return
+        if self.quiet_for_s < quiet_s:
+            return
+        if self.host_speaking:
+            return
         self.start_calls += 1
 
 
 def test_auto_start_fires_after_lobby_grace():
-    g = _FakeGame(roster_size=3, next_question_ready=True, elapsed_s=90.0)
+    g = _FakeGame(roster_size=3, next_question_ready=True, elapsed_s=120.0)
     g._try_auto_start()
     assert g.start_calls == 1
 
@@ -213,7 +226,7 @@ def test_auto_start_fires_after_lobby_grace():
 def test_auto_start_blocked_by_single_voice():
     # Single-voice tune-ups (one person testing the mic) must never flip
     # into game mode from ambient chatter.
-    g = _FakeGame(roster_size=1, next_question_ready=True, elapsed_s=90.0)
+    g = _FakeGame(roster_size=1, next_question_ready=True, elapsed_s=120.0)
     g._try_auto_start()
     assert g.start_calls == 0
 
@@ -224,11 +237,31 @@ def test_auto_start_blocked_before_grace():
     assert g.start_calls == 0
 
 
+def test_auto_start_blocked_while_lobby_still_talking():
+    # Quiet-after-last-user-turn: banter past the grace window must not
+    # flip the game on (RM_qs6 / RM_VYp6 live failures).
+    g = _FakeGame(
+        roster_size=3, next_question_ready=True, elapsed_s=120.0,
+        quiet_for_s=3.0,
+    )
+    g._try_auto_start()
+    assert g.start_calls == 0
+
+
+def test_auto_start_blocked_without_any_user_turn():
+    g = _FakeGame(
+        roster_size=3, next_question_ready=True, elapsed_s=120.0,
+        has_user_turn=False,
+    )
+    g._try_auto_start()
+    assert g.start_calls == 0
+
+
 def test_auto_start_blocked_without_prefetched_question():
     # If the question bank hasn't landed yet the guard requests a prefetch
     # and defers. Firing start_game without a question armed would put the
     # state block into a "banter forever" hole again.
-    g = _FakeGame(roster_size=3, next_question_ready=False, elapsed_s=90.0)
+    g = _FakeGame(roster_size=3, next_question_ready=False, elapsed_s=120.0)
     g._try_auto_start()
     assert g.start_calls == 0
     assert g.prefetch_calls == 1
@@ -236,7 +269,7 @@ def test_auto_start_blocked_without_prefetched_question():
 
 def test_auto_start_is_noop_once_started():
     g = _FakeGame(
-        roster_size=3, next_question_ready=True, elapsed_s=90.0,
+        roster_size=3, next_question_ready=True, elapsed_s=120.0,
         game_started=True,
     )
     g._try_auto_start()

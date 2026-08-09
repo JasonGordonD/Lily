@@ -3828,6 +3828,18 @@ class LilyGame:
         if getattr(self.sk, "host_speaking", False):
             self._undelivered_ticks = 0
             return "idle"
+        # Do not re-air into active table talk. An interrupted delivery
+        # releases its claim; if the room is still mid-side-chatter the
+        # watchdog used to re-dispatch immediately and stack another copy
+        # of the same question on top of the banter (RM_qs6 /
+        # RM_VYp6 undelivered-refire loops). Hold until the room goes
+        # quiet; ticks keep accumulating so a truly silent stall still
+        # recovers once the quiet window elapses.
+        last_user = getattr(self, "_last_user_turn_at", None)
+        if last_user is not None:
+            quiet_for = time.monotonic() - last_user
+            if quiet_for < lily_config.undelivered_refire_quiet_seconds():
+                return "idle"
         # Armed, window closed, delivery unconfirmed (never registered or
         # stuck PENDING): count consecutive stuck ticks.
         self._undelivered_ticks = getattr(self, "_undelivered_ticks", 0) + 1
@@ -9412,7 +9424,8 @@ class LilyGame:
         one — neither Lily via lily_begin_round nor the UI via
         lily_control.start — has actually started the game. Guards ensure
         we never start while there is only one voice, before the first
-        question has been prefetched, or before the lobby grace period."""
+        question has been prefetched, before the lobby grace period, or
+        while the table is still mid-conversation."""
         if self.game_started or self.game_over:
             return
         if self.intake_roundrobin_active():
@@ -9435,10 +9448,40 @@ class LilyGame:
         grace = lily_config.auto_start_lobby_grace_seconds()
         if time.time() - self.session_started_at < grace:
             return
+        # Quiet-after-last-user-turn: ambient banter past the grace window
+        # must not flip the game on. note_user_turn stamps monotonic time;
+        # fall back to "never quiet enough" when no user turn has landed
+        # yet (the greeting alone is not a settled table).
+        quiet_needed = lily_config.auto_start_quiet_seconds()
+        last_user = getattr(self, "_last_user_turn_at", None)
+        if last_user is None:
+            logger.info(
+                "LILY_STATE | START_DEFERRED | session=%s "
+                "source=auto_after_lobby reason=no_user_turn",
+                self.sk.session_id,
+            )
+            return
+        quiet_for = time.monotonic() - last_user
+        if quiet_for < quiet_needed:
+            logger.info(
+                "LILY_STATE | START_DEFERRED | session=%s "
+                "source=auto_after_lobby reason=lobby_active "
+                "quiet_for=%.1fs need=%.1fs",
+                self.sk.session_id, quiet_for, quiet_needed,
+            )
+            return
+        if getattr(self.sk, "host_speaking", False):
+            logger.info(
+                "LILY_STATE | START_DEFERRED | session=%s "
+                "source=auto_after_lobby reason=host_speaking",
+                self.sk.session_id,
+            )
+            return
         logger.info(
-            "LILY_STATE | AUTO_START | session=%s roster=%d elapsed=%.1fs",
+            "LILY_STATE | AUTO_START | session=%s roster=%d elapsed=%.1fs "
+            "quiet_for=%.1fs",
             self.sk.session_id, self.sk.roster_size(),
-            time.time() - self.session_started_at,
+            time.time() - self.session_started_at, quiet_for,
         )
         asyncio.ensure_future(self.start_game(source="auto_after_lobby"))
 
@@ -10545,10 +10588,19 @@ class LilyAgent(Agent):
         # Asking obligates listening. This used to be telemetry-only, so the
         # model could ask two questions or ask one and keep explaining over
         # the players. Physically end conversational turns at the first
-        # completed question. Authoritative game deliveries are exempt:
-        # multiple-choice options legitimately follow their stem.
+        # completed question. Authoritative MC deliveries are exempt:
+        # multiple-choice options legitimately follow their stem. Freeform
+        # deliveries AND verdict-plus-next-question stacks are NOT exempt —
+        # the live cartography→mitochondria leap was a stacked turn that
+        # slipped through because any delivery matched the exempt path.
         n_questions = lily_say_gate.lily_stacked_question_flag(full)
-        if not self._game.is_question_delivery_turn(full):
+        armed = getattr(self._game, "armed_question", None) or {}
+        mc_delivery = (
+            isinstance(armed.get("choices"), list)
+            and bool(armed.get("choices"))
+            and self._game.is_question_delivery_turn(full)
+        )
+        if not mc_delivery:
             clipped, yielded = lily_say_gate.lily_yield_after_first_question(full)
             if yielded:
                 logger.warning(
@@ -10682,17 +10734,52 @@ class LilyAgent(Agent):
                 asyncio.ensure_future(self.session.generate_reply())
             else:
                 self._empty_retry_pending = False
-                logger.error(
-                    "LILY_EMPTY_CANDIDATE | second consecutive empty response "
-                    "— giving the turn back to the room"
+                # Second empty on a question delivery: do not leave dead
+                # air. Speak the deterministic armed sheet so the table
+                # still hears the question (Gemini FinishReason.STOP /
+                # empty-completion class from RM_qs6YeUdkV7or).
+                sheet = ""
+                try:
+                    if (
+                        getattr(self._game, "game_started", False)
+                        and getattr(self._game, "armed_question", None)
+                        is not None
+                        and not self._game.sk.answer_window_open
+                    ):
+                        sheet = (
+                            self._game.rendered_armed_question() or ""
+                        ).strip()
+                except Exception:
+                    sheet = ""
+                if sheet:
+                    logger.error(
+                        "LILY_EMPTY_CANDIDATE | second empty on delivery — "
+                        "forcing armed question sheet (%d chars)",
+                        len(sheet),
+                    )
+                    self._game.expect_delivery()
+                    full = sheet
+                else:
+                    logger.error(
+                        "LILY_EMPTY_CANDIDATE | second consecutive empty "
+                        "response — giving the turn back to the room"
+                    )
+                    yield rtc.AudioFrame(
+                        data=b"\x00\x00" * 2400,
+                        sample_rate=24000,
+                        num_channels=1,
+                        samples_per_channel=2400,
+                    )
+                    return
+            if self._empty_retry_pending or not full:
+                yield rtc.AudioFrame(
+                    data=b"\x00\x00" * 2400,
+                    sample_rate=24000,
+                    num_channels=1,
+                    samples_per_channel=2400,
                 )
-            yield rtc.AudioFrame(
-                data=b"\x00\x00" * 2400,
-                sample_rate=24000,
-                num_channels=1,
-                samples_per_channel=2400,
-            )
-            return
+                return
+            # Fall through with the forced sheet.
 
         self._empty_retry_pending = False
 

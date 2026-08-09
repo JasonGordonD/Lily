@@ -39,6 +39,20 @@ Living documentation lives here. Dated work-order and fix entries live in
   `SpeechHandle.exception()`, and the playout watcher maps a failed handle
   onto the suppressed path so say-gate claims release instead of confirming), runs a bounded duration; finals-only scoring, one
   candidate per player, segments outside the window are game-inert.
+  Non-answers (backchannels, bare roster names, procedural imperatives like
+  `"Go."` / `"Next question."`, and HOTFIX-006 N4 meta-speech) are logged
+  never scored. Host-addressed interrogatives do not need a terminal `?`.
+- **Lobby auto-start is a quiet-room safety net, not a timer.** It needs
+  min roster, a prefetched question, lobby grace
+  (`LILY_AUTO_START_LOBBY_GRACE_SECONDS`, default 90s), intake settle after
+  the last bind, **and** quiet after the last user turn
+  (`LILY_AUTO_START_QUIET_SECONDS`, default 20s). Active banter or host
+  speech defers it; `lily_begin_round` / UI start still start immediately
+  once intake has settled.
+- **Outbound speech yields after the first question** except for MC
+  deliveries (stem + options). Freeform deliveries and verdict-plus-next
+  stacks clip at the first `?`. Undelivered-delivery re-fires wait for
+  table quiet (`LILY_UNDELIVERED_REFIRE_QUIET_SECONDS`) before re-asking.
 - **Two-tier adjudication:** Tier-1 conservative fuzzy/phonetic match against
   `acceptable_answers` (uncertainty escalates, never rejects); Tier-2 is one
   non-spoken LLM call that judges against the supplied canonical answer only — it
@@ -2226,7 +2240,10 @@ the `LILY_TIER1_THRESHOLD_*` / `LILY_OVERLAP_EPSILON_SECONDS` /
 `LILY_TIER1_CLARIFY_MARGIN` state-prior tunables (see the state-prior
 thresholds section),
 `LILY_AUTO_START_MIN_PLAYERS` / `LILY_AUTO_START_LOBBY_GRACE_SECONDS`
-(lobby auto-start safety net), `LILY_GROUP_ID` (group-identity override),
+(default 90s) / `LILY_AUTO_START_QUIET_SECONDS` (default 20s — quiet after
+last user turn before auto-start) (lobby auto-start safety net),
+`LILY_UNDELIVERED_REFIRE_QUIET_SECONDS` (default 8s — hold re-asks while
+the table is mid-turn), `LILY_GROUP_ID` (group-identity override),
 `LILY_ARCHITECT_MODE` (server-authenticated adult-mode testing override),
 `LILY_GREETING_MEMORY_BUDGET_SECONDS` (default 1.5) /
 `LILY_MEMORY_MIN_QUESTIONS` (default 3) — memory-at-the-door gates,

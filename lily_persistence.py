@@ -471,18 +471,28 @@ async def lily_write_answer(
         if not optional:
             logger.error("lily_write_answer error: %s", e)
             return
-        dropped = {k: row.pop(k) for k in optional}
-        logger.info(
-            "lily_write_answer: optional column(s) not accepted (%s) — "
-            "retrying without %s (cause is encoded in verdict for "
-            "non-adjudication rows)", e, sorted(dropped),
-        )
-        try:
-            await asyncio.to_thread(
-                lambda: supabase.table("lily_answers").insert(row).execute()
+        # Strip optional columns one at a time so a pre-024 database that
+        # is missing only ``cause`` still keeps ``utterance_id`` (and the
+        # reverse) when that column has already landed. Last resort drops
+        # every remaining optional key.
+        last_err = e
+        for key in list(optional):
+            dropped = row.pop(key, None)
+            logger.info(
+                "lily_write_answer: optional column %r not accepted (%s) — "
+                "retrying without it (cause is encoded in verdict for "
+                "non-adjudication rows; dropped=%r)",
+                key, last_err, dropped,
             )
-        except Exception as e2:
-            logger.error("lily_write_answer error: %s", e2)
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.table("lily_answers").insert(row).execute()
+                )
+                return
+            except Exception as e2:
+                last_err = e2
+                continue
+        logger.error("lily_write_answer error: %s", last_err)
 
 
 async def lily_write_score_event(
@@ -1612,6 +1622,143 @@ async def lily_merge_speaker(
     return summary
 
 
+async def lily_rekey_speaker_voiceprints(
+    supabase: SupabaseClient,
+    old_group_id: str,
+    new_group_id: str,
+    session_id: str,
+) -> None:
+    """Move provisional voiceprint rows onto a resolved group id without
+    colliding on ``(group_id, speaker_label)``.
+
+    A blind UPDATE fails when the resolved group already has the same
+    labels (returning tables / name-set hash upgrades onto an existing
+    ``grp_*`` — RM_qs6YeUdkV7or logged
+    ``REKEY_FAILED ... duplicate key ... S1 already exists``). For each
+    provisional row: merge identifiers into the existing resolved row when
+    the label is already taken, otherwise retarget the provisional row.
+    Provisional rows are deleted after a successful merge. Tolerates
+    failure independently like the other rekey helpers.
+    """
+    if not old_group_id or not new_group_id or old_group_id == new_group_id:
+        return
+    try:
+        old_res = await asyncio.to_thread(
+            lambda: supabase.table("lily_speaker_voiceprints")
+            .select(
+                "id, speaker_label, player_name, speaker_identifiers, "
+                "sample_count, updated_at"
+            )
+            .eq("group_id", old_group_id)
+            .execute()
+        )
+        old_rows = [
+            r for r in (old_res.data or []) if isinstance(r, dict)
+        ]
+        if not old_rows:
+            return
+        moved = 0
+        merged = 0
+        for row in old_rows:
+            label = row.get("speaker_label")
+            if not label:
+                continue
+            existing_res = await asyncio.to_thread(
+                lambda label=label: supabase.table("lily_speaker_voiceprints")
+                .select(
+                    "id, speaker_label, player_name, speaker_identifiers, "
+                    "sample_count"
+                )
+                .eq("group_id", new_group_id)
+                .eq("speaker_label", label)
+                .limit(1)
+                .execute()
+            )
+            existing_rows = [
+                r for r in (existing_res.data or []) if isinstance(r, dict)
+            ]
+            if existing_rows:
+                existing = existing_rows[0]
+                old_ids = list(row.get("speaker_identifiers") or [])
+                new_ids = list(existing.get("speaker_identifiers") or [])
+                # Preserve order, drop duplicates.
+                seen = set()
+                merged_ids = []
+                for ident in new_ids + old_ids:
+                    if ident in seen or ident is None:
+                        continue
+                    seen.add(ident)
+                    merged_ids.append(ident)
+                patch = {
+                    "speaker_identifiers": merged_ids,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                # Prefer a real player_name when the provisional row has one
+                # and the resolved row does not.
+                if row.get("player_name") and not existing.get("player_name"):
+                    patch["player_name"] = row["player_name"]
+                old_samples = int(row.get("sample_count") or 0)
+                new_samples = int(existing.get("sample_count") or 0)
+                if old_samples or new_samples:
+                    patch["sample_count"] = max(old_samples, new_samples)
+                existing_id = existing.get("id")
+                if existing_id is not None:
+                    await asyncio.to_thread(
+                        lambda existing_id=existing_id, patch=patch: (
+                            supabase.table("lily_speaker_voiceprints")
+                            .update(patch)
+                            .eq("id", existing_id)
+                            .execute()
+                        )
+                    )
+                old_id = row.get("id")
+                if old_id is not None:
+                    await asyncio.to_thread(
+                        lambda old_id=old_id: (
+                            supabase.table("lily_speaker_voiceprints")
+                            .delete()
+                            .eq("id", old_id)
+                            .execute()
+                        )
+                    )
+                merged += 1
+            else:
+                old_id = row.get("id")
+                if old_id is not None:
+                    await asyncio.to_thread(
+                        lambda old_id=old_id: (
+                            supabase.table("lily_speaker_voiceprints")
+                            .update({"group_id": new_group_id})
+                            .eq("id", old_id)
+                            .execute()
+                        )
+                    )
+                else:
+                    # Id-less fakes / legacy rows: best-effort retarget by
+                    # the provisional group + label.
+                    await asyncio.to_thread(
+                        lambda label=label: (
+                            supabase.table("lily_speaker_voiceprints")
+                            .update({"group_id": new_group_id})
+                            .eq("group_id", old_group_id)
+                            .eq("speaker_label", label)
+                            .execute()
+                        )
+                    )
+                moved += 1
+        logger.info(
+            "LILY_MEMORY | REKEY | table=lily_speaker_voiceprints "
+            "session=%s old=%s new=%s moved=%d merged=%d",
+            session_id, old_group_id, new_group_id, moved, merged,
+        )
+    except Exception as e:
+        logger.error(
+            "LILY_MEMORY | REKEY_FAILED | table=lily_speaker_voiceprints "
+            "session=%s error=%s",
+            session_id, e,
+        )
+
+
 async def lily_rekey_group(
     supabase: SupabaseClient,
     old_group_id: str,
@@ -1648,13 +1795,6 @@ async def lily_rekey_group(
         and len(old_group_id) == len(lily_memory.NAME_SET_GROUP_PREFIX) + 40
         and all(ch in "0123456789abcdef" for ch in old_group_id[-40:].lower())
     )
-    if old_group_id == session_id or is_name_set_hash:
-        updates.append(
-            ("lily_speaker_voiceprints",
-             lambda: supabase.table("lily_speaker_voiceprints")
-             .update({"group_id": new_group_id})
-             .eq("group_id", old_group_id).execute())
-        )
     for table, call in updates:
         try:
             await asyncio.to_thread(call)
@@ -1667,6 +1807,10 @@ async def lily_rekey_group(
                 "LILY_MEMORY | REKEY_FAILED | table=%s session=%s error=%s",
                 table, session_id, e,
             )
+    if old_group_id == session_id or is_name_set_hash:
+        await lily_rekey_speaker_voiceprints(
+            supabase, old_group_id, new_group_id, session_id
+        )
     # lily_group_prefs (group prefs WO): PK-safe merge re-key — its own
     # helper because a blind UPDATE collides with an existing prefs row
     # under the resolved id. Tolerates failure independently like the rest.
