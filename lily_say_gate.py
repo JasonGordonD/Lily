@@ -361,14 +361,39 @@ _FALSE_CLEAN_SLATE_RE = re.compile(
     r"\b(?:you|this table|we)\s+(?:have|has|haven't|hasn't|never)\b"
     r".{0,45}\b(?:no\s+)?recorded\s+game\b"
     r"|\b(?:first|clean[- ]slate)\s+(?:game|night|session)\b"
-    r"|\beffectively\s+a\s+clean\s+slate\b",
+    r"|\beffectively\s+a\s+clean\s+slate\b"
+    # Live 2026-08-09 Rami session: organic intake asserted absence while
+    # the voice-identity probe was still outstanding.
+    r"|\b(?:completely\s+)?clean\s+slate\b"
+    r"|\bblank\s+slate\b"
+    r"|\bno\s+saved\s+stats\b"
+    r"|\bnothing\s+on\s+file\b"
+    r"|\bno\s+(?:stats|facts|record|history)\s+on\s+file\b"
+    r"|\bmemory\s+bank\s+is\s+sitting\s+on\b"
+    r"|\bno\s+record(?:ed)?\s+(?:of\s+you|on\s+file)\b",
     re.IGNORECASE,
 )
 
 
 def lily_false_clean_slate_claim(text: str) -> bool:
-    """True when Lily denies history while a returner claim is unresolved."""
+    """True when Lily asserts ABSENCE of memory/history as a settled fact.
+
+    Forbidden while identity is unresolved or a returner dispute is open —
+    UNKNOWN must not be spoken as EMPTY.
+    """
     return bool(_FALSE_CLEAN_SLATE_RE.search(text or ""))
+
+
+_STILL_CHECKING_REWRITE = (
+    "If we've played, I'll get the card as we talk — I'm still checking. "
+    "What should I call you?"
+)
+
+
+def lily_still_checking_rewrite() -> str:
+    """Inventory-stable spoken sheet when a false empty-memory claim is
+    caught before playout. No personality polish — one honest beat."""
+    return _STILL_CHECKING_REWRITE
 
 
 def lily_mirror_flag(text: str) -> Optional[str]:

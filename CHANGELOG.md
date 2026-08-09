@@ -5,6 +5,31 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0: Ban false clean slate + recognition dispute lock
+
+Live trust-killer: returner said it was not their first time; Lily aired
+"clean slate / no saved stats… on file" while the voice-identity probe
+was still outstanding; ~50s later the match landed ("NOW I've got you").
+He asked why; she agreed instead of answering and drove toward kickoff.
+
+**P0-A.** `can_claim_empty_memory()` — clean-slate / nothing-on-file
+language only when identity is resolved empty (no memory block, no device
+candidate, probe not outstanding). State block injects
+`identity: STILL CHECKING…`. `tts_node` rewrites false empty claims to
+the still-checking sheet whenever absence is unsettled (not only when a
+returner note is armed). Detector covers the live phrases
+("no saved stats", "completely clean slate", …).
+
+**P0-B.** `recognition_dispute` locks `start_game`, auto-start, and
+`lily_begin_round` until the why-beat lands. Armed on returner claim
+while unsettled, or on explicit clean-slate / "why still pulling" challenge.
+
+**P0-C.** One-shot why directive in the state block; sycophantic
+"you're right" openers rewrite to one grounded why sentence while the
+dispute is open. Why-answered unlocks kickoff when he asks.
+
+No prompt polish. No extracts. Audeering parked.
+
 ## 2026-08-09 — F1: Lobby empty-STOP opener recover
 
 Fail-closed on empty LLM STOP is correct for the dead handle, but two
