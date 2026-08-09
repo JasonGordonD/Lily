@@ -1042,6 +1042,9 @@ pool. Weak `room_name`/`name_set_hash` identities may only redirect into an
 existing confident match; they cannot found or reinforce a rival centroid,
 and their own old orphan row is excluded from matching. Stable
 participant/env provenance may still found a genuinely new identity.
+Migration 025 retires the known `lily-9337B1` one-sample `Playing` rival
+instead of merging its borderline match, removes only its two false legacy
+voiceprints and wrong memory row, and preserves all session audit evidence.
 `forget me` disables further identity persistence for the session, deletes
 the ordinary voiceprints/memory rows, and retires the durable centroid so it
 cannot match again.

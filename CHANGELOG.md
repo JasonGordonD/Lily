@@ -5,6 +5,17 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — P0-E3: retire the `Playing` identity poison
+
+After the binding/rekey/quarantine fixes, production evidence showed the
+bad one-sample `Playing` centroid at cosine 0.7518736 to canonical Rami:
+barely over the absolute floor, not safe to merge without a fresh biometric
+verification.
+
+**Cleanup.** Migration 025 retires that centroid, deletes only voiceprints
+315/316 and wrong memory row 31, and preserves the session, transcript,
+answers and report as audit evidence. Predicates are exact and idempotent.
+
 ## 2026-08-09 — P0-E2: weak voice identities cannot found rivals
 
 Live `lily-9337B1-331ff234`: the bad `Playing` name-set group failed to
