@@ -5457,11 +5457,27 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                         pass  # table has the question; window already open
                     else:
                         self.expect_delivery()
+            # Y7 (HOTFIX-007): decide the cut CAUSE once, here, and let both
+            # arms below read that one decision. A DELIBERATE barge-in (the
+            # VAD layer saw a human take the floor) is a CANCEL: she stops,
+            # yields, and nothing brings the killed line back. Recovery
+            # machinery is for a turn the ROOM did not end — a dead TTS
+            # stream, a mid-air network death — which is `failed`, or an
+            # `interrupted` with no human voice behind it.
+            barge_in = (
+                interrupted and not failed
+                and self.cut_was_deliberate_barge_in()
+            )
             # Regeneration gate (WS-3): the act just cut/suppressed will
             # re-dispatch — arm the gate so the retry is spoken fresh, not
             # replayed. An interrupted turn partially aired (a re-air is
             # coming); a suppressed turn only re-airs if a claim was freed.
-            if interrupted or released:
+            # Y7: NOT on a barge-in. The arm is Chain A's entry point — it
+            # tells the next dispatch to say this again in fresh words, which
+            # is precisely how a line the player killed comes back rephrased
+            # ("say it again, differently" also defeats the exact-match dup
+            # guards that would otherwise catch the copy: GUARD_MAP §7).
+            if (interrupted or released) and not barge_in:
                 self.arm_reair_gate()
             # Cut-recovery contract (WS-3, STREAM-INTEGRITY-002): a cut or
             # mid-stream-FAILED organic turn (no keyed claim to drive a
@@ -14244,7 +14260,13 @@ async def entrypoint(ctx: JobContext) -> None:
         # P0-2 BE8D8B: the LLM tried lily_begin_round while the next
         # (18-second) setup segment was still being spoken. VAD state is the
         # only truth available before that final transcript lands.
-        game._user_speaking = ev.new_state == "speaking"
+        #
+        # Y7 (HOTFIX-007) rides the SAME subscription: this is the VAD layer,
+        # and it is the only place the cause of a cut is knowable before the
+        # framework acts on it. note_user_speech_state keeps _user_speaking
+        # and stamps the falling edge so `cut_was_deliberate_barge_in` can
+        # answer "did a human end that turn?" after the fact.
+        game.note_user_speech_state(ev.new_state == "speaking")
         if game._user_speaking:
             logger.info(
                 "LILY_SETUP | USER_SPEAKING | session=%s — kickoff blocked",
