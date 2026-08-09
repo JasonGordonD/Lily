@@ -13,17 +13,18 @@ MIGRATION = (
 def test_cleanup_retires_rival_centroid_instead_of_merging_it():
     assert "SET status = 'retired'" in MIGRATION
     assert "sample_count = 1" in MIGRATION
-    assert "a665f656-8326-47ee-9892-659913b8b441" in MIGRATION
+    assert "WHERE session_id = 'lily-9337B1-331ff234'" in MIGRATION
     # The borderline sample is never folded into canonical Rami blindly.
     assert "UPDATE lily_voice_identity" in MIGRATION
     assert "grp_0b07f989673dcf11e62da96343a39fd4006c1405" not in MIGRATION
 
 
 def test_cleanup_deletes_only_proven_playing_derivatives():
-    assert "id IN (315, 316)" in MIGRATION
     assert "lower(player_name) = 'playing'" in MIGRATION
-    assert "id = 31" in MIGRATION
     assert "lower(COALESCE(winner, '')) = 'playing'" in MIGRATION
+    # Generated PKs/UUIDs vary by environment and are never migration keys.
+    assert "WHERE id IN (" not in MIGRATION
+    assert "::uuid" not in MIGRATION
 
 
 def test_cleanup_preserves_session_audit_rows():
