@@ -5770,8 +5770,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         )
         self.last_addressee_judgment = judgment
         # PATCH-003 P9: a host-directed final IS a direct address — start
-        # the responsiveness clock. Cleared when she next dispatches a turn
-        # (note_response_dispatched); the watchdog WARNs if it goes unmet
+        # the responsiveness clock. Cleared only when real response playout
+        # starts; the watchdog WARNs if dispatch queued but never reached air
         # past the budget (the "Hey... Hello?" -> 34s silence fixture).
         if judgment.classification == (
             lily_addressee_classifier.CLASS_HOST_DIRECTED

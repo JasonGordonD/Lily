@@ -6,14 +6,17 @@ past it trips ADDRESS_UNANSWERED. The grounded holding beat ('one sec —
 checking the picture lane') is a state-block template, never a vamp.
 """
 
+import inspect
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_config
+import lily_say_gate
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
+from lily_speech_delivery import LilySpeechDeliveryMixin
 
 
 def _make_game():
@@ -21,6 +24,9 @@ def _make_game():
     game.sk = LilyScorekeeper("p9")
     game._awaiting_address_since = 0.0
     game._address_unanswered_warned = False
+    game._playout_started_ids = set()
+    game.say_registry = lily_say_gate.SpeechActRegistry()
+    game.cancel_cut_recovery = lambda: None
     return game
 
 
@@ -43,14 +49,19 @@ def test_address_past_budget_is_flagged(monkeypatch):
     assert game.address_unanswered(now=134.0) is True  # the 34s fixture
 
 
-def test_a_dispatched_response_clears_the_clock():
-    """gated_say clears _awaiting_address_since on dispatch — a response
-    was given, so the floor is met."""
+def test_dispatch_does_not_clear_the_clock():
+    body = inspect.getsource(LilySpeechDeliveryMixin.gated_say)
+    assert "_awaiting_address_since = 0.0" not in body
+
+
+def test_real_response_playout_clears_the_clock():
     game = _make_game()
     game._awaiting_address_since = 100.0
-    # Simulate what gated_say does on a successful dispatch.
-    game._awaiting_address_since = 0.0
+    game._address_unanswered_warned = True
+    game.note_playout_started("speech-1")
     assert game.address_unanswered(now=200.0) is False
+    assert game._address_unanswered_warned is False
+    assert "speech-1" in game._playout_started_ids
 
 
 def test_budget_config_default():

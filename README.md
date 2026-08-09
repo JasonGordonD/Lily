@@ -109,6 +109,11 @@ question IDs and context-component hashes, never raw private prompt contents.
   deterministic flags at the transcript-event layer; the prompt is
   texture, not the mechanism. The adult layer is additively injected/removed on the
   sticky `mode` flag — removal fully reverts her.
+- **Responsiveness is measured at the air, not dispatch.** A host-directed
+  final starts `_awaiting_address_since`; generating or queueing a response
+  does not clear it. Only the framework's real playout-start transition
+  clears the latch, so a wedged/suppressed handle still produces the
+  one-shot `LILY_RESPONSIVENESS | ADDRESS_UNANSWERED` warning.
 - **tts_node punctuation-flush guard is mandatory** — suspense holds ("The answer
   is…") deadlock the SegmentSynchronizer without it.
 - **Outbound speech passes the say gate** (`lily_say_gate.py`): the designated

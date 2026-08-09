@@ -1,7 +1,7 @@
 # LILY — Master Work Order
 
 Document version: 2026-08-09
-Pinned at pre-window P0-F start: `main @ 18b25db`
+Pinned at responsiveness P0-H start: `main @ 209ba62`
 Product: Multiplayer voice trivia host (LiveKit agent)
 
 This is the repository's single backlog source. Chat status is not a second
@@ -54,8 +54,12 @@ Each row is a separate merged PR.
 | P0-E1 | Voiceprint rekey schema | Production-schema rekey succeeds and is idempotent | Shipped `eb94ea6` |
 | P0-E2 | Voice identity quarantine/promotion | Temporary samples cannot found a rival identity before canonical match | Shipped `c0c7f39` |
 | P0-E3 | Verified identity cleanup | Retire borderline rival; delete only false derivatives; preserve audit rows | Shipped/applied `669fb88` |
-| P0-F | Pre-window scope | Only speech during actual delivery playout can become an early answer | **Completed in this change** |
-| P0-G | Meta/progression ownership | Delivery watchdog pauses for intake/meta; responsiveness latch clears; one-emission cut behavior | Queued |
+| P0-F | Pre-window scope | Only speech during actual delivery playout can become an early answer | Shipped `209ba62` |
+| P0-G | Meta/progression ownership | Delivery watchdog pauses for unresolved intake/meta holds | Queued |
+| P0-H | Responsiveness latch lifecycle | Dispatch cannot clear it; real response playout does | **Completed in this change** |
+| P0-I | One speech owner after verdict | Verdict, relational beat and N+1 cannot race | Queued |
+| P0-J | Fragment/cut one-emission recovery | No orphan fragment; cut recovery XOR retry/re-air | Queued |
+| P0-K | Deterministic question delivery | Curated armed sheet does not depend on LLM generation | Queued |
 
 ## Epic A — live proof after P0
 

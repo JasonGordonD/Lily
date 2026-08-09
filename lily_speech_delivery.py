@@ -185,8 +185,6 @@ class LilySpeechDeliveryMixin:
             "LILY_SAY | act=%s | key=%s | source=%s", act, key or "-", source
         )
         handle = self.instructed_reply(instructions)
-        # PATCH-003 P9: she's responding — the direct-address clock is met.
-        self._awaiting_address_since = 0.0
         speech_id = getattr(handle, "id", None)
         if speech_id:
             self.say_registry.reassign_owner(reservation, speech_id)
@@ -308,6 +306,17 @@ class LilySpeechDeliveryMixin:
         if started is None:
             started = self._playout_started_ids = set()
         started.add(speech_id)
+        if getattr(self, "_awaiting_address_since", 0.0):
+            # A dispatch is only an intention. Clear at real playout so a
+            # queued, wedged, or suppressed handle cannot hide the
+            # ADDRESS_UNANSWERED signal.
+            self._awaiting_address_since = 0.0
+            self._address_unanswered_warned = False
+            logger.info(
+                "LILY_RESPONSIVENESS | RESPONSE_PLAYOUT | session=%s "
+                "speech_id=%s — direct-address latch cleared",
+                self.sk.session_id, speech_id,
+            )
         # M4: if the speech now airing owns this question's delivery claim,
         # its STEM has reached the air — record it so an abandonment before
         # the window opens is flagged as cancelled, never a silent vanish.
