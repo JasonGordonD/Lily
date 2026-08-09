@@ -5,6 +5,67 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-08 — WO-LILY-HOTFIX-006: identity race, custom rounds, question binding
+
+Three consecutive three-player sessions (Rami, Rhonda, Chris) —
+`lily-16A9AE`, `lily-4FB3B2`, `lily-D99BE7`. Deployed sha at session time:
+**2c8ecf52**. Every database claim below verified against prod before any
+code was written, and every defect reproduced as a failing test first.
+
+**N1 — the greeting raced the identity match.** `lily-4FB3B2` carries
+`[RETURNING TABLE] … 12 game(s) played` landing ~2.5 minutes AFTER Lily had
+already said "tonight is actually a clean slate". The matcher was never
+wrong; it was not waited for, and its absence was narrated as a fact. The
+root cause was not the budgeted await: the CLAIMED RETURNER beat under the
+neutral branch instructed her to "name the gap plainly", which is itself a
+memory claim, fired the moment a player said "it's not my first time". New
+`identity_probe_outstanding()` — while a probe is unresolved, no line may
+characterise memory at all. "I have no memory of you" and "I do not know YET
+whether I have memory of you" are different statements and only the second
+was ever true at greeting time.
+
+**N2 — custom rounds were narrated, not built.** The operator asked for Cape
+Cod; the six `lily_asked_history` rows were Gold, Vatican City, Psycho, One
+Direction, rupee, Rehab. The mechanism was worse than the symptom:
+`lily_set_category` returned its confirmation SYNCHRONOUSLY before any
+question existed, and `lily_fetch_bank_question`'s third fallback stage
+`(None, None)` DROPPED THE CATEGORY FILTER ENTIRELY — so the compounding-
+arsenal optimisation silently rewrote "build me a Cape Cod round" into
+"serve me anything", and generation never ran. The confirmation line now
+generates only from a non-empty registration result, registered before
+anything is spoken, with `CUSTOM_ROUND_DIVERGENCE` as the X1-shaped net.
+
+**N3/N4/N9 — the adjudication boundary.** Seven confirmed rows of
+meta-speech entered as answers, including "Um. Why are we in Mumbai or
+Delhi?" adjudicated **CORRECT, one point** — a player scored for complaining
+about the topic, having said aloud "we're not talking to you". Answers filed
+against the wrong question. And the Jupiter case: Rami said "It's Jupiter",
+Lily said "Jupiter was spot on", and the ledger recorded "Go." — his start
+command — as his answer, marked wrong.
+
+The fixtures exposed the live mechanism nobody had named: a stale candidate
+ABSORBED the next window's answer as a "revision" and inherited the old
+question id. Question identity is now captured at window-open and carried to
+the ledger; `utterance_id` binds the verdict to the utterance that actually
+arrived; late-but-correct is a defined outcome with a grace margin or an
+announced miss; and a spoken verdict generates from the committed row.
+
+**N12/N8/N13.** Two lanes narrated the same transition with opposite
+verdicts while question four was delivered over question three's reveal — a
+transition is now one journaled event with one owner. A revealed answer can
+no longer open a steal window. Spoken player counts are read from roster
+state, not generated ("whenever you four" to a table of three).
+
+**Migrations 023 and 024** (asked-history category; answer utterance
+binding) applied to prod. Both nullable with no default — pre-migration rows
+genuinely do not know these values, and backfilling a guess is the invented
+certainty this WO exists to remove.
+
+**Not closed:** N5 is partial (the biometric-outranks-hash guard is
+defensive; the name-hash fallback and name-keyed voiceprint lookup remain,
+so one misheard name still defeats both paths). N11, N6, N7 and N10 are not
+started.
+
 ## 2026-08-08 — Live-session repair: memory, honesty, latency, and the voiceprint
 
 Session `lily-1D27C8` (14:56 local): a returning operator was greeted as a
