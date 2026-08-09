@@ -3050,10 +3050,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     "denial you will have to retract."
                 )
         parts.append(
-            " Bind names as people speak. When the table feels ready — "
-            "the first genuine group laugh, or a clear 'start' — call "
-            "lily_begin_round to open round one; nothing scores until "
-            "you do."
+            " Bind names as people speak. At least one confirmed name is "
+            "required. Only clear start language authorizes calling "
+            "lily_begin_round; a laugh, general energy, or a bare yes to "
+            "another choice does not. Nothing scores until the round opens."
         )
         return "".join(parts)
 
@@ -10118,7 +10118,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if not self.game_started:
             extra.append(
                 "game not started: you are in the lobby — bind names, fish "
-                "for lobby facts, start on the first genuine group laugh"
+                "for lobby facts, and wait for clear start language"
             )
             if self.promoted_categories:
                 # Gated category proposals (F): PROMOTED extras only —
@@ -11043,8 +11043,9 @@ class LilyAgent(Agent):
     @function_tool()
     async def lily_begin_round(self, context: RunContext) -> str:
         """Kick off round one and open the tiered question loop. Call this
-        the moment the lobby has real energy — a genuine group laugh, or a
-        clear "let's play" from the table. Once called, the state block
+        only after clear start language from the table and at least one
+        confirmed bound name. A laugh, general energy, or a bare yes to
+        another choice is not authorization. Once called, the state block
         starts serving [NEXT QUESTION] and the answer window opens on your
         first ask. No-op if the game is already running."""
         if self._game.game_started:
