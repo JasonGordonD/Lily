@@ -113,7 +113,7 @@ prompt + lint, not a second copy bank.
 
 ```text
 voice inventory freeze          ← this document
-  → speech/delivery extract     (zero string edits; keep acts/keys above)
+  → speech/delivery extract     ← lily_speech_delivery.py (done; zero string edits)
   → supply/custom-round
   → director (adjudicate/transcript)
   → identity (rekey-merge tests must travel with the move)

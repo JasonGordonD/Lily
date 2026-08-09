@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import lily_audeering_consumers
 import lily_say_gate
 import lily_agent
+import lily_speech_delivery
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
 
@@ -111,7 +112,7 @@ def test_stale_never_played_claim_is_superseded_on_retry(monkeypatch):
     game = _make_game()
     assert game.gated_say("session_greet", "greet", "greet them", "on_enter")
     # Age the pending claim past the deadline; playout never started.
-    monkeypatch.setattr(lily_agent, "_STALE_CLAIM_SECONDS", 0.0)
+    monkeypatch.setattr(lily_speech_delivery, "_STALE_CLAIM_SECONDS", 0.0)
     assert game.gated_say(
         "session_greet", "greet", "greet them", "entrypoint"
     ) is True
@@ -129,7 +130,7 @@ def test_stale_claim_holds_while_its_speech_is_airing(monkeypatch):
     assert game.gated_say("finale", "finale", "big finish", "code")
     owner = game.say_registry.owner_of("finale")
     game.note_playout_started(owner)
-    monkeypatch.setattr(lily_agent, "_STALE_CLAIM_SECONDS", 0.0)
+    monkeypatch.setattr(lily_speech_delivery, "_STALE_CLAIM_SECONDS", 0.0)
     assert not game.gated_say("finale", "finale", "big finish", "retry")
     assert len(game.instructed_replies) == 1
 
@@ -140,7 +141,7 @@ def test_stale_claim_holds_while_other_audio_is_airing(monkeypatch):
     game = _make_game()
     assert game.gated_say("session_greet", "greet", "greet them", "on_enter")
     game.sk.host_speaking = True
-    monkeypatch.setattr(lily_agent, "_STALE_CLAIM_SECONDS", 0.0)
+    monkeypatch.setattr(lily_speech_delivery, "_STALE_CLAIM_SECONDS", 0.0)
     assert not game.gated_say(
         "session_greet", "greet", "greet them", "entrypoint"
     )
@@ -155,7 +156,7 @@ def test_watchdog_releases_and_retries_a_wedged_dispatch(monkeypatch):
     suppressed retry, then nothing): the watchdog itself frees the frozen
     claim and re-dispatches, bounded to _STALE_CLAIM_MAX_RETRIES before
     declaring the audio path down."""
-    monkeypatch.setattr(lily_agent, "_STALE_CLAIM_SECONDS", 0.01)
+    monkeypatch.setattr(lily_speech_delivery, "_STALE_CLAIM_SECONDS", 0.01)
 
     async def scenario():
         game = _make_game()
@@ -175,7 +176,7 @@ def test_watchdog_releases_and_retries_a_wedged_dispatch(monkeypatch):
 
 
 def test_watchdog_is_a_noop_once_the_act_confirms(monkeypatch):
-    monkeypatch.setattr(lily_agent, "_STALE_CLAIM_SECONDS", 0.01)
+    monkeypatch.setattr(lily_speech_delivery, "_STALE_CLAIM_SECONDS", 0.01)
 
     async def scenario():
         game = _make_game()
@@ -195,7 +196,7 @@ def test_watchdog_is_a_noop_once_the_act_confirms(monkeypatch):
 
 
 def test_watchdog_leaves_airing_speech_alone(monkeypatch):
-    monkeypatch.setattr(lily_agent, "_STALE_CLAIM_SECONDS", 0.01)
+    monkeypatch.setattr(lily_speech_delivery, "_STALE_CLAIM_SECONDS", 0.01)
 
     async def scenario():
         game = _make_game()
