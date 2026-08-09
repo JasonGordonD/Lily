@@ -360,9 +360,10 @@ machine ran clean; the defects were experiential:
   celebrations every beat. Say-gate `REPEAT_FLAG` lint (log-only) makes
   cycling a telemetry count.
 - **Early buzz-ins are captured** (the fixture's Q5 root cause,
-  DB-audited): finals spoken between the delivery claim and window open
-  buffer per-question and replay at open, then run the instant Tier-1
-  fast path — the "no early buzz-ins" v1 concession is retired.
+  DB-audited): only finals whose captured timestamps overlap actual question
+  playout buffer per-question and replay at open, then run the instant Tier-1
+  fast path. A TTS claim queued behind other audio, pre-claim chatter, and
+  speech during the post-playout discharge gap cannot answer the question.
 
 ### WO checklist (standing rules)
 

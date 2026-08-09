@@ -12,10 +12,11 @@ Two layers, offline:
   window. mc_early_answer_check halts the read AND adjudicates, so it neither
   replays nor goes inert — the JOINT "TTS halts + no verbatim replay" check.
 
-  Layer 2 — the contract. Answers become adjudicable once the stem has been
-  read (stem stays protected); a buffered final that Tier-1-matches a read
-  option truncates the remaining options and jumps to adjudication; the buzz
-  buffer widens to cover T seconds pre-claim so early finals are captured.
+  Layer 2 — the contract. Answers become adjudicable once actual delivery
+  playout begins and the stem has been read (stem stays protected); a
+  buffered final that Tier-1-matches a read option truncates the remaining
+  options and jumps to adjudication. Pre-claim/queued speech is never an
+  answer to a question the table has not heard.
 
 Idiom mirrors test_recognition_variety._make_game (LilyGame via __new__,
 stubbed adjudicate + publishes), plus a fake session recording interrupt().
@@ -109,6 +110,9 @@ def _make_game() -> LilyGame:
     game._mc_delivery_qnum = None
     game._mc_delivery_started_at = None
     game._mc_delivery_stem_words = 0
+    game._active_delivery_qnum = None
+    game._active_delivery_started_at = None
+    game._active_delivery_ended_at = None
     game._recent_finals = []
     game.session = _FakeSession()
     game.published = []
@@ -147,7 +151,13 @@ def _arm_and_claim(game: LilyGame, question: dict) -> str:
     game._pending_delivery_qnum = None
     game.expect_delivery()
     sheet = game.rendered_armed_question()
-    return game.register_delivery_claim(sheet)
+    result = game.register_delivery_claim(sheet)
+    # Model the framework's speaking transition (actual delivery playout).
+    game._active_delivery_started_at = 200.0
+    game._active_delivery_ended_at = None
+    if game._mc_delivery_qnum is not None:
+        game._mc_delivery_started_at = 200.0
+    return result
 
 
 def _seg(text: str, start: float, label: str = "S1") -> dict:
@@ -357,9 +367,9 @@ def test_freeform_chatter_does_not_abort_read():
     assert game.sk.answer_window_open is False
 
 
-# -- Layer 2: buzz-buffer widening (T seconds pre-claim) ----------------------
+# -- P0-F: queued/pre-claim speech is never an answer -------------------------
 
-def test_pre_claim_final_within_T_is_captured_and_scored_at_open():
+def test_pre_claim_final_within_old_horizon_is_dropped():
     game = _make_game()
     game.sk.bind_speaker("S1", "Rami")
     # The player buzzes just BEFORE the delivery claim lands.
@@ -369,19 +379,10 @@ def test_pre_claim_final_within_T_is_captured_and_scored_at_open():
     key = f"q_{game.sk.question_number}_delivery"
     game.say_registry.claim(key)  # delivery registered (buffer precondition)
     game.note_recent_final(_seg("Canberra", 100.0), 100.0)
-    # Claim reference clock 1.5s later — inside the 3.0s default horizon.
+    # Even 1.5s later is ineligible: no question audio had started.
     game._backfill_prewindow_from_recent(now=101.5)
-    assert len(game._pre_window_segments) == 1
-
-    async def scenario():
-        game.open_window(duration=30.0)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-
-    _run(scenario(), game)
-    cands = game.sk.ordered_candidates()
-    assert cands and cands[0]["text"] == "Canberra"
-    assert game.adjudications == [False]
+    assert game._pre_window_segments == []
+    assert game._recent_finals == []
 
 
 def test_pre_claim_final_beyond_T_is_dropped():

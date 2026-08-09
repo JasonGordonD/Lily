@@ -313,6 +313,12 @@ class LilySpeechDeliveryMixin:
         # the window opens is flagged as cancelled, never a silent vanish.
         delivery_key = f"q_{self.sk.question_number}_delivery"
         if self.say_registry.owner_of(delivery_key) == speech_id:
+            now = time.time()
+            self._active_delivery_qnum = self.sk.question_number
+            self._active_delivery_started_at = now
+            self._active_delivery_ended_at = None
+            if getattr(self, "_mc_delivery_qnum", None) == self.sk.question_number:
+                self._mc_delivery_started_at = now
             self.mark_stem_aired(self.sk.question_number)
             # THE QUESTION IS NOW AUDIBLE — so it belongs on the glass and
             # in the group's burn ledger. Both used to wait for the delivery
@@ -691,7 +697,11 @@ class LilySpeechDeliveryMixin:
             # buffer, so an early buzzer is scored at open, not left inert.
             self._note_mc_delivery_start(qnum)
             self._active_delivery_qnum = qnum
-            self._active_delivery_started_at = time.time()
+            # Registration happens in tts_node, which may precede actual
+            # playout while other audio is queued. Only note_playout_started
+            # opens the early-answer interval.
+            self._active_delivery_started_at = None
+            self._active_delivery_ended_at = None
             # PATCH-001 T5(a) / OMNIBUS-004 WS-2: the pre-window buffer
             # covers CLAIM-TO-OPEN ONLY. The old backfill folded finals
             # from BEFORE the delivery claim into the buffer — speech
@@ -713,6 +723,22 @@ class LilySpeechDeliveryMixin:
         # normally.
         return None
 
+    def _segment_overlaps_active_delivery(self, seg: dict) -> bool:
+        """True only when captured speech overlaps actual delivery playout."""
+        qnum = getattr(self, "_active_delivery_qnum", None)
+        if qnum is None or qnum != self.sk.question_number:
+            return False
+        started = getattr(self, "_active_delivery_started_at", None)
+        if started is None:
+            return False
+        try:
+            seg_start = float(seg["segment_start_time"])
+            seg_end = float(seg.get("segment_end_time", seg_start))
+        except (KeyError, TypeError, ValueError):
+            return False
+        ended = getattr(self, "_active_delivery_ended_at", None)
+        return seg_end >= started and (ended is None or seg_start <= ended)
+
     def buffer_pre_window_answer(self, seg: dict) -> None:
         """RECOGNITION-VARIETY fixture Q5 fix — capture the early buzz.
 
@@ -729,6 +755,7 @@ class LilySpeechDeliveryMixin:
             getattr(self, "_delivery_stop_sticky", False)
             or self.sk.answer_window_open
             or self.armed_question is None
+            or not self._segment_overlaps_active_delivery(seg)
         ):
             return
         key = f"q_{self.sk.question_number}_delivery"
@@ -826,23 +853,7 @@ class LilySpeechDeliveryMixin:
         self._recent_finals = [(t, s) for (t, s) in buf if t >= cutoff][-12:]
 
     def _backfill_prewindow_from_recent(self, now: float | None = None) -> None:
-        """WS-5: at the delivery claim, fold finals from the last
-        buzz_prewindow_seconds() into the pre-window buffer. They land under
-        the SAME buffering condition as in-read finals (armed + delivery
-        claimed), so they replay and score at window open instead of being
-        inert. Consumed once — the rolling store clears."""
-        recent = getattr(self, "_recent_finals", None)
-        if not recent:
-            return
-        horizon = lily_config.buzz_prewindow_seconds()
-        if horizon <= 0:
-            self._recent_finals = []
-            return
-        ref = now if now is not None else time.time()
-        cutoff = ref - horizon
-        for ts, seg in recent:
-            if ts >= cutoff:
-                self.buffer_pre_window_answer(seg)
+        """Retired: pre-claim speech can never answer a queued question."""
         self._recent_finals = []
 
     def _note_mc_delivery_start(self, qnum: int) -> None:
@@ -852,17 +863,17 @@ class LilySpeechDeliveryMixin:
         stem-protection model. No-op (and clears any prior MC flag) for a
         freeform delivery — nothing to truncate there.
 
-        started_at is taken at claim/dispatch, which is the playout head for
-        a delivery turn (a reveal/celebration ahead of it has its own claim
-        and playout). This is the one boundary the 1.6.6 stack cannot signal
-        mid-stream — the diagnosis-named live-leg boundary."""
+        The qnum is armed at claim, but started_at remains unset until
+        note_playout_started receives the framework's speaking transition.
+        A queued delivery claim is not an audible question."""
         armed = self.armed_question or {}
         choices = armed.get("choices")
         if not isinstance(choices, list) or len(choices) != 4:
             self._mc_delivery_qnum = None
+            self._mc_delivery_started_at = None
             return
         self._mc_delivery_qnum = qnum
-        self._mc_delivery_started_at = time.time()
+        self._mc_delivery_started_at = None
         self._mc_delivery_stem_words = len(
             str(armed.get("prompt") or "").split()
         )
@@ -929,6 +940,8 @@ class LilySpeechDeliveryMixin:
         if self.armed_question is None or self.sk.answer_window_open:
             return False
         if getattr(self, "_adjudicating", False):
+            return False
+        if not self._segment_overlaps_active_delivery(seg):
             return False
         ref = now if now is not None else time.time()
         if self._mc_stem_protected(ref):
@@ -1004,6 +1017,8 @@ class LilySpeechDeliveryMixin:
         qnum = getattr(self, "_active_delivery_qnum", None)
         if qnum is None or qnum != self.sk.question_number:
             return False
+        if not self._segment_overlaps_active_delivery(seg):
+            return False
         if self.sk.answer_window_open or getattr(self, "_adjudicating", False):
             return False
         try:
@@ -1027,6 +1042,8 @@ class LilySpeechDeliveryMixin:
         )
         self.mark_deterministic_reply(seg.get("text") or "")
         self._active_delivery_qnum = None
+        self._active_delivery_started_at = None
+        self._active_delivery_ended_at = None
         self._interrupt_current_speech()
         buf = self._pre_window_segments
         if buf is None:
