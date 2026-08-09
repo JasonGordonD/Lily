@@ -12653,6 +12653,20 @@ class LilyAgent(Agent):
         ):
             self._reair_regen_pending = True
             speech_id = _current_speech_id()
+            # Guard-map chain D fix (HOTFIX-007): this early return never
+            # airs, so the handle MUST be marked suppressed — otherwise it
+            # finishes "clean" and records its never-aired text into
+            # agent_turns/transcripts as said, polluting her context and
+            # the dedupe lint window (the falsified-record path that made
+            # zero of 34 live duplicates reachable by either guard).
+            if speech_id:
+                suppressed_ids = getattr(
+                    self._game, "_suppressed_speech_ids", None
+                )
+                if suppressed_ids is None:
+                    self._game._suppressed_speech_ids = set()
+                    suppressed_ids = self._game._suppressed_speech_ids
+                suppressed_ids.add(speech_id)
             released = (
                 self._game.say_registry.release_owner(speech_id)
                 if speech_id
@@ -12694,6 +12708,16 @@ class LilyAgent(Agent):
             # exempt (a barged question is re-read verbatim on purpose).
             self._reair_regen_pending = False
             speech_id = _current_speech_id()
+            # Guard-map chain D fix: mark suppressed so the silent turn is
+            # never recorded as said (see the regen-gate note above).
+            if speech_id:
+                suppressed_ids = getattr(
+                    self._game, "_suppressed_speech_ids", None
+                )
+                if suppressed_ids is None:
+                    self._game._suppressed_speech_ids = set()
+                    suppressed_ids = self._game._suppressed_speech_ids
+                suppressed_ids.add(speech_id)
             released = (
                 self._game.say_registry.release_owner(speech_id)
                 if speech_id
