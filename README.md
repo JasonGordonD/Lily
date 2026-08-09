@@ -51,7 +51,13 @@ Spoken-surface freeze before any speech/delivery extract:
   the last bind, **and** quiet after the last user turn
   (`LILY_AUTO_START_QUIET_SECONDS`, default 20s). Active banter or host
   speech defers it; `lily_begin_round` / UI start still start immediately
-  once intake has settled.
+  once intake has settled — except when a kickoff lock is active (below).
+- **Kickoff locks (code, not prompt).** `start_game`, lobby auto-start, and
+  `lily_begin_round` share `start_blocked_reason()`: (1) `recognition_dispute`
+  after a false clean-slate / empty-memory claim until one grounded why-beat
+  lands; (2) `ambiguous_yes` after an A-or-B offer (ready vs waiting, etc.)
+  when the table answers with a bare "yes" / "yes I am" — that answers the
+  choice, not a start. Explicit start language clears the yes-lock.
 - **Outbound speech yields after the first question** except for MC
   deliveries (stem + options). Freeform deliveries and verdict-plus-next
   stacks clip at the first `?`. Undelivered-delivery re-fires wait for
@@ -1912,14 +1918,28 @@ speaker verification, Hume, any gender-conditional behavior.
 ### Media mode — the lobby choice
 
 `media_mode` is a **sticky, deterministic flag** on the scorekeeper
-(`voice_only` default | `pictures`), offered once in the lobby and flipped in
-code by the spoken-choice detector (`lily_scorekeeper.lily_detect_media_choice`
-— same punctuation/fragment-proof command-layer pattern as "skip"/"back to
-normal"): "pictures on" / "picture rounds" / "use the screen" → `pictures`;
-"voice only" / "no pictures" / "pictures off" → `voice_only` (the OFF
-direction wins a collision). Published as the agent attribute `media_mode`.
+(`voice_only` default | `pictures`). It flips in code — never by LLM whim —
+via `LilyGame.try_activate_pictures` (dependency-checked: generation key +
+Supabase pipeline must be up, or the honest unavailability line fires and
+the flag stays `voice_only`).
+
+**Ways it turns ON (any one is enough):**
+- Spoken detector (`lily_detect_media_choice`): "pictures on" / "picture
+  rounds" / "use the screen" / "pictures in mixed mode" / "images live" →
+  `pictures`; "voice only" / "no pictures" / "pictures off" → `voice_only`
+  (OFF wins a collision).
+- Adult heat tool: successful `lily_set_adult_image_intensity` also flips
+  pictures ON when the lane is healthy (heat alone used to leave the bank
+  dark while `media_mode` stayed `voice_only`).
+- Confirm after her offer: if she asks "want them on?" while still
+  voice-only, a short "yes" / "live immediately" / "turn them on" flips
+  the same path.
+
+Published as the agent attribute `media_mode`.
 **Picture questions are excluded entirely in voice_only** — the supply path
 never calls a picture builder and strips any cached bank image before arming.
+Once ON, prefetch draws the standing arsenal first (`lily_picture_arsenal`),
+then live generation.
 
 ### Image storage (cache-first)
 

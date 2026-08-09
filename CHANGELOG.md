@@ -5,6 +5,22 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Pictures: flip media_mode when the bank is ready
+
+Live (`lily-E66E1B`): adult + "pictures in mixed mode" set heat to `mix`
+but left `media_mode=voice_only`. Lily correctly grounded "lane healthy,
+not live" — the arsenal already had ready adult rows; the sticky flag
+never flipped, so supply never drew.
+
+**Fix.** Shared `try_activate_pictures` (dependency-checked). Spoken
+detector covers "pictures in mixed mode" / "images live". Adult
+`lily_set_adult_image_intensity` flips pictures ON when the lane is
+healthy. After her "want them on?" offer, short yes / "live immediately"
+flips the same path. Heat alone no longer implies pictures without the
+flag.
+
+No prompt polish. Arsenal seed unchanged (already stocked).
+
 ## 2026-08-09 — WO-2: Ambiguous yes ≠ start
 
 After Lily offers an A-or-B (ready vs waiting, voice-only vs chase
