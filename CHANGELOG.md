@@ -5,6 +5,117 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 Y10: the FLOOR-001 counterweight (code-side restraint)
+
+Y11's canon draft found the push mandate is enforced in CODE, not in the
+prompt — the 3.0s responsiveness budget, the M1 "silence is her failure
+mode" gate, the auto-resume watchdog — and that FLOOR-001's restraint
+counterweight was never built. This is that counterweight, minimal.
+
+**Archaeology (what existed, why it did not suffice).** Four surfaces each
+held a piece of "whose floor is it": the `SpeechActRegistry` claims plus
+`_playout_started_ids` (act identity — which act is airing or owed, never
+"the room is talking"); `_hold_active` / `hold_blocks_dispatch` (a real
+global yield, but only ever entered by an explicit event — STOP, a
+decline, her own wait-promise, a question timeout — never because the
+table is enjoying itself); `_question_pending` (the floor yielded after
+SHE asks, blind to the room talking on its own); and FL-1's
+`last_addressee_judgment`, the only per-utterance read of
+player-to-player talk, which was consumed EXCLUSIVELY as two
+`build_state_block` context lines. It conditioned her words and gated
+nothing — FL-2, the floor-state machine named as FL-1's own downstream
+contract, was never built.
+
+**The fix (extends the say-gate/claims system; no second floor manager).**
+1. `LilyGame.floor_state()` — a pure DERIVED read (`hold` /
+   `lily_speaking` / `player_speaking` / `open_floor`) over those four
+   existing surfaces. No new attribute, nothing to keep in sync, no
+   transitions. Room-talk liveness comes from the classifier's OWN knobs
+   (`adjacency_seconds` for a lone aside, `cluster_max_gap_seconds` for a
+   locked side-cluster) rather than a new tuning constant. A HOST_DIRECTED
+   judgment deliberately does NOT yield — the canon keeps the
+   responsiveness budget for a direct address.
+2. **The graded choice.** `_cut_recovery_should_fire` — a machine timer
+   speaking into silence with nobody asking, the purest push path in the
+   codebase — now chooses SILENCE (`LILY_FLOOR | RECOVERY_YIELDED`) when
+   the room holds the floor or a hold is active. No resume, no minimal
+   ack, nothing re-armed.
+3. **GUARD_MAP chain F CLOSED.** `trigger_cut_recovery` dispatched via
+   `instructed_reply`, skipping every gate in `gated_say`; it now routes
+   through that funnel (`act=cut_recovery`, keyless, not hold-exempt), so
+   hold / question-pending / P0-G / P8 bind it. Closing it also fixed a
+   latent leak: the cut's re-air arm was previously eaten by whatever code
+   dispatch came next, which could hand the cut-short-mid-question
+   directive to a question that was never cut.
+
+**Deliberately NOT built** (would be the second layer the mandate
+forbids): the full graded-response ladder (per-act "full turn vs minimal
+acknowledgment vs silence" on every lane) and a stateful FL-2 machine.
+Also deliberately unchanged: the game-lane recovery producers (delivery
+nudge, WS-2 refire, IDLE_REARM, the P10 re-offer) still progress the game
+while the table talks — on game beats the floor IS hers, and yielding
+those would park the night. No prompt edits (Y11/Y12 own those).
+
+**Deletions:** none — net addition of one derived read plus one gate
+binding; the only removal is `trigger_cut_recovery`'s direct
+`instructed_reply` call, replaced by the shared funnel. Failure direction
+is deliberate: an unusable judgment timestamp reads as no room floor, so
+the lane falls back to speaking — a restraint counterweight must not be
+able to fail into a permanent mute.
+
+**Adversarial-review fixes, folded in (three findings, all verified).**
+Restraint has to clean up after itself, and the first cut of Y10 let two
+pieces of state outlive the recovery it stood down:
+
+* **F1 — the address debt (MEDIUM).** `_awaiting_address_since` is set for
+  every host-directed final and cleared ONLY at real playout. A reply cut
+  BEFORE playout whose recovery then yields left that latch set with no
+  actor left to clear it: `progression_paused_reason()` returns
+  `address_unanswered` forever, so the idle watchdog logs
+  `WATCHDOG_PAUSED` and `continue`s past the WHOLE game-lane recovery
+  ladder every tick — machine-unbounded in-game dead air, M1's failure
+  mode arriving through the counterweight's own door. Pre-Y10 the chain-F
+  bypass covered this by accident (the resume always fired and its playout
+  cleared the latch). Both refusal paths now release it
+  (`LILY_RESPONSIVENESS | ADDRESS_DEBT_CLEARED`): the address WAS answered,
+  by a turn that died, so the debt dies with the recovery that would have
+  paid it. No new watchdog.
+* **F2 — pre-game yields (MEDIUM-LOW).** Decision: the floor yield is
+  **in-game only**. Pre-game no machine path can re-engage (the idle
+  watchdog returns early when `game_started` is False), so a stood-down
+  lobby/intake resume would be one-shot dead air exactly where intake
+  needs her back — and pre-game there is no game progression to protect
+  the room from. An explicit pre-game hold is still honoured one layer
+  down, by `gated_say`'s hold gate.
+* **F3 — the stranded re-air arm (LOW-MEDIUM).** On either refusal the
+  cut's arm stayed live, so an unrelated later dispatch (an IDLE_REARM
+  `question_nudge` minutes on) could take it and air a never-cut question
+  carrying the "you were cut short mid-question" directive. Both paths now
+  CLEAR the arm (`REAIR_ARM_CLEARED`) — cleared, not consumed: consuming
+  would hand the tts_node regen gate a turn that is not a re-air.
+
+All three land in one shared exit, `_stand_down_cut_recovery`, so the two
+refusal paths can never diverge (pinned by a source test). Also recorded
+in comments, no code change: the FL-1 judgment is never cleared on
+`note_agent_prompt`, so a cluster read can outlive its cluster by up to
+`cluster_max_gap_seconds` (bounded by recency + floor precedence, costing
+at most a few seconds of silence on this one lane); and GUARD_MAP now
+states explicitly that five direct `instructed_reply` lanes plus the
+tts_node `generate_reply` retries remain outside the funnel — chain F was
+the machine-into-silence bypass, not the last one.
+
+**Tests:** tests/test_floor_state.py (39 fixture-first tests: floor
+derivation and precedence, staleness in classifier units, direct-address
+non-yield, the three chain-F gate bindings, keyless/no-retry-ladder, the
+F1 latch sequence end to end, the F2 pre-game carve-out, the F3 arm
+cleanup on both refusal paths, plus source pins that `gated_say` is the
+mixin's only `instructed_reply` call site, that both refusal paths run the
+one shared stand-down, and that `floor_state` stores nothing). One
+existing WS-3 assertion updated (`test_trigger_dispatches_fresh_resume`):
+the resume now consumes its own re-air arm, so the pin moved to
+`_reair_turn_pending`. Suite 2016 → 2055 green; the 83 character-regression
+pins untouched and green.
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 Y7: a barge-in is a CANCEL, not a cut to recover
 
 When a human deliberately talks over Lily she now stops and yields the
@@ -101,7 +212,6 @@ path, cause-decided-once source order). Suite 2016 → 2036 green.
 Mandate numbers: lily_agent.py 14,801 lines (14,779 + 22, comments
 included); prompt ~8,880 tokens UNCHANGED (no prompt touched); main tip /
 deployed sha: integrator's concern.
-
 ## 2026-08-09 — P0 PROMPT EVICTION: every 2026-08-09 call ran user turns with NO system prompt
 
 Found by the new pre-call readiness simulation on its FIRST run — not by

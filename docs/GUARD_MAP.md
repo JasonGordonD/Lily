@@ -12,6 +12,11 @@ choke-point primitives they call in `lily_say_gate.py`.
 
 Every mechanism below is one of six kinds:
 
+**Amendment 2026-08-09 (WO-LILY-HOTFIX-007 Y10):** chain F is now CLOSED — see §8 chain F for the
+disposition. Mechanism 21's "bypassing `gated_say`" and its "only the tts_node gates can stop it"
+note are therefore superseded: the auto-resume dispatches through `gated_say` and consults a derived
+floor read before firing. Everything else in this document remains as analysed.
+
 | Kind | Meaning |
 |---|---|
 | **GATE** | Refuses/blocks an action at a choke point (returns False, returns early, yields silence) |
@@ -317,12 +322,57 @@ finished.
 
 ### Chain F — cut recovery bypasses the dispatch gate that would stop it
 
+**CLOSED 2026-08-09 by WO-LILY-HOTFIX-007 Y10 (FLOOR-001 counterweight).** The analysis below stands
+as the diagnosis; the two bindings that close it are recorded after it.
+
 `trigger_cut_recovery` (SD:625) calls `self.instructed_reply(...)`, not `gated_say`. So mechs. 5–11
 (hold, question-pending, P0-G, P8 game-lane, dup-claim, stale-claim) never run on the auto-resume.
 Its only pre-conditions are the five checks in `_cut_recovery_should_fire` (SD:593–612). A cut that
 lands while a hold is active therefore produces an auto-resume that the hold was specifically
 designed to prevent — the hold check happens in the *watchdog* (A:3882) but not in the *cut-recovery
 watchdog*.
+
+**Y10 disposition (two bindings, no new gate):**
+
+1. `trigger_cut_recovery` now dispatches through `gated_say(None, "cut_recovery", …,
+   source="cut_recovery")`, so mechs. 5, 6, 7, 9, 10 run on the auto-resume like every other
+   *code-dispatched game/recovery* turn. Keyless by design: no claim, so mechs. 4/8 (dup-claim,
+   stale-claim watchdog) stay out of it — a refused resume is silence, not a queued retry.
+   `cut_recovery` is deliberately NOT in `_HOLD_EXEMPT_SOURCES`. Side effect: the resume now consumes
+   its own re-air arm (mech. 20) instead of leaving it for the next code dispatch, which could
+   previously hand the cut-short-mid-question directive to a question that was never cut.
+
+   **This is NOT a claim that every outbound lane is funneled.** Still outside `gated_say`, all
+   pre-existing and out of Y10's scope: the late-recognition ack (`A:2154`, gated instead by
+   `late_recognition_blocked_reason()`), four player-photo/vision reactions in the entrypoint
+   (`A:14582`, `A:14602`, `A:14621`, `A:14642`) — those five are all user-initiated — and the
+   tts_node regeneration / empty-candidate retries, which re-enter through raw
+   `session.generate_reply()` (mechs. 22, 48). Chain F was the *machine-into-silence* bypass; these
+   are not, and consolidating them belongs to the WS-6 tranche in §10.
+2. `_cut_recovery_should_fire` reads the new derived `LilyGame.floor_state()` and returns False
+   (`LILY_FLOOR | RECOVERY_YIELDED`) when the ROOM holds the floor or a hold is active — the graded
+   silence choice. `floor_state()` adds no state: it derives `hold` / `lily_speaking` /
+   `player_speaking` / `open_floor` from `_hold_active`, `sk.host_speaking`, `_question_pending`
+   and FL-1's `last_addressee_judgment` (whose judgment had until then gated nothing — it was
+   consumed only as build_state_block context lines). A HOST_DIRECTED judgment deliberately does not
+   yield: the responsiveness budget for a direct address is canon-correct.
+
+Both refusal paths (floor yield and a gated dispatch) run one shared stand-down —
+`_stand_down_cut_recovery` — which clears the cut's re-air arm (so mech. 20's arm can never leak to
+an unrelated later dispatch) and releases the `_awaiting_address_since` latch (mech. 58). The latch
+release is load-bearing: that latch is cleared only at real playout (mech. 12), so a reply that died
+before playout plus a stood-down recovery would otherwise leave `progression_paused_reason()`
+returning `address_unanswered` forever, and mech. 15 would `continue` past the entire recovery ladder
+on every tick. The pre-Y10 code got this for free from the chain-F bypass itself (the resume always
+fired, and its playout cleared the latch).
+
+The floor yield is IN-GAME ONLY: pre-game the idle watchdog does not run (A:3899), so a stood-down
+lobby/intake resume would be unrecoverable dead air. A pre-game hold still refuses one layer down, at
+the dispatch gate.
+
+Not changed by Y10, deliberately: the game-lane recovery producers (mechs. 29, 30, 59, 60) still
+progress the game while the table talks — on game beats the floor IS hers, and yielding those would
+park the night. §10's consolidation notes are otherwise untouched.
 
 ### Chain G — WS-2 ↔ WS-6 ordering dependency
 
