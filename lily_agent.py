@@ -824,6 +824,15 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # requires it IN ADDITION to the model's confirmed_all_18_plus flag,
         # so a question ("Should I verify?") can never unlock the deck.
         self._age_consent_confirmed: bool = False
+        # P0-2 BE8D8B: all setup intents in a final are non-exclusive.
+        # Kickoff is blocked while any requested setup job remains.
+        self._setup_requested: set[str] = set()
+        self._setup_pending: set[str] = set()
+        self._setup_heat_requested: str | None = None
+        self._setup_start_requested: bool = False
+        # VAD-backed floor: a start tool called while the player is still
+        # speaking cannot race ahead of the rest of a split multi-intent.
+        self._user_speaking: bool = False
         self._group_facts_written: set = set()  # per-session fact dedupe
 
         # Persistent cross-session memory (rematch): the [RETURNING TABLE]
@@ -2380,12 +2389,124 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         """WO-2: bare yes after an A-or-B offer must not open the round."""
         return bool(getattr(self, "_ambiguous_yes_blocks_start", False))
 
+    def pending_setup_jobs(self) -> set[str]:
+        """Requested lobby setup not yet committed in code."""
+        return set(getattr(self, "_setup_pending", set()) or set())
+
+    def mark_setup_applied(self, *jobs: str) -> None:
+        """Clear setup jobs only after their real state mutation succeeds."""
+        pending = getattr(self, "_setup_pending", None)
+        if pending is None:
+            self._setup_pending = set()
+            pending = self._setup_pending
+        before = set(pending)
+        pending.difference_update(jobs)
+        if before != pending:
+            logger.info(
+                "LILY_SETUP | APPLIED | session=%s jobs=%s pending=%s",
+                getattr(self.sk, "session_id", "?"),
+                ",".join(sorted(jobs)),
+                ",".join(sorted(pending)) or "none",
+            )
+
+    def note_lobby_setup_intents(self, text: str) -> dict:
+        """Parse and merge every setup intent before any kickoff dispatch.
+
+        Deterministic jobs commit here when safe. Adult/voice/heat stay
+        pending until their tools actually mutate state. P0-3 owns broader
+        consent semantics; age mention is enough to hold start fail-closed.
+        """
+        intents = lily_scorekeeper.lily_parse_lobby_setup_intents(text)
+        if getattr(self, "game_started", False):
+            return intents
+        requested = getattr(self, "_setup_requested", None)
+        pending = getattr(self, "_setup_pending", None)
+        if requested is None:
+            self._setup_requested = set()
+            requested = self._setup_requested
+        if pending is None:
+            self._setup_pending = set()
+            pending = self._setup_pending
+
+        if intents["start"]:
+            self._setup_start_requested = True
+        if intents["voice"]:
+            requested.add("voice")
+            pending.add("voice")
+        if intents["adult"]:
+            requested.add("adult")
+            if self.sk.mode == "adult":
+                pending.discard("adult")
+            else:
+                pending.add("adult")
+        if intents["age_mentioned"]:
+            requested.add("consent")
+            if getattr(self, "_age_consent_confirmed", False):
+                pending.discard("consent")
+            else:
+                pending.add("consent")
+        if intents["media"] == "pictures":
+            requested.add("pictures")
+            # If adult/heat is also requested, do not draw a general image
+            # while setup is incomplete (the BE8D8B Greece-on-general bug).
+            if intents["adult"] or "adult" in pending or intents["heat"]:
+                pending.add("pictures")
+            else:
+                outcome = self.try_activate_pictures(
+                    source="multi_intent_setup", announce=False
+                )
+                if outcome in ("on", "already_on"):
+                    pending.discard("pictures")
+                else:
+                    pending.add("pictures")
+        elif intents["media"] == "voice_only":
+            self.sk.set_media_mode("voice_only")
+            self.publish_attributes_nowait()
+            pending.discard("pictures")
+        if intents["heat"]:
+            self._setup_heat_requested = intents["heat"]
+            requested.add("heat")
+            if (
+                self.sk.mode == "adult"
+                and self.sk.adult_image_intensity == intents["heat"]
+                and self.sk.media_mode == "pictures"
+            ):
+                pending.discard("heat")
+                pending.discard("pictures")
+            else:
+                pending.add("heat")
+
+        if any(
+            (
+                intents["start"],
+                intents["voice"],
+                intents["adult"],
+                intents["media"],
+                intents["heat"],
+                intents["age_mentioned"],
+            )
+        ):
+            logger.info(
+                "LILY_SETUP | INTENTS | session=%s start=%s voice=%s "
+                "adult=%s media=%s heat=%s consent_heard=%s pending=%s",
+                getattr(self.sk, "session_id", "?"),
+                intents["start"], intents["voice"], intents["adult"],
+                intents["media"], intents["heat"],
+                getattr(self, "_age_consent_confirmed", False),
+                ",".join(sorted(pending)) or "none",
+            )
+        return intents
+
     def start_blocked_reason(self) -> str | None:
         """Single choke for kickoff gates. None = start allowed."""
         if self.recognition_dispute_blocks_start():
             return "recognition_dispute"
         if self.ambiguous_yes_blocks_start():
             return "ambiguous_yes"
+        if getattr(self, "_user_speaking", False):
+            return "user_speaking"
+        if self.pending_setup_jobs():
+            return "setup_pending"
         return None
 
     def clear_ambiguous_yes_block(self, *, reason: str) -> None:
@@ -5603,6 +5724,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
         command = result.get("control_command")
 
+        # P0-2: non-exclusive setup parse BEFORE any start dispatch. The
+        # scorekeeper result is command-or-media for scoring, but setup must
+        # retain voice + adult + pictures + consent + play from one final.
+        setup_intents = self.note_lobby_setup_intents(text)
+
         # WO-2: if her last turn was an A-or-B offer, a bare yes must not
         # open round one — lock kickoff until explicit start language.
         try:
@@ -5879,9 +6005,19 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     source="voice_command",
                 )
 
-        media_choice = result.get("media_choice")
+        # Full setup parse wins over the scorekeeper's command/media XOR.
+        media_choice = setup_intents.get("media") or result.get("media_choice")
         if media_choice and media_choice != self.sk.media_mode:
             if media_choice == "pictures":
+                if "pictures" in self.pending_setup_jobs():
+                    # Adult/heat setup owns activation; do not draw from the
+                    # general partition while those jobs are pending.
+                    logger.info(
+                        "LILY_SETUP | MEDIA_DEFERRED | session=%s pending=%s",
+                        self.sk.session_id,
+                        ",".join(sorted(self.pending_setup_jobs())),
+                    )
+                    return
                 # PATCH-003 P1: activation is a REAL flip, dependency-checked.
                 # A down lane never flips to a false "ON" — the honest,
                 # specific unavailability line names the real cause (P4
@@ -9110,6 +9246,20 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "choice, NOT a start. Do NOT call lily_begin_round. Ask one "
                 "clear confirm or wait for 'let's start' / 'let's play'."
             )
+        pending_setup = self.pending_setup_jobs()
+        if pending_setup:
+            extra.append(
+                "setup_pending: ACTIVE — finish these requested jobs BEFORE "
+                "Round One: "
+                + ", ".join(sorted(pending_setup))
+                + ". Do NOT call lily_begin_round or announce a category. "
+                "Use the matching setup tools; then confirm ready."
+            )
+        if getattr(self, "_user_speaking", False):
+            extra.append(
+                "floor: USER SPEAKING — do not call lily_begin_round or "
+                "start; listen for the rest of the turn."
+            )
         # HOTFIX-005 X12: explain-on-request and verdict-contest conditioning
         # — context only, leak-filtered like every note above.
         explain_note = getattr(self, "_explain_request_note", None)
@@ -9965,6 +10115,7 @@ class LilyAgent(Agent):
         # question is flushed (the live "powerhouse of the cell" defect)
         # and the adult deck starts drawing immediately.
         self._game.flush_for_mode_switch(source="enter_adult")
+        self._game.mark_setup_applied("adult", "consent")
         # flush_for_mode_switch already published nowait; a second awaited
         # publish only delayed the tool result / follow-up turn.
         self._game.publish_attributes_nowait()
@@ -10033,6 +10184,7 @@ class LilyAgent(Agent):
         )
         self._game.publish_attributes_nowait()
         if flip == "on" or flip == "already_on":
+            self._game.mark_setup_applied("heat", "pictures")
             return (
                 f"Adult image intensity is now {level.upper()} — sticky for "
                 "this session until they change it or say back to normal. "
@@ -10077,6 +10229,18 @@ class LilyAgent(Agent):
                 "round one yet. Ask one clear confirm — ready to start the "
                 "game? — or wait for an explicit 'let's start' / 'let's play'."
             )
+        if blocked == "user_speaking":
+            return (
+                "Hold kickoff — the player is still speaking. Listen for "
+                "the rest of the turn; do not announce Round One."
+            )
+        if blocked == "setup_pending":
+            jobs = ", ".join(sorted(self._game.pending_setup_jobs()))
+            return (
+                "Hold kickoff — requested setup is incomplete: "
+                f"{jobs}. Apply those tools/latches first, then confirm "
+                "ready. Do NOT announce Round One or a category."
+            )
         intake_hold = (
             "Hold that thought — a name just landed and the intake "
             "round-robin is still going. Finish collecting names "
@@ -10099,6 +10263,14 @@ class LilyAgent(Agent):
                 return (
                     "That bare yes answered a choice, not a start. Wait for "
                     "an explicit 'let's start' / 'let's play'."
+                )
+            if blocked == "user_speaking":
+                return "Hold kickoff — the player is still speaking."
+            if blocked == "setup_pending":
+                jobs = ", ".join(sorted(self._game.pending_setup_jobs()))
+                return (
+                    "Hold kickoff — requested setup is incomplete: "
+                    f"{jobs}. Apply it before Round One."
                 )
             # A bind landed between the gate check above and start_game's
             # own gate — the start deferred (WS-1).
@@ -12506,6 +12678,18 @@ async def entrypoint(ctx: JobContext) -> None:
             "LILY_INTERRUPT | FALSE_INTERRUPTION | session=%s resumed=%s",
             scorekeeper.session_id, getattr(ev, "resumed", None),
         )
+
+    @session.on("user_state_changed")
+    def _on_user_state(ev) -> None:
+        # P0-2 BE8D8B: the LLM tried lily_begin_round while the next
+        # (18-second) setup segment was still being spoken. VAD state is the
+        # only truth available before that final transcript lands.
+        game._user_speaking = ev.new_state == "speaking"
+        if game._user_speaking:
+            logger.info(
+                "LILY_SETUP | USER_SPEAKING | session=%s — kickoff blocked",
+                scorekeeper.session_id,
+            )
 
     @session.on("agent_state_changed")
     def _on_agent_state(ev) -> None:

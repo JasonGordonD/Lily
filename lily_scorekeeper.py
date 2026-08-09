@@ -328,6 +328,80 @@ _START_GAME_RE = _re.compile(
     r")\b"
 )
 
+# P0-2 multi-intent setup parser. Unlike on_transcript_segment's
+# command-or-media dispatch result, this deliberately returns ALL setup
+# intents present in the final so "let's play + adult + pictures + voice"
+# cannot collapse to start_game.
+_START_PARAPHRASE_RE = _re.compile(
+    r"\b(?:i|we)\s+(?:want|would like)\s+to\s+play\b"
+)
+_VOICE_CHANGE_REQUEST_RE = _re.compile(
+    r"\b(?:"
+    r"(?:change|switch|swap|use)\s+(?:your\s+)?voice"
+    r"|(?:the\s+)?other\s+voice"
+    r"|voice\s+(?:one|two|1|2)"
+    r")\b"
+)
+_ADULT_DECK_REQUEST_RE = _re.compile(
+    r"\b(?:adult|grown[- ]?up|18\s*\+)\s+(?:deck|trivia|game|mode)\b"
+)
+_SETUP_AGE_MENTION_RE = _re.compile(
+    r"\b(?:18\s*\+|18|eighteen|above\s+18|over\s+18|"
+    r"\d{2}\s+years?\s+old|born\s+in\s+(?:19|20)\d{2})\b"
+)
+_ADULT_HEAT_MIX_RE = _re.compile(
+    r"\b(?:mixed?\s+pictures?|pictures?\s+in\s+mixed?\s+mode|"
+    r"both\s+(?:the\s+)?suggestive\s+and\s+explicit|"
+    r"suggestive\s+and\s+explicit)\b"
+)
+_ADULT_HEAT_EXPLICIT_RE = _re.compile(
+    r"\b(?:explicit|full\s+explicit)\b"
+)
+_ADULT_HEAT_SUGGESTIVE_RE = _re.compile(
+    r"\b(?:suggestive|spicy[- ]but[- ]suggestive)\b"
+)
+
+
+def lily_parse_lobby_setup_intents(text: str) -> dict:
+    """Return every setup/start intent in one user final.
+
+    This is intentionally non-exclusive; the scorekeeper's control result
+    remains exclusive for scoring, while the agent uses this full parse to
+    finish setup before kickoff.
+    """
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return {
+            "start": False,
+            "voice": False,
+            "adult": False,
+            "media": None,
+            "heat": None,
+            "age_mentioned": False,
+            "age_consent": False,
+        }
+    heat = None
+    if _ADULT_HEAT_MIX_RE.search(normalized):
+        heat = "mix"
+    elif _ADULT_HEAT_EXPLICIT_RE.search(normalized):
+        heat = "explicit"
+    elif _ADULT_HEAT_SUGGESTIVE_RE.search(normalized):
+        heat = "suggestive"
+    return {
+        "start": bool(
+            _START_GAME_RE.search(normalized)
+            or _START_PARAPHRASE_RE.search(normalized)
+        ),
+        "voice": bool(_VOICE_CHANGE_REQUEST_RE.search(normalized)),
+        "adult": bool(_ADULT_DECK_REQUEST_RE.search(normalized)),
+        # Run independently from control-command detection: no XOR.
+        "media": lily_detect_media_choice(text),
+        "heat": heat,
+        # Presence is ordering evidence only; P0-3 owns consent semantics.
+        "age_mentioned": bool(_SETUP_AGE_MENTION_RE.search(normalized)),
+        "age_consent": lily_detect_age_consent(text),
+    }
+
 # Bare affirmatives — must NOT start the game after an A-or-B offer
 # (WO-2: "Yes, I am." after ready-or-waiting).
 _BARE_AFFIRMATIVE_RE = _re.compile(
