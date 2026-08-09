@@ -13859,9 +13859,13 @@ async def entrypoint(ctx: JobContext) -> None:
     # per-call LLMMetrics carries prompt_cached_tokens, the number that
     # proves whether the Y1a static prefix actually cache-hits at Grok.
     def _wire_llm_metrics(llm) -> None:
+        # collect_llm_call_soon, not collect_llm_call: the framework's
+        # sibling subscriber stamps speech_id onto the event in place, and
+        # emitter subscriber order is a coin flip — the deferred fold
+        # always sees the stamp (wave-1 review, HIGH finding).
         llm.on(
             "metrics_collected",
-            lambda m: session_metrics.collect_llm_call(m),
+            lambda m: session_metrics.collect_llm_call_soon(m),
         )
 
     _wire_llm_metrics(general_vocal_llm)

@@ -5,6 +5,39 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — WO-LILY-HOTFIX-007 wave-1 review: findings fixed (nothing waved through)
+
+Independent adversarial review of the five wave-1 commits (b0da435,
+46b2f42, 76dc872, 32eb2d6, 377f69d) against the installed framework
+source. Verdicts: Y1a/Y1c/Y2/Y3 PASS (Y1a's byte-preservation and the
+Y1c framework claims re-verified independently); **Y4 FAILED as a
+reliable gate** and is fixed here:
+
+**HIGH (fixed):** LLMMetrics.speech_id is None at emit time — the
+framework's sibling subscriber on the SAME emitter stamps it in place,
+and rtc.EventEmitter keeps subscribers in a set, so ordering vs Lily's
+handler was an address-hash coin flip: ~50% of sessions would have
+silently produced NO per-turn grouping (indistinguishable from "no
+multi-call turns"). Fix: `collect_llm_call_soon` defers the fold one
+event-loop tick (call_soon runs after the whole emit pass, so the stamp
+always lands first); race reproduced and pinned in test.
+
+**MEDIUM (covered + documented):** the Y2 `invalidated` counter sees
+only the equivalence-mismatch warning — the framework's ~8 other
+preemptive-discard sites (interruptions, pauses) are silent. That is
+the RIGHT number for the settle-vs-split decision (it isolates
+context-churn invalidation), and the interrupt-path waste now surfaces
+separately as `cancelled_calls` in the llm_cache block. Docstring
+states the full contract.
+
+**LOW (fixed):** all-empty payloads no longer fold as zero-token calls
+(denominator inflation). **LOW (documented):** `used` reads 0 at the
+production INFO log level — decision closes on `invalidated` +
+`cancelled_calls`, which are always counted. **Nit (recorded):**
+b0da435's message says "nine sections"; 7 were added, 2 pre-existed.
+
+**Deletions:** none. Suite 2008 → 2011 green.
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 Y3: conversation history bounded (framework truncate, wired)
 
 **Archaeology (mandate rule 0):** nothing anywhere trimmed the chat

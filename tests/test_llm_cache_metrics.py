@@ -80,13 +80,57 @@ def test_no_calls_means_no_llm_cache_section():
     assert "llm_cache" not in LilyMetricsCollector().summary()
 
 
-def test_garbage_never_raises():
+def test_garbage_never_raises_and_never_counts():
+    """Wave-1 review finding: an all-empty payload used to fold as a
+    zero-token call, inflating the denominator. Now it is not a call."""
     c = LilyMetricsCollector()
     c.collect_llm_call(None)
     c.collect_llm_call(object())
     c.collect_llm_call({"prompt_tokens": "not_a_number"})
-    # The object() call folds as a zero-token call; nothing raised is the pin.
-    assert c.summary().get("llm_cache", {}).get("cached_tokens", 0) == 0
+    assert "llm_cache" not in c.summary()
+
+
+def test_deferred_fold_sees_the_late_speech_id_stamp():
+    """The HIGH wave-1 review finding, reproduced: LLMMetrics.speech_id is
+    None at emit time and stamped IN PLACE by a sibling subscriber whose
+    ordering vs ours is a set-iteration coin flip. collect_llm_call_soon
+    defers one loop tick, so the stamp always lands first."""
+    import asyncio
+
+    async def scenario():
+        c = LilyMetricsCollector()
+        m = _call(1000, 0)
+        m.speech_id = None          # what our handler may see at emit time
+        c.collect_llm_call_soon(m)  # defers via call_soon
+        m.speech_id = "speech_late"  # the framework's stamp, same emit pass
+        await asyncio.sleep(0)      # run the deferred fold
+        return c
+
+    c = asyncio.run(scenario())
+    cache = c.summary()["llm_cache"]
+    assert cache["calls"] == 1
+    assert cache["calls_per_turn_max"] == 1  # grouped under speech_late
+    assert "speech_late" in c._llm_calls_by_speech
+
+
+def test_collect_soon_falls_back_immediately_without_a_loop():
+    c = LilyMetricsCollector()
+    c.collect_llm_call_soon(_call(500, 100))
+    assert c.summary()["llm_cache"]["calls"] == 1
+
+
+def test_cancelled_calls_are_counted():
+    """Interrupt-path waste: preemptive discards outside the equivalence
+    warning (8 silent cancel sites in the framework) surface here as
+    cancelled calls — the complement to the Y2 invalidated counter."""
+    c = LilyMetricsCollector()
+    m = _call(1000, 0)
+    m.cancelled = True
+    c.collect_llm_call(m)
+    c.collect_llm_call(_call(1000, 500))
+    cache = c.summary()["llm_cache"]
+    assert cache["calls"] == 2
+    assert cache["cancelled_calls"] == 1
 
 
 def test_wiring_is_component_level_on_both_transports():
