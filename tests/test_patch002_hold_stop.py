@@ -50,10 +50,40 @@ def _make_game():
     game.session = _FakeSession()
     game._hold_active = False
     game._hold_since = 0.0
+    game._hold_reason = None
+    game._delivery_stop_sticky = False
     game._speech_handles = {}
     game._suppressed_speech_ids = set()
     game._armed_speech_misses = 0
     game._undelivered_ticks = 0
+    game._undelivered_refires = 0
+    game._supply_stall_ticks = 0
+    game._prefetch_stall_ticks = 0
+    game._pending_delivery_qnum = None
+    game._active_delivery_qnum = None
+    game._active_delivery_started_at = None
+    game._delivery_speech_acts = {}
+    game._pre_window_segments = []
+    game._recent_finals = []
+    game._pending_reveal_event = None
+    game._prefetch_task = None
+    game._window_timer = None
+    game._bed_handle = None
+    game._steal_window = False
+    game._phase_hold = None
+    game._mc_delivery_qnum = None
+    game._mc_delivery_started_at = None
+    game.armed_question = None
+    game.next_question = None
+    game.pending_clarify = {}
+    game.used_prompts = []
+    game._burned_question_ids = set()
+    game._burned_question_hashes = set()
+    game.supabase = None
+    game.game_started = True
+    game.game_over = False
+    game.publish_attributes_nowait = lambda: None
+    game.start_prefetch = lambda: None
     game.instructed_replies = []
 
     def _reply(text):
@@ -96,6 +126,7 @@ def test_stop_primitive_halts_cancels_and_holds():
     assert game.say_registry.state("q_3_delivery") is None
     assert game.session.interrupted is True
     assert game._hold_active is True
+    assert game.game_delivery_stopped() is True
     # Exactly one short acknowledgment aired (the stop ack is hold-exempt).
     assert len(game.instructed_replies) == 1
     assert "stop" in game.instructed_replies[0].lower()
@@ -129,6 +160,115 @@ def test_user_speech_releases_hold_via_release_method():
     assert game.release_hold(reason="user_speech") is True
     assert game._hold_active is False
     assert game.gated_say(None, "banter", "chat", source="organic") is True
+
+
+def test_sticky_stop_survives_conversational_hold_release():
+    game = _make_game()
+    game.handle_stop_primitive("Stop the quiz.")
+    assert game.release_hold(reason="user_speech") is True
+
+    assert game._hold_active is False
+    assert game.game_delivery_stopped() is True
+    # Conversation may continue; the game plane may not.
+    assert game.gated_say(None, "banter", "chat", source="organic") is True
+    assert (
+        game.gated_say(
+            None, "question_delivery", "Question?", source="post_reveal"
+        )
+        is False
+    )
+
+
+def test_stop_clears_all_question_delivery_state():
+    game = _make_game()
+    game.sk.question_number = 4
+    game.armed_question = {"id": "q4", "prompt": "Frankenstein?"}
+    game.next_question = {"id": "q5", "prompt": "Rosetta Stone?"}
+    game.sk.current_question = dict(game.armed_question)
+    game.sk.open_answer_window(
+        duration=30.0, question_id="q4", question_index=4
+    )
+    game.sk.answer_candidates["Playing"] = {"text": "meta"}
+    game._pending_delivery_qnum = 4
+    game._active_delivery_qnum = 4
+    game._delivery_speech_acts = {"s4": "question_delivery"}
+    game._pre_window_segments = [{"text": "old meta"}]
+    game._recent_finals = [(1.0, {"text": "old meta"})]
+
+    game.handle_stop_primitive("I don't want to play anymore.")
+
+    assert game.armed_question is None
+    assert game.next_question is None
+    assert game.sk.current_question is None
+    assert game.sk.answer_window_open is False
+    assert game.sk.answer_candidates == {}
+    assert game._pending_delivery_qnum is None
+    assert game._active_delivery_qnum is None
+    assert game._delivery_speech_acts == {}
+    assert game._pre_window_segments == []
+    assert game._recent_finals == []
+    assert game.next_question_ready() is False
+    assert game.arm_next_question() is False
+
+
+def test_only_explicit_resume_clears_sticky_stop():
+    game = _make_game()
+    starts = []
+    game.start_prefetch = lambda: starts.append("prefetch")
+    game.handle_stop_primitive("Stop the game.")
+    game.release_hold(reason="user_speech")
+
+    assert not lily_scorekeeper.lily_detect_resume_game("okay")
+    assert not lily_scorekeeper.lily_detect_resume_game(
+        "I don't want to continue."
+    )
+    assert game.game_delivery_stopped() is True
+
+    assert lily_scorekeeper.lily_detect_resume_game("Continue the game")
+    assert game.resume_game_delivery(reason="test") is True
+    assert game.game_delivery_stopped() is False
+    assert starts == ["prefetch"]
+
+
+def test_repeated_stop_does_not_repeat_ack():
+    game = _make_game()
+    game.handle_stop_primitive("Stop the quiz.")
+    game.handle_stop_primitive("I don't want to play anymore.")
+
+    assert len(game.instructed_replies) == 1
+
+
+def test_quit_phrases_are_stop_commands():
+    for text in [
+        "Stop the quiz.",
+        "I don't want to play anymore.",
+        "End the game.",
+        "I'm done playing.",
+    ]:
+        assert lily_scorekeeper.lily_detect_stop(text, solo=True), text
+
+
+def test_sticky_stop_blocks_expect_claim_and_pre_window_buffer():
+    game = _make_game()
+    game.sk.question_number = 6
+    game.armed_question = {"id": "q6", "prompt": "Who was Caesar?"}
+    game._delivery_stop_sticky = True
+
+    game.expect_delivery()
+    delivery = game.register_delivery_claim(
+        "Who was Caesar?", speech_id="s6"
+    )
+    game.buffer_pre_window_answer(
+        {
+            "text": "This is meta speech, not an answer.",
+            "speaker_label": "S1",
+            "is_final": True,
+        }
+    )
+
+    assert game._pending_delivery_qnum is None
+    assert delivery is None
+    assert game._pre_window_segments == []
 
 
 def test_self_wait_promise_phrase_detected():

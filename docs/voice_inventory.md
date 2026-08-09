@@ -54,6 +54,11 @@ Blocked when no live game (`game_payload_blocked`):
 `question_delivery`, `question_nudge`, `verdict`, `reveal`,
 `reveal_flourish`, `reveal_scores`, `reveal_finale`, `steal_window`
 
+Sticky STOP (`_delivery_stop_sticky`) blocks every game-lane act even after
+ordinary conversation releases the temporary hold. `stop_ack` remains the
+single hold-exempt acknowledgment; repeated STOP emits no second ack. Only an
+explicit resume/continue command clears the game-delivery latch.
+
 ### Key patterns (idempotent claims)
 
 - `session_greet`, `session_rejoin`

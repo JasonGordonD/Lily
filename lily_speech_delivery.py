@@ -135,10 +135,15 @@ class LilySpeechDeliveryMixin:
         # question live. Validate at dispatch, the same chokepoint as the
         # hold gate.
         if self.game_payload_blocked(act, source):
+            reason = (
+                "game_stopped"
+                if getattr(self, "_delivery_stop_sticky", False)
+                else "no_live_game"
+            )
             logger.warning(
-                "LILY_SAY_SUPPRESSED | reason=no_live_game | act=%s | "
+                "LILY_SAY_SUPPRESSED | reason=%s | act=%s | "
                 "source=%s | game_started=%s q=%d window=%s",
-                act, source, getattr(self, "game_started", False),
+                reason, act, source, getattr(self, "game_started", False),
                 self.sk.question_number, self.sk.answer_window_open,
             )
             return False
@@ -333,6 +338,13 @@ class LilySpeechDeliveryMixin:
         q_{N}_delivery at dispatch. No-op pre-game (WS-1: intake turns can
         never become deliveries), when nothing is armed, the window is
         already open, or the delivery is already claimed."""
+        if getattr(self, "_delivery_stop_sticky", False):
+            logger.info(
+                "LILY_DELIVERY | EXPECT_BLOCKED | session=%s q=%d "
+                "reason=game_stopped",
+                self.sk.session_id, self.sk.question_number,
+            )
+            return
         if not getattr(self, "game_started", False):
             return
         if self.armed_question is None or self.sk.answer_window_open:
@@ -483,6 +495,8 @@ class LilySpeechDeliveryMixin:
             return False
         if getattr(self, "game_over", False):
             return False
+        if getattr(self, "_delivery_stop_sticky", False):
+            return False
         if getattr(self.sk, "answer_window_open", False):
             return False
         return not getattr(self, "_adjudicating", False)
@@ -577,6 +591,8 @@ class LilySpeechDeliveryMixin:
                                    caller makes it physically silent);
           None                   — not a delivery event; speak normally.
         """
+        if getattr(self, "_delivery_stop_sticky", False):
+            return None
         armed = self.armed_question
         if armed is None or self.sk.answer_window_open:
             return None
@@ -709,7 +725,11 @@ class LilySpeechDeliveryMixin:
         CLAIM and window open now buffer (last 6) and replay at open.
         No-op unless a question is armed and its delivery is claimed —
         lobby chatter and post-window banter never buffer."""
-        if self.sk.answer_window_open or self.armed_question is None:
+        if (
+            getattr(self, "_delivery_stop_sticky", False)
+            or self.sk.answer_window_open
+            or self.armed_question is None
+        ):
             return
         key = f"q_{self.sk.question_number}_delivery"
         if self.say_registry.state(key) is None:

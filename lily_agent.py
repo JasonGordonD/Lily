@@ -724,6 +724,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # generous timeout elapses. Her own "take your time" binds her too.
         self._hold_active = False
         self._hold_since = 0.0
+        self._hold_reason: str | None = None
+        # P0-B 9337B1: STOP is a persistent game-delivery freeze, distinct
+        # from a temporary conversational wait. Ordinary follow-up speech
+        # may resume conversation but never clears this latch.
+        self._delivery_stop_sticky = False
         # PATCH-003 P6/P10: yield-after-question state.
         self._question_pending = False
         self._question_pending_since = 0.0
@@ -1065,8 +1070,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             window = "steal" if getattr(self, "_steal_window", False) else "open"
         else:
             window = "closed"
-        if getattr(self, "_hold_active", False):
-            hold = "stop"
+        if getattr(self, "_delivery_stop_sticky", False):
+            hold = "stop_sticky"
+        elif getattr(self, "_hold_active", False):
+            hold = "wait"
         elif getattr(self, "_question_pending", False):
             hold = "q_pending"
         else:
@@ -1075,6 +1082,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             supply = "lobby"
         elif getattr(self, "game_over", False):
             supply = "over"
+        elif getattr(self, "_delivery_stop_sticky", False):
+            supply = "stopped"
         elif self.next_question_ready():
             supply = "ready"
         else:
@@ -1108,6 +1117,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         exists — the starvation the 583a0f16 session sat in with no screen
         cue. Pre-game and post-game report ready (the lobby/final screens
         carry their own state, not a supply cue)."""
+        if getattr(self, "_delivery_stop_sticky", False):
+            return False
         if not getattr(self, "game_started", False) or getattr(
             self, "game_over", False
         ):
@@ -1699,7 +1710,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         Strict TTS validation rewrites any drift to the deterministic sheet.
         """
         if (
-            self.armed_question is None
+            getattr(self, "_delivery_stop_sticky", False)
+            or self.armed_question is None
             or self.sk.answer_window_open
             or getattr(self, "game_over", False)
         ):
@@ -2600,6 +2612,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
     def start_blocked_reason(self) -> str | None:
         """Single choke for kickoff gates. None = start allowed."""
+        if getattr(self, "_delivery_stop_sticky", False):
+            return "game_stopped"
         if self.recognition_dispute_blocks_start():
             return "recognition_dispute"
         if self.ambiguous_yes_blocks_start():
@@ -3130,6 +3144,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     def start_prefetch(self) -> None:
         """Prefetch N+1 in the background while the current question plays
         out. Failure writes an honest status note (§11.2)."""
+        if getattr(self, "_delivery_stop_sticky", False):
+            return
         if self._prefetch_task and not self._prefetch_task.done():
             return
         if self.next_question is not None or self.game_over:
@@ -3352,7 +3368,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 question.pop("image_prompt", None)
                 if question.get("image_source"):
                     question["image_source"] = "none"
-            if question is not None:
+            if (
+                question is not None
+                and not getattr(self, "_delivery_stop_sticky", False)
+            ):
                 self.next_question = question
                 # HOTFIX-006 N2 — THE registration point. This is the moment
                 # a named topic stops being a promise: a real, verified,
@@ -3445,6 +3464,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 if getattr(self, "_session_closed", False):
                     return
                 if not self.game_started or self.game_over:
+                    continue
+                if getattr(self, "_delivery_stop_sticky", False):
+                    # Conversation may continue, but every game-plane owner
+                    # stays frozen until explicit resume.
                     continue
                 # PATCH-002 A4: the hold binds every lane. While held, the
                 # watchdog itself must not refire/nudge/vamp — that would be
@@ -4017,6 +4040,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         gate; a lobby/ended state blocks every game-lane act."""
         if act not in self._GAME_LANE_ACTS:
             return False
+        if getattr(self, "_delivery_stop_sticky", False):
+            return True
         return not getattr(self, "game_started", False) or getattr(
             self, "game_over", False
         )
@@ -4038,6 +4063,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         already = getattr(self, "_hold_active", False)
         self._hold_active = True
         self._hold_since = time.time()
+        self._hold_reason = reason
         if not already:
             logger.warning(
                 "LILY_HOLD | ENTERED | session=%s reason=%s — all dispatch "
@@ -4051,6 +4077,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if not getattr(self, "_hold_active", False):
             return False
         self._hold_active = False
+        self._hold_reason = None
         logger.info(
             "LILY_HOLD | RELEASED | session=%s reason=%s",
             self.sk.session_id, reason,
@@ -4062,6 +4089,27 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return False
         ref = now if now is not None else time.time()
         return (ref - getattr(self, "_hold_since", 0.0)) >= lily_config.hold_timeout_seconds()
+
+    def game_delivery_stopped(self) -> bool:
+        """Persistent STOP latch; conversation may resume, game delivery may not."""
+        return bool(getattr(self, "_delivery_stop_sticky", False))
+
+    def resume_game_delivery(self, *, reason: str) -> bool:
+        """Clear sticky STOP only after an explicit resume utterance."""
+        if not self.game_delivery_stopped():
+            return False
+        self._delivery_stop_sticky = False
+        self.release_hold(reason=f"explicit_resume:{reason}")
+        self.sk.clear_status_notes()
+        logger.warning(
+            "LILY_STOP | RESUMED | session=%s reason=%s — game delivery "
+            "may restart",
+            self.sk.session_id, reason,
+        )
+        self.publish_attributes_nowait()
+        if self.game_started and not self.game_over:
+            self.start_prefetch()
+        return True
 
     # -- PATCH-003 P6/P10: yield-after-question ------------------------------
     #
@@ -4127,16 +4175,80 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return False
         return True
 
+    def _freeze_game_delivery_for_stop(self) -> None:
+        """Retire every current delivery surface without ending conversation."""
+        self._delivery_stop_sticky = True
+
+        timer = getattr(self, "_window_timer", None)
+        if timer is not None and not timer.done():
+            timer.cancel()
+        self._window_timer = None
+        self.sk.close_answer_window()
+        self.sk.answer_candidates = {}
+        self.sk.answer_window_question_id = None
+        self.sk.answer_window_question_index = None
+        self.clear_pending_clarify_for_question(
+            self.sk.question_number, reason="stop_primitive"
+        )
+        if getattr(self, "_bed_handle", None) is not None:
+            self._stop_bed()
+        self._steal_window = False
+
+        for question in (
+            getattr(self, "armed_question", None),
+            getattr(self, "next_question", None),
+        ):
+            if question is not None:
+                # Session-retire only. A table stopping must not globally
+                # burn a curated bank row for every future table.
+                self._burn_question(
+                    question, reason="stop_primitive", persist=False
+                )
+        self.armed_question = None
+        self.next_question = None
+        self.sk.current_question = None
+
+        task = getattr(self, "_prefetch_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._prefetch_task = None
+        self._pending_delivery_qnum = None
+        self._active_delivery_qnum = None
+        self._active_delivery_started_at = None
+        self._mc_delivery_qnum = None
+        self._mc_delivery_started_at = None
+        self._delivery_speech_acts = {}
+        self._pre_window_segments = []
+        self._recent_finals = []
+        self._pending_reveal_event = None
+        self._armed_speech_misses = 0
+        self._undelivered_ticks = 0
+        self._undelivered_refires = 0
+        self._supply_stall_ticks = 0
+        self._prefetch_stall_ticks = 0
+        self._phase_hold = None
+        self.sk.clear_status_notes()
+        publish_nowait = getattr(self, "publish_attributes_nowait", None)
+        if callable(publish_nowait):
+            publish_nowait()
+        try:
+            publish_metadata = getattr(self, "publish_metadata", None)
+            if callable(publish_metadata):
+                asyncio.get_running_loop().create_task(publish_metadata(""))
+        except RuntimeError:
+            pass
+
     def handle_stop_primitive(self, source_text: str) -> None:
         """A5/T12: the dispatch-gate STOP reflex — the runaway-agent
         brake, called BEFORE the LLM ever sees the turn. Halt playout,
         cancel every queued/in-flight dispatch for the turn (no re-fire,
         no watchdog resurrection), enter the hold, one brief
         acknowledgment, then yield."""
+        already_stopped = self.game_delivery_stopped()
         logger.warning(
             "LILY_STOP | PRIMITIVE | session=%s text=%r — halting playout, "
-            "cancelling dispatches, entering hold",
-            self.sk.session_id, (source_text or "")[:60],
+            "cancelling dispatches, entering hold sticky=%s",
+            self.sk.session_id, (source_text or "")[:60], already_stopped,
         )
         # 1. Halt anything airing + cancel every tracked handle.
         for speech_id in list(getattr(self, "_speech_handles", {})):
@@ -4149,14 +4261,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             )
         self._armed_speech_misses = 0
         self._undelivered_ticks = 0
-        # HOTFIX-004 Defect 2: in the adult deck, a STOP means "that content
-        # is not okay" — so the objected-to material must never re-air. Burn
-        # the armed AND queued questions (adding them to the dead set), the
-        # exact gap behind "a queued adult question re-aired after an apology
-        # and commitment not to." General-deck STOP is a pause, not a
-        # content objection, so it leaves the queue intact.
+        # P0-B: every STOP retires armed/prefetched game content for THIS
+        # session and freezes every future delivery owner until explicit
+        # resume. Adult content retains its existing hard burn semantics.
         if self.sk.mode == "adult":
             self._burn_pending_adult_questions(reason="stop_in_adult")
+        self._freeze_game_delivery_for_stop()
         # 3. Interrupt the live session speech if the framework holds one.
         session = getattr(self, "session", None)
         interrupt = getattr(session, "interrupt", None)
@@ -4167,6 +4277,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 logger.warning("LILY_STOP | session interrupt failed: %s", e)
         # 4. Enter the hold and speak ONE short acknowledgment.
         self.enter_hold(reason="stop_primitive")
+        if already_stopped:
+            logger.info(
+                "LILY_STOP | REASSERTED | session=%s — sticky STOP remains; "
+                "no second acknowledgment",
+                self.sk.session_id,
+            )
+            return
         self.gated_say(
             None,
             "stop_ack",
@@ -4320,6 +4437,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # falling through to the armed-guard "idle" below.
         if not self.no_stuck_claims():
             return "blocked"
+        if getattr(self, "_delivery_stop_sticky", False):
+            return "idle"
         if (
             self.armed_question is not None
             or self.next_question is not None
@@ -4619,6 +4738,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     def arm_next_question(self) -> bool:
         """Move the prefetched question into the state block for Lily to
         perform. Returns True if a question is armed."""
+        if getattr(self, "_delivery_stop_sticky", False):
+            return False
         if self.armed_question is not None:
             return True
         if self.next_question is None:
@@ -5145,6 +5266,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     def open_window(
         self, duration: float | None = None, steal: bool = False
     ) -> None:
+        if getattr(self, "_delivery_stop_sticky", False):
+            logger.info(
+                "LILY_WINDOW | OPEN_BLOCKED | session=%s q=%d "
+                "reason=game_stopped",
+                self.sk.session_id, self.sk.question_number,
+            )
+            return
         if not getattr(self, "game_started", False):
             # WS-1: no window arming in any pre-game phase — the ghost
             # q_0001 window adjudicated Rhonda's self-introduction as a
@@ -5885,8 +6013,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if lily_scorekeeper.lily_detect_stop(text, solo=solo):
             self.handle_stop_primitive(text)
             return
+        if (
+            self.game_delivery_stopped()
+            and lily_scorekeeper.lily_detect_resume_game(text)
+        ):
+            self.resume_game_delivery(reason="spoken_resume")
         # PATCH-002 A4 — any user final RELEASES the hold (they've spoken;
-        # she may resume). The hold's own STOP ack is exempt (it's hers).
+        # conversation may resume). Sticky STOP remains an independent game
+        # delivery freeze unless the explicit resume detector above fired.
         if getattr(self, "_hold_active", False):
             self.release_hold(reason="user_speech")
         # PATCH-003 P6 — the table answered the question she asked: release
@@ -6547,7 +6681,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         ORDER by timestamps; Tier-1/Tier-2 decide CORRECTNESS; this commit
         happens BEFORE Lily narrates (§11.3 event-bound truth)."""
         if (
-            self._adjudicating
+            getattr(self, "_delivery_stop_sticky", False)
+            or self._adjudicating
             or getattr(self, "_question_transitioning", False)
             or self.armed_question is None
         ):
@@ -6914,6 +7049,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             points = (
                 5 if self.sk.round > self.rounds_total else max(1, self.sk.round)
             )
+
+            if getattr(self, "_delivery_stop_sticky", False):
+                logger.warning(
+                    "LILY_STOP | ADJUDICATION_ABORTED | session=%s q=%d — "
+                    "STOP landed before score commit",
+                    self.sk.session_id, self.sk.question_number,
+                )
+                return
 
             # Commit — scores land in the scorekeeper BEFORE Lily speaks.
             # T6 (PATCH-001): a failed commit means NO award narration —
@@ -9435,6 +9578,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         answered_line = self.answered_closed_state_line()
         if answered_line:
             extra.append(answered_line)
+        if getattr(self, "_delivery_stop_sticky", False):
+            extra.append(
+                "game_delivery: STOPPED — conversation may continue, but "
+                "do not ask, arm, reveal, score, nudge, or promise another "
+                "question. Only an explicit resume/continue command clears "
+                "this state."
+            )
         score_line = self._score_authority_line()
         if score_line:
             extra.append(score_line)
@@ -9727,7 +9877,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
     # -- burn protocol (say-gate WO §1) ------------------------------------------
 
-    def _burn_question(self, question: dict, reason: str) -> None:
+    def _burn_question(
+        self, question: dict, reason: str, *, persist: bool = True
+    ) -> None:
         """Mark one question burned: LILY_BURN log, status='burned' for
         bank rows (kb_ ids — generated questions have no DB row and are
         simply discarded), and the prompt joins used_prompts so the
@@ -9758,7 +9910,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self._burned_question_hashes.add(
                 lily_bank.lily_question_text_hash(prompt)
             )
-        if self.supabase is not None:
+        if persist and self.supabase is not None:
             asyncio.ensure_future(
                 lily_persistence.lily_burn_question(self.supabase, qid)
             )
@@ -10674,6 +10826,11 @@ class LilyAgent(Agent):
         if self._game.game_started:
             return "Already running — the next question is in the state block."
         blocked = self._game.start_blocked_reason()
+        if blocked == "game_stopped":
+            return (
+                "The game is STOPPED. Do not open Round One or deliver a "
+                "question. Wait for an explicit resume/continue command."
+            )
         if blocked == "recognition_dispute":
             return (
                 "Hold the kickoff — a recognition question is still open. "
@@ -10711,6 +10868,11 @@ class LilyAgent(Agent):
         await self._game.start_game(source="host_tool")
         if not self._game.game_started:
             blocked = self._game.start_blocked_reason()
+            if blocked == "game_stopped":
+                return (
+                    "The game is STOPPED. Wait for an explicit resume "
+                    "before any question."
+                )
             if blocked == "recognition_dispute":
                 return (
                     "Hold the kickoff — a recognition question is still open. "
