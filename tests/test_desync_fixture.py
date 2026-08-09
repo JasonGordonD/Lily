@@ -123,7 +123,7 @@ def _make_game() -> LilyGame:
     async def _publish_metadata(question_text, **kwargs):
         game.metadata_publishes.append(question_text or "")
 
-    async def _publish_attributes():
+    async def _publish_attributes(*a, **k):
         game.attribute_publishes.append(True)
 
     game.publish_metadata = _publish_metadata
@@ -875,7 +875,7 @@ def test_013754_replay_score_published_before_the_verdict_speaks():
         await asyncio.sleep(0.05)  # the network round-trip
         timeline.append(("meta_end", question_text or ""))
 
-    async def attrs_publish():
+    async def attrs_publish(*a, **k):
         timeline.append(
             ("attrs", {n: s["score"] for n, s in game.sk.players.items()})
         )
@@ -935,7 +935,7 @@ def test_adjudication_publishes_reveal_and_attributes_concurrently():
         await asyncio.sleep(0.05)
         timeline.append("meta_end")
 
-    async def slow_attrs():
+    async def slow_attrs(*a, **k):
         timeline.append("attrs_start")
         await asyncio.sleep(0.01)
         timeline.append("attrs_end")
@@ -1019,9 +1019,26 @@ def test_first_question_phase_hold_keeps_lobby_until_playout():
     assert game.ui_phase == "answering"
 
 
-def test_mid_game_arm_does_not_hold_phase():
-    # The hold is strictly a lobby -> first-delivery bridge: arming from any
-    # in-game phase publishes immediately exactly as before.
+def test_mid_game_arm_holds_the_reveal_until_the_next_question_airs():
+    # WIDENED 2026-08-09. This fixture used to assert the opposite — "the
+    # hold is strictly a lobby -> first-delivery bridge" — and that scoping
+    # was what erased the reveal from the glass.
+    #
+    # adjudicate publishes phase=reveal + the reveal metadata, then runs
+    # SYNCHRONOUSLY to the end of the function; arming N+1 queues
+    # phase=question in the same tick, landing ~1 RTT later. The frontend
+    # gates every part of the reveal on the phase (lily-game.tsx:377/396/
+    # 419-427: revealPhase, revealActive, showingVerdict, displayText), and
+    # the `reveal` data packet is only emitted at the VERDICT TURN'S
+    # PLAYOUT (on_agent_speech_finished) — an LLM round-trip plus TTS TTFB
+    # after the phase already reverted. Net live behaviour: she says
+    # "Correct — Saturn! Point to Maya" over a board showing no answer and
+    # no verdict, while the just-answered question is re-chalked as the
+    # live one under the NEXT question's number.
+    #
+    # The lobby case and the reveal case are the same defect. The hold now
+    # covers both, and the frontend's 12s reveal TTL is the backstop if the
+    # next delivery never airs.
     game = _make_game()
     game.ui_phase = "reveal"
     game._phase_hold = None
@@ -1033,8 +1050,11 @@ def test_mid_game_arm_does_not_hold_phase():
         await _drain()
 
     _run(scenario(), game)
-    assert game._phase_hold is None
-    assert game.ui_phase == "question"
+    assert game._phase_hold == "reveal", (
+        "arming the next question yanked the board off the reveal before "
+        "the verdict had even been spoken"
+    )
+    assert game.ui_phase == "question"  # internal truth still advances
 
 
 def test_reveal_beat_carries_committed_winner_score():

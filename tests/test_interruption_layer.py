@@ -99,7 +99,7 @@ def _make_game() -> LilyGame:
     async def _publish_metadata(question_text, **kwargs):
         pass
 
-    async def _publish_attributes():
+    async def _publish_attributes(*a, **k):
         pass
 
     game.publish_metadata = _publish_metadata

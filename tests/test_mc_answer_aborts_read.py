@@ -113,7 +113,7 @@ def _make_game() -> LilyGame:
     game.session = _FakeSession()
     game.published = []
 
-    async def _publish_attributes():
+    async def _publish_attributes(*a, **k):
         game.published.append("attrs")
 
     async def _publish_metadata(text, **kwargs):

@@ -197,7 +197,7 @@ def _make_game(session_id: str = "lily-D99BE7") -> LilyGame:
     async def _publish_metadata(question_text, **kwargs):
         game.metadata_publishes.append(question_text or "")
 
-    async def _publish_attributes():
+    async def _publish_attributes(*a, **k):
         game.attribute_publishes.append(
             {n: s["score"] for n, s in game.sk.players.items()}
         )

@@ -151,7 +151,7 @@ def _make_game(game_started: bool) -> LilyGame:
     async def _publish_metadata(question_text, **kwargs):
         game.metadata_publishes.append(question_text or "")
 
-    async def _publish_attributes():
+    async def _publish_attributes(*a, **k):
         pass
 
     game.publish_metadata = _publish_metadata

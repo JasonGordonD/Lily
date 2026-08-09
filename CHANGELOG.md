@@ -5,6 +5,79 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Glass truth: the phase that was reached is the phase that is published
+
+A UI-sync audit of the agent↔glass seam. Three HIGH findings, **one root
+cause**, verified with a repro against the real publish path.
+
+**`publish_attributes_nowait` bound the phase at TASK-RUN time, not at
+schedule time.** The coroutine read `self.ui_phase` when the loop got round
+to it, so two consecutive SYNCHRONOUS transitions collapsed into whichever
+ran last. `adjudicate` does exactly that:
+
+    if round_over: self._set_ui_phase("scores")   # queues publish A
+    if not self.arm_next_question():              # -> "question", queues B
+
+Measured before the fix: `PHASES ON THE WIRE: ['question', 'question']`.
+
+- **`phase="scores"` had never reached the wire** on a normal round
+  boundary. `LilyStandings` — a whole designed screen — only rendered when
+  supply was starved enough for `arm_next_question` to FAIL.
+- **The reveal was erased ~1 RTT after it published.** The frontend gates
+  every part of the reveal on the phase (`lily-game.tsx:377/396/419-427`),
+  and the `reveal` data packet only fires at the VERDICT TURN'S PLAYOUT —
+  an LLM round-trip plus TTS TTFB after the phase reverted. She said
+  "Correct — Saturn! Point to Maya" over a board showing no answer and no
+  verdict. "Go back" showed answers the live screen never displayed,
+  because history folds `state.reveal`.
+- **The previous question was re-chalked as the live one.** Between arm and
+  air, metadata still held question N's prompt and choices while
+  `question_number` read N+1 — so the just-answered question was freshly
+  animated in under the new number for the whole flourish + LLM + TTS.
+
+The phase is now bound where the publish is queued, and `_phase_hold` —
+built this morning as a lobby→first-delivery bridge — is widened to every
+phase an arm can interrupt (`lobby`, `reveal`, `scores`). Same defect, same
+seam; the earlier fixture asserting "mid-game arm does not hold phase"
+encoded the bug and is rewritten with the evidence. The frontend's 12s
+reveal TTL is the backstop if the next delivery never airs.
+
+**Also closed from the same audit:**
+
+- `lily_control.start` / `.skip` returned `ok:true` unconditionally, while
+  `start_game` early-returns on `start_blocked_reason` / intake round-robin
+  / already-started and `skip_question` early-returns while adjudicating.
+  The player tapped Start, the pill returned to normal, nothing happened
+  and nothing was said. Both now report the real outcome with a reason.
+- A worker reconnect published EMPTY room metadata over a restored
+  question. Room metadata is server-side and survived the restart, so this
+  erased a question the agent still held armed — picture and all. It now
+  republishes what she actually has.
+- The supply-stall hold was gated on `revealPhase`, but most stall entries
+  leave the phase on `question` (`skip_question`, `flush_for_mode_switch`,
+  `on_answer_leak`, and a delivery released after too many cuts). The flag
+  was on the wire and the board rendered nothing for all of them.
+- `LILY_HEARTBEAT_STALE_MS` (60s) sat BELOW the agent's hold timeout (90s),
+  and there is no periodic attribute publisher — so a healthy "take your
+  time" tripped the watchdog into "Connection paused. Scores may be out of
+  date.", resting the timer bar and dropping the skip affordance while the
+  agent was alive and counting. Raised to 120s.
+
+**Audited and found clean** (recorded so they are not re-audited): the
+per-key attribute merge, `applyRoomMetadata` clearing, the 50/50 republish
+carrying `image_url`, the glass image pending/confirmed lifecycle, and the
+client reconnect/late-join snapshot restore.
+
+**Open from the same audit, not closed here:** an unbound-voice award is
+invisible on the glass (`_players_payload` has no branch that can emit the
+`unclaimed` row the client was extended to render); review-history keys
+collide past the 60-snapshot cap; a re-bind orphans a scored roster row and
+the client collapses with `max()` rather than `sum()`; and the metadata
+`question_number` stale-render guard the agent publishes is never read by
+the frontend — the guard that would have caught the re-chalk bug above.
+
+1802 passed.
+
 ## 2026-08-09 — Barge-in is the steady state, not the error path
 
 Operator directive: *"it's a game that's going to have a lot of barging in,

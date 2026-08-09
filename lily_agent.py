@@ -962,9 +962,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             for name, s in self.sk.players.items()
         ]
 
-    async def publish_attributes(self) -> None:
+    async def publish_attributes(self, phase: str | None = None) -> None:
         """LWW participant attributes — updated on every phase transition
-        and score change. Exact key spellings per the seam contract."""
+        and score change. Exact key spellings per the seam contract.
+
+        `phase` is the phase this publish was SCHEDULED for. Reading it
+        live here loses any transition that a later synchronous statement
+        overwrote before the loop ran — see publish_attributes_nowait."""
         try:
             window = {
                 "open": self.sk.is_window_open(),
@@ -983,7 +987,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 # Published phase honors the pre-delivery screen hold: the
                 # glass must never lead the voice (first-question arm fires
                 # mid-greeting; the hold keeps the lobby up until playout).
-                "phase": self._phase_hold or self.ui_phase,
+                "phase": phase or self._phase_hold or self.ui_phase,
                 "round": str(self.sk.round),
                 "question_number": str(self.sk.question_number),
                 "mode": self.sk.mode,  # deterministic sticky flag (§11.4)
@@ -1023,7 +1027,22 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self.publish_attributes())
+        # BIND THE PHASE AT SCHEDULE TIME, not at task-run time. The
+        # coroutine used to read self.ui_phase when the loop got round to
+        # it, so two consecutive SYNCHRONOUS transitions collapsed to
+        # whichever ran last. adjudicate does exactly that:
+        #
+        #     if round_over: self._set_ui_phase("scores")   # queues A
+        #     if not self.arm_next_question():              # -> "question", queues B
+        #
+        # Both A and B published "question". `phase=scores` has never once
+        # reached the wire, so LilyStandings — a whole designed screen —
+        # has never rendered on a normal round boundary, only when supply
+        # was starved enough for arm to fail. Verified with a repro against
+        # the real publish path: ['question', 'question'].
+        loop.create_task(
+            self.publish_attributes(phase=self._phase_hold or self.ui_phase)
+        )
 
     def spine_fields(self) -> dict:
         """Snapshot the operability spine for logs / tests."""
@@ -4630,14 +4649,33 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 _task.cancel()
         self._spec_judge = {}
         self._nbest_by_key = {}  # n-best dicts are per-question
-        if self.ui_phase == "lobby":
+        if self.ui_phase in ("lobby", "reveal", "scores"):
             # Voice/glass sync (2026-07-31 live report): the FIRST question
             # arms while Lily is still greeting — flipping the published
             # phase here replaced the lobby with the game board mid-
-            # salutation. Hold the published phase on the lobby until the
-            # delivery turn's playout opens the window (open_window
-            # publishes phase=answering and clears the hold).
-            self._phase_hold = "lobby"
+            # salutation. Hold the published phase until the delivery turn
+            # actually airs (publish_question_to_glass clears the hold).
+            #
+            # WIDENED 2026-08-09 from "lobby" to every phase the arm can
+            # interrupt, because the same defect was eating the reveal.
+            # adjudicate publishes phase=reveal + the reveal metadata and
+            # then runs synchronously to the end — arming N+1 queues
+            # phase=question in the same tick, ~1 RTT later. The frontend
+            # gates ALL reveal rendering on the phase
+            # (`revealPhase = phase === 'reveal' || 'scores'`), and the
+            # `reveal` data packet only fires at the verdict turn's playout
+            # start — an LLM round-trip AFTER the phase already went back.
+            # So the answer never stamped and "X got it" never appeared:
+            # she said "Correct — Saturn! Point to Maya" over a board
+            # showing neither. "Go back" showed answers the live screen
+            # never displayed, because history folds state.reveal.
+            #
+            # Same hold also stops the PREVIOUS question being re-chalked
+            # as the live one: between arm and air the metadata still holds
+            # question N's prompt and choices while question_number reads
+            # N+1, so the just-answered question was freshly animated in
+            # under the new number for the whole flourish + LLM + TTS.
+            self._phase_hold = self.ui_phase
         self._set_ui_phase("question")
         # Metadata publish moved to WINDOW-OPEN time (delivery playout
         # completion): the old arm-time publish clobbered the reveal
@@ -13163,13 +13201,33 @@ async def entrypoint(ctx: JobContext) -> None:
         asyncio.ensure_future(_persist())
 
     # --- RPC handlers (frontend -> agent): exactly two methods ---
+    # Both report the REAL outcome. They used to return ok:True
+    # unconditionally, but start_game early-returns on start_blocked_reason
+    # / intake_roundrobin_active / already-started, and skip_question
+    # early-returns while adjudicating or transitioning. The client reads
+    # ok to decide whether to show "Lily didn't catch that"
+    # (lily-lobby.tsx / lily-game.tsx), so a deferred start looked
+    # identical to a successful one: the player taps Start, the pill
+    # returns to normal, nothing happens, and nothing is said.
     async def _rpc_start(data: rtc.RpcInvocationData) -> str:
+        started = game.game_started
         await game.start_game(source="rpc")
-        return json.dumps({"ok": True, "phase": game.ui_phase})
+        ok = game.game_started and not started
+        return json.dumps({
+            "ok": ok,
+            "phase": game.ui_phase,
+            "reason": None if ok else (
+                game.start_blocked_reason() or "already_started"
+            ),
+        })
 
     async def _rpc_skip(data: rtc.RpcInvocationData) -> str:
+        before = scorekeeper.question_number
         await game.skip_question(source="rpc")
-        return json.dumps({"ok": True, "question_number": scorekeeper.question_number})
+        return json.dumps({
+            "ok": scorekeeper.question_number != before,
+            "question_number": scorekeeper.question_number,
+        })
 
     async def _rpc_merge(data: rtc.RpcInvocationData) -> str:
         # WS-8 operator identity reconciliation: {"from_label":"S4",
@@ -13471,7 +13529,16 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Initial truth for late joiners / reconnect snap-restore.
     await game.publish_attributes()
-    await game.publish_metadata("")
+    if game.armed_question is not None:
+        # A WORKER RECONNECT restored a checkpointed question
+        # (restore_reconnected_state). Room metadata is server-side and
+        # survived the restart, so blanking it here actively ERASED a
+        # question that was on the glass a moment ago and that the agent
+        # still holds armed — picture and all. Republish what she actually
+        # has instead.
+        game.publish_question_to_glass(reason="reconnect")
+    else:
+        await game.publish_metadata("")
     game.start_prefetch()
 
     # Session opener — SECOND trigger path (on_enter, inside session.start,
