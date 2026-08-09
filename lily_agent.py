@@ -8243,38 +8243,53 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 self.supabase, tag
             )
             enroll_group = self.group_id
-            # Narrow on purpose: only the ROOM-NAME throwaway is barred from
-            # founding an identity. A real group id off participant or
-            # dispatch metadata is a legitimate home for a first centroid —
-            # it recurs, so it can be matched to later. A room name cannot.
-            if getattr(self, "group_id_source", "") == "room_name" and not any(
-                r["group_id"] == self.group_id for r in existing
-            ):
-                # Weak group with no centroid of its own — let the voice say
-                # where it belongs rather than founding a new identity on a
-                # room name.
+            source = getattr(self, "group_id_source", "")
+            weak_source = source in ("room_name", "name_set_hash")
+            prior_self = next(
+                (r for r in existing if r["group_id"] == self.group_id),
+                None,
+            )
+            # Every not-yet-enrolled group asks the GLOBAL biometric pool
+            # first. A weak room/name-set identity may never found or
+            # reinforce its own centroid: 9337B1's bogus `Playing` name-set
+            # minted a rival beside the seven-sample canonical Rami row.
+            must_match_existing = weak_source or prior_self is None
+            if must_match_existing:
+                candidates = [
+                    r for r in existing
+                    if not (weak_source and r["group_id"] == self.group_id)
+                ]
                 match = lily_voice_identity.lily_match_voice(
-                    emb, existing,
+                    emb, candidates,
                     threshold=lily_config.voice_identity_match_threshold(),
                     margin=lily_config.voice_identity_match_margin(),
                 )
-                if match is None:
+                if match is not None:
+                    enroll_group = match["group_id"]
+                    logger.info(
+                        "LILY_VOICE_ID | ENROLL_REDIRECTED | session=%s "
+                        "from=%s to=%s score=%.3f — folding the sample into "
+                        "the identity the voice actually matches",
+                        self.sk.session_id, self.group_id, enroll_group,
+                        match["score"],
+                    )
+                elif weak_source:
                     logger.warning(
                         "LILY_VOICE_ID | ENROLL_SKIPPED_ORPHAN | session=%s "
                         "group=%s source=%s — weak group and no voice match; "
-                        "dropping the sample rather than minting an orphan "
-                        "centroid that can never be matched to",
-                        self.sk.session_id, self.group_id, self.group_id_source,
+                        "quarantining the sample rather than minting or "
+                        "reinforcing a rival centroid",
+                        self.sk.session_id, self.group_id, source,
                     )
                     return False
-                enroll_group = match["group_id"]
-                logger.info(
-                    "LILY_VOICE_ID | ENROLL_REDIRECTED | session=%s from=%s "
-                    "to=%s score=%.3f — folding the sample into the identity "
-                    "the voice actually matches",
-                    self.sk.session_id, self.group_id, enroll_group,
-                    match["score"],
-                )
+                elif source not in ("participant_metadata", "env_override"):
+                    logger.warning(
+                        "LILY_VOICE_ID | ENROLL_SKIPPED_UNVERIFIED | "
+                        "session=%s group=%s source=%s — no existing voice "
+                        "match and group provenance cannot found an identity",
+                        self.sk.session_id, self.group_id, source,
+                    )
+                    return False
             prior = next(
                 (r for r in existing if r["group_id"] == enroll_group), None
             )
