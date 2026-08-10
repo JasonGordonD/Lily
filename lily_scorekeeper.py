@@ -546,6 +546,15 @@ _FORGET_NEGATION_RE = _re.compile(
 # only in solo (one player — no ambiguity about who is being told to stop).
 _STOP_WORD = r"st[ao][h']?[ao]?p+|st[ao]wp|stlop|halt|freeze"
 _STOP_CORE_RE = _re.compile(rf"\b(?:{_STOP_WORD})\b")
+# Emphatic repetition ("stop stop stop") — three or more stop-words in a
+# row is an unambiguous runaway-agent brake. The solo gate exists only to
+# disambiguate WHO a lone "stop" addresses; a shouted repetition removes
+# that ambiguity, so it fires regardless of roster (the live lily-5E3036
+# leak: "Stop stop stop stop stop stop stop" never routed because a phantom
+# second player made the room read non-solo).
+_STOP_REPEAT_RE = _re.compile(
+    rf"\b(?:{_STOP_WORD})\b(?:[\s,.!]+(?:{_STOP_WORD})\b){{2,}}"
+)
 _STOP_ADDRESSED_RE = _re.compile(
     rf"\b(?:lily|lilly|lil)\b[\s,.!]*(?:{_STOP_WORD})"
     rf"|(?:{_STOP_WORD})\b[\s,.!]*\b(?:lily|lilly|lil)\b"
@@ -585,6 +594,9 @@ def lily_detect_stop(text: str, *, solo: bool = False) -> bool:
         return True
     if _STOP_ADDRESSED_RE.search(normalized):
         return True
+    # Emphatic repetition is roster-independent (see _STOP_REPEAT_RE).
+    if _STOP_REPEAT_RE.search(normalized):
+        return True
     return bool(solo and _STOP_CORE_RE.search(normalized))
 
 
@@ -600,6 +612,36 @@ def lily_detect_resume_game(text: str) -> bool:
     ):
         return False
     return bool(_RESUME_GAME_RE.match(normalized))
+
+
+# Hold-narration integrity (WO-LILY-HOTFIX-009 W8) — the stop-ack register
+# Lily speaks when she says she has halted: "Stopped. I'm listening.",
+# "Still stopped. You say when.", "Stopped until you say go." (all four
+# real lily-5E3036 confabulations). A turn in this register asserts a hold
+# state; the claim-integrity organ requires that state to actually exist.
+# Runs on Lily's OWN outbound text (real casing/punctuation), not user STT,
+# so it is not routed through _normalize_command_text.
+_HOLD_NARRATION_STATE_RE = _re.compile(r"\bstopped\b", _re.IGNORECASE)
+_HOLD_NARRATION_CUE_RE = _re.compile(
+    r"\bstill\b"
+    r"|\bi'?m listening\b"
+    r"|\b(?:say (?:the word|when|go)|until you say|you say (?:when|go))\b",
+    _re.IGNORECASE,
+)
+
+
+def lily_detect_hold_narration(text: str) -> bool:
+    """True when an outbound turn narrates a stopped/hold state — a
+    "stopped" assertion paired with a hold cue ('still', "I'm listening",
+    a 'say the word / until you say go' release invitation). Deliberately
+    conservative: a bare "stopped" with no hold cue ("the clock stopped")
+    does not fire."""
+    if not text:
+        return False
+    return bool(
+        _HOLD_NARRATION_STATE_RE.search(text)
+        and _HOLD_NARRATION_CUE_RE.search(text)
+    )
 
 
 # ---------------------------------------------------------------------------

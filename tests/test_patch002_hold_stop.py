@@ -398,3 +398,157 @@ def test_stop_primitive_delivery_lane_behaviour_unchanged():
     result = game.register_delivery_claim(_Q6_FREUDIAN, speech_id="s6")
     assert result is None
     assert game.say_registry.state("q_6_delivery") is None
+
+
+# -- W8 (WO-LILY-HOTFIX-009): the stop DETECTS but did not ROUTE --------------
+#
+# Live lily-5E3036, 05:39:10: Rami shouts the real utterance below. It never
+# routed to handle_stop_primitive — zero LILY_STOP/LILY_HOLD in the whole
+# trace, LILY_SPINE hold=clear throughout — because a phantom second player
+# ("Rummy", an STT name-capture artifact) made roster_size() read 2, so
+# solo=False, and a bare stop counts only in solo. Lily then narrated three
+# "Stopped…" confirmations of a hold that mechanically did NOT exist, and the
+# q_6 Freudian question aired at 05:40:11 with no hold to block it. W8 routes
+# the emphatic-repetition register regardless of roster, and backs any
+# stopped-state narration with an actual hold.
+
+# The 05:39:10 utterance, verbatim from lily_transcripts (speaker Rami).
+_REAL_STOP_UTTERANCE = (
+    "Stop stop stop stop stop stop stop, I. This is unfair. "
+    "Are you not listening?"
+)
+
+# The four real confabulated hold-narration turns (Lily, source rows
+# 05:39:26 / 05:39:49 / 05:40:00 / 05:40:17).
+_REAL_HOLD_NARRATIONS = [
+    "[soft] Stopped. I'm listening. …[cut off]",
+    "[soft] Still stopped. You say when.",
+    "[soft] Yes. I heard you. Stopped until you say go.",
+    "[soft] Still stopped until you say go. …[cut off]",
+]
+
+
+def _polluted_roster_game():
+    """The live roster: one real player (Rami) plus the phantom 'Rummy', so
+    roster_size() == 2 and solo=False — exactly what suppressed the stop."""
+    game = _armed_q6_game()
+    game.sk.players = {"rami": {"score": 2}, "rummy": {"score": 0}}
+    assert game.sk.roster_size() == 2
+    return game
+
+
+def test_emphatic_repetition_stop_is_roster_independent():
+    """The root-cause needle. The real shouted utterance, and a bare
+    'stop stop stop', fire even when solo=False — the emphatic-repetition
+    register removes the who-is-being-addressed ambiguity the solo gate
+    guards. A single bare stop still needs solo; two is not yet emphatic;
+    the word-bound/negation guards still hold."""
+    assert lily_scorekeeper.lily_detect_stop(
+        _REAL_STOP_UTTERANCE, solo=False
+    ) is True
+    assert lily_scorekeeper.lily_detect_stop("stop stop stop", solo=False)
+    # Unchanged: a single bare stop is still solo-only; two is not emphatic.
+    assert lily_scorekeeper.lily_detect_stop("stop", solo=False) is False
+    assert lily_scorekeeper.lily_detect_stop("stop stop", solo=False) is False
+    assert lily_scorekeeper.lily_detect_stop("stop", solo=True) is True
+    # Still word-bounded and negation-guarded.
+    assert lily_scorekeeper.lily_detect_stop(
+        "stopwatch stopwatch stopwatch", solo=False
+    ) is False
+    assert lily_scorekeeper.lily_detect_stop(
+        "don't stop stop stop", solo=False
+    ) is False
+
+
+def test_real_stop_utterance_routes_to_hold_with_polluted_roster():
+    """The primary end-to-end needle, on the production consult path. With the
+    live polluted roster (solo=False), the real 05:39:10 utterance enters the
+    hold MECHANICALLY: maybe_route_stop returns True, the hold is active, the
+    sticky STOP latch is set, and exactly one ack aired. On base this routed
+    nothing (detection returned False for a bare stop in a non-solo room)."""
+    game = _polluted_roster_game()
+    handled = game.maybe_route_stop(_REAL_STOP_UTTERANCE)
+    assert handled is True
+    assert game._hold_active is True
+    assert game.game_delivery_stopped() is True
+    assert len(game.instructed_replies) == 1
+    assert "stop" in game.instructed_replies[0].lower()
+
+
+def test_solo_and_addressed_stop_routing_unchanged():
+    """No regression on the paths that routed before W8: a solo bare stop
+    still routes, an addressed stop routes regardless of roster, and a lone
+    bare stop in a genuine multi-player room still does not."""
+    solo = _armed_q6_game()
+    solo.sk.players = {"rami": {"score": 0}}
+    assert solo.maybe_route_stop("stop") is True
+    assert solo._hold_active is True
+
+    addressed = _polluted_roster_game()
+    assert addressed.maybe_route_stop("Lily, stop!") is True
+    assert addressed._hold_active is True
+
+    lone = _polluted_roster_game()
+    assert lone.maybe_route_stop("stop") is False
+    assert lone._hold_active is False
+
+
+def test_hold_narration_without_state_enters_hold():
+    """Honesty needle. Each real confabulated line, spoken with no hold and
+    no sticky STOP, enters the hold to back the claim — a narrated stopped
+    state can no longer exist without the mechanical state behind it."""
+    for line in _REAL_HOLD_NARRATIONS:
+        game = _armed_q6_game()
+        assert game._hold_active is False
+        backed = game.back_hold_narration(line)
+        assert backed is True, line
+        assert game._hold_active is True, line
+
+
+def test_hold_narration_noop_when_already_backed():
+    """No double-action / no over-reach: already-held (the legitimate
+    stop-ack path) and sticky-STOP (the claim is backed by the latch) are
+    both no-ops, and a normal turn never enters a hold."""
+    held = _armed_q6_game()
+    held.enter_hold(reason="stop_primitive")
+    assert held.back_hold_narration("Stopped. I'm listening.") is False
+
+    sticky = _armed_q6_game()
+    sticky._delivery_stop_sticky = True
+    assert sticky.back_hold_narration("Still stopped until you say go.") is False
+    assert sticky._hold_active is False
+
+    normal = _armed_q6_game()
+    assert normal.back_hold_narration("Here's your next question.") is False
+    assert normal._hold_active is False
+
+
+def test_confabulated_narration_path_suppresses_freudian_delivery():
+    """The lived 05:40 path is unreproducible end-to-end (part 2 + W2). Lily
+    narrates 'Stopped until you say go' with no hold; backing it enters the
+    hold; the very next q_6 delivery through the tts_node lane is then
+    suppressed ('held') instead of airing as it did at 05:40:11."""
+    game = _armed_q6_game()
+    assert game.back_hold_narration(
+        "Yes. I heard you. Stopped until you say go."
+    ) is True
+    assert game._hold_active is True
+
+    game._pending_delivery_qnum = 6
+    result = game.register_delivery_claim(_Q6_FREUDIAN, speech_id="s6")
+    assert result == "held"
+    assert game.say_registry.state("q_6_delivery") is None
+
+
+def test_routed_stop_then_freudian_delivery_suppressed():
+    """The other end-to-end path (part 1 + W2): the emphatic stop routes with
+    the polluted roster, enters the hold, and the armed q_6 delivery is then
+    suppressed by the same delivery-lane gate."""
+    game = _polluted_roster_game()
+    assert game.maybe_route_stop(_REAL_STOP_UTTERANCE) is True
+    game._pending_delivery_qnum = 6
+    result = game.register_delivery_claim(_Q6_FREUDIAN, speech_id="s6")
+    # Sticky STOP (set by the primitive) already freezes this lane at None;
+    # either way the Freudian question does not air.
+    assert result in (None, "held")
+    assert game.say_registry.state("q_6_delivery") is None

@@ -5132,6 +5132,54 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         except RuntimeError:
             pass
 
+    def maybe_route_stop(self, text: str) -> bool:
+        """W8: the STOP consult on every final. Reads the roster (a bare
+        stop counts only in a solo room), detects the runaway-agent brake,
+        and routes a detected stop into handle_stop_primitive so the hold
+        is entered MECHANICALLY — detection is never left as a value the
+        LLM narrates without the state existing. Returns True when a stop
+        was handled (the caller returns; the halt bypasses the LLM).
+
+        The live lily-5E3036 leak routed through here: "Stop stop stop…"
+        did not fire because a phantom second player made roster_size()
+        read 2 (solo=False) and a bare stop counts only in solo. The
+        emphatic-repetition register now fires regardless of roster
+        (lily_detect_stop), so this consult routes it without depending on
+        the roster being clean (W7's territory)."""
+        solo = self.sk.roster_size() <= 1
+        if lily_scorekeeper.lily_detect_stop(text, solo=solo):
+            self.handle_stop_primitive(text)
+            return True
+        return False
+
+    def back_hold_narration(self, spoken_text: str) -> bool:
+        """W8 honest-narration integrity: a turn that narrates a stopped/
+        hold state ("Stopped. I'm listening.", "Still stopped until you say
+        go.") must be backed by an actual hold. If none is active, enter it
+        so the spoken claim is true — a correction, never a silent
+        confabulation of a state that does not exist. No-op when a hold is
+        already active (the claim is already backed) or the game is under
+        the sticky STOP latch (the stopped claim is backed by that), or the
+        turn makes no such claim. Returns True when a hold was entered to
+        back the narration. Sets _hold_active only; this in-flight turn
+        already passed the gated_say gate, so backing the claim never
+        suppresses the ack itself — it binds the NEXT dispatch (with W2's
+        gate, the leaked delivery)."""
+        if getattr(self, "_hold_active", False):
+            return False
+        if self.game_delivery_stopped():
+            return False
+        if not lily_scorekeeper.lily_detect_hold_narration(spoken_text or ""):
+            return False
+        self.enter_hold(reason="narrated_stop")
+        logger.warning(
+            "LILY_HOLD | NARRATION_BACKED | session=%s text=%r — outbound "
+            "narrated a stopped state with no hold active; entering the hold "
+            "so the claim is backed by state (W8)",
+            self.sk.session_id, (spoken_text or "")[:80],
+        )
+        return True
+
     def handle_stop_primitive(self, source_text: str) -> None:
         """A5/T12: the dispatch-gate STOP reflex — the runaway-agent
         brake, called BEFORE the LLM ever sees the turn. Halt playout,
@@ -7154,11 +7202,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         ts = segment_ts if segment_ts is not None else time.time()
 
         # PATCH-002 A5/T12 — STOP primitive, at the very top so it bypasses
-        # the LLM and can never be answered by a re-aired question. A bare
-        # stop counts only in a solo room (one rostered player).
-        solo = self.sk.roster_size() <= 1
-        if lily_scorekeeper.lily_detect_stop(text, solo=solo):
-            self.handle_stop_primitive(text)
+        # the LLM and can never be answered by a re-aired question. The
+        # consult (roster read → detect → route into the hold) lives in
+        # maybe_route_stop so the routing is offline-testable on the real
+        # production path (W8).
+        if self.maybe_route_stop(text):
             return
         if (
             self.game_delivery_stopped()
@@ -13938,6 +13986,15 @@ class LilyAgent(Agent):
             # Fall through with the forced sheet.
 
         self._empty_retry_pending = False
+
+        # W8 honest-narration integrity: if this turn narrates a stopped/
+        # hold state and no hold is actually active, enter the hold now so
+        # the spoken claim is backed by state. Placed BEFORE the delivery
+        # claim so the freshly-entered hold binds the same-turn / next
+        # delivery lane through W2's gate — the live lily-5E3036 leak aired
+        # "Stopped until you say go" (05:40:00) and then the q_6 Freudian
+        # delivery (05:40:11) with no hold to block it.
+        self._game.back_hold_narration(full)
 
         # STRUCTURAL delivery registration (desync WO Sub-agent B) — the
         # q_{N}_delivery CLAIM is the delivery event; window-open and
