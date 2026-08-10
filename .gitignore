@@ -3,6 +3,7 @@ __pycache__/
 .env
 logs/
 .pytest_cache/
+.venv/
 .venv-ws12/
 .venv166/
 

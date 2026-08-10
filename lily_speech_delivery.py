@@ -884,6 +884,10 @@ class LilySpeechDeliveryMixin:
           "duplicate"            — the turn textually re-performs an
                                    already-delivered question (BUG-2: the
                                    caller makes it physically silent);
+          "held"                 — a hold is active and this turn would air
+                                   the armed question; suppressed at
+                                   dispatch, the caller makes it physically
+                                   silent (W2);
           None                   — not a delivery event; speak normally.
         """
         if getattr(self, "_delivery_stop_sticky", False):
@@ -899,6 +903,29 @@ class LilySpeechDeliveryMixin:
             return None
         qnum = self.sk.question_number
         key = f"q_{qnum}_delivery"
+        # W2 (WO-LILY-HOTFIX-009): the hold binds the DELIVERY lane, not
+        # just the gated_say (code-dispatch) lanes. gated_say already
+        # refuses every code-triggered beat while held (hold_blocks_dispatch),
+        # but a question can still reach the air through THIS lane — an
+        # organic turn (or a nudge-induced turn) that performs the armed
+        # question is registered here, at tts_node, having never passed the
+        # gated_say hold gate. Live lily-5E3036 q_6: the Freudian question
+        # aired at 05:40:11 as a structural tts_node claim. So the hold is
+        # checked at THIS dispatch too: a turn that would air the armed
+        # question while held is suppressed (physically silent), never
+        # deferred and fired later. Keyed on the question actually being in
+        # the turn's text — a conversational reply the player is owed (her
+        # "still stopped until you say go") is not a delivery here and
+        # speaks. STOP/sticky is stronger and returns above; this changes
+        # only the plain-hold case (self-wait-promise / question-unanswered).
+        if getattr(self, "_hold_active", False) and (
+            self._delivery_text_matches_armed(spoken_text)
+        ):
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=hold | key=%s | "
+                "act=question_delivery | source=tts_node", key,
+            )
+            return "held"
         delivery_acts = getattr(self, "_delivery_speech_acts", None) or {}
         delivery_act = (
             delivery_acts.pop(speech_id, None) if speech_id else None

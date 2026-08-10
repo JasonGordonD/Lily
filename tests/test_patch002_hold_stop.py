@@ -305,3 +305,96 @@ def test_paraphrase_lint_spares_fresh_content():
         "Round two, question one: which planet has the most moons?",
         prev, threshold=0.6,
     ) is None
+
+
+# -- W2 (WO-LILY-HOTFIX-009): the hold binds the DELIVERY lane too ------------
+#
+# Live lily-5E3036, q_6 (kb_519): the player has the floor held and Lily is
+# saying "still stopped until you say go", yet a full question aired anyway —
+# transcript 05:40:11, trace `LILY_SAY | act=question_delivery |
+# key=q_6_delivery | source=tts_node | trigger=structural`. That lane is
+# register_delivery_claim (tts_node), which honoured the sticky-STOP latch
+# but NOT the plain hold state: a question reaching the air through the
+# organic/structural delivery lane never passes the gated_say hold gate the
+# code-dispatch lanes do. This is the 006 "two lanes, opposite assertions,
+# seconds apart" shape, on the hold/delivery pair rather than the
+# reveal/verdict transition 006 serialized. The real armed question below is
+# the kb_519 fixture verbatim from the session rows.
+
+_Q6_FREUDIAN = (
+    "Operating entirely on the pleasure principle, the primal and impulsive "
+    "part of the Freudian psyche is what two-letter concept?"
+)
+
+
+def _armed_q6_game():
+    game = _make_game()
+    game.sk.question_number = 6
+    game.armed_question = {
+        "id": "kb_519",
+        "prompt": _Q6_FREUDIAN,
+        "acceptable_answers": ["id", "es"],
+    }
+    game.sk.current_question = dict(game.armed_question)
+    return game
+
+
+def test_hold_suppresses_delivery_lane_freudian_fixture():
+    """The primary needle. A PLAIN hold (self-wait-promise / question-
+    unanswered — not the sticky STOP) is active, the structural delivery is
+    armed, and the outbound turn performs the armed question. On base this
+    lane claims and airs q_6_delivery ("claimed_structural"); the hold must
+    suppress it instead — physically silent, not deferred."""
+    game = _armed_q6_game()
+    game.enter_hold(reason="self_wait_promise")
+    assert game._hold_active is True
+    assert game._delivery_stop_sticky is False  # a hold, not the STOP latch
+    game._pending_delivery_qnum = 6  # the structural nudge armed the delivery
+
+    result = game.register_delivery_claim(_Q6_FREUDIAN, speech_id="s6")
+
+    assert result == "held"
+    # The delivery never claimed, so no window opens off it and nothing airs.
+    assert game.say_registry.state("q_6_delivery") is None
+
+
+def test_hold_does_not_suppress_the_owed_conversational_reply():
+    """No over-reach: while held she still owes the player an answer. A
+    conversational turn that is NOT the armed question is not a delivery and
+    speaks normally (returns None), exactly as it does with no hold."""
+    game = _armed_q6_game()
+    game.enter_hold(reason="self_wait_promise")
+    result = game.register_delivery_claim(
+        "Still stopped until you say go.", speech_id="sc"
+    )
+    assert result is None
+    assert game.say_registry.state("q_6_delivery") is None
+
+
+def test_hold_release_re_enables_the_delivery_lane():
+    """The hold is not a mute button — once the player says go and the hold
+    releases, the same delivery airs through the same lane."""
+    game = _armed_q6_game()
+    game.enter_hold(reason="self_wait_promise")
+    game._pending_delivery_qnum = 6
+    assert game.register_delivery_claim(_Q6_FREUDIAN, speech_id="s6") == "held"
+
+    assert game.release_hold(reason="user_speech") is True
+    game._pending_delivery_qnum = 6
+    result = game.register_delivery_claim(_Q6_FREUDIAN, speech_id="s6b")
+    assert result == "claimed_structural"
+    assert game.say_registry.state("q_6_delivery") is not None
+
+
+def test_stop_primitive_delivery_lane_behaviour_unchanged():
+    """The STOP primitive's existing behaviour is untouched: under the sticky
+    STOP latch the delivery lane returns None (the pre-existing contract —
+    conversation may continue, the game plane is frozen at gated_say), which
+    is the same value it returned before W2."""
+    game = _armed_q6_game()
+    game.handle_stop_primitive("Lily, stop!")
+    assert game.game_delivery_stopped() is True
+    game._pending_delivery_qnum = 6
+    result = game.register_delivery_claim(_Q6_FREUDIAN, speech_id="s6")
+    assert result is None
+    assert game.say_registry.state("q_6_delivery") is None

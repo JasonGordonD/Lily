@@ -13660,7 +13660,10 @@ class LilyAgent(Agent):
                     self._game.sk.session_id,
                     self._game.sk.question_number,
                 )
-        if delivery == "duplicate":
+        if delivery in ("duplicate", "held"):
+            # "held" (W2): a hold is active and this turn would air the armed
+            # question. Suppressed at dispatch exactly like a duplicate — the
+            # turn is made physically silent, not deferred and fired later.
             if speech_id:
                 suppressed_ids = getattr(
                     self._game, "_suppressed_speech_ids", None
