@@ -12502,11 +12502,26 @@ class LilyAgent(Agent):
         name = (player_name or "").strip()
         if name not in self._game.sk.players:
             return f"No rostered player named {name!r} — nothing corrected."
+        ground = (grounds or "").strip().lower()
+        # answer_denied is mechanically corroborated in correct_verdict: feed
+        # it the contested question's canonical answer from the in-session
+        # asked_history (keyed off the denied row's question_id) so the
+        # existing Tier-1 matcher can confirm the recorded attempt actually
+        # matched. The other grounds ignore these kwargs.
+        canonical = None
+        denied = self._game.sk.ledger_row_for(name, None)
+        if denied is not None:
+            qid = denied.get("question_id")
+            for h in reversed(self._game.asked_history):
+                if h.get("question_id") == qid:
+                    canonical = h.get("canonical_answer")
+                    break
         entry = self._game.sk.correct_verdict(
             name,
-            grounds=(grounds or "").strip().lower(),
+            grounds=ground,
             actor="player_contest",
             delta=1,
+            canonical_answer=canonical,
         )
         if entry is None:
             # Refused: no prior verdict to amend, unknown grounds, or already

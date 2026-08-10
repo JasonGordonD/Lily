@@ -65,11 +65,21 @@ Fix — the correction concept, added without loosening the ledger:
   `"verdict_correction"` cause. It REQUIRES a prior `"answer"` verdict row
   to amend, refuses grounds outside the closed set (`wrong_rule`,
   `answer_denied`, `misheard`, `out_of_window`), refuses a second
-  correction of the same verdict, and requires the delta to match reality
-  (a restoration only follows a denial, a reversal only a real award — so
-  a spurious contest on a correct answer cannot stack a point). This is the
-  line that separates a correction from a fabrication: a correction can
-  only amend a ruling that happened.
+  correction of the same verdict, and requires a positive restoration
+  against an actual denial (a spurious contest on a correct answer cannot
+  stack a point). This is the line that separates a correction from a
+  fabrication: a correction can only amend a ruling that happened.
+- HARDEN (fix-loop): grounds="answer_denied" — the highest-risk ground — is
+  MECHANICALLY corroborated, not LLM-asserted: the recorded attempt must
+  fuzzy-match the canonical answer through the EXISTING Tier-1 matcher
+  (lily_evaluation.lily_tier1_evaluate); no match ⇒ refuse. The tool feeds
+  the canonical from in-session asked_history. A rightly-denied WRONG answer
+  can no longer be restored. The diamond's correct utterance was ignored at
+  scoring (addressee_log id=819) and is not in-session, so that class routes
+  through grounds="misheard" (the wrong utterance was bound); mechanically
+  corroborating it would need a scoped lily_addressee_log read (flagged for
+  the operator). The unreachable negative-reversal branch was deleted
+  (restoration-only); negative reversal is named as a future surface.
 - Corrections are APPENDED, never overwritten — the original row stands, a
   new row carries the delta, grounds, actor, and a `corrects` reference to
   the amended verdict. Standings already derive from the ledger-including-

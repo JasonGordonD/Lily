@@ -75,14 +75,24 @@ def _rami_on_two_diamond_denied() -> LilyScorekeeper:
     sk.record_result("Rami", correct=True, points=1, question_id="q_3914",
                      question_index=3, transcript="Carbon.",
                      utterance_id="utt_q_3914")
-    # The diamond question — correct answer denied; the wrong utterance was
-    # scored incorrect (lily_answers.id=134). record_result(correct=False)
-    # is exactly the row the live adjudication committed.
+    # The diamond question, the REAL two-row denial. The engine mis-bound the
+    # filler "It's on me." as Rami's answer and ruled it incorrect
+    # (lily_answers.id=134, cause "answer"); the true in-window "diamond"
+    # (addressee_log id=819) was rejected by one-candidate-per-player and
+    # never entered the ledger; "I said diamond." was then ruled "late"
+    # (id=135, cause "late_answer", 0 pts). ledger_row_for targets the
+    # cause="answer" row, so the correction amends id=134 — whose recorded
+    # transcript is the FILLER, not "diamond".
     sk.start_question({"prompt": DIAMOND_PROMPT, "canonical_answer": DIAMOND_ANSWER})
     sk.record_result(
         "Rami", correct=False, points=0, question_id="q_7391",
         question_index=5, transcript=DIAMOND_SCORED_UTTERANCE,
-        utterance_id="utt_q_7391",
+        utterance_id="utt_q_7391_134",
+    )
+    sk.apply_score_event(
+        "Rami", cause="late_answer", correct=False, points=0,
+        question_id="q_7391", question_index=5,
+        transcript=DIAMOND_LATE_UTTERANCE, utterance_id="utt_q_7391_135",
     )
     return sk
 
@@ -120,19 +130,23 @@ def test_contest_detector_stays_conservative():
 # The correction contract (scorekeeper level)
 # ============================================================================
 
-def test_diamond_correction_restores_the_point_appends_row_with_grounds():
-    # Canonical grounds = "answer_denied". The durable record (addressee_log
-    # id=819: window_open=true, seconds_into_window=0.0, fuzzy_matched=true,
-    # agent_action=ignored) proves the correct answer arrived IN window and
-    # was ignored — Lily's "past the window" narration was confabulated. The
-    # re-adjudication anchors on that row, not on her narration.
+def test_diamond_correction_restores_the_point_via_misheard():
+    # The diamond's TRUE classification is "misheard": the durable record
+    # shows a DIFFERENT utterance ("It's on me.") was bound as Rami's answer
+    # while the correct "diamond" (addressee_log id=819, in-window,
+    # fuzzy_matched, agent_action=ignored) was rejected by
+    # one-candidate-per-player and never entered the ledger. That correct
+    # utterance is NOT in-session at contest time, so answer_denied cannot be
+    # mechanically corroborated (see the refused test below); the wrong-
+    # utterance-bound case is grounds="misheard", judged within bounds.
     sk = _rami_on_two_diamond_denied()
     assert sk.players["Rami"]["score"] == 2
     original = sk.ledger_row_for("Rami", "q_7391")
     assert original["correct"] is False and original["points"] == 0
+    assert original["transcript"] == DIAMOND_SCORED_UTTERANCE  # the filler
 
     entry = sk.correct_verdict(
-        "Rami", grounds="answer_denied", actor="player_contest", delta=1
+        "Rami", grounds="misheard", actor="player_contest", delta=1
     )
     assert entry is not None
     # Append-only: the original denial row is untouched.
@@ -140,17 +154,64 @@ def test_diamond_correction_restores_the_point_appends_row_with_grounds():
     # A NEW correction row carries the delta, grounds, actor and provenance.
     assert entry["cause"] == "verdict_correction"
     assert entry["points"] == 1
-    assert entry["grounds"] == "answer_denied"
+    assert entry["grounds"] == "misheard"
     assert entry["actor"] == "player_contest"
     assert entry["corrects"]["question_id"] == "q_7391"
-    assert entry["corrects"]["utterance_id"] == "utt_q_7391"
+    assert entry["corrects"]["utterance_id"] == "utt_q_7391_134"
     # The point is back.
     assert sk.players["Rami"]["score"] == 3
 
 
+def test_diamond_answer_denied_refused_without_in_session_corroboration():
+    # The HARDEN: answer_denied needs the recorded attempt to fuzzy-match
+    # canonical. The diamond's in-session recorded attempt is the filler
+    # "It's on me." (the correct "diamond" is DB-only, addressee_log id=819),
+    # so answer_denied is refused even with the right canonical passed. The
+    # remedy for this class is grounds="misheard" (above).
+    sk = _rami_on_two_diamond_denied()
+    entry = sk.correct_verdict(
+        "Rami", grounds="answer_denied", delta=1, canonical_answer="diamond",
+    )
+    assert entry is None
+    assert sk.players["Rami"]["score"] == 2
+
+
+def test_answer_denied_proceeds_when_recorded_attempt_matches_canonical():
+    # The clean answer_denied case: the CORRECT answer was recorded but ruled
+    # incorrect (an eval miss, not a mis-bind). The recorded attempt matches
+    # canonical via the existing Tier-1 matcher, so the correction proceeds.
+    sk = LilyScorekeeper("RM_RQTZZanrHURF")
+    sk.bind_speaker("S1", "Rami")
+    sk.start_question({"prompt": "p", "canonical_answer": "diamond"})
+    sk.record_result("Rami", correct=False, points=0, question_id="q_clean",
+                     transcript="diamond", utterance_id="u")
+    entry = sk.correct_verdict(
+        "Rami", grounds="answer_denied", delta=1, canonical_answer="diamond",
+    )
+    assert entry is not None
+    assert entry["grounds"] == "answer_denied"
+    assert sk.players["Rami"]["score"] == 1
+
+
+def test_f1_rightly_denied_wrong_answer_cannot_be_restored_via_answer_denied():
+    # F1 closed: a genuinely wrong answer ("Saturn" for a diamond question)
+    # has a recorded attempt that does NOT match canonical, so answer_denied
+    # is mechanically refused — an LLM assertion can no longer restore it.
+    sk = LilyScorekeeper("RM_RQTZZanrHURF")
+    sk.bind_speaker("S1", "Rami")
+    sk.start_question({"prompt": "p", "canonical_answer": "diamond"})
+    sk.record_result("Rami", correct=False, points=0, question_id="q_wrong",
+                     transcript="Saturn", utterance_id="u")
+    entry = sk.correct_verdict(
+        "Rami", grounds="answer_denied", delta=1, canonical_answer="diamond",
+    )
+    assert entry is None
+    assert sk.players["Rami"]["score"] == 0
+
+
 def test_standings_equal_ledger_plus_corrections_and_reconcile_clean():
     sk = _rami_on_two_diamond_denied()
-    sk.correct_verdict("Rami", grounds="answer_denied", delta=1)
+    sk.correct_verdict("Rami", grounds="misheard", delta=1)
     assert sk.ledger_scores()["Rami"] == 3
     assert sk.players["Rami"]["score"] == 3
     # The counter and the ledger-including-corrections never diverge.
@@ -246,7 +307,7 @@ def test_ws4_idempotency_belt_is_intact_for_answer_cause():
 # The tool + narration (agent level — she says what she is fixing)
 # ============================================================================
 
-def _agent_with(sk):
+def _agent_with(sk, asked_history=None):
     from lily_agent import LilyAgent
 
     class _FakeGame:
@@ -256,6 +317,10 @@ def _agent_with(sk):
             self.supabase = None
             self.events = []
             self.publish_nowait_calls = 0
+            # The tool reads asked_history for the answer_denied corroboration
+            # (the contested question's canonical answer). Same shape the
+            # production game stores: question_id + canonical_answer.
+            self.asked_history = list(asked_history or [])
 
         def send_event_nowait(self, event_type, payload):
             self.events.append((event_type, dict(payload)))
@@ -314,6 +379,45 @@ def test_tool_refuses_a_spurious_contest_and_states_it_stands():
     assert sk.players["Rami"]["score"] == 1  # no ledger change
     assert game.events == []
     assert game.publish_nowait_calls == 0
+
+
+def test_tool_answer_denied_corroborated_via_asked_history():
+    # The tool feeds correct_verdict the contested question's canonical from
+    # asked_history; a recorded attempt that matches proceeds.
+    from lily_agent import LilyAgent
+
+    sk = LilyScorekeeper("RM_RQTZZanrHURF")
+    sk.bind_speaker("S1", "Rami")
+    sk.start_question({"prompt": "p", "canonical_answer": "diamond"})
+    sk.record_result("Rami", correct=False, points=0, question_id="q_clean",
+                     transcript="diamond", utterance_id="u")
+    agent, game = _agent_with(
+        sk, asked_history=[{"question_id": "q_clean", "canonical_answer": "diamond"}]
+    )
+    msg = _call(LilyAgent.lily_correct_verdict.__wrapped__(
+        agent, None, "Rami", "answer_denied", "you had it",
+    ))
+    assert "goes back to Rami" in msg
+    assert sk.players["Rami"]["score"] == 1
+    assert game.events and game.events[0][1]["grounds"] == "answer_denied"
+
+
+def test_tool_answer_denied_refused_when_attempt_mismatches():
+    # The diamond via the tool + answer_denied: asked_history supplies the
+    # canonical, but the in-session recorded attempt is the filler, so the
+    # Tier-1 corroboration fails and the tool states it stands.
+    from lily_agent import LilyAgent
+
+    sk = _rami_on_two_diamond_denied()
+    agent, game = _agent_with(
+        sk, asked_history=[{"question_id": "q_7391", "canonical_answer": "diamond"}]
+    )
+    msg = _call(LilyAgent.lily_correct_verdict.__wrapped__(
+        agent, None, "Rami", "answer_denied", "I said diamond",
+    ))
+    assert "No correction made" in msg
+    assert sk.players["Rami"]["score"] == 2
+    assert game.events == []
 
 
 def test_tool_refuses_before_game_started():

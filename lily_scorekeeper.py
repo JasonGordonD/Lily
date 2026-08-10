@@ -2943,6 +2943,8 @@ class LilyScorekeeper:
         actor: str = "player_contest",
         question_id: Optional[str] = None,
         delta: int = 1,
+        canonical_answer: Optional[str] = None,
+        corroborating_attempt: Optional[str] = None,
     ) -> Optional[dict]:
         """W1 — reverse a wrong verdict, auditably, without loosening the
         ledger. This is the ONLY writer of verdict_correction rows and the
@@ -2956,6 +2958,24 @@ class LilyScorekeeper:
         * Grounds must be in CORRECTION_GROUNDS (fails closed).
         * A verdict may be corrected once (existing_correction refuses a
           second amendment of the same verdict).
+        * It only RESTORES a denied point (delta > 0). A spurious contest on
+          a correctly-scored answer is refused. Negative reversal (a point
+          given to the wrong player) is a FUTURE SURFACE — there is no caller
+          for it yet, so the branch is not carried as dead code.
+        * grounds="answer_denied" is MECHANICALLY corroborated (HOTFIX-009 W1
+          harden): the recorded attempt for the contested verdict must
+          fuzzy-match the canonical answer via the EXISTING Tier-1 matcher
+          (lily_evaluation.lily_tier1_evaluate). Absent that corroboration
+          the correction is refused. This converts the highest-risk ground
+          from an LLM assertion into a mechanical check, so a rightly-denied
+          WRONG answer (whose recorded attempt does not match canonical)
+          cannot be restored. The other grounds (wrong_rule / misheard /
+          out_of_window) stay judged by the caller within the existing
+          bounds. NOTE: the corroborating attempt is whatever is in-session
+          (the denied row's transcript, or one the caller supplies); an
+          answer that was IGNORED at scoring time and survives only in
+          lily_addressee_log is NOT in-session — that class routes through
+          grounds="misheard" (the wrong utterance was bound), see the report.
         * The original row is never touched — a NEW row is appended carrying
           the delta, grounds, actor, and a `corrects` reference (the amended
           row's question_id + utterance_id). Standings derive from the
@@ -2966,8 +2986,9 @@ class LilyScorekeeper:
           and delta.
 
         Returns the correction ledger entry, or None on refusal (unrostered
-        player / no prior verdict / bad grounds / already corrected / zero
-        delta) — each refusal warns and mutates nothing.
+        player / no prior verdict / bad grounds / already corrected /
+        non-positive delta / uncorroborated answer_denied) — each refusal
+        warns and mutates nothing.
         """
         state = self.players.get(player_name)
         if state is None:
@@ -3001,15 +3022,24 @@ class LilyScorekeeper:
                 self.session_id, player_name, original.get("question_id"),
             )
             return None
-        # The grounds must match reality, deterministically. A positive
-        # RESTORATION only applies to a verdict that actually DENIED the
-        # point — a spurious contest on a correctly-scored answer (the
-        # answer already won its point) is refused here, so a contest can
-        # never stack a second point onto a right answer. A negative
-        # REVERSAL only applies where a point was actually awarded.
+        # This tool RESTORES a denied point. delta must be positive; negative
+        # reversal (taking a point off the wrong player) has no caller yet and
+        # is a future surface, so it is not carried as a dead branch.
+        if delta <= 0:
+            logger.warning(
+                "LILY_SCORE | VERDICT_CORRECTION_NON_POSITIVE_DELTA | "
+                "session=%s player=%s delta=%s — refused (restoration only)",
+                self.session_id, player_name, delta,
+            )
+            return None
+        # The grounds must match reality, deterministically. A restoration
+        # only applies to a verdict that actually DENIED the point — a
+        # spurious contest on a correctly-scored answer (it already won its
+        # point) is refused here, so a contest can never stack a second point
+        # onto a right answer.
         awarded = int(original.get("points") or 0)
         already_scored = original.get("correct") is not False and awarded > 0
-        if delta > 0 and already_scored:
+        if already_scored:
             logger.warning(
                 "LILY_SCORE | VERDICT_CORRECTION_NOT_DENIED | session=%s "
                 "player=%s question_id=%s — refused (the answer already "
@@ -3017,31 +3047,44 @@ class LilyScorekeeper:
                 original.get("question_id"),
             )
             return None
-        if delta < 0 and not already_scored:
-            logger.warning(
-                "LILY_SCORE | VERDICT_CORRECTION_NOTHING_AWARDED | session=%s "
-                "player=%s question_id=%s — refused (no point to take back)",
-                self.session_id, player_name, original.get("question_id"),
+        # HOTFIX-009 W1 harden: answer_denied is the highest-risk ground (a
+        # rightly-denied WRONG answer is ledger-indistinguishable from a
+        # denied CORRECT one). Corroborate it mechanically — the recorded
+        # attempt must fuzzy-match the canonical answer through the existing
+        # Tier-1 matcher. No canonical / no match ⇒ refuse. Other grounds
+        # stay caller-judged.
+        if ground == "answer_denied":
+            attempt = (
+                corroborating_attempt
+                if corroborating_attempt is not None
+                else original.get("transcript")
             )
-            return None
-        if not delta:
-            logger.warning(
-                "LILY_SCORE | VERDICT_CORRECTION_ZERO_DELTA | session=%s "
-                "player=%s — refused", self.session_id, player_name,
+            corroborated = bool(canonical_answer) and (
+                lily_evaluation.lily_tier1_evaluate(
+                    attempt or "", [canonical_answer]
+                ).get("verdict") == "correct"
             )
-            return None
+            if not corroborated:
+                logger.warning(
+                    "LILY_SCORE | VERDICT_CORRECTION_UNCORROBORATED | "
+                    "session=%s player=%s question_id=%s — refused "
+                    "(answer_denied: recorded attempt %r does not match "
+                    "canonical %r via Tier-1)", self.session_id, player_name,
+                    original.get("question_id"), (attempt or "")[:60],
+                    canonical_answer,
+                )
+                return None
         corrects = {
             "question_id": original.get("question_id"),
             "utterance_id": original.get("utterance_id"),
             "question_index": original.get("question_index"),
         }
-        # A positive restoration re-applies answer semantics (a wrongly
-        # denied correct answer becomes correct again); a negative reversal
-        # (a point given to the wrong player) moves points only.
+        # A restoration re-applies answer semantics: a wrongly denied correct
+        # answer becomes correct again (streak/answers_correct advance).
         entry = self.apply_score_event(
             player_name,
             cause="verdict_correction",
-            correct=True if delta > 0 else None,
+            correct=True,
             points=delta,
             question_id=original.get("question_id"),
             question_index=original.get("question_index"),
