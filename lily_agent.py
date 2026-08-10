@@ -11111,6 +11111,24 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "question. Only an explicit resume/continue command clears "
                 "this state."
             )
+        elif getattr(self, "_hold_active", False):
+            # W8: a plain hold (a self-wait-promise, a decline, P10, or a
+            # backed stopped-state narration) is not the sticky STOP latch,
+            # so the STOPPED directive above does not fire — yet the delivery
+            # lane only mechanically suppresses a turn that performs the
+            # ARMED QUESTION (mech. 13 + W2). An organic turn narrating a
+            # reveal/verdict/steal/score in PROSE would slip that gate and
+            # air under the hold (W2 review Residual i). Make the held state
+            # explicit so the model does not produce any game payload while
+            # held; the mechanical gate stays the backstop for the armed
+            # question. Same context-only, leak-filtered contract.
+            extra.append(
+                "held: you have PAUSED at the player's stop and are waiting "
+                "for their go. Do not ask, arm, reveal, score, nudge, open a "
+                "steal window, or promise another question — in prose or as "
+                "the question itself. Acknowledge only that you've stopped "
+                "and are listening; the game resumes when they say so."
+            )
         if (
             getattr(self, "_identity_required_before_start", False)
             and not getattr(self, "game_started", False)

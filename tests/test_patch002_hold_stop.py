@@ -552,3 +552,78 @@ def test_routed_stop_then_freudian_delivery_suppressed():
     # either way the Freudian question does not air.
     assert result in (None, "held")
     assert game.say_registry.state("q_6_delivery") is None
+
+
+# -- W8 residual (W2 review SPEC-1 i/ii): prose payload & sub-threshold --------
+# paraphrase slip the delivery-lane gate, which is coextensive with armed-
+# question detection. Coordinator ruling: the held state is made EXPLICIT to
+# the LLM/prompt surface so the model does not narrate any game payload while
+# held; the mechanical gate stays the backstop for the armed-question form. The
+# state block ([GAME STATE]) is what llm_node injects as a system message
+# (`_apply_context_blocks`, tested in test_context_blocks.py), so asserting the
+# directive is in the stable block asserts the LLM is instructed against it.
+
+def _with_state_block_attrs(game):
+    """Fill the few state-block attributes _make_game omits so
+    build_state_block_split runs (mirrors test_preemptive_volatile_split)."""
+    game.session_started_at = 0.0
+    game.availability_flags = None
+    game.promoted_categories = []
+    game.memory_block = ""
+    game._pending_unbound_award = None
+    game.eliminated = []
+    game.forget_state = None
+    game.prefs = {}
+    return game
+
+
+def test_plain_hold_state_surface_forbids_game_payloads():
+    """Residual (i) prevention needle. A plain hold — here the backed
+    stopped-state narration, but equally a self-wait-promise or P10 — makes
+    the prompt surface carry an explicit directive that no game payload
+    (ask/arm/reveal/score/nudge/steal), in prose OR as the question, may air
+    while held. On base the [GAME STATE] block has no such directive for a
+    plain hold, so an organic prose reveal/verdict slips both the prompt and
+    the armed-question-only delivery gate."""
+    game = _with_state_block_attrs(_armed_q6_game())
+    assert game.back_hold_narration("Stopped. I'm listening.") is True
+    assert game._hold_active is True and game._delivery_stop_sticky is False
+    stable, _ = game.build_state_block_split()
+    assert "held: you have PAUSED" in stable
+    # The directive enumerates the forbidden payloads, in prose or as the Q.
+    for token in ("reveal", "score", "steal", "in prose or as"):
+        assert token in stable, token
+    # The stronger sticky-STOP directive does not fire (this is a plain hold).
+    assert "game_delivery: STOPPED" not in stable
+
+
+def test_sticky_stop_state_surface_unchanged_and_no_double_directive():
+    """The sticky STOP path (handle_stop_primitive) keeps its own stronger
+    STOPPED directive and does NOT additionally emit the plain-hold line —
+    the two are mutually exclusive, no redundant double-directive."""
+    game = _with_state_block_attrs(_armed_q6_game())
+    game.handle_stop_primitive("Lily, stop!")
+    stable, _ = game.build_state_block_split()
+    assert "game_delivery: STOPPED" in stable
+    assert "held: you have PAUSED" not in stable
+
+
+def test_no_hold_state_surface_has_no_stop_directive():
+    """No hold, no sticky → neither directive. The held directive never
+    leaks into ordinary play."""
+    game = _with_state_block_attrs(_armed_q6_game())
+    stable, _ = game.build_state_block_split()
+    assert "held: you have PAUSED" not in stable
+    assert "game_delivery: STOPPED" not in stable
+
+
+def test_hold_release_clears_the_payload_directive():
+    """The directive is bound to live hold state, not latched: once the hold
+    releases (the player's go), the prompt surface no longer forbids payloads,
+    so the game resumes."""
+    game = _with_state_block_attrs(_armed_q6_game())
+    game.back_hold_narration("Still stopped until you say go.")
+    assert "held: you have PAUSED" in game.build_state_block_split()[0]
+    game.release_hold(reason="user_go")
+    assert game._hold_active is False
+    assert "held: you have PAUSED" not in game.build_state_block_split()[0]
