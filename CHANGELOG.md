@@ -72,14 +72,18 @@ Fix — the correction concept, added without loosening the ledger:
 - HARDEN (fix-loop): grounds="answer_denied" — the highest-risk ground — is
   MECHANICALLY corroborated, not LLM-asserted: the recorded attempt must
   fuzzy-match the canonical answer through the EXISTING Tier-1 matcher
-  (lily_evaluation.lily_tier1_evaluate); no match ⇒ refuse. The tool feeds
-  the canonical from in-session asked_history. A rightly-denied WRONG answer
-  can no longer be restored. The diamond's correct utterance was ignored at
-  scoring (addressee_log id=819) and is not in-session, so that class routes
-  through grounds="misheard" (the wrong utterance was bound); mechanically
-  corroborating it would need a scoped lily_addressee_log read (flagged for
-  the operator). The unreachable negative-reversal branch was deleted
-  (restoration-only); negative reversal is named as a future surface.
+  (lily_evaluation.lily_tier1_evaluate); no match ⇒ refuse. Two legs feed the
+  corroborating attempt: (1) in-session — the denied row's own transcript (a
+  recorded-but-mis-ruled correct answer); (2) FALLBACK (Option B) — a scoped
+  session read of lily_addressee_log (answer_window_open + fuzzy_matched_answer)
+  for the IGNORED-answer class (the diamond: the correct "diamond" was rejected
+  by one-candidate-per-player and survives only there, id=819). The same Tier-1
+  matcher re-checks each fetched transcript against canonical; the table has no
+  question_id, so the match IS the question association. DB read failure ⇒
+  honest "evidence unavailable" refusal, never a restore. A rightly-denied WRONG
+  answer can no longer be restored on any leg. The unreachable negative-reversal
+  branch was deleted (restoration-only); negative reversal is named as a future
+  surface. Residual: only misheard / out_of_window grounds remain caller-judged.
 - Corrections are APPENDED, never overwritten — the original row stands, a
   new row carries the delta, grounds, actor, and a `corrects` reference to
   the amended verdict. Standings already derive from the ledger-including-

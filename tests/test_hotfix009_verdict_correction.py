@@ -307,14 +307,54 @@ def test_ws4_idempotency_belt_is_intact_for_answer_cause():
 # The tool + narration (agent level — she says what she is fixing)
 # ============================================================================
 
-def _agent_with(sk, asked_history=None):
+# -- minimal fakes for the Option-B lily_addressee_log fallback read ----------
+class _FakeSelect:
+    def __init__(self, rows):
+        self._rows, self._filters = rows, []
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, col, val):
+        self._filters.append((col, val))
+        return self
+
+    def insert(self, row):  # tolerate the fire-and-forget score-event write
+        self._rows.append(dict(row) if isinstance(row, dict) else row)
+        return self
+
+    def execute(self):
+        data = [r for r in self._rows if all(r.get(c) == v for c, v in self._filters)]
+        return type("R", (), {"data": data})()
+
+
+class _FakeSupabase:
+    """Seedable addressee_log; every other table is empty (the score-event
+    write lands in a throwaway list)."""
+    def __init__(self, addressee_rows):
+        self._addressee = list(addressee_rows)
+
+    def table(self, name):
+        return _FakeSelect(self._addressee if name == "lily_addressee_log" else [])
+
+
+class _FakeSupabaseDown:
+    def table(self, name):
+        class _Raiser:
+            def select(self, *a, **k): return self
+            def eq(self, *a, **k): return self
+            def execute(self): raise RuntimeError("addressee_log unreachable")
+        return _Raiser()
+
+
+def _agent_with(sk, asked_history=None, supabase=None):
     from lily_agent import LilyAgent
 
     class _FakeGame:
         def __init__(self, sk):
             self.game_started = True
             self.sk = sk
-            self.supabase = None
+            self.supabase = supabase
             self.events = []
             self.publish_nowait_calls = 0
             # The tool reads asked_history for the answer_denied corroboration
@@ -337,7 +377,15 @@ def _agent_with(sk, asked_history=None):
 def _call(coro):
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(coro)
+        result = loop.run_until_complete(coro)
+        # Drain fire-and-forget tasks (the score-event write ensure_future'd
+        # by the tool) so no task is destroyed-pending when the loop closes.
+        pending = asyncio.all_tasks(loop)
+        if pending:
+            loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True)
+            )
+        return result
     finally:
         loop.close()
 
@@ -402,21 +450,81 @@ def test_tool_answer_denied_corroborated_via_asked_history():
     assert game.events and game.events[0][1]["grounds"] == "answer_denied"
 
 
-def test_tool_answer_denied_refused_when_attempt_mismatches():
-    # The diamond via the tool + answer_denied: asked_history supplies the
-    # canonical, but the in-session recorded attempt is the filler, so the
-    # Tier-1 corroboration fails and the tool states it stands.
+def test_tool_answer_denied_diamond_corroborated_via_addressee_fallback():
+    # OPTION B: the diamond passes answer_denied through the FALLBACK leg. The
+    # in-session recorded attempt is the filler ("It's on me."), so the tool
+    # consults lily_addressee_log — seeded here with the REAL id=819-shaped
+    # row (in-window, fuzzy_matched, the correct "diamond" utterance that was
+    # ignored at scoring). The existing Tier-1 matcher re-checks it against
+    # canonical, corroborates, and the point is restored.
     from lily_agent import LilyAgent
 
     sk = _rami_on_two_diamond_denied()
+    id819 = {
+        "session_id": "RM_RQTZZanrHURF",
+        "transcript": "Answer to your fucking question is diamond.",
+        "answer_window_open": True,
+        "fuzzy_matched_answer": True,
+        "agent_action": "ignored",
+    }
     agent, game = _agent_with(
-        sk, asked_history=[{"question_id": "q_7391", "canonical_answer": "diamond"}]
+        sk,
+        asked_history=[{"question_id": "q_7391", "canonical_answer": "diamond"}],
+        supabase=_FakeSupabase([id819]),
+    )
+    msg = _call(LilyAgent.lily_correct_verdict.__wrapped__(
+        agent, None, "Rami", "answer_denied", "diamond was yours",
+    ))
+    assert "goes back to Rami" in msg
+    assert "On 3" in msg
+    assert sk.players["Rami"]["score"] == 3
+    assert game.events and game.events[0][1]["grounds"] == "answer_denied"
+
+
+def test_tool_answer_denied_refused_when_no_corroboration_anywhere():
+    # The needle that survives Option B: with the filler in-session AND an
+    # addressee_log that holds no in-window fuzzy match for this answer, there
+    # is no corroboration anywhere — the tool states it stands, no restore.
+    from lily_agent import LilyAgent
+
+    sk = _rami_on_two_diamond_denied()
+    unrelated = {
+        "session_id": "RM_RQTZZanrHURF",
+        "transcript": "is it Saturn?",
+        "answer_window_open": True,
+        "fuzzy_matched_answer": True,  # matched a DIFFERENT question's answer
+    }
+    agent, game = _agent_with(
+        sk,
+        asked_history=[{"question_id": "q_7391", "canonical_answer": "diamond"}],
+        supabase=_FakeSupabase([unrelated]),
     )
     msg = _call(LilyAgent.lily_correct_verdict.__wrapped__(
         agent, None, "Rami", "answer_denied", "I said diamond",
     ))
     assert "No correction made" in msg
     assert sk.players["Rami"]["score"] == 2
+    assert game.events == []
+
+
+def test_tool_answer_denied_refuses_honestly_when_db_unreachable():
+    # Bound #2: a DB read failure at contest time refuses with an honest
+    # "evidence unavailable" line — never restores on a guess, never crashes.
+    from lily_agent import LilyAgent
+
+    sk = _rami_on_two_diamond_denied()
+    agent, game = _agent_with(
+        sk,
+        asked_history=[{"question_id": "q_7391", "canonical_answer": "diamond"}],
+        supabase=_FakeSupabaseDown(),
+    )
+    msg = _call(LilyAgent.lily_correct_verdict.__wrapped__(
+        agent, None, "Rami", "answer_denied", "I said diamond",
+    ))
+    assert "can't reach the record" in msg
+    assert "guess" in msg
+    assert sk.players["Rami"]["score"] == 2  # no restore
+    assert game.events == []
     assert game.events == []
 
 

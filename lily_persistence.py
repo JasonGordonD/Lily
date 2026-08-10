@@ -524,6 +524,42 @@ async def lily_write_score_event(
     )
 
 
+async def lily_fetch_inwindow_fuzzy_transcripts(
+    supabase: SupabaseClient,
+    session_id: str,
+) -> list[str]:
+    """W1 (HOTFIX-009 Option B) — the FALLBACK corroboration source for the
+    answer_denied ground. Session-scoped in-window utterances that the
+    addressee pipeline already flagged as fuzzy-matching the live answer
+    (`answer_window_open=true` AND `fuzzy_matched_answer=true`). This is the
+    ONLY durable record of an answer that was IGNORED at scoring time (the
+    diamond class: rejected by one-candidate-per-player, never a ledger row).
+
+    NOTE (schema): lily_addressee_log carries NO question_id column, so the
+    query cannot filter by it. Question association is done by the caller,
+    which re-runs the existing Tier-1 matcher on each returned transcript
+    against the contested question's canonical answer — a transcript only
+    corroborates if it actually matches THAT question's answer.
+
+    Raises on DB failure (the caller refuses honestly rather than restoring
+    on a guess). Returns the matching transcripts (possibly empty)."""
+    def _q():
+        return (
+            supabase.table("lily_addressee_log")
+            .select("transcript")
+            .eq("session_id", session_id)
+            .eq("answer_window_open", True)
+            .eq("fuzzy_matched_answer", True)
+            .execute()
+        )
+    res = await asyncio.to_thread(_q)
+    return [
+        r.get("transcript")
+        for r in (getattr(res, "data", None) or [])
+        if r.get("transcript")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Addressee-label corpus (B1 training-data flywheel)
 # ---------------------------------------------------------------------------

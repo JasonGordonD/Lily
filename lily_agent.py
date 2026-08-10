@@ -12472,6 +12472,19 @@ class LilyAgent(Agent):
         self._game.publish_attributes_nowait()
         return f"Bonus point to {name}."
 
+    @staticmethod
+    def _answer_matches(attempt: str | None, canonical: str | None) -> bool:
+        """W1: does a recorded utterance corroborate a canonical answer,
+        via the EXISTING Tier-1 matcher (no new matching machinery)."""
+        if not attempt or not canonical:
+            return False
+        return (
+            lily_evaluation.lily_tier1_evaluate(attempt, [canonical]).get(
+                "verdict"
+            )
+            == "correct"
+        )
+
     @function_tool()
     async def lily_correct_verdict(
         self, context: RunContext, player_name: str, grounds: str, reason: str
@@ -12503,25 +12516,60 @@ class LilyAgent(Agent):
         if name not in self._game.sk.players:
             return f"No rostered player named {name!r} — nothing corrected."
         ground = (grounds or "").strip().lower()
-        # answer_denied is mechanically corroborated in correct_verdict: feed
-        # it the contested question's canonical answer from the in-session
-        # asked_history (keyed off the denied row's question_id) so the
-        # existing Tier-1 matcher can confirm the recorded attempt actually
-        # matched. The other grounds ignore these kwargs.
+        sk = self._game.sk
+        # answer_denied is mechanically corroborated in correct_verdict (the
+        # recorded attempt must fuzzy-match canonical). Two legs:
+        #  (1) in-session: the denied row's own transcript (a recorded-but-
+        #      mis-ruled correct answer);
+        #  (2) FALLBACK (HOTFIX-009 Option B): the ignored-answer class — the
+        #      correct utterance was rejected by one-candidate-per-player and
+        #      survives only in lily_addressee_log. A scoped session read
+        #      pulls in-window fuzzy-matched transcripts; the SAME Tier-1
+        #      matcher re-checks each against THIS question's canonical (the
+        #      table has no question_id, so the match IS the association).
+        # Other grounds ignore these kwargs.
         canonical = None
-        denied = self._game.sk.ledger_row_for(name, None)
-        if denied is not None:
-            qid = denied.get("question_id")
+        corroborating_attempt = None
+        if ground == "answer_denied":
+            denied = sk.ledger_row_for(name, None)
+            qid = denied.get("question_id") if denied else None
             for h in reversed(self._game.asked_history):
                 if h.get("question_id") == qid:
                     canonical = h.get("canonical_answer")
                     break
-        entry = self._game.sk.correct_verdict(
+            in_session = denied.get("transcript") if denied else None
+            if canonical and self._answer_matches(in_session, canonical):
+                corroborating_attempt = in_session
+            elif canonical and self._game.supabase is not None:
+                try:
+                    transcripts = (
+                        await lily_persistence
+                        .lily_fetch_inwindow_fuzzy_transcripts(
+                            self._game.supabase, sk.session_id
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "LILY_SCORE | VERDICT_CORRECTION_DB_UNREACHABLE | "
+                        "session=%s player=%s — refused honestly (%s)",
+                        sk.session_id, name, e,
+                    )
+                    return (
+                        "I can't reach the record I'd need to check that call "
+                        "right now, so I'm not moving the score on a guess — "
+                        "ask me again in a moment and I'll take another look."
+                    )
+                for t in transcripts:
+                    if self._answer_matches(t, canonical):
+                        corroborating_attempt = t
+                        break
+        entry = sk.correct_verdict(
             name,
             grounds=ground,
             actor="player_contest",
             delta=1,
             canonical_answer=canonical,
+            corroborating_attempt=corroborating_attempt,
         )
         if entry is None:
             # Refused: no prior verdict to amend, unknown grounds, or already
