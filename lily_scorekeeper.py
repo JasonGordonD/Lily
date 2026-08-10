@@ -784,6 +784,14 @@ _VERDICT_CONTEST_RE = _re.compile(
     r"|(?:the )?(?:correct )?answer (?:is|was) (?:a|b|c|d)\b"
     r"|i (?:should have|shoulda) (?:got|gotten) (?:the|that|a) point"
     r"|(?:check|go back to|review) (?:the|that|my) (?:answer|last one)"
+    # W1 (HOTFIX-009) rule-violation contest — the diamond form: the player
+    # disputes not that they were misheard but that a RULE was misapplied
+    # (a clock on a relaxed round) and the score held wrongly. Anchored to a
+    # rules/clock reference so trivia content never fires.
+    r"|you violated (?:the )?rules?"
+    r"|we (?:had )?agreed (?:on |to )?(?:no timer|relaxed)"
+    r"|you (?:put|threw|tossed|dinged) (?:me )?(?:on )?(?:a |the )?(?:timer|clock)"
+    r"|(?:keep|keeping|held|holding|hold) (?:my|me) (?:score|point)"
     r")\b"
 )
 
@@ -2749,6 +2757,9 @@ class LilyScorekeeper:
         transcript: Optional[str] = None,
         eval_tier: Optional[int] = None,
         utterance_id: Optional[str] = None,
+        grounds: Optional[str] = None,
+        actor: Optional[str] = None,
+        corrects: Optional[dict] = None,
     ) -> Optional[dict]:
         """The SOLE score writer (WS-7). Every scoring mutation — an
         adjudicated result, a bonus, a make-good, an operator-directed
@@ -2758,9 +2769,16 @@ class LilyScorekeeper:
 
         Cause vocabulary: "answer" (adjudication commit, correct set),
         "bonus", "make_good", "operator_award", "rehydrate" (checkpoint
-        seed). correct=True applies answer semantics (streak/answers_correct
-        advance); correct=False resets the streak and forces points to 0;
-        correct=None moves points without touching the streak.
+        seed), "verdict_correction" (W1: an auditable reversal of a prior
+        verdict — carries grounds/actor/corrects and is the ONLY cause
+        exempt from the WS-4 idempotency belt, because a correction is by
+        definition a second, intentional movement on an already-ruled
+        question; its ONLY caller is correct_verdict, which will not run
+        without a real prior verdict row, so the exemption cannot reopen
+        the fabrication hole). correct=True applies answer semantics
+        (streak/answers_correct advance); correct=False resets the streak
+        and forces points to 0; correct=None moves points without touching
+        the streak.
 
         Returns the ledger entry, or None for an unrostered name (warned,
         no mutation, no audit — a point can never land on a null player).
@@ -2781,7 +2799,12 @@ class LilyScorekeeper:
         # positive movements are keyed: an incorrect commit (points=0) still
         # audits and never consumes the key; bonuses carry no question_id
         # and are intentionally exempt.
-        if question_id is not None and points and correct is not False:
+        if (
+            question_id is not None
+            and points
+            and correct is not False
+            and cause != "verdict_correction"
+        ):
             prior = self._existing_award(question_id, player_name)
             if prior is not None:
                 logger.info(
@@ -2821,6 +2844,15 @@ class LilyScorekeeper:
             "score_after": state["score"],
             "ts": _now_iso(),
         }
+        # W1 correction provenance: which verdict this row amends, on what
+        # grounds, and who triggered it. Present only on verdict_correction
+        # rows; snapshot copies the whole entry so they ride the checkpoint.
+        if grounds is not None:
+            entry["grounds"] = grounds
+        if actor is not None:
+            entry["actor"] = actor
+        if corrects is not None:
+            entry["corrects"] = corrects
         self.score_ledger.append(entry)
         logger.info(
             "LILY_STATE | SCORE_COMMIT | session=%s player=%s cause=%s correct=%s points=%d score=%d streak=%d",
@@ -2880,6 +2912,157 @@ class LilyScorekeeper:
         if entry is None:
             return None
         return self.players.get(player_name)
+
+    # W1 (WO-LILY-HOTFIX-009) — the auditable reversal path. The closed set
+    # of grounds on which a committed verdict may be amended. An unknown
+    # ground is refused (fails closed).
+    CORRECTION_GROUNDS = frozenset(
+        {"wrong_rule", "answer_denied", "misheard", "out_of_window"}
+    )
+
+    def existing_correction(
+        self, player_name: str, question_id: Optional[str]
+    ) -> Optional[dict]:
+        """The prior verdict_correction row for this (player, question), or
+        None. A verdict may be corrected once — this is the correction
+        analogue of the WS-4 idempotency belt."""
+        for entry in self.score_ledger:
+            if (
+                entry.get("cause") == "verdict_correction"
+                and entry.get("player") == player_name
+                and entry.get("question_id") == question_id
+            ):
+                return entry
+        return None
+
+    def correct_verdict(
+        self,
+        player_name: str,
+        *,
+        grounds: str,
+        actor: str = "player_contest",
+        question_id: Optional[str] = None,
+        delta: int = 1,
+    ) -> Optional[dict]:
+        """W1 — reverse a wrong verdict, auditably, without loosening the
+        ledger. This is the ONLY writer of verdict_correction rows and the
+        contract that separates a CORRECTION from a FABRICATION:
+
+        * It REQUIRES a prior "answer" verdict row for (player, question) —
+          a correction can only amend a ruling that actually happened. There
+          is no path here to mint a point for an unadjudicated question, so
+          the belt-exemption on the verdict_correction cause cannot reopen
+          the fabrication hole.
+        * Grounds must be in CORRECTION_GROUNDS (fails closed).
+        * A verdict may be corrected once (existing_correction refuses a
+          second amendment of the same verdict).
+        * The original row is never touched — a NEW row is appended carrying
+          the delta, grounds, actor, and a `corrects` reference (the amended
+          row's question_id + utterance_id). Standings derive from the
+          ledger-including-corrections for free (ledger_scores sums every
+          row); the counter is kept in step by apply_score_event, so
+          reconcile stays clean.
+        * Every correction hard-logs VERDICT_CORRECTED with grounds, actor
+          and delta.
+
+        Returns the correction ledger entry, or None on refusal (unrostered
+        player / no prior verdict / bad grounds / already corrected / zero
+        delta) — each refusal warns and mutates nothing.
+        """
+        state = self.players.get(player_name)
+        if state is None:
+            logger.warning(
+                "LILY_SCORE | VERDICT_CORRECTION_UNKNOWN_PLAYER | "
+                "session=%s name=%s", self.session_id, player_name,
+            )
+            return None
+        ground = (grounds or "").strip().lower()
+        if ground not in self.CORRECTION_GROUNDS:
+            logger.warning(
+                "LILY_SCORE | VERDICT_CORRECTION_BAD_GROUNDS | session=%s "
+                "player=%s grounds=%r — refused", self.session_id,
+                player_name, grounds,
+            )
+            return None
+        original = self.ledger_row_for(player_name, question_id)
+        if original is None:
+            # No ruling to amend. A correction can only follow a verdict —
+            # this is the line that keeps a correction from being invention.
+            logger.warning(
+                "LILY_SCORE | VERDICT_CORRECTION_NO_VERDICT | session=%s "
+                "player=%s question_id=%s — refused (nothing to correct)",
+                self.session_id, player_name, question_id,
+            )
+            return None
+        if self.existing_correction(player_name, original.get("question_id")):
+            logger.warning(
+                "LILY_SCORE | VERDICT_CORRECTION_ALREADY_CORRECTED | "
+                "session=%s player=%s question_id=%s — refused",
+                self.session_id, player_name, original.get("question_id"),
+            )
+            return None
+        # The grounds must match reality, deterministically. A positive
+        # RESTORATION only applies to a verdict that actually DENIED the
+        # point — a spurious contest on a correctly-scored answer (the
+        # answer already won its point) is refused here, so a contest can
+        # never stack a second point onto a right answer. A negative
+        # REVERSAL only applies where a point was actually awarded.
+        awarded = int(original.get("points") or 0)
+        already_scored = original.get("correct") is not False and awarded > 0
+        if delta > 0 and already_scored:
+            logger.warning(
+                "LILY_SCORE | VERDICT_CORRECTION_NOT_DENIED | session=%s "
+                "player=%s question_id=%s — refused (the answer already "
+                "scored; nothing was denied)", self.session_id, player_name,
+                original.get("question_id"),
+            )
+            return None
+        if delta < 0 and not already_scored:
+            logger.warning(
+                "LILY_SCORE | VERDICT_CORRECTION_NOTHING_AWARDED | session=%s "
+                "player=%s question_id=%s — refused (no point to take back)",
+                self.session_id, player_name, original.get("question_id"),
+            )
+            return None
+        if not delta:
+            logger.warning(
+                "LILY_SCORE | VERDICT_CORRECTION_ZERO_DELTA | session=%s "
+                "player=%s — refused", self.session_id, player_name,
+            )
+            return None
+        corrects = {
+            "question_id": original.get("question_id"),
+            "utterance_id": original.get("utterance_id"),
+            "question_index": original.get("question_index"),
+        }
+        # A positive restoration re-applies answer semantics (a wrongly
+        # denied correct answer becomes correct again); a negative reversal
+        # (a point given to the wrong player) moves points only.
+        entry = self.apply_score_event(
+            player_name,
+            cause="verdict_correction",
+            correct=True if delta > 0 else None,
+            points=delta,
+            question_id=original.get("question_id"),
+            question_index=original.get("question_index"),
+            # The audit trail persists via the transcript field (no DDL):
+            # lily_write_score_event forwards it into lily_answers.transcript.
+            transcript=f"grounds={ground} actor={actor} delta={delta:+d}",
+            utterance_id=original.get("utterance_id"),
+            grounds=ground,
+            actor=actor,
+            corrects=corrects,
+        )
+        if entry is not None:
+            logger.info(
+                "LILY_SCORE | VERDICT_CORRECTED | session=%s player=%s "
+                "question_id=%s grounds=%s actor=%s delta=%+d score=%d "
+                "corrects_utterance=%s",
+                self.session_id, player_name, original.get("question_id"),
+                ground, actor, delta, state["score"],
+                original.get("utterance_id"),
+            )
+        return entry
 
     def award_bonus(self, player_name: str, points: int = 1,
                     transcript: Optional[str] = None) -> Optional[dict]:

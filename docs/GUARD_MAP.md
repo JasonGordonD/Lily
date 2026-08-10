@@ -31,6 +31,20 @@ floor read before firing. Everything else in this document remains as analysed.
 
 **Mechanism count: 80** (see §9 for the tally by kind and by owning WO).
 
+**Amendment 2026-08-10 (WO-LILY-HOTFIX-009 W1 — the auditable reversal path):** the ledger gained
+a *correction* concept. Three new mechanisms in `lily_scorekeeper.py`, all GATE-kind and all on the
+correction side of the fabrication line:
+
+| # | Name / log tag | file | Trigger | Action | WO | Interactions |
+|---|---|---|---|---|---|---|
+| 81 | `correct_verdict` grounds/verdict gate / `VERDICT_CORRECTION_NO_VERDICT`, `VERDICT_CORRECTION_BAD_GROUNDS`, `VERDICT_CORRECTION_NOT_DENIED`, `VERDICT_CORRECTION_NOTHING_AWARDED` | SK `correct_verdict` | A verdict-correction request | Refuses unless a prior `"answer"` row exists, grounds ∈ `CORRECTION_GROUNDS`, and the delta matches reality (a restoration requires a denial; a reversal requires an award). **This is the correction/fabrication boundary** — a correction can only amend a ruling that happened, so a point can never be minted here | HOTFIX-009 W1 | Reads `ledger_row_for` (mech-adjacent to WS-7); the ONLY writer of the `verdict_correction` cause; feeds mech. 65 (standings already sum it) |
+| 82 | Correction idempotency belt / `VERDICT_CORRECTION_ALREADY_CORRECTED` | SK `existing_correction` | A second correction of the same `(player, question_id)` | Refuses | HOTFIX-009 W1 | The correction analogue of the WS-4 award belt (`_existing_award`). Distinct from it: the WS-4 belt guards the `"answer"` cause and is **untouched**; this one guards `"verdict_correction"` |
+| 83 | WS-4 belt exemption scoping | SK `apply_score_event` | `cause == "verdict_correction"` | The WS-4 idempotency belt is skipped for this cause ONLY (a correction is an intentional second movement) | HOTFIX-009 W1 | Load-bearing that this is scoped by cause AND that the cause has one caller (mech. 81, which requires a real prior verdict): the exemption cannot reopen the fabrication hole the WS-4 belt closes |
+
+Tool surface: `lily_correct_verdict` (`A`) exposes mech. 81 to the LLM; the HOTFIX-005 X12 verdict-contest
+directive (`_contest_note`, `on_transcript_event`) now names it. No mechanism was **removed** — the
+anti-fabrication belt guards a different cause and stays whole. **New mechanism count: 83.**
+
 ---
 
 ## 1. The speech-act registry — the substrate everything else keys off

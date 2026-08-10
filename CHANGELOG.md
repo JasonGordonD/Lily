@@ -39,6 +39,61 @@ and reconnect — the transition owner was the one seam that never
 consulted it. Fixture `tests/test_hotfix009_w6_burned_reserve.py` from
 the real session rows; needles proven to bite on 4e902cb.
 
+## 2026-08-10 — WO-LILY-HOTFIX-009 W1: an auditable path to reverse a wrong verdict
+
+P0 LEAD DEFECT. Live `RM_RQTZZanrHURF` 05:37→05:41: Rami answered the
+diamond question ("hardest naturally occurring substance") correctly on a
+RELAXED round, Lily denied it on a clock/window that should not have been
+running, then — even after conceding both the rule violation and the
+correct answer — held him at two: "Score stays two because the board
+already locked" (05:39:02). The contest that followed ("you violated the
+rules we agreed on… and now you're gonna keep my score at two") earned an
+apology and no fix.
+
+Root cause (logical/contract, not plumbing): every ledger mechanism was
+built to stop the score being FABRICATED (the WS-4 idempotency belt, the
+Z1 dup belt, board-lock). Nothing was built to let it be CORRECTED.
+Immutability was the right instinct against invention and the wrong
+instinct against injustice. The HOTFIX-005 X12 verdict-contest path
+already detected the contest and injected a directive to "make it right
+via your scoring tool" — but no such tool existed: the only writable
+scoring tool, `lily_award_bonus`, mints a free bonus with no reference to
+the wrong ruling.
+
+Fix — the correction concept, added without loosening the ledger:
+- `LilyScorekeeper.correct_verdict()` — the sole writer of a new
+  `"verdict_correction"` cause. It REQUIRES a prior `"answer"` verdict row
+  to amend, refuses grounds outside the closed set (`wrong_rule`,
+  `answer_denied`, `misheard`, `out_of_window`), refuses a second
+  correction of the same verdict, and requires the delta to match reality
+  (a restoration only follows a denial, a reversal only a real award — so
+  a spurious contest on a correct answer cannot stack a point). This is the
+  line that separates a correction from a fabrication: a correction can
+  only amend a ruling that happened.
+- Corrections are APPENDED, never overwritten — the original row stands, a
+  new row carries the delta, grounds, actor, and a `corrects` reference to
+  the amended verdict. Standings already derive from the ledger-including-
+  corrections (`ledger_scores` sums every row) and the counter stays in
+  step, so reconcile stays clean and the correction rides the checkpoint.
+  Every correction hard-logs `VERDICT_CORRECTED` with grounds/actor/delta.
+- `apply_score_event` gains the `"verdict_correction"` cause and skips the
+  WS-4 belt for that cause ONLY (a correction is an intentional second
+  movement); the belt is otherwise untouched and still guards `"answer"`.
+- `lily_correct_verdict` tool exposes it to the LLM; the X12 contest
+  directive now names it and its grounds, so the re-check produces a
+  narrated correction or a stated reason it stands — never "the board is
+  locked".
+- `_VERDICT_CONTEST_RE` gained a rule-violation branch so the diamond
+  contest form ("you violated the rules", "we agreed relaxed/no timer",
+  "keep my score at…") fires the path. This is the shared contest-intent
+  surface (see W3 seam).
+
+Persistence needs no DDL: `lily_write_score_event` already forwards any
+cause, so a correction lands as a `lily_answers` row (`verdict=
+"verdict_correction"`, `awarded_points=delta`), grounds+actor in its
+`transcript`. No mechanism was removed; the anti-fabrication belt guards a
+different cause and stays whole. GUARD_MAP mechanism count 80 → 83.
+
 ## 2026-08-10 — WO-LILY-HOTFIX-008 Z2c: release the question transition when narration is complete but supply is empty
 
 P0. Live `lily-938EFF-2260354c` 03:42:56→03:47:28, the other half of the

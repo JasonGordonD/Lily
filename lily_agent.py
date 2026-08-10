@@ -7408,15 +7408,21 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             and lily_scorekeeper.lily_detect_verdict_contest(text)
         ):
             self._contest_note = (
-                "[verdict contest — a player says they were misheard or that "
-                "their answer was right. Give them ONE honest re-check against "
-                "the committed record (the SCORES field and the last ruling): "
-                "if what they actually said matches the canonical answer and "
-                "they were not credited, say so plainly and make it right via "
-                "your scoring tool (never invent the score — the ledger is "
-                "the only truth); if the ruling stands, tell them exactly why "
-                "in one line. Never brush it off with 'we're past that'. One "
-                "re-check only.]"
+                "[verdict contest — a player says they were misheard, that "
+                "their answer was right, or that a rule was misapplied. Give "
+                "them ONE honest re-check against the committed record (the "
+                "SCORES field and the last ruling) and the recorded utterance. "
+                "If the ruling was wrong — a correct answer denied, an answer "
+                "misheard, a rule misapplied (a clock on a relaxed round), or "
+                "a call made outside its own window — put it right with "
+                "lily_correct_verdict (grounds = answer_denied / misheard / "
+                "wrong_rule / out_of_window). That tool APPENDS an audited "
+                "correction and restores the point; it will refuse if there is "
+                "no committed verdict to amend, so you can never invent a "
+                "point. Say what you're fixing and why ('that one was yours — "
+                "putting the point back'). If the ruling stands, tell them "
+                "exactly why in one line. Never brush it off with 'we're past "
+                "that' or 'the board is locked'. One re-check only.]"
             )
             logger.info(
                 "LILY_CONTEST | REQUEST | session=%s player=%s text=%r",
@@ -12465,6 +12471,72 @@ class LilyAgent(Agent):
         # tool-return turn on attribute RTT.
         self._game.publish_attributes_nowait()
         return f"Bonus point to {name}."
+
+    @function_tool()
+    async def lily_correct_verdict(
+        self, context: RunContext, player_name: str, grounds: str, reason: str
+    ) -> str:
+        """Reverse a WRONG ruling and put a denied point back. Use ONLY when
+        a verdict you already committed is established wrong — a correct
+        answer was scored incorrect, an answer was misheard, a rule was
+        misapplied (a clock on a relaxed round), or a question was judged
+        outside its own window. This does NOT overwrite the old ruling: it
+        appends an audited correction, so the point is restored and the trail
+        gets longer, not rewritten. Never use it to invent a point that was
+        never earned — it only amends a ruling that actually happened.
+
+        Args:
+            player_name: The rostered player whose verdict is being corrected.
+            grounds: WHY the ruling was wrong — one of "answer_denied"
+                (a correct answer was marked incorrect), "misheard" (you
+                misheard the answer), "wrong_rule" (a rule was misapplied,
+                e.g. a timer on a relaxed round), "out_of_window" (judged
+                outside its own window).
+            reason: One short line spoken back to the table ("diamond was
+                yours, and I'd put a clock on a relaxed round").
+        """
+        if not self._game.game_started:
+            return (
+                "A verdict can only be corrected once a round is underway."
+            )
+        name = (player_name or "").strip()
+        if name not in self._game.sk.players:
+            return f"No rostered player named {name!r} — nothing corrected."
+        entry = self._game.sk.correct_verdict(
+            name,
+            grounds=(grounds or "").strip().lower(),
+            actor="player_contest",
+            delta=1,
+        )
+        if entry is None:
+            # Refused: no prior verdict to amend, unknown grounds, or already
+            # corrected. Tell the LLM plainly so it states why it stands
+            # rather than inventing a point.
+            return (
+                f"No correction made for {name} — there's no matching committed "
+                "verdict to amend on those grounds, or it was already "
+                "corrected. If the ruling stands, say so plainly and why; "
+                "never invent a point."
+            )
+        supabase = self._game.supabase
+        if supabase is not None:
+            asyncio.ensure_future(lily_persistence.lily_write_score_event(
+                supabase, self._game.sk.session_id, entry,
+            ))
+        clean_reason = (reason or "").strip()[:200] or None
+        self._game.send_event_nowait(
+            "verdict_corrected",
+            {
+                "player": name,
+                "grounds": entry.get("grounds"),
+                "delta": entry.get("points"),
+                "score_after": entry.get("score_after"),
+                "reason": clean_reason,
+            },
+        )
+        self._game.publish_attributes_nowait()
+        new_score = self._game.sk.players[name]["score"]
+        return f"Corrected — the point goes back to {name}. On {new_score} now."
 
     # Ungated by game_started (tool-gating principle: gate tools that
     # mutate game outcomes or emit game events — a pacing preference does
