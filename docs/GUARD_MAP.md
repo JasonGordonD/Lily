@@ -29,7 +29,7 @@ floor read before firing. Everything else in this document remains as analysed.
 `file:line` is the definition site. Where a mechanism is a *decision + call site* pair, both are given.
 `A` = `lily_agent.py`, `SD` = `lily_speech_delivery.py`, `SG` = `lily_say_gate.py`.
 
-**Mechanism count: 79** (see §9 for the tally by kind and by owning WO).
+**Mechanism count: 80** (see §9 for the tally by kind and by owning WO).
 
 ---
 
@@ -121,8 +121,8 @@ Executed top to bottom in `tts_node` (A:12466–12960). Each numbered step can r
 | # | Name / log tag | file:line | Trigger | Action | WO | Interactions |
 |---|---|---|---|---|---|---|
 | 54 | Idle watchdog loop / `LILY_WATCHDOG \| TICK_FAILED` | A:3866–4082; `WATCHDOG_INTERVAL_SECONDS = 10.0` A:3838; start A:3841–3852, A:9245; stop A:3854–3864 | Every 10 s while the game is live | Runs the whole recovery ladder below | live 2026-07-15 stall class | `stop_idle_watchdog` exists because the loop outlived the AgentSession and dispatched against a dead session once per hangup (A:3855–3859) |
-| 55 | `ARMED_LIMBO` | A:3941–4000 | Armed, window closed, delivery claim **CONFIRMED**, for 2 consecutive ticks (~20 s) | Candidates waiting → forces `adjudicate(steal_allowed=False, reclaim_transition=True)`; no candidates → `open_window()` | live 2026-07-15 04:05 (adjudication crashed between commit and reveal; the game parked on Q3) | **The `reclaim_transition=True` is load-bearing:** without it mech. 56's `SECOND_LANE_REFUSED` refused the recovery every ~20 s while ARMED_LIMBO forced it every ~20 s — "a permanent dead-air loop (lily-1C53C6)" (A:1626–1636, A:3968–3972). This is Chain B in §8 |
-| 56 | Transition claim / `LILY_TRANSITION \| OPEN`, `SECOND_LANE_REFUSED`, `RECLAIMED_UNAIRED` | `open_question_transition` A:1614–1679; `_transition_reached_air` A:1592–1612 | A lane opening a question transition | Two independent refusals (existing journal, claim key); `reclaim_unaired=True` from the recovery path releases a dead journal whose stages never reached air | HOTFIX-006 N12 + `lily-1C53C6` deadlock | `_transition_reached_air` is the arbiter: a bound narration, a CONFIRMED stage key, or a journaled `next_delivery`. A transition with **any** aired stage keeps the original refusal |
+| 55 | `ARMED_LIMBO` | A:3941–4000 | Armed, window closed, delivery claim **CONFIRMED**, for 2 consecutive ticks (~20 s) | Candidates waiting → forces `adjudicate(steal_allowed=False, reclaim_transition=True)`; no candidates → `open_window()` | live 2026-07-15 04:05 (adjudication crashed between commit and reveal; the game parked on Q3) | **The `reclaim_transition=True` is load-bearing:** without it mech. 56's `SECOND_LANE_REFUSED` refused the recovery every ~20 s while ARMED_LIMBO forced it every ~20 s — "a permanent dead-air loop (lily-1C53C6)" (A:1626–1636, A:3968–3972). This is Chain B in §8. **HOTFIX-008 Z2c:** the forced adjudication now has a completion path through the AIRED-verdict gap too — a narration-complete open transition is RESUMED (mech. 80), not refused, so the limbo it forces can actually end |
+| 56 | Transition claim / `LILY_TRANSITION \| OPEN`, `SECOND_LANE_REFUSED`, `RECLAIMED_UNAIRED` | `open_question_transition` A:1614–1679; `_transition_reached_air` A:1592–1612 | A lane opening a question transition | Two independent refusals (existing journal, claim key); `reclaim_unaired=True` from the recovery path releases a dead journal whose stages never reached air | HOTFIX-006 N12 + `lily-1C53C6` deadlock | `_transition_reached_air` is the arbiter: a bound narration, a CONFIRMED stage key, or a journaled `next_delivery`. A transition with **any** aired stage keeps the original refusal. **HOTFIX-008 Z2c:** that refusal held a NARRATION-COMPLETE transition (reveal+verdict aired, question never consumed) hostage — Chain B reopened through the aired-verdict gap. The recovery caller now RESUMES such a transition instead of reopening it (mech. 80); the refusal itself is unmodified and still guards every non-recovery lane and every partially-aired journal |
 | 57 | Transition journal / `STAGE`, `STAGE_DUP`, `NO_OPEN_TRANSITION` | `journal_transition` A:1681–1721; stages `("reveal","verdict","next_delivery")` A:1580 | Each stage of one question transition | Appends once; a second attempt at the same stage is logged and refused | HOTFIX-006 N12 | Read by mechs. 19, 51, 56 |
 | 58 | P9 responsiveness floor / `ADDRESS_UNANSWERED` | A:3887–3902; `address_unanswered` A:4583 | A direct address unanswered past `responsiveness_budget_seconds()` | WARN once | PATCH-003 P9 | Sets `_awaiting_address_since`, which is one of the **two** states mechs. 7/18 still pause on |
 | 59 | P10 question re-offer + hold conversion / `QUESTION_PENDING` | A:3903–3923 | Pending conversational question timed out | ONE gentle re-offer (exempt from mech. 6), then `release_question_pending` + `enter_hold` | PATCH-003 P10 | The re-offer is a re-air producer that is **deliberately exempt** from the gate that would block it |
@@ -133,6 +133,7 @@ Executed top to bottom in `tts_node` (A:12466–12960). Each numbered step can r
 | 64 | WS-8 enrollment retry / `ENROLL_*` | `_maybe_retry_enrollment` A:8354–8407; driver A:6581 | Bound player below the voiceprint threshold, past cooldown | Re-fires enrollment | WS-8 | — |
 | 65 | Wrapup/score reconciliation / `SCORE_DIVERGENCE`, `ROSTER_DIVERGENCE`, `CUSTOM_ROUND_DIVERGENCE` | A:9304–9372 | Wrap-up | Compares ledger-derived standings to the live board and records the divergence | WS-7 | Detection only at this layer |
 | 79 | Z2 phase-independent supply recovery / `SUPPLY_SILENT_WINDOW`, `LILY_SUPPLY \| RETRY`, `BANK_TO_SUPPLY`, `SUPPLY_EXHAUSTED`, `RECOVERY_FAILED`, plus `INSURANCE_BANK_HIT/EMPTY/ERROR` on the prefetch insurance leg | `ensure_supply_recovery` / `_recover_supply` / `_bank_to_supply` / `_supply_silent_window`; watchdog check ahead of the armed/window branches; failure hook at the tail of `start_prefetch`'s wrapper | (a) A prefetch that produced nothing (genuine failure, not a mode/category discard) schedules recovery from the failure itself; (b) watchdog: `next_question` None + prefetch task done/absent + past the first arm, for 2 consecutive ticks, in a NON-idle phase (idle keeps mechs. 60/32/61) | Ladder: one de-escalated re-prefetch (adult high→medium, general medium→low) → `_bank_to_supply` (lands the row on `next_question` WITHOUT arming — delivery stays phase-owned) → ONE honest line + explicit pause offer (`supply_exhausted` act via `gated_say`), never an open-ended wait | HOTFIX-008 Z2, session `lily-938EFF-2260354c` | Exists because mechs. 32/60/61 were ALL idle-gated: q1 armed/window-cycling made a dead supply line invisible for 4.5 min with the bank full. Incident state (`_supply_retry_attempts`, `_supply_exhausted_notified`, `_supply_silent_ticks`) resets when any question lands on the supply line; `stop_idle_watchdog` cancels the ladder with the loop |
+| 80 | Z2c transition release / `RESUMED_COMPLETE`, `RELEASED_COMPLETE`, `REOPEN_REFUSED_TERMINAL` | `transition_narration_complete` / `release_completed_transition` (after `dispatch_armed_question`); release call sites: adjudicate arm-failed branch (`supply_empty_at_arm`), post_reveal playout seam (`supply_empty_post_reveal`); resume: adjudicate transition-open site (`reclaim_transition=True` only); terminal-window refusal: the delivery_claim reopen branch | A transition whose narration fully aired (reveal+verdict journaled, verdict provably played per mech. 56's arbiter) that cannot arm/deliver N+1; and any delivery_claim window (re)open for a question `question_is_terminal` already owns | Journals the terminal `next_delivery` marker (`delivered_q=None` — journal KEPT, never popped), frees the claim, clears the open slot; recovery adjudication RESUMES the aired beat and runs only bookkeeping (burn/consume/arm-or-release), re-airing nothing; a ruled question's window never reopens | HOTFIX-008 Z2c, session `lily-938EFF-2260354c` | Closes Chain B's aired-verdict gap (§8). The circular wait: next_delivery needed supply, supply recovery (mech. 79's arm rung + mechs. 32/60/61) needed idle, idle needed the transition closed. `_transition_reached_air`, SECOND_LANE_REFUSED and ARMED_LIMBO are deliberately unmodified — with the beat resumable/releasable they behave correctly |
 
 ---
 
@@ -302,6 +303,20 @@ Broken by `reclaim_unaired` (A:1639–1655) plus `_transition_reached_air` (A:15
 only broken for the recovery caller** — any other lane still hits the unconditional refusal, so the
 fix is a special case, not a removal of the cycle.
 
+**Reopened 2026-08-10 through the AIRED-verdict gap (lily-938EFF-2260354c), resolved at source
+(HOTFIX-008 Z2c, mech. 80).** `reclaim_unaired` assumed a stuck transition never aired — but an
+adjudication that dies AFTER its organic verdict is confirmed on the air (the 03:43:38 task died
+inside the reveal-publish await; CancelledError skips the CRASHED log) leaves a journal
+[reveal, verdict] that `_transition_reached_air` correctly calls aired, so recovery hit
+SECOND_LANE_REFUSED forever while the confirmed delivery claim reopened the dead question's
+window every agent turn (12× in 4.5 min). The circular wait: the beat's completion marker
+(next_delivery) needed supply; supply recovery needed idle; idle needed the beat closed. Z2c
+closes it WITHOUT touching this chain's guards: a narration-complete transition is RESUMED by the
+recovery caller (bookkeeping only, nothing re-airs) and RELEASED when there is nothing to deliver
+(terminal next_delivery marker, delivered_q=None), and a ruled question's window can no longer
+reopen off its delivery claim (`REOPEN_REFUSED_TERMINAL`). Both cycle directions are now pinned by
+fixtures: aired-organic (releases) and never-aired (still reclaims).
+
 ### Chain C — re-air gate ↔ N12 transition dup gate
 
 `register_transition_narration` must exempt the verdict-key holder because *"its re-air after a
@@ -428,6 +443,7 @@ therefore serialized through a counter whose observable lifetime had to be hand-
 | 2026-07-15 stall class | 54, 55, 60, 61 |
 | lily-1C53C6 deadlock | 55, 56 |
 | HOTFIX-008 Z2 (2260354c supply starvation) | 79 (extends 32, 61) |
+| HOTFIX-008 Z2c (2260354c transition deadlock) | 80 (extends 55, 56, 57) |
 | lily-2C489B triple re-read | 28 |
 | lily-A070E8 quadruple greeting | 23 |
 

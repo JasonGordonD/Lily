@@ -5,6 +5,97 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-10 — WO-LILY-HOTFIX-008 Z2c: release the question transition when narration is complete but supply is empty
+
+P0. Live `lily-938EFF-2260354c` 03:42:56→03:47:28, the other half of the
+Z2 incident: ONE circular deadlock around `q_1_transition`. Rami
+answered q1 correctly, Lily's own conversational turn performed the
+verdict organically, q2's prefetch had already failed. The 03:43:38
+adjudication opened the transition, journaled reveal + verdict
+(ORGANIC_PREEMPTED — `q_1_reveal` claimed+confirmed, narration bound)
+and then DIED before consuming the question. Evidence correction to the
+WO's RCA, from the room log: the arm-failed branch never executed —
+`LILY_SPINE` at 03:43:44.668 still reads `delivery=armed` and no
+CRASHED line exists, so the adjudicate task was cancelled inside the
+reveal-publish `await` (CancelledError skips `except Exception`;
+`finally` cleared `_adjudicating`), leaving `armed_question` SET, the
+transition open at `[reveal, verdict]`, and zero `ARMED_LIMBO` lines
+(the ~40s SECOND_LANE_REFUSED cadence was the window-close adjudication
+lane, not the watchdog). The wedge then self-sustained: the confirmed
+`q_1_delivery` claim made every post-ruling agent turn REOPEN the ruled
+question's window (`LILY_WINDOW | OPEN reason=delivery_claim`, the
+phase=reveal→answering regression), candidates fed adjudication,
+adjudication hit `SECOND_LANE_REFUSED` (the aired-verdict gap in
+`_transition_reached_air`'s `reclaim_unaired` — dd2a56e assumed a stuck
+transition never aired) and returned with the question unconsumed —
+12×, ~4.5 min honest vamp, zero questions. Chain B (mechs 55/56)
+reopened through the gap `053cc44` (next_delivery = completion AND sole
+release) + `dd2a56e` + `bba7427` left.
+
+Fix at source — the beat becomes closeable; NO new refusal guards, and
+`_transition_reached_air` / SECOND_LANE_REFUSED / ARMED_LIMBO untouched
+(mech 80, extends 55/56/57):
+
+1. **Chosen shape: keep the journal, journal the terminal stage** (over
+   popping the claim/journal): `transition_narration_complete()` +
+   `release_completed_transition()` close a reveal+verdict-aired
+   transition with the terminal `next_delivery` marker
+   (`delivered_q=None`), free the claim key and clear the open slot.
+   Chosen because every completion consumer already keys on the
+   journaled `next_delivery` stage and the kept journal is precisely
+   what keeps `open_question_transition`'s refusal protecting the aired
+   verdict from ever re-narrating — release without amnesia. Nothing is
+   deleted; what is RELEASED: the `q_N_transition` claim and the
+   `_open_transition_qnum` slot.
+2. Release fires from BOTH supply-empty seams: the adjudicate
+   arm-failed branch (`supply_empty_at_arm` — the WO's item 1, live
+   when adjudication completes) and the post_reveal playout seam
+   (`supply_empty_post_reveal` — the WO's "next_delivery reachable
+   without an armed question", live when the verdict confirms after a
+   non-organic dispatch).
+3. `RESUMED_COMPLETE`: the recovery caller (`reclaim_transition=True`
+   only, same scoping as `reclaim_unaired`) finding its own open
+   transition narration-complete RESUMES it instead of reopening —
+   skips the entire narration/publish block (re-publishing would lie:
+   the re-entry recomputes winner=None over already-judged candidates)
+   and runs only bookkeeping: burn, consume, arm N+1 or release. This
+   is what unwedges the REAL incident state, where the release seams of
+   (2) are unreachable because the first adjudication never got there.
+4. The window-reopen regression, at ITS source: the delivery_claim
+   reopen branch refuses a question `question_is_terminal()` already
+   owns (`REOPEN_REFUSED_TERMINAL`) — a ruled question has no answer
+   window. `question_is_terminal` (the `note_answer_heard` boundary),
+   NOT `_is_burned`/`question_already_answered`: the incident row shows
+   the durable-asked burn (03:42:56) and pre-window buffered candidates
+   both predate the question's legitimate FIRST open (03:43:07), which
+   lands in this same branch and stays untouched.
+
+Fixtures (`tests/test_hotfix008_z2c_transition_release.py`, 9 tests,
+real q_1732 data): completed-adjudication WO replay (organic verdict +
+arm failure → releases at `supply_empty_at_arm`, second lane still
+refused in both modes); fresh-transition-can-open; the TRUE wedge
+(publish await cancelled mid-beat → no window reopen for the ruled
+question; recovery resumes, re-airs NOTHING, releases, no double award,
+question burned); resume requires the reclaim flag (normal lane keeps
+today's refusal); mech-55/56 regression (never-aired journal still
+RECLAIMED_UNAIRED, never "released complete" — Chain B pinned in both
+directions); release preconditions (incomplete/already-closed refuse);
+first-open-untouched vs terminal-reopen-refused; combined Z2+Z2c
+end-to-end (prefetch starved → transition releases → `_bank_to_supply`
+lands q2 → arm → q2 delivers → fresh q2 transition opens: the
+03:42:56→03:47:28 stall is unreproducible).
+
+Residual, named: the wedge CREATOR — an adjudicate task cancelled
+mid-await after opening a transition (no CRASHED log; CancelledError)
+— still exists; Z2c makes every such wedge recoverable on the next
+forced adjudication instead of permanent. Cancellation policy for
+in-flight adjudication is Y7/barge-in territory, out of Z2c scope.
+
+Suite: 2110 → 2119 green (Z2c +9 on top of Z2/Z3/hygiene after rebase,
+zero regressions; all 83 character pins green, unmodified). Mandate
+numbers: lily_agent.py 15,320 → 15,451 lines; prompt untouched; main
+tip `a668062` → this commit; no deploy (per WO).
+
 ## 2026-08-10 — WO-LILY-HOTFIX-008 hygiene: call-time prefetch walls; live `_watch`-body needle
 
 Two small closures out of the HOTFIX-008 reviews — no behavior change on

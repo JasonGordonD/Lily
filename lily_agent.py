@@ -2000,6 +2000,57 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 )
         return dispatched
 
+    def transition_narration_complete(self, qnum: int) -> bool:
+        """True when q_{qnum}'s transition has narrated its whole beat to
+        air — reveal and verdict journaled, the verdict provably played
+        (_transition_reached_air) — and only next_delivery remains. In
+        this state the beat owes the game nothing but bookkeeping: supply
+        permitting, the N+1 delivery closes it; supply empty, it must be
+        released, never held (HOTFIX-008 Z2c)."""
+        stages = self.transition_stages(qnum)
+        return (
+            "next_delivery" not in stages
+            and "reveal" in stages
+            and "verdict" in stages
+            and self._transition_reached_air(qnum)
+        )
+
+    def release_completed_transition(self, qnum: int, *, reason: str) -> bool:
+        """Close out a narration-complete transition that cannot reach its
+        next_delivery stage because there is no question to deliver.
+
+        HOTFIX-008 Z2c — the lily-938EFF circular wait: transition
+        completion needed supply (next_delivery only journals when a
+        question dispatches), supply recovery needed the idle watchdog,
+        and idle needed this transition released. Held open, a transition
+        whose narration fully aired guards nothing — it only pins the
+        game.
+
+        The journal is KEPT (never popped) and gains the terminal
+        next_delivery marker with delivered_q=None: every completion
+        consumer reads the beat as over, while open_question_transition's
+        journal refusal still prevents any lane from re-narrating the
+        aired verdict. The claim key is released and the open-transition
+        slot cleared so a FRESH transition can open for the next question
+        the moment supply recovers."""
+        if not self.transition_narration_complete(qnum):
+            return False
+        self.journal_transition(
+            qnum, "next_delivery",
+            detail={"source": reason, "delivered_q": None},
+        )
+        self.say_registry.release(self.transition_key(qnum))
+        if getattr(self, "_open_transition_qnum", None) == qnum:
+            self._open_transition_qnum = None
+        logger.warning(
+            "LILY_TRANSITION | RELEASED_COMPLETE | session=%s q=%d "
+            "reason=%s — narration aired in full, no question to deliver; "
+            "claim released so supply recovery can run and a fresh "
+            "transition can open (HOTFIX-008 Z2c)",
+            self.sk.session_id, qnum, reason,
+        )
+        return True
+
 
     def memory_disclosure_instruction(self) -> str:
         """Task 4 lobby disclosure (WO-LILY-FORGETME-001) — RETURNING
@@ -6122,6 +6173,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # this gate, so N+1 cannot queue over the previous round's scores.
             if self.dispatch_armed_question(source="post_reveal"):
                 return
+            # HOTFIX-008 Z2c: the beat finished on the air but there is no
+            # armed question to deliver (supply was starved at arm time).
+            # next_delivery must be reachable WITHOUT an armed question —
+            # close the beat with its terminal marker and free the claim,
+            # so the idle/supply recovery runs and a fresh transition
+            # delivers N+1 when supply returns.
+            open_qnum = getattr(self, "_open_transition_qnum", None)
+            if open_qnum is not None and self.armed_question is None:
+                self.release_completed_transition(
+                    open_qnum, reason="supply_empty_post_reveal"
+                )
         if (
             self.armed_question is not None
             and not self.sk.answer_window_open
@@ -6144,6 +6206,25 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 self.say_registry.state(key)
                 == lily_say_gate.CLAIM_CONFIRMED
             ):
+                # HOTFIX-008 Z2c (lily-938EFF, the phase=reveal→answering
+                # regression): a question adjudication already owns
+                # (note_answer_heard ran — its ruling is committed or
+                # committing) has NO answer window. The confirmed delivery
+                # claim outlives the ruling, so without this check every
+                # post-ruling agent turn re-opened the dead question's
+                # window and fed candidates back into an adjudication
+                # loop. The question's legitimate FIRST open lands in this
+                # same branch BEFORE adjudication starts, when it is never
+                # terminal — only the stale reopen is refused.
+                if self.question_is_terminal(self.sk.question_number):
+                    logger.warning(
+                        "LILY_WINDOW | REOPEN_REFUSED_TERMINAL | "
+                        "session=%s q=%d — adjudication owns this "
+                        "question; a ruled question has no answer window "
+                        "(HOTFIX-008 Z2c)",
+                        self.sk.session_id, self.sk.question_number,
+                    )
+                    return
                 # Delivery is registered (claimed at dispatch, confirmed
                 # just above) and its turn finished playing — open.
                 self._armed_speech_misses = 0
@@ -8255,188 +8336,226 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # claim and never narrates.
             transition_qnum = self.sk.question_number
             transition_owner = f"transition_{uuid.uuid4().hex}"
-            if not self.open_question_transition(
+            # HOTFIX-008 Z2c (lily-938EFF): recovery re-entry over a
+            # transition whose narration ALREADY aired in full. The first
+            # adjudication opened this transition and journaled
+            # reveal+verdict (organic verdict, confirmed on the air) but
+            # died before consuming the question, so every forced re-entry
+            # found "already owned and narrated", refused, and abandoned
+            # the beat — which could never finish on its own (its
+            # next_delivery needed supply; supply recovery needed idle;
+            # idle needed this transition closed). Narration-complete is
+            # NOT the lily-1C53C6 reclaim case (there, nothing aired) and
+            # must never re-narrate: RESUME the open transition instead
+            # and run only the bookkeeping below — burn, consume, then
+            # arm N+1 or release on empty supply.
+            resumed_complete = (
+                reclaim_transition
+                and getattr(self, "_open_transition_qnum", None)
+                == transition_qnum
+                and self.transition_narration_complete(transition_qnum)
+            )
+            if resumed_complete:
+                logger.warning(
+                    "LILY_TRANSITION | RESUMED_COMPLETE | session=%s q=%d "
+                    "— recovery resumes a fully-narrated transition; "
+                    "nothing re-airs, only bookkeeping runs "
+                    "(HOTFIX-008 Z2c)",
+                    self.sk.session_id, transition_qnum,
+                )
+            elif not self.open_question_transition(
                 transition_qnum, owner=transition_owner, source="adjudicate",
                 reclaim_unaired=reclaim_transition,
             ):
                 return
 
-            # Reveal — stinger is the ruling; packet fires on TTS playback.
-            self._stinger(correct=winner_candidate is not None)
-            self.journal_transition(
-                transition_qnum, "reveal", owner=transition_owner,
-                detail={
-                    "answer": str(question.get("canonical_answer", "")),
+            if resumed_complete:
+                # Nothing to narrate and nothing to journal: reveal and
+                # verdict already sit on the journal with the verdict
+                # provably on the air. Re-publishing here would also lie
+                # — this re-entry recomputes winner=None because every
+                # candidate is already judged, while the committed
+                # scores went out with the original beat. Only the
+                # bookkeeping below (burn, consume, arm or release)
+                # remains.
+                verdict_spoken_organically = True
+            else:
+                # Reveal — stinger is the ruling; packet fires on TTS playback.
+                self._stinger(correct=winner_candidate is not None)
+                self.journal_transition(
+                    transition_qnum, "reveal", owner=transition_owner,
+                    detail={
+                        "answer": str(question.get("canonical_answer", "")),
+                        "correct": winner_candidate is not None,
+                        "winner": winner,
+                        "question_id": bound_question_id,
+                    },
+                )
+                # T4 (PATCH-001): VERDICT-FIRST. The measured live cost of the
+                # single long reveal turn was 11–12s from commit to a spoken
+                # verdict — long enough that players re-answered ("Saturn"
+                # twice, "Kama Sutra" ×15). The verdict word now airs as its
+                # own SHORT turn dispatched immediately at commit (budget:
+                # dispatch within ~1.5s of commit, logged below; flourish and
+                # standings follow as a separate turn). The organic-preempt
+                # guard stands: a conversational turn that already performed
+                # the verdict makes the beat silently done.
+                verdict_commit_ts = time.monotonic()
+                verdict_qnum = self.sk.question_number
+                verdict_ends_round = (
+                    verdict_qnum % self.sk.questions_per_round == 0
+                    or self.sk.round > self.rounds_total
+                )
+                verdict_key = (
+                    f"q_{verdict_qnum}_verdict"
+                    if verdict_ends_round
+                    else f"q_{verdict_qnum}_reveal"
+                )
+                verdict_spoken_organically = self._verdict_already_spoken(
+                    question, winner_candidate
+                )
+                if verdict_spoken_organically:
+                    if self.say_registry.claim(verdict_key):
+                        self.say_registry.confirm(verdict_key)
+                    logger.info(
+                        "LILY_REVEAL | ORGANIC_PREEMPTED | session=%s q=%d — "
+                        "verdict already spoken in her last turn",
+                        self.sk.session_id, verdict_qnum,
+                    )
+                    # N12: the transition's ONE narration is the turn that
+                    # already aired — bound here, so any later turn narrating
+                    # this same transition is a second narration and loses.
+                    self.journal_transition(
+                        transition_qnum, "verdict", owner=transition_owner,
+                        detail={
+                            "key": verdict_key,
+                            "narration": getattr(
+                                self, "_last_assistant_text", ""
+                            ) or "",
+                            "source": "organic",
+                        },
+                    )
+                reveal_payload = {
                     "correct": winner_candidate is not None,
                     "winner": winner,
-                    "question_id": bound_question_id,
-                },
-            )
-            # T4 (PATCH-001): VERDICT-FIRST. The measured live cost of the
-            # single long reveal turn was 11–12s from commit to a spoken
-            # verdict — long enough that players re-answered ("Saturn"
-            # twice, "Kama Sutra" ×15). The verdict word now airs as its
-            # own SHORT turn dispatched immediately at commit (budget:
-            # dispatch within ~1.5s of commit, logged below; flourish and
-            # standings follow as a separate turn). The organic-preempt
-            # guard stands: a conversational turn that already performed
-            # the verdict makes the beat silently done.
-            verdict_commit_ts = time.monotonic()
-            verdict_qnum = self.sk.question_number
-            verdict_ends_round = (
-                verdict_qnum % self.sk.questions_per_round == 0
-                or self.sk.round > self.rounds_total
-            )
-            verdict_key = (
-                f"q_{verdict_qnum}_verdict"
-                if verdict_ends_round
-                else f"q_{verdict_qnum}_reveal"
-            )
-            verdict_spoken_organically = self._verdict_already_spoken(
-                question, winner_candidate
-            )
-            if verdict_spoken_organically:
-                if self.say_registry.claim(verdict_key):
-                    self.say_registry.confirm(verdict_key)
-                logger.info(
-                    "LILY_REVEAL | ORGANIC_PREEMPTED | session=%s q=%d — "
-                    "verdict already spoken in her last turn",
-                    self.sk.session_id, verdict_qnum,
+                    # Score truth ON THE WIRE (08-04 screen bug): the beat now
+                    # carries the winner's COMMITTED score. The frontend's old
+                    # overlay GUESSED the increment and — because commits have
+                    # published BEFORE the reveal beat since desync-E — its
+                    # "attribute is lagging" check passed trivially and the
+                    # chip rolled one point HIGH after every reveal, holding
+                    # the wrong score until the next commit. With the real
+                    # number on the beat there is nothing to guess.
+                    "winner_score": (
+                        (self.sk.players.get(winner) or {}).get("score")
+                        if winner else None
+                    ),
+                }
+                self._pending_reveal_event = reveal_payload
+                self._set_ui_phase("reveal")
+                # Score truth (desync WO Sub-agent E): the committed scores go
+                # out in the SAME tick as the verdict. The attribute publish
+                # (players/scores) is dispatched alongside the reveal metadata
+                # — never queued behind its network round-trip (the old
+                # sequential awaits held the scoreboard hostage to the
+                # metadata call while Lily called the point "safe and sound"
+                # over a screen still showing zero). Everything from here to
+                # the reveal gated_say below is synchronous for a non-final
+                # question, so the publish dispatch, the score commit above,
+                # and the verdict speech dispatch share one tick.
+                await asyncio.gather(
+                    self.publish_metadata(
+                        question.get("prompt", ""),
+                        reveal={
+                            "answer": str(question.get("canonical_answer", "")),
+                            "winner": winner,
+                            "correct": winner_candidate is not None,
+                        },
+                        choices=question.get("choices"),
+                        eliminated=self.eliminated,
+                        # B3: reveal clears the picture — leaving image_url here
+                        # kept the prior Q on the glass through verdict / arm N+1
+                        # until the next open_window (stale screen).
+                        category=question.get("category"),
+                    ),
+                    self.publish_attributes(),
                 )
-                # N12: the transition's ONE narration is the turn that
-                # already aired — bound here, so any later turn narrating
-                # this same transition is a second narration and loses.
-                self.journal_transition(
-                    transition_qnum, "verdict", owner=transition_owner,
-                    detail={
-                        "key": verdict_key,
-                        "narration": getattr(
-                            self, "_last_assistant_text", ""
-                        ) or "",
-                        "source": "organic",
-                    },
-                )
-            reveal_payload = {
-                "correct": winner_candidate is not None,
-                "winner": winner,
-                # Score truth ON THE WIRE (08-04 screen bug): the beat now
-                # carries the winner's COMMITTED score. The frontend's old
-                # overlay GUESSED the increment and — because commits have
-                # published BEFORE the reveal beat since desync-E — its
-                # "attribute is lagging" check passed trivially and the
-                # chip rolled one point HIGH after every reveal, holding
-                # the wrong score until the next commit. With the real
-                # number on the beat there is nothing to guess.
-                "winner_score": (
-                    (self.sk.players.get(winner) or {}).get("score")
-                    if winner else None
-                ),
-            }
-            self._pending_reveal_event = reveal_payload
-            self._set_ui_phase("reveal")
-            # Score truth (desync WO Sub-agent E): the committed scores go
-            # out in the SAME tick as the verdict. The attribute publish
-            # (players/scores) is dispatched alongside the reveal metadata
-            # — never queued behind its network round-trip (the old
-            # sequential awaits held the scoreboard hostage to the
-            # metadata call while Lily called the point "safe and sound"
-            # over a screen still showing zero). Everything from here to
-            # the reveal gated_say below is synchronous for a non-final
-            # question, so the publish dispatch, the score commit above,
-            # and the verdict speech dispatch share one tick.
-            await asyncio.gather(
-                self.publish_metadata(
-                    question.get("prompt", ""),
-                    reveal={
-                        "answer": str(question.get("canonical_answer", "")),
-                        "winner": winner,
-                        "correct": winner_candidate is not None,
-                    },
-                    choices=question.get("choices"),
-                    eliminated=self.eliminated,
-                    # B3: reveal clears the picture — leaving image_url here
-                    # kept the prior Q on the glass through verdict / arm N+1
-                    # until the next open_window (stale screen).
-                    category=question.get("category"),
-                ),
-                self.publish_attributes(),
-            )
-            # T4 dispatch point: AFTER the score/reveal publishes (desync-E:
-            # the committed score reaches the glass before the verdict
-            # speaks) but before all remaining bookkeeping — the budget is
-            # commit → dispatch within ~1.5s, logged for telemetry.
-            if not verdict_spoken_organically:
-                answer_text = str(question.get("canonical_answer", ""))
-                # RULINGS-001 R1: ratified verdict-beat register anchor —
-                # verdict word first, then at most one short flourish.
-                # HOTFIX-006 N9 part 3: the verdict is GENERATED FROM the
-                # committed ledger row — the row that was actually written,
-                # naming the utterance actually bound. The live failure was
-                # narration and ledger describing two different utterances
-                # ("Jupiter was spot on, Rami" over a q_1052 row reading
-                # incorrect, transcript "Go."). On any disagreement the
-                # ledger wins; lily_narrated_verdict_divergence makes a
-                # disagreement loud after the fact.
-                ledger_row = self.sk.ledger_row_for(winner, bound_question_id)
-                if winner_candidate is not None:
-                    committed = ""
-                    if ledger_row is not None:
-                        committed = (
-                            " THE COMMITTED ROW you are speaking from: "
-                            f"{ledger_row.get('player')} — "
-                            f"{str(ledger_row.get('transcript') or '')!r} — "
-                            "CORRECT. Those are the words that scored; do "
-                            "NOT credit a different utterance or a "
-                            "different player."
+                # T4 dispatch point: AFTER the score/reveal publishes (desync-E:
+                # the committed score reaches the glass before the verdict
+                # speaks) but before all remaining bookkeeping — the budget is
+                # commit → dispatch within ~1.5s, logged for telemetry.
+                if not verdict_spoken_organically:
+                    answer_text = str(question.get("canonical_answer", ""))
+                    # RULINGS-001 R1: ratified verdict-beat register anchor —
+                    # verdict word first, then at most one short flourish.
+                    # HOTFIX-006 N9 part 3: the verdict is GENERATED FROM the
+                    # committed ledger row — the row that was actually written,
+                    # naming the utterance actually bound. The live failure was
+                    # narration and ledger describing two different utterances
+                    # ("Jupiter was spot on, Rami" over a q_1052 row reading
+                    # incorrect, transcript "Go."). On any disagreement the
+                    # ledger wins; lily_narrated_verdict_divergence makes a
+                    # disagreement loud after the fact.
+                    ledger_row = self.sk.ledger_row_for(winner, bound_question_id)
+                    if winner_candidate is not None:
+                        committed = ""
+                        if ledger_row is not None:
+                            committed = (
+                                " THE COMMITTED ROW you are speaking from: "
+                                f"{ledger_row.get('player')} — "
+                                f"{str(ledger_row.get('transcript') or '')!r} — "
+                                "CORRECT. Those are the words that scored; do "
+                                "NOT credit a different utterance or a "
+                                "different player."
+                            )
+                        verdict_instr = (
+                            "VERDICT BEAT. The ruling is COMMITTED. "
+                            "REGISTER GUIDANCE (vary freely "
+                            "within this length and temperature, never "
+                            "longer): the verdict word FIRST, then at most one "
+                            f"short flourish — 'Correct — {answer_text}!', "
+                            f"point to {winner or 'the table'}. No trivia "
+                            "color, no next question — those come in your next "
+                            "turn." + committed
                         )
-                    verdict_instr = (
-                        "VERDICT BEAT. The ruling is COMMITTED. "
-                        "REGISTER GUIDANCE (vary freely "
-                        "within this length and temperature, never "
-                        "longer): the verdict word FIRST, then at most one "
-                        f"short flourish — 'Correct — {answer_text}!', "
-                        f"point to {winner or 'the table'}. No trivia "
-                        "color, no next question — those come in your next "
-                        "turn." + committed
+                    else:
+                        verdict_instr = (
+                            "VERDICT BEAT. The ruling is COMMITTED. "
+                            "REGISTER GUIDANCE (vary freely "
+                            "within this length and temperature, never "
+                            "longer): the verdict first, then at most one "
+                            f"short line — nobody landed it, it was "
+                            f"{answer_text}. No next question — that comes in "
+                            "your next turn. NO committed row for this question "
+                            "is correct, so do NOT tell anyone their answer was "
+                            "right — not as a consolation, not 'you were close', "
+                            "not 'that was right but late'. If someone was right "
+                            "after the buzzer you will have been given a late-"
+                            "answer note; without one, nobody was right."
+                        )
+                    self.gated_say(
+                        verdict_key, "verdict", verdict_instr,
+                        source="adjudicate_verdict",
                     )
-                else:
-                    verdict_instr = (
-                        "VERDICT BEAT. The ruling is COMMITTED. "
-                        "REGISTER GUIDANCE (vary freely "
-                        "within this length and temperature, never "
-                        "longer): the verdict first, then at most one "
-                        f"short line — nobody landed it, it was "
-                        f"{answer_text}. No next question — that comes in "
-                        "your next turn. NO committed row for this question "
-                        "is correct, so do NOT tell anyone their answer was "
-                        "right — not as a consolation, not 'you were close', "
-                        "not 'that was right but late'. If someone was right "
-                        "after the buzzer you will have been given a late-"
-                        "answer note; without one, nobody was right."
+                    # N12: the verdict stage of THIS transition is now spoken
+                    # for. Its narration is bound by the first turn that
+                    # reaches the say gate performing it (register_transition_
+                    # narration); the second one — the contradiction — is
+                    # suppressed there.
+                    self.journal_transition(
+                        transition_qnum, "verdict", owner=transition_owner,
+                        detail={
+                            "key": verdict_key,
+                            "narration": None,
+                            "source": "adjudicate_verdict",
+                        },
                     )
-                self.gated_say(
-                    verdict_key, "verdict", verdict_instr,
-                    source="adjudicate_verdict",
-                )
-                # N12: the verdict stage of THIS transition is now spoken
-                # for. Its narration is bound by the first turn that
-                # reaches the say gate performing it (register_transition_
-                # narration); the second one — the contradiction — is
-                # suppressed there.
-                self.journal_transition(
-                    transition_qnum, "verdict", owner=transition_owner,
-                    detail={
-                        "key": verdict_key,
-                        "narration": None,
-                        "source": "adjudicate_verdict",
-                    },
-                )
-                logger.info(
-                    "LILY_VERDICT | COMMIT_TO_DISPATCH_MS | session=%s "
-                    "q=%d ms=%.0f",
-                    self.sk.session_id, verdict_qnum,
-                    (time.monotonic() - verdict_commit_ts) * 1000.0,
-                )
+                    logger.info(
+                        "LILY_VERDICT | COMMIT_TO_DISPATCH_MS | session=%s "
+                        "q=%d ms=%.0f",
+                        self.sk.session_id, verdict_qnum,
+                        (time.monotonic() - verdict_commit_ts) * 1000.0,
+                    )
             # Burn the revealed question (WS-4): its canonical answer is
             # now going to air (winner confirmation OR a timeout Lily
             # resolves by speaking the answer with nobody scoring). A
@@ -8485,6 +8604,18 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                         "the next question is still being written — vamp "
                         "warmly for a beat; do NOT re-ask the last "
                         "question and do NOT invent one"
+                    )
+                    # HOTFIX-008 Z2c (lily-938EFF): with the narration on
+                    # the air and nothing to deliver, the transition is
+                    # waiting only on supply — held open it deadlocks the
+                    # game (supply recovery needs idle; idle needs this
+                    # released). Close the beat at source. When the
+                    # verdict is still airing (non-organic dispatch just
+                    # above) this returns False and the release instead
+                    # happens at the verdict's playout completion
+                    # (post_reveal seam) or on the recovery resume.
+                    self.release_completed_transition(
+                        transition_qnum, reason="supply_empty_at_arm"
                     )
             # Checkpoint only after the consumed question has either been
             # replaced by N+1 or explicitly cleared. A reconnect must never
