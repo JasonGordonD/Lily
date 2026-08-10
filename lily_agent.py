@@ -9734,6 +9734,24 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     # Z3: no-match is not resolution while the name door
                     # is untried — hold memory-characterising speech.
                     self._voice_identity_no_match_at = time.time()
+                    # V7 resolve-before-mint: the enrolled-voice route has
+                    # now REPORTED (no match). If the roster is already
+                    # stable (game started) on a weak group, resolve_group_
+                    # identity may have DEFERRED the name-set mint waiting on
+                    # exactly this answer — re-invoke it so the deterministic
+                    # fallback mints now, never ahead of the biometric.
+                    if (
+                        getattr(self, "game_started", False)
+                        and self.group_id_source not in _STRONG_GROUP_SOURCES
+                        and not getattr(self, "device_candidate_group_id", None)
+                    ):
+                        try:
+                            await self.resolve_group_identity("voice_no_match")
+                        except Exception as e:
+                            logger.warning(
+                                "LILY_MEMORY | GROUP_ID_RESOLVE | "
+                                "voice_no_match re-resolve failed: %s", e,
+                            )
                 return False
             logger.info(
                 "LILY_VOICE_ID | MATCH_AT_START | session=%s group=%s score=%.3f",
@@ -9745,7 +9763,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             if staged:
                 await self._promote_device_candidate("voice_identity_match")
                 return True
-            return False
+            # V7: the biometric resolved an identity but the matched group
+            # has no memory to stage (a thin prior table below the
+            # game-memory write threshold, or a group carrying only a
+            # centroid). stage_device_candidate returns False for empty
+            # memory, and returning False HERE dropped the resolved identity
+            # — so a session that booted onto the room-name fallback kept
+            # group_id == session_id, a throwaway surviving a session in
+            # which a KNOWN voice spoke. The centroid match IS the proof of
+            # identity independent of how much memory is on file: bind to it
+            # so this session's rows and its fresh voiceprint sample land on
+            # the real group (upgrade_group_id rekeys + re-enrolls under it),
+            # never on a throwaway the name-set hash would later fragment.
+            await self.upgrade_group_id(
+                match["group_id"], "voice_identity_match"
+            )
+            self.device_identity_verified = True
+            return True
         except Exception as e:
             self._voice_identity_resolved = True
             # Z3: a failed probe gave no answer either — same hold shape.
@@ -10185,11 +10219,40 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             logger.warning(
                 "LILY_MEMORY | GROUP_ID_RESOLVE | voiceprint match failed: %s", e
             )
-        # (c) name-set hash fallback — deterministic across sessions
+        # (c) name-set hash fallback — deterministic across sessions, but
+        # minted only AFTER the enrolled-voice route has reported. V7
+        # resolve-before-mint: the ECAPA matcher is the cross-session signal
+        # that actually holds a table together; the name-set hash keys on
+        # THIS session's HEARD names, so a single mishearing mints a fresh
+        # group and one table fractures across sessions (three grp_ hashes
+        # for one table, live 2026-08-10). While a voice match is in flight,
+        # do NOT mint — the no-match branch of _voice_identity_match_at_start
+        # re-invokes this resolver once the voice has reported, so a genuine
+        # new table still mints, just never AHEAD of the biometric.
         if new_id is None:
+            if (
+                lily_config.voice_identity_enabled()
+                and getattr(self, "_voice_identity_attempted", False)
+                and not getattr(self, "_voice_identity_resolved", False)
+            ):
+                logger.info(
+                    "LILY_MEMORY | GROUP_ID_RESOLVE | trigger=%s deferring "
+                    "name-set mint — enrolled-voice match in flight "
+                    "(resolve before mint)", trigger,
+                )
+                return
             hashed = lily_memory.lily_name_set_group_id(names)
-            if hashed:
+            if hashed and hashed != self.group_id:
                 new_id, source = hashed, "name_set_hash"
+                logger.info(
+                    "LILY_MEMORY | NAME_SET_MINT | trigger=%s group=%s "
+                    "reason=%s — no device token and no enrolled-voice "
+                    "match; minting deterministic name-set group",
+                    trigger, hashed,
+                    "voice_disabled"
+                    if not lily_config.voice_identity_enabled()
+                    else "voice_no_match_or_absent",
+                )
         if new_id is None or new_id == self.group_id:
             return
         await self.upgrade_group_id(new_id, source)
