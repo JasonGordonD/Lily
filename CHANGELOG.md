@@ -5,6 +5,41 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-10 — WO-LILY-HOTFIX-008 hygiene: call-time prefetch walls; live `_watch`-body needle
+
+Two small closures out of the HOTFIX-008 reviews — no behavior change on
+any healthy path.
+
+1. **Prefetch walls read at call time** (Doc-directed hygiene).
+   `lily_reasoning` froze `lily_config.prefetch_timeout_seconds()` /
+   `prefetch_total_budget_seconds()` into module constants at import, so
+   a live env change to `LILY_PREFETCH_TIMEOUT_SECONDS` /
+   `LILY_PREFETCH_TOTAL_BUDGET_SECONDS` did nothing until the next
+   deploy — not a factor in lily-938EFF-2260354c, but an hour-shaped
+   trap for a future incident. Archaeology: the module constant dates to
+   `4cbd0b9` (M3, literal 30s); `82ad673` moved the values into
+   lily_config accessors but kept the import-time freeze, defeating the
+   env-tunability it introduced. Now every wall site (the three per-call
+   `asyncio.wait_for` legs, the overall-budget guard, and
+   `_generate_grok_json`'s default — resolved `None -> accessor` at call
+   time, explicit timeouts like the judge's 12s unchanged) reads the
+   accessor when it runs. Defaults identical (20.0/45.0).
+   `test_transition_reclaim` now pins BOTH walls by patching the
+   accessors after import — proving call-time reads — instead of
+   poking module globals.
+
+2. **Watcher-body needle** (Z1 review Note A). Z1's tests drive the
+   extracted `_handle_spoken_text`, not the live `_watch` closure — a
+   regression re-adding a `_last_assistant_text` fallback between
+   `_handle_spoken_text` and `on_agent_speech_finished` would slip past
+   them. `test_hotfix008_z1_phantom_cutoff` now needles the closure body
+   itself on unparsed AST (comments stripped — the Z1 deletion note
+   quotes the old fallback in prose): no buffer reference, no rewrite of
+   `spoken`, and `spoken` reaches `on_agent_speech_finished` as a bare
+   name. Non-vacuous by construction: a sibling test runs the same
+   checker against the embedded pre-Z1 two-line shape and requires it to
+   fail on both counts.
+
 ## 2026-08-10 — WO-LILY-HOTFIX-008 Z3: a biometric NO_MATCH is not the probe resolving — the Y9 hold now outlasts it
 
 P0 honesty-timing. Live `lily-938EFF-2260354c` (RM_V7MnLQBeFMi9): the

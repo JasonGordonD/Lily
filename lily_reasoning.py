@@ -69,16 +69,17 @@ REASONING_THINKING_LEVEL = "high"
 # bound in judge() + Tier-1 fallback protects the critical path if a HIGH
 # turn runs long.
 JUDGE_THINKING_LEVEL = "high"
-# 30s -> 20s per call (lily-1C53C6): at 30s per call the generate ->
-# verify -> choices chain could stack ~90s of dead wait before
-# PREFETCH_FAILED fired — the live q2 hang rode exactly two of those
-# stacked timeouts. 20s keeps margin over healthy-but-slow authoring
-# turns (grok-4.5 reasoning lanes routinely run double-digit seconds);
-# the overall budget below is the real bound — no combination of stalls
-# can exceed it. Both env-tunable (lily_config accessors) so the walls
-# can track the measured authoring p95 without a code deploy.
-PREFETCH_TIMEOUT_SECONDS = lily_config.prefetch_timeout_seconds()
-PREFETCH_TOTAL_BUDGET_SECONDS = lily_config.prefetch_total_budget_seconds()
+# Prefetch walls (lily-1C53C6, 30s -> 20s per call): at 30s per call the
+# generate -> verify -> choices chain could stack ~90s of dead wait
+# before PREFETCH_FAILED fired — the live q2 hang rode exactly two of
+# those stacked timeouts. 20s keeps margin over healthy-but-slow
+# authoring turns (grok-4.5 reasoning lanes routinely run double-digit
+# seconds); the overall budget is the real bound — no combination of
+# stalls can exceed it. Both walls are read through the lily_config
+# accessors (prefetch_timeout_seconds / prefetch_total_budget_seconds)
+# AT CALL TIME — never frozen into module constants at import — so a
+# live env change to either wall takes effect on the next prefetch
+# without a code deploy.
 
 # xAI multi-agent transport (Engineering Note 2026-08-07): the
 # grok-*-multi-agent tier rejects the Chat Completions endpoint (HTTP 400
@@ -476,7 +477,7 @@ class LilyReasoning:
         *,
         system_instruction: Optional[str] = None,
         max_tokens: int,
-        timeout: float = PREFETCH_TIMEOUT_SECONDS,
+        timeout: Optional[float] = None,
         effort: Optional[str] = None,
         model: Optional[str] = None,
     ) -> str:
@@ -498,6 +499,8 @@ class LilyReasoning:
             )
         model = model or lily_config.adult_reasoning_model()
         effort = effort or lily_config.adult_reasoning_effort()
+        if timeout is None:
+            timeout = lily_config.prefetch_timeout_seconds()
         # xAI's multi-agent tier (grok-*-multi-agent) does NOT support the
         # Chat Completions endpoint (HTTP 400 "Multi Agent requests are not
         # allowed on chat completions") and rejects `max_tokens`; it speaks
@@ -859,14 +862,14 @@ class LilyReasoning:
                     avoid_questions, multiple_choice=multiple_choice,
                     avoid_answers=avoid_answers, effort=effort,
                 ),
-                timeout=PREFETCH_TIMEOUT_SECONDS,
+                timeout=lily_config.prefetch_timeout_seconds(),
             )
             if question is None:
                 raise RuntimeError("question generation returned unparseable JSON")
             pre_verify_answer = str(question.get("canonical_answer", ""))
             ok, reason = await asyncio.wait_for(
                 self.verify_question(question, mode=scorekeeper.mode),
-                timeout=PREFETCH_TIMEOUT_SECONDS,
+                timeout=lily_config.prefetch_timeout_seconds(),
             )
             if not ok:
                 raise RuntimeError(f"verification failed: {reason}")
@@ -891,7 +894,7 @@ class LilyReasoning:
                 # synthesize distractors; failure degrades to freeform.
                 await asyncio.wait_for(
                     self.ensure_choices(question),
-                    timeout=PREFETCH_TIMEOUT_SECONDS,
+                    timeout=lily_config.prefetch_timeout_seconds(),
                 )
             return question
 
@@ -902,7 +905,7 @@ class LilyReasoning:
             # into minutes of silence before the honest failure fires.
             question = await asyncio.wait_for(
                 _generate_verify_choices(),
-                timeout=PREFETCH_TOTAL_BUDGET_SECONDS,
+                timeout=lily_config.prefetch_total_budget_seconds(),
             )
             scorekeeper.clear_status_notes()
             logger.info(

@@ -40,7 +40,9 @@ Pinned here:
   - the HOTFIX-002 tool-call-only shape stays an empty record.
 """
 
+import ast
 import asyncio
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -400,3 +402,125 @@ def test_no_cut_off_row_without_genuine_truncation():
         if r["text"].endswith(CUT_MARK)
     ]
     assert marked == []
+
+
+# --- Z1 review Note A: needle the LIVE `_watch` closure body ---------------
+#
+# Every functional test above drives the EXTRACTED _handle_spoken_text; a
+# regression that re-adds a buffer fallback INSIDE the `_watch` closure —
+# between the _handle_spoken_text call and on_agent_speech_finished —
+# would slip past all of them. So the closure body itself is needled at
+# the source (the test_post_tts_transcript_truth idiom), on UNPARSED AST
+# rather than raw text: the Z1 deletion note in `_watch` quotes the old
+# fallback verbatim in a comment, and needles must hit code, not prose.
+
+
+def _watch_body_violations(source: str) -> list:
+    """Needle checker for a module source containing the playout watcher
+    `_watch`. Returns human-readable violations; [] means the Z1 shape
+    holds. Source-agnostic on purpose so the negative fixture below can
+    prove the needle bites on the pre-Z1 shape."""
+    watches = [
+        n for n in ast.walk(ast.parse(source))
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_watch"
+    ]
+    if len(watches) != 1:
+        return [f"expected exactly one `_watch` closure, found {len(watches)}"]
+    watch = watches[0]
+    violations = []
+
+    code_only = ast.unparse(watch)
+    for needle in ("_last_assistant_text", "last_assistant_text_for"):
+        if needle in code_only:
+            violations.append(f"buffer reference inside _watch: {needle}")
+
+    def _called_name(call):
+        fn = call.func
+        return fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+
+    spoken_var = None
+    for node in ast.walk(watch):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and _called_name(node.value) == "_handle_spoken_text"
+        ):
+            target = node.targets[0]
+            first = target.elts[0] if isinstance(target, ast.Tuple) else target
+            if isinstance(first, ast.Name):
+                spoken_var = first.id
+    if spoken_var is None:
+        violations.append(
+            "_watch no longer binds the result of _handle_spoken_text"
+        )
+        return violations
+
+    # Any OTHER write to the spoken variable is a reintroduced rewrite.
+    for node in ast.walk(watch):
+        if not isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            continue
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and _called_name(node.value) == "_handle_spoken_text"
+        ):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for t in targets:
+            for leaf in ast.walk(t):
+                if isinstance(leaf, ast.Name) and leaf.id == spoken_var:
+                    violations.append(
+                        f"`{spoken_var}` reassigned inside _watch after "
+                        "_handle_spoken_text"
+                    )
+
+    # And it must reach on_agent_speech_finished as the first argument,
+    # unmodified (a bare Name, not an expression wrapping it).
+    finish_calls = [
+        n for n in ast.walk(watch)
+        if isinstance(n, ast.Call)
+        and _called_name(n) == "on_agent_speech_finished"
+    ]
+    if not finish_calls:
+        violations.append("_watch no longer calls on_agent_speech_finished")
+    for call in finish_calls:
+        first_arg = call.args[0] if call.args else None
+        if not (isinstance(first_arg, ast.Name) and first_arg.id == spoken_var):
+            violations.append(
+                "on_agent_speech_finished's first argument is not the "
+                f"unmodified `{spoken_var}` from _handle_spoken_text"
+            )
+    return violations
+
+
+# The pre-Z1 regression shape: the two-line itemless fallback re-added
+# between _handle_spoken_text and on_agent_speech_finished (541dcff's
+# narrowing, deleted by Z1). Embedded as text — never checked out.
+_PRE_Z1_WATCH_SHAPE = '''
+async def _watch() -> None:
+    await handle.wait_for_playout()
+    spoken, had_items = _handle_spoken_text(handle)
+    if not spoken and not had_items:
+        spoken = game._last_assistant_text
+    game.on_agent_speech_finished(
+        spoken,
+        speech_id=handle.id,
+        interrupted=handle.interrupted,
+    )
+'''
+
+
+def test_watch_body_has_no_buffer_fallback():
+    """The live `_watch` closure keeps the Z1 shape: no reference to the
+    last-assistant buffer, and _handle_spoken_text's result flows to
+    on_agent_speech_finished untouched."""
+    assert _watch_body_violations(inspect.getsource(lily_agent)) == []
+
+
+def test_watch_needle_bites_on_the_pre_z1_shape():
+    """Non-vacuity self-check: run the same needle against the pre-Z1
+    fallback shape and require it to FAIL — on both the buffer reference
+    and the `spoken` rewrite."""
+    violations = _watch_body_violations(_PRE_Z1_WATCH_SHAPE)
+    assert any("_last_assistant_text" in v for v in violations)
+    assert any("reassigned" in v for v in violations)

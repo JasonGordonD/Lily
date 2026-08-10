@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import asyncio
 
+import lily_config
 import lily_say_gate
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
@@ -160,8 +161,8 @@ def test_prefetch_total_budget_bounds_stacked_stalls():
 
     sk = LilyScorekeeper("lily-1C53C6")
 
-    original_budget = lily_reasoning.PREFETCH_TOTAL_BUDGET_SECONDS
-    lily_reasoning.PREFETCH_TOTAL_BUDGET_SECONDS = 0.2
+    original_budget = lily_config.prefetch_total_budget_seconds
+    lily_config.prefetch_total_budget_seconds = lambda: 0.2
     try:
         async def _go():
             return await asyncio.wait_for(
@@ -170,7 +171,44 @@ def test_prefetch_total_budget_bounds_stacked_stalls():
             )
         result = asyncio.new_event_loop().run_until_complete(_go())
     finally:
-        lily_reasoning.PREFETCH_TOTAL_BUDGET_SECONDS = original_budget
+        lily_config.prefetch_total_budget_seconds = original_budget
+
+    assert result is None
+    assert sk.status_notes  # the honest "question machine failure" note
+
+
+def test_prefetch_walls_are_read_at_call_time():
+    """Hygiene (HOTFIX-008): 82ad673 froze the lily_config wall accessors
+    into module constants at import, so a live env change to either wall
+    did nothing until the next deploy. The walls are read through the
+    accessors at call time — patching an accessor AFTER lily_reasoning
+    is imported must move the wall. Pinned on the per-call wall; the
+    overall-budget accessor is pinned the same way by
+    test_prefetch_total_budget_bounds_stacked_stalls above."""
+    import lily_reasoning
+
+    reasoning = lily_reasoning.LilyReasoning.__new__(
+        lily_reasoning.LilyReasoning
+    )
+
+    async def _hang(*args, **kwargs):
+        await asyncio.sleep(60)
+
+    reasoning.generate_question = _hang
+
+    sk = LilyScorekeeper("lily-1C53C6")
+
+    original_wall = lily_config.prefetch_timeout_seconds
+    lily_config.prefetch_timeout_seconds = lambda: 0.2
+    try:
+        async def _go():
+            return await asyncio.wait_for(
+                reasoning.prefetch_question(sk, "space", 2, []),
+                timeout=5.0,  # the 0.2s per-call wall must fire well first
+            )
+        result = asyncio.new_event_loop().run_until_complete(_go())
+    finally:
+        lily_config.prefetch_timeout_seconds = original_wall
 
     assert result is None
     assert sk.status_notes  # the honest "question machine failure" note
