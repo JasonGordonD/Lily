@@ -176,6 +176,15 @@ def test_correction_reaches_the_glass_in_one_update():
     assert game.confirmed_name_for_label("S1") == "Rami"
     assert len(game.attribute_publishes) == publishes_before + 1
     assert game.attribute_publishes[-1] == ["Rami"]
+    # W5 interface: the correction is a REBIND, not an ADD — everything
+    # downstream of sk.players (roster size, checkpoint scorekeeper_state,
+    # final_standings, session_reports.per_player, lily_memories
+    # player_names) derives from this one identity. The live session's
+    # ghost inflated the roster to 2 and fired a steal window at a solo
+    # table (05:32:11 UTC).
+    assert game.sk.roster_size() == 1
+    assert set(game.sk.players) == {"Rami"}
+    assert set(game.sk.ledger_scores()) == {"Rami"}
 
 
 def test_complaint_alone_changes_nothing():
