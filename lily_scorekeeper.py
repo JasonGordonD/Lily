@@ -1662,6 +1662,29 @@ class LilyScorekeeper:
         # or migrate the identity when this is a same-voice correction.
         for other_name, state in list(self.players.items()):
             if other_name != name and state.get("speaker_label") == speaker_label:
+                if state.get("placeholder"):
+                    # HOTFIX-010 V5: this label was hosting an unnamed
+                    # present voice under a speaker-label placeholder (play
+                    # and scoring proceeded without a name). A real name for
+                    # the SAME label is that voice naming itself, so the
+                    # placeholder's score history migrates to the name
+                    # unconditionally — no similarity gate, because a
+                    # placeholder is by construction the very voice now
+                    # speaking its name. The placeholder key is retired.
+                    migrated = self.players.pop(other_name)
+                    for entry in self.score_ledger:
+                        if entry.get("player") == other_name:
+                            entry["player"] = name
+                    if name not in self.players:
+                        migrated.pop("placeholder", None)
+                        migrated["speaker_label"] = None
+                        self.players[name] = migrated
+                    logger.info(
+                        "LILY_STATE | PLACEHOLDER_NAMED | session=%s label=%s "
+                        "placeholder=%s name=%s",
+                        self.session_id, speaker_label, other_name, name,
+                    )
+                    continue
                 if rename and name not in self.players and not (
                     lily_binding.lily_names_probably_same(other_name, name)
                 ):
@@ -1718,8 +1741,69 @@ class LilyScorekeeper:
         if player_name in self.players:
             self.players[player_name]["lobby_fact"] = fact
 
-    def roster_size(self) -> int:
-        return len(self.players)
+    def roster_size(self, include_placeholder: bool = True) -> int:
+        if include_placeholder:
+            return len(self.players)
+        return sum(
+            1 for s in self.players.values() if not s.get("placeholder")
+        )
+
+    def ensure_present_placeholder(self, speaker_label: str) -> Optional[str]:
+        """HOTFIX-010 V5: stand up a placeholder identity for a present but
+        unnamed voice so hosting proceeds — and SCORES — without a name
+        first. The placeholder is keyed by the speaker label (its identity
+        anchor); a real name for that label later migrates the accumulated
+        history through bind_speaker. Idempotent: a real name already on the
+        table, or this label already bound (named or placeholder), is a
+        no-op. Returns the placeholder key, or None when nothing was
+        created."""
+        label = (speaker_label or "").strip() or "UU"
+        for state in self.players.values():
+            if state.get("speaker_label") == label:
+                return None
+        if self.roster_size(include_placeholder=False) >= 1:
+            # A named voice is already hosting; the anonymous voice rides
+            # its own attribution and names itself opportunistically.
+            return None
+        if label in self.players:
+            return None
+        self.players[label] = {
+            "speaker_label": label,
+            "speaker_id": None,
+            "score": 0,
+            "streak": 0,
+            "talk_time_s": 0.0,
+            "answers_attempted": 0,
+            "answers_correct": 0,
+            "last_correct_category": None,
+            "questions_since_spoke": 0,
+            "lobby_fact": None,
+            "lifeline_available": True,
+            "placeholder": True,
+        }
+        logger.info(
+            "LILY_STATE | PLACEHOLDER_STOOD_UP | session=%s label=%s",
+            self.session_id, label,
+        )
+        return label
+
+    def has_active_placeholder(self) -> bool:
+        return any(s.get("placeholder") for s in self.players.values())
+
+    def real_player_names(self) -> list[str]:
+        """Rostered NAMES only — placeholder anchors excluded. The spoken
+        roster/score surfaces recite from this so a raw speaker label never
+        reaches the air; the head count still includes placeholders."""
+        return [
+            n for n, s in self.players.items() if not s.get("placeholder")
+        ]
+
+    def present_placeholder_label(self) -> str:
+        """The present unnamed voice's label — the most-observed unrostered
+        label, else a stable anonymous anchor."""
+        if self.unrostered_labels:
+            return max(self.unrostered_labels.items(), key=lambda kv: kv[1])[0]
+        return "UU"
 
     # -- attribution -------------------------------------------------------
 

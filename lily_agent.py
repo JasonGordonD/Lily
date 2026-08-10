@@ -693,6 +693,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # 2s fragment window so LLM/tool latency cannot erase it.
         self._confirmed_name_evidence: dict[str, str] = {}
         self._identity_required_before_start = True
+        # HOTFIX-010 V5: the session's ONE name ask is a one-shot. Once a
+        # present voice has taken the floor (on_user_turn_completed) the ask
+        # is spent and the gate is satisfied for good — it can never re-fire.
+        self._identity_ask_spent = False
         self.rounds_total = lily_config.rounds_total()
         self.sk.questions_per_round = lily_config.questions_per_round()
         self.sk.rounds_total = self.rounds_total
@@ -3257,6 +3261,53 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             )
         return intents
 
+    def _identity_gate_satisfied(self) -> bool:
+        """HOTFIX-010 V5: the name gate is a ONE-SHOT, never a standing
+        block. Hosting requires no name first, so the gate is satisfied —
+        and can no longer re-fire — the moment ANY of the WO's three
+        conditions holds:
+          * a name is captured (a real, non-placeholder roster entry);
+          * a placeholder is in use (a present unnamed voice is hosting and
+            scoring under its speaker-label anchor);
+          * the session's one identity ask has been spent.
+        Live 2026-08-10: "what should I call you?" fired seven times in
+        3.5 min — appended to every turn AFTER the player had given the
+        name and she had echoed it — because both gate sites keyed only on
+        roster_size()<1 with no satisfaction path, and the name never bound
+        to the roster. A name binds OPPORTUNISTICALLY whenever it arrives;
+        once the gate is satisfied it is never re-requested."""
+        if self.sk.roster_size(include_placeholder=False) >= 1:
+            return True
+        if self.sk.has_active_placeholder():
+            return True
+        if getattr(self, "_identity_ask_spent", False):
+            return True
+        return False
+
+    def identity_intake_line(self) -> str | None:
+        """HOTFIX-010 V5: the ONE name ask, folded into the opening beat —
+        never appended to every turn. It offers itself only while the gate
+        is unsatisfied (no name, no placeholder, ask unspent) and the game
+        has not started; the moment a present voice takes the floor the
+        gate satisfies (placeholder + ask-spent, set in
+        on_user_turn_completed) and this returns None for the rest of the
+        session. Replaces the old 'do not start Round One yet' hostage
+        clause: hosting never waits on a name."""
+        if getattr(self, "game_started", False):
+            return None
+        if not getattr(self, "_identity_required_before_start", False):
+            return None
+        if self._identity_gate_satisfied():
+            return None
+        return (
+            "identity_intake: this is the ONE time to ask a name — no one "
+            "has spoken yet. Fold a single short 'what should I call you?' "
+            "into your opening beat. You will not ask again: whatever comes "
+            "back — a name, or nothing — you host anyway. A name binds "
+            "whenever it arrives (now or later); until then the voice plays "
+            "and scores under its own place at the table."
+        )
+
     def start_blocked_reason(self) -> str | None:
         """Single choke for kickoff gates. None = start allowed."""
         if getattr(self, "_delivery_stop_sticky", False):
@@ -3267,7 +3318,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return "ambiguous_yes"
         if (
             getattr(self, "_identity_required_before_start", False)
-            and self.sk.roster_size() < 1
+            and not self._identity_gate_satisfied()
         ):
             return "identity_unconfirmed"
         if getattr(self, "_user_speaking", False):
@@ -11345,7 +11396,16 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return None
         if not scores:
             return None
-        pairs = ", ".join(f"{n} {v}" for n, v in scores.items())
+        # HOTFIX-010 V5: a placeholder anchor scores internally (its history
+        # migrates to a real name on binding) but its raw label is never
+        # aired — omit it from the recited detail.
+        try:
+            real = set(self.sk.real_player_names())
+        except Exception:
+            real = set(scores)
+        pairs = ", ".join(f"{n} {v}" for n, v in scores.items() if n in real)
+        if not pairs:
+            return None
         return (
             "SCORES — AUTHORITATIVE, READ-ONLY (committed ledger, the ONLY "
             f"score truth): {pairs}. NEVER compute, add up, infer, or carry a "
@@ -11361,17 +11421,20 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         named Rami, Rhonda and Chris. She held the names and still
         GENERATED the number. A count of people is state; state is read."""
         try:
-            names = list(self.sk.players)
+            count = self.sk.roster_size()
+            names = self.sk.real_player_names()
         except Exception:
             return None
-        if not names:
+        if count < 1:
             return None
-        count = len(names)
         word = _ROSTER_COUNT_WORDS.get(count, str(count))
+        # HOTFIX-010 V5: placeholders count toward the head count but are
+        # never recited — a raw speaker-label anchor must not reach the air.
+        named = f" — {', '.join(names)}" if names else ""
         return (
             "ROSTER — AUTHORITATIVE, READ-ONLY (the enrolled table, the "
             f"ONLY roster truth): {count} player"
-            f"{'' if count == 1 else 's'} — {', '.join(names)}. NEVER "
+            f"{'' if count == 1 else 's'}{named}. NEVER "
             "compute, estimate, or carry a player count forward from the "
             "conversation; any count of people you speak ('you "
             f"{word}', 'the {word} of you', '{word} players') must be "
@@ -11449,16 +11512,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "the question itself. Acknowledge only that you've stopped "
                 "and are listening; the game resumes when they say so."
             )
-        if (
-            getattr(self, "_identity_required_before_start", False)
-            and not getattr(self, "game_started", False)
-            and self.sk.roster_size() < 1
-        ):
-            extra.append(
-                "identity_intake: REQUIRED — no player has confirmed a name. "
-                "Ask one short 'what should I call you?', wait for their own "
-                "answer, bind it, and do not start Round One yet."
-            )
+        intake_line = self.identity_intake_line()
+        if intake_line:
+            extra.append(intake_line)
         score_line = self._score_authority_line()
         if score_line:
             extra.append(score_line)
@@ -13562,6 +13618,19 @@ class LilyAgent(Agent):
         # ride the mid-session paths from here on, never the pre-utterance
         # greet.
         self._game._first_human_utterance_seen = True
+        # HOTFIX-010 V5: a present voice is now on the floor. The one name
+        # ask has had its beat — spend it — and, while no name is bound,
+        # stand up the speaker-label placeholder so hosting and scoring
+        # proceed. Both satisfy the identity gate permanently, so the ask
+        # can never re-fire; a real name still migrates the placeholder's
+        # history through bind_speaker whenever it arrives.
+        game = self._game
+        if getattr(game, "_identity_required_before_start", False):
+            game._identity_ask_spent = True
+            if game.sk.roster_size(include_placeholder=False) < 1:
+                game.sk.ensure_present_placeholder(
+                    game.sk.present_placeholder_label()
+                )
         consume_reply = getattr(self._game, "consume_deterministic_reply", None)
         message_text = _message_text(new_message)
         event_owned = (
