@@ -1151,15 +1151,42 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         top = max(scores.values())
         leaders = [n for n, v in scores.items() if v == top and top > 0]
         sole_leader = leaders[0] if len(leaders) == 1 else None
+        display = self._surface_names()
         return [
             {
-                "name": name,
+                "name": display[name],
                 "score": scores[name],
                 "streak": s["streak"],
                 "leader": name == sole_leader,
             }
             for name, s in self.sk.players.items()
         ]
+
+    def _surface_names(self) -> dict[str, str]:
+        """HOTFIX-010 V5 fix-loop: the one naming authority for every name
+        SURFACE — symmetry with the spoken authority lines, which recite
+        real_player_names() only. A placeholder anchor is keyed by its raw
+        diarizer label ("UU"/"S1"); that label is an attribution anchor, NOT
+        an identity, so it must never be aired or persisted as a player name.
+        This maps each roster key to the name it may surface as: real names
+        pass through; placeholders become a neutral non-identity marker. Shared
+        by every surface that would otherwise leak the raw label — the frontend
+        scoreboard and finale/comeback/standings (via _players_payload) AND the
+        per-player block persisted in game_stats (build_game_stats) — so the
+        two persistence legs stay consistent (same placeholder → same marker,
+        both iterate self.sk.players in insertion order). Scores/streak/leader
+        stay keyed on the raw dict key; only the surfaced name is neutralized.
+        A real name later migrates the placeholder's history via bind_speaker,
+        after which the entry is real and surfaces as itself."""
+        names: dict[str, str] = {}
+        seq = 0
+        for key, s in self.sk.players.items():
+            if s.get("placeholder"):
+                seq += 1
+                names[key] = "Player" if seq == 1 else f"Player {seq}"
+            else:
+                names[key] = key
+        return names
 
     async def publish_attributes(self, phase: str | None = None) -> None:
         """LWW participant attributes — updated on every phase transition
@@ -10681,8 +10708,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         """game_stats jsonb for lily_session_reports: final standings,
         rounds/questions played, per-player answers attempted/correct,
         mode changes, callouts, duration."""
+        # HOTFIX-010 V5 fix-loop: per_player is a durable identity map inside
+        # the persisted game_stats blob — key it through the same surface-name
+        # authority as final_standings so a placeholder's raw diarizer label is
+        # never persisted as a player identity here either.
+        surface = self._surface_names()
         per_player = {
-            name: {
+            surface[name]: {
                 "answers_attempted": s.get("answers_attempted", 0),
                 "answers_correct": s.get("answers_correct", 0),
             }

@@ -19,7 +19,9 @@ file FAILS on pre-V5 code where the ask re-fires.
 
 from __future__ import annotations
 
+import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -154,3 +156,96 @@ def test_late_name_migrates_placeholder_history():
     assert game.sk.real_player_names() == ["Rami"]
     assert game.sk.ledger_scores().get("Rami") == 3  # history travelled
     assert game.start_blocked_reason() is None
+
+
+# --- HOTFIX-010 V5 fix-loop: the raw diarizer label placeholder must never
+#     surface as an identity on ANY name surface. The two spoken authority
+#     lines already recite real_player_names() only; _players_payload() (the
+#     single choke point behind the frontend scoreboard, the finale/comeback
+#     events, and Supabase persistence) was NOT filtered and emitted the raw
+#     label as name=. These pin the symmetry: the raw label is aired/persisted
+#     nowhere; a neutral non-identity marker appears instead; scoring is intact.
+#     FAILS on pre-fix 7ee9b4c (name == raw label "S1"/"UU").
+
+
+def _solo_unnamed_scored(points: int = 2) -> tuple[LilyGame, str]:
+    """A solo, never-named session under a speaker-label placeholder that has
+    scored — the exact bad-identity-data shape V1/V7 exist to prevent."""
+    game = _game()
+    _first_human_utterance(game, label="S1")  # no name ever given
+    key = game.sk.present_placeholder_label()
+    assert key == "S1"  # the raw diarizer label — must not surface anywhere
+    game.sk.start_question({"id": "q1", "canonical_answer": "Mars"})
+    game.sk.apply_score_event(
+        key, cause="answer", correct=True, points=points,
+        question_id="q1", transcript="Mars",
+    )
+    return game, key
+
+
+def test_players_payload_neutralizes_raw_placeholder_label():
+    game, key = _solo_unnamed_scored(points=2)
+    payload = game._players_payload()
+    assert len(payload) == 1
+    row = payload[0]
+    # Surface source: the raw label is gone; a neutral marker stands in.
+    assert row["name"] != key
+    assert row["name"] == "Player"
+    # Scoring is intact under the neutral relabel.
+    assert row["score"] == 2
+
+
+def test_frontend_scoreboard_attr_has_no_raw_label():
+    """Surface 1 — the published 'players' frontend attribute is exactly
+    json.dumps(_players_payload()) (lily_agent.py:1201)."""
+    game, key = _solo_unnamed_scored()
+    players_attr = json.dumps(game._players_payload())
+    assert key not in players_attr
+    assert "Player" in players_attr
+
+
+def test_finale_and_comeback_events_have_no_raw_label():
+    """Surfaces 2 — finish_game builds standings = sorted(_players_payload())
+    and hands standings[0]['name'] to the biggest_comeback event and the full
+    list to the finale event."""
+    game, key = _solo_unnamed_scored()
+    standings = sorted(game._players_payload(), key=lambda p: -p["score"])
+    # finale event {"standings": standings}
+    assert all(row["name"] != key for row in standings)
+    assert any(row["name"] == "Player" for row in standings)
+    # biggest_comeback {"player"/"name": standings[0]["name"]}
+    assert standings[0]["name"] != key
+    assert standings[0]["name"] == "Player"
+
+
+def test_cross_session_persistence_never_stores_raw_label():
+    """Surface 3 (worst leg) — final_standings feeds lily_checkpoint,
+    lily_write_session_memory and build_game_stats. None may key the durable
+    player identity to the raw diarizer label."""
+    game, key = _solo_unnamed_scored()
+    standings = sorted(game._players_payload(), key=lambda p: -p["score"])
+    # lily_checkpoint(final_standings=standings) / lily_write_session_memory(
+    # standings, ...): the durable player identity is the neutral marker.
+    for row in standings:
+        assert row["name"] != key
+    # build_game_stats(standings) -> game_stats["final_standings"] AND its
+    # independent per_player identity map — neither may carry the raw label.
+    game.highlights = []
+    game.session_started_at = time.time()
+    stats = game.build_game_stats(standings)
+    assert key not in json.dumps(stats)
+    assert "Player" in stats["per_player"]  # per_player keyed by neutral marker
+    assert key not in stats["per_player"]
+
+
+def test_bound_real_name_recites_and_never_neutralized():
+    """The relabel is placeholder-only: once a real name binds (migrating the
+    placeholder's history), it surfaces normally and is never masked."""
+    game, key = _solo_unnamed_scored(points=3)
+    game.sk.bind_speaker(key, "Rami")  # rename=False path: name binds
+    payload = game._players_payload()
+    names = [r["name"] for r in payload]
+    assert "Rami" in names
+    assert "Player" not in names
+    assert key not in names
+    assert game.sk.ledger_scores().get("Rami") == 3  # history travelled
