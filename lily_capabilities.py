@@ -46,7 +46,7 @@ from typing import Optional
 
 # Bumped whenever a player-facing feature lands. The delta a returning
 # table hears is every feature with `since` greater than their stamp.
-LILY_FEATURE_VERSION: int = 5
+LILY_FEATURE_VERSION: int = 6
 
 # The backfill (version 1) is the audited launch set; voice presets are
 # version 2 (Rami's direct change, 2026-07-31 — added at commit time per
@@ -105,6 +105,21 @@ LILY_CAPABILITIES: list = [
         "description": "point values climb each round; the wager round risks it all",
         # Gameplay structure, not an askable option — described in the
         # ROUNDS/FINAL prose, not the options block.
+        "prompt_marker": None,
+        "askable": False,
+    },
+    {
+        "key": "verdict_correction",
+        "code_ref": "lily_agent:LilyAgent.lily_correct_verdict",
+        "tools": ["lily_correct_verdict"],
+        "since": 6,
+        "description": (
+            "a wrong call can be contested and put right — she restores the "
+            "point, says what she's fixing, and the original ruling still "
+            "stands in the ledger"
+        ),
+        # A justice mechanism reached by contest, not a lobby option — like
+        # bonus_points it is described in prose, not the options block.
         "prompt_marker": None,
         "askable": False,
     },

@@ -106,7 +106,8 @@ Persistence needs no DDL: `lily_write_score_event` already forwards any
 cause, so a correction lands as a `lily_answers` row (`verdict=
 "verdict_correction"`, `awarded_points=delta`), grounds+actor in its
 `transcript`. No mechanism was removed; the anti-fabrication belt guards a
-different cause and stays whole. GUARD_MAP mechanism count 80 → 83.
+different cause and stays whole. GUARD_MAP mechanism count 83 → 87
+(mechs. 84–87; renumbered from 81–84 on rebase — W6/W7/W3 landed 81–83 first).
 
 ## 2026-08-10 — WO-LILY-HOTFIX-008 Z2c: release the question transition when narration is complete but supply is empty
 
