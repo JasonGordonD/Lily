@@ -259,37 +259,56 @@ _PACING_TIMED_PATTERNS = (
 )
 _PACING_RELAXED_RE = _re.compile("|".join(_PACING_RELAXED_PATTERNS))
 _PACING_TIMED_RE = _re.compile("|".join(_PACING_TIMED_PATTERNS))
-# A REFUSED timer is a relaxed request. The timed-enable patterns above key
-# on the noun vocabulary (timer/clock/countdown) AND the adjective (timed);
-# this refusal guard must cover the SAME vocabulary or it re-inverts. The
-# live W3 failure was exactly the gap: "I'm not playing with the timer"
-# hit the enable substring "with the timer" while an adjective-only
-# negation guard ("not timed") missed the noun three tokens away, so a
-# protest against the clock turned it ON. Explicit refusal CONSTRUCTIONS
-# (not a wildcard window) so "timed rounds, not relaxed" never misreads:
-#   - "[neg] … playing|doing|using|messing|dealing with … timer/clock"
-#   - "stop|kill|lose|drop|ditch|cut|cancel|scrap|forget … the timer/clock"
-#   - "not/no with|on the clock/timer"
-#   - "[neg] … timed" (the old adjacent-adjective case, folded in)
-# (Apostrophes normalize to spaces: "don t".)
-_PACING_TIMER_REFUSAL_RE = _re.compile(
-    r"\b(?:not|no|don t|dont|do not|won t|wont|never|ain t)\b"
-    r"(?:\s+(?:gonna|going to|want to|wanna|here to|about to))?"
-    r"\s+(?:playing|play|doing|do|using|use|messing|dealing|bothering"
-    r"|working|running|down for|into)"
-    r"(?:\s+(?:with|around with|around))?"
-    r"\s+(?:the\s+|a\s+|any\s+|that\s+|this\s+)?"
-    r"(?:timer|timed|clock|countdown)s?\b"
-    r"|\b(?:stop|kill|lose|drop|ditch|cut|cancel|scrap|forget|kill off"
-    r"|no more|ditch the|skip)"
-    r"(?:\s+(?:the|that|this|with(?: the)?|about(?: the)?))?"
-    r"\s+(?:timer|timed(?:\s+clock)?|clock|countdown)s?\b"
-    r"|\b(?:not|no)\s+(?:with|on)\s+(?:the\s+|a\s+)?(?:timer|clock|countdown)s?\b"
-    r"|\b(?:don t want|dont want|do not want|not want|won t do|no need for)"
-    r"(?:\s+(?:the|any|a))?\s+(?:timer|clock|countdown)s?\b"
-    r"|\b(?:no|not|don t want|dont want|do not want|won t do|without)"
-    r"\s+(?:the\s+|it\s+|any\s+|them\s+)?timed\b"
-)
+# SHARED negation/refusal builder (WO-LILY-HOTFIX-009 W3 + fix-loop
+# consolidation). Every deterministic mode-extraction surface — pacing
+# (lily_detect_pacing_choice), media (lily_detect_media_choice) and the
+# adult-deck lobby intent (lily_parse_lobby_setup_intents) — keys its
+# ENABLE on a noun vocabulary, so each needs the SAME refusal check or a
+# refusal re-inverts into the thing refused. Rather than patch negation
+# into each independently, they route through this one builder: the next
+# surface added inherits the whole construction set by calling it.
+#
+# The live W3 failure was the gap: "I'm not playing with the timer" hit
+# the enable substring "with the timer" while an adjective-only negation
+# guard ("not timed") missed the noun three tokens away. Explicit refusal
+# CONSTRUCTIONS (not a wildcard window) so "timed rounds, not relaxed"
+# never misreads. `noun` is a raw alternation of the topic's nouns
+# (e.g. "timer|timed|clock|countdown"); apostrophes normalize to spaces
+# ("don t"). Constructions covered:
+#   1. "[neg] … playing|doing|using|messing|dealing with … NOUN"
+#   2. "stop|kill|lose|drop|ditch|cut|cancel|scrap|forget … the NOUN"
+#   3. "[neg] with|on the NOUN"
+#   4. "don't want … NOUN"
+#   5. "[neg] put|turn|bring|switch … NOUN (on)" — negates an ENABLE verb
+#      ("don't put the timer on", "don't turn on the timer"): the fix-loop
+#      HIGH-1 gap, where the negation lands on the enable verb, not the noun
+#   6. "[neg] (the) NOUN" — bare adjacent negation ("no timer", "not timed")
+def _build_refusal_re(noun: str) -> "_re.Pattern":
+    return _re.compile(
+        r"\b(?:not|no|don t|dont|do not|won t|wont|never|ain t)\b"
+        r"(?:\s+(?:gonna|going to|want to|wanna|here to|about to))?"
+        r"\s+(?:playing|play|doing|do|using|use|messing|dealing|bothering"
+        r"|working|running|down for|into)"
+        r"(?:\s+(?:with|around with|around))?"
+        r"\s+(?:the\s+|a\s+|any\s+|that\s+|this\s+)?"
+        rf"(?:{noun})s?\b"
+        r"|\b(?:stop|kill|lose|drop|ditch|cut|cancel|scrap|forget|kill off"
+        r"|no more|skip)"
+        r"(?:\s+(?:the|that|this|with(?: the)?|about(?: the)?))?"
+        rf"\s+(?:{noun})s?\b"
+        rf"|\b(?:not|no)\s+(?:with|on)\s+(?:the\s+|a\s+)?(?:{noun})s?\b"
+        r"|\b(?:don t want|dont want|do not want|not want|won t do|no need for)"
+        rf"(?:\s+(?:the|any|a))?\s+(?:{noun})s?\b"
+        r"|\b(?:not|no|don t|dont|do not|never)\s+"
+        r"(?:put|turn|bring|switch|get|have|start|throw|set)"
+        r"(?:\s+(?:on|up|back|us|it|the|a|any|some)){0,3}\s+"
+        rf"(?:{noun})s?(?:\s+(?:on|up|back|back on))?\b"
+        r"|\b(?:no|not|don t|dont|do not|won t do|without)"
+        rf"\s+(?:the\s+|it\s+|any\s+|them\s+|more\s+)?(?:{noun})s?\b"
+    )
+
+
+_PACING_TIMER_REFUSAL_RE = _build_refusal_re(r"timer|timed|clock|countdown")
 
 
 _PACE_SLOWER_RE = _re.compile(
@@ -372,6 +391,17 @@ _VOICE_CHANGE_REQUEST_RE = _re.compile(
 _ADULT_DECK_REQUEST_RE = _re.compile(
     r"\b(?:adult|grown[- ]?up|18\s*\+)\s+(?:deck|trivia|game|mode)\b"
 )
+# W3 fix-loop (MEDIUM-1): the adult deck is a mode reached by spoken
+# preference too, so it shares the negation hazard — "I don't want the
+# adult deck" hit the request substring "adult deck" and enabled it.
+# Same shared refusal builder as pacing/media; blocks the request when the
+# utterance refuses it. (Apostrophes normalize to spaces; "18+" -> "18".)
+_ADULT_DECK_REFUSAL_RE = _build_refusal_re(
+    r"adult (?:deck|trivia|game|mode|round|content|stuff)"
+    r"|grown up (?:deck|trivia|game|mode)"
+    r"|grownup (?:deck|trivia|game|mode)"
+    r"|18 (?:deck|trivia|game|mode)"
+)
 _SETUP_AGE_MENTION_RE = _re.compile(
     r"\b(?:18\s*\+|18|eighteen|above\s+18|over\s+18|"
     r"\d{2}\s+years?\s+old|born\s+in\s+(?:19|20)\d{2})\b"
@@ -420,7 +450,8 @@ def lily_parse_lobby_setup_intents(text: str) -> dict:
             or _START_PARAPHRASE_RE.search(normalized)
         ),
         "voice": bool(_VOICE_CHANGE_REQUEST_RE.search(normalized)),
-        "adult": bool(_ADULT_DECK_REQUEST_RE.search(normalized)),
+        "adult": bool(_ADULT_DECK_REQUEST_RE.search(normalized))
+        and not _ADULT_DECK_REFUSAL_RE.search(normalized),
         # Run independently from control-command detection: no XOR.
         "media": lily_detect_media_choice(text),
         "heat": heat,
@@ -966,22 +997,10 @@ _MEDIA_VOICE_ONLY_RE = _re.compile(
 # "images live", so a verb-separated refusal ("I'm not playing with
 # pictures", "I don't want the pictures / the picture deck", "stop with the
 # images") would otherwise hit the enable substring and turn the screen ON.
-# Explicit refusal constructions over the picture/screen/image nouns;
-# checked FIRST in lily_detect_media_choice so OFF wins the collision.
-_MEDIA_REFUSAL_RE = _re.compile(
-    r"\b(?:not|no|don t|dont|do not|won t|wont|never|ain t)\b"
-    r"(?:\s+(?:gonna|going to|want to|wanna|here to|about to))?"
-    r"\s+(?:playing|play|doing|do|using|use|messing|dealing|bothering"
-    r"|working|down for|into)"
-    r"(?:\s+(?:with|around with|around))?"
-    r"\s+(?:the\s+|a\s+|any\s+|that\s+|this\s+)?"
-    r"(?:pictures?|images?|screen|picture (?:deck|round|lane))s?\b"
-    r"|\b(?:stop|kill|lose|drop|ditch|cut|cancel|scrap|forget|no more|skip)"
-    r"(?:\s+(?:the|that|this|with(?: the)?|about(?: the)?))?"
-    r"\s+(?:pictures?|images?|screen|picture (?:deck|round|lane))s?\b"
-    r"|\b(?:don t want|dont want|do not want|not want)"
-    r"(?:\s+(?:the|any|these|those))?"
-    r"\s+(?:pictures?|images?|picture (?:deck|round|lane))s?\b"
+# Built from the shared refusal builder; checked FIRST in
+# lily_detect_media_choice so OFF wins the collision.
+_MEDIA_REFUSAL_RE = _build_refusal_re(
+    r"picture|image|screen|picture (?:deck|round|lane)"
 )
 
 

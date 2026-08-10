@@ -813,6 +813,15 @@ def test_w3_timer_refusal_reads_as_relaxed_never_timed():
         assert lily_detect_control_command(txt) != "pacing_timed", txt
 
 
+def _stated_relaxed_this_session(game):
+    # Models the real incident: relaxed was set by a live voice command this
+    # session (05:32:58 "You asked for relaxed"), so the provenance flag is
+    # set and the confirmation beat may truthfully say "chose this session".
+    game.sk.set_pacing("relaxed")
+    game.prefs = {"pacing": "relaxed"}
+    game._pacing_stated_this_session = True
+
+
 def test_w3_real_utterance_never_enables_the_clock_on_the_wire():
     # Production path: the table set relaxed at the top of the session, then
     # protested the timer. The live bug flipped the clock ON and aired
@@ -820,8 +829,7 @@ def test_w3_real_utterance_never_enables_the_clock_on_the_wire():
     # line is dispatched.
     db = _FakeSupabase({"lily_group_prefs": []})
     game = _make_game(supabase=db)
-    game.sk.set_pacing("relaxed")
-    game.prefs = {"pacing": "relaxed"}
+    _stated_relaxed_this_session(game)
 
     async def _run():
         for txt in _W3_TIMER_REFUSALS:
@@ -841,8 +849,7 @@ def test_w3_contradicting_change_asks_before_applying():
     # relaxed choice is held for one confirmation beat, not applied silently.
     db = _FakeSupabase({"lily_group_prefs": []})
     game = _make_game(supabase=db)
-    game.sk.set_pacing("relaxed")
-    game.prefs = {"pacing": "relaxed"}
+    _stated_relaxed_this_session(game)
 
     asyncio.run(_drive_one(game, "let's do timed rounds"))
     assert game.sk.pacing == "relaxed"           # held
@@ -850,6 +857,9 @@ def test_w3_contradicting_change_asks_before_applying():
     assert len(game.session.instructions) == 1   # exactly one beat
     beat = game.session.instructions[0].lower()
     assert "timed" in beat and ("confirm" in beat or "switch" in beat)
+    # MEDIUM-2: relaxed was stated THIS session, so the beat says so.
+    assert "this session" in beat
+    assert "on file" not in beat
     # Nothing persisted while it is only pending.
     assert game.prefs["pacing"] == "relaxed"
 
@@ -857,8 +867,7 @@ def test_w3_contradicting_change_asks_before_applying():
 def test_w3_confirmation_assent_applies_the_change():
     db = _FakeSupabase({"lily_group_prefs": []})
     game = _make_game(supabase=db)
-    game.sk.set_pacing("relaxed")
-    game.prefs = {"pacing": "relaxed"}
+    _stated_relaxed_this_session(game)
 
     asyncio.run(_drive_one(game, "let's do timed rounds"))
     asyncio.run(_drive_one(game, "yes, switch it"))
@@ -870,8 +879,7 @@ def test_w3_confirmation_assent_applies_the_change():
 def test_w3_confirmation_decline_keeps_the_stated_choice():
     db = _FakeSupabase({"lily_group_prefs": []})
     game = _make_game(supabase=db)
-    game.sk.set_pacing("relaxed")
-    game.prefs = {"pacing": "relaxed"}
+    _stated_relaxed_this_session(game)
 
     asyncio.run(_drive_one(game, "let's do timed rounds"))
     asyncio.run(_drive_one(game, "no, leave it"))
@@ -911,3 +919,69 @@ def test_w3_picture_refusal_never_enables_pictures():
     # Un-negated enables still work.
     assert lily_detect_media_choice("turn the pictures on") == "pictures"
     assert lily_detect_media_choice("with pictures") == "pictures"
+
+
+# ---------------------------------------------------------------------------
+# W3 fix-loop — HIGH-1 (enable-verb negation), MEDIUM-1 (adult-deck refusal
+# on the lobby-intake surface), MEDIUM-2 (confirmation-beat provenance).
+# ---------------------------------------------------------------------------
+
+def test_w3_high1_negated_enable_verb_never_enables_timed():
+    # "don't" is brief-named. The negation here lands on the ENABLE VERB
+    # (put/turn/bring the timer on), not the noun — the reviewer's HIGH-1
+    # gap. None of these may resolve to pacing_timed.
+    for txt in (
+        "don't put the timer on",
+        "don't turn on the timer",
+        "don't turn the timer on",
+        "do not put the timer on",
+        "don't put us on the clock",
+        "don't bring the timer back",
+        "no, don't turn the timer on",
+    ):
+        assert lily_detect_control_command(txt) != "pacing_timed", txt
+    # The un-negated enable forms are untouched.
+    assert lily_detect_control_command("put the timer on") == "pacing_timed"
+    assert lily_detect_control_command("turn the clock back on") == "pacing_timed"
+
+
+def test_w3_medium1_adult_deck_refusal_never_enables_on_lobby_intake():
+    # The adult deck is reached by spoken preference through
+    # lily_parse_lobby_setup_intents["adult"] (_ADULT_DECK_REQUEST_RE), and
+    # shares the negation hazard. The LITERAL brief phrasing must not enable.
+    from lily_scorekeeper import lily_parse_lobby_setup_intents
+    for txt in (
+        "I don't want the adult deck",
+        "no adult deck",
+        "not playing the adult deck",
+        "stop the adult deck",
+        "don't put on the adult deck",
+        "we don't want the grown up deck",
+    ):
+        assert lily_parse_lobby_setup_intents(txt)["adult"] is False, txt
+    # A genuine adult-deck request still enables.
+    for txt in ("let's do the adult deck", "adult deck please",
+                "I want the adult mode", "grown-up trivia"):
+        assert lily_parse_lobby_setup_intents(txt)["adult"] is True, txt
+
+
+def test_w3_medium2_remembered_pref_beat_does_not_claim_this_session():
+    # The pref came from CROSS-SESSION memory (loaded into self.prefs, never
+    # written by a this-session set_pacing) — the beat must NOT confabulate
+    # "you chose relaxed this session". Direction still holds (it confirms
+    # before applying), only the provenance wording changes.
+    db = _FakeSupabase({"lily_group_prefs": []})
+    game = _make_game(supabase=db)
+    game.sk.set_pacing("relaxed")            # applied at game start, sk-only
+    game.prefs = {"pacing": "relaxed"}        # loaded from memory
+    game._pacing_stated_this_session = False  # never a live this-session write
+
+    asyncio.run(_drive_one(game, "let's do timed rounds"))
+    assert game.sk.pacing == "relaxed"        # still held pending confirm
+    assert game._pending_pacing == "timed"
+    beat = game.session.instructions[0].lower()
+    assert "this session" not in beat         # no confabulated provenance
+    assert "on file" in beat                  # honest "the usual from before"
+    # And it still applies on assent.
+    asyncio.run(_drive_one(game, "yes"))
+    assert game.sk.pacing == "timed"

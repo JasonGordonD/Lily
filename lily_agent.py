@@ -1047,6 +1047,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # yes/no like the forget flow.
         self._pending_pacing: str | None = None
         self._pending_pacing_requester: str | None = None
+        # W3 fix-loop (MEDIUM-2): provenance of the CURRENT prefs["pacing"].
+        # True only once a live this-session action (set_pacing) wrote it;
+        # a value merged from cross-session memory leaves it False. The
+        # confirmation beat's wording derives from this so it never claims
+        # "you chose X earlier this session" about a remembered preference.
+        self._pacing_stated_this_session: bool = False
         # The group id the cascade targets — captured on the FIRST attempt,
         # BEFORE the fresh-anonymous re-bind, so a retry after partial
         # failure still deletes the ORIGINAL identity, never the fresh one.
@@ -7553,15 +7559,27 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             ):
                 self._pending_pacing = pacing
                 self._pending_pacing_requester = player or speaker_label
+                # MEDIUM-2: wording must match the pref's real provenance —
+                # "chose this session" only if a live write set it; a value
+                # merged from cross-session memory is "the usual on file",
+                # never a this-session claim.
+                if getattr(self, "_pacing_stated_this_session", False):
+                    provenance = (
+                        f"already chose {stated} pacing earlier this session"
+                    )
+                else:
+                    provenance = (
+                        f"has {stated} pacing on file as its usual from before"
+                    )
                 self.gated_say(
                     None,
                     "pacing_confirm",
                     f"A player asked for {pacing} pacing, but this table "
-                    f"already chose {stated} earlier this session — that is "
-                    "a contradiction, so confirm before switching, never "
-                    "flip it silently. One light line naming the earlier "
-                    f"choice and asking if they want to switch to {pacing}. "
-                    "Nothing changes until they say yes.",
+                    f"{provenance} — that is a contradiction, so confirm "
+                    "before switching, never flip it silently. One light "
+                    "line naming that earlier preference and asking if they "
+                    f"want to switch to {pacing}. Nothing changes until they "
+                    "say yes.",
                     source="voice_command",
                 )
                 return
@@ -9177,6 +9195,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.sk.set_pacing(pacing)
         self.prefs = dict(self.prefs or {})
         self.prefs["pacing"] = pacing
+        # A live this-session write — the confirmation beat may now truthfully
+        # say the table chose this pacing this session (MEDIUM-2 provenance).
+        self._pacing_stated_this_session = True
         logger.info(
             "LILY_PREFS | PACING | session=%s group=%s pacing=%s source=%s "
             "changed=%s",
