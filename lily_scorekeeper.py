@@ -1505,16 +1505,38 @@ class LilyScorekeeper:
         player_name: str,
         speaker_id: Optional[str] = None,
         lobby_fact: Optional[str] = None,
+        rename: bool = False,
     ) -> dict:
         """
         Bind a diarization label to a player name (lily_bind_speaker tool).
         Re-binding an existing player updates their label (late-session
         label drift resolves through the same path).
+
+        rename=True (HOTFIX-009 W7) marks a same-voice self-correction:
+        the label's current holder is the SAME person under a wrong
+        spelling ("Rummy" -> "Rami"), so the entry MIGRATES — state and
+        ledger history travel to the corrected name — instead of forking
+        a fresh entry and leaving a misspelled ghost on the glass. Only
+        callers whose name provenance is that voice's own words (confirmed
+        evidence, the known-name snap of it) may assert it.
         """
         name = player_name.strip()
-        # If this label was bound to someone else, release it there.
-        for other_name, state in self.players.items():
+        # If this label was bound to someone else, release it there —
+        # or migrate the identity when this is a same-voice correction.
+        for other_name, state in list(self.players.items()):
             if other_name != name and state.get("speaker_label") == speaker_label:
+                if rename and name not in self.players:
+                    migrated = self.players.pop(other_name)
+                    for entry in self.score_ledger:
+                        if entry.get("player") == other_name:
+                            entry["player"] = name
+                    self.players[name] = migrated
+                    logger.info(
+                        "LILY_STATE | PLAYER_RENAMED | session=%s label=%s "
+                        "from=%s to=%s",
+                        self.session_id, speaker_label, other_name, name,
+                    )
+                    continue
                 state["speaker_label"] = None
                 logger.info(
                     "LILY_STATE | LABEL_REBOUND | session=%s label=%s from=%s to=%s",

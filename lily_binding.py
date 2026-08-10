@@ -77,6 +77,86 @@ _INTRODUCER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# HOTFIX-009 W7: a letter-by-letter name correction ("my name is Romeo.
+# Alpha. Mike. Indigo." — live 2026-08-10, after "Rummy" bound) must parse
+# as name evidence. The A070E8 stoplist correctly keeps the correction
+# VOCABULARY from binding as a name, but that left the spelled name itself
+# inert — the stale first-capture evidence then outranked every corrected
+# re-bind and the glass kept the wrong spelling until the player complained.
+# NATO alphabet plus the common informal "as in" words; the implied letter
+# is always the word's first letter. Cue-gated on a NAME introducer (never
+# bare "spelled"/"it's spelled"), so a trivia answer being spelled out can
+# never become name evidence.
+_SPELLING_ALPHABET = {
+    "alfa", "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+    "golf", "hotel", "india", "indigo", "juliet", "juliett", "kilo",
+    "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+    "sierra", "tango", "uniform", "victor", "whiskey", "whisky", "xray",
+    "yankee", "zulu",
+    "able", "adam", "apple", "baker", "boy", "cat", "david", "dog",
+    "easy", "edward", "frank", "fox", "george", "henry", "how", "ida",
+    "item", "jack", "john", "king", "lincoln", "love", "mary", "nancy",
+    "nora", "ocean", "peter", "queen", "robert", "roger", "sam", "sugar",
+    "thomas", "tom", "uncle", "union", "william", "young", "zebra",
+}
+
+_SPELL_FILLER = {
+    "as", "in", "like", "for", "and", "then", "uh", "um", "dash",
+    "hyphen", "space", "dot", "period", "comma",
+}
+
+_SPELL_CUE_RE = re.compile(
+    r"\b(?:my\s+name(?:\s+is|['’`]?s)?(?:\s+spelled)?|call\s+me|they\s+call\s+me)\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def lily_extract_spelled_name(raw: str) -> Optional[str]:
+    """Assemble a spelled-out self-identification into a name.
+
+    "my name is Romeo. Alpha. Mike. Indigo." -> "Rami"
+    "call me R as in Romeo, A as in Apple, M as in Mary, I as in India"
+    -> "Rami". Conservative: every token after the cue must be a spelling
+    unit (a single letter or a known spelling-alphabet word) or filler —
+    one ordinary word aborts, so "my name is Jack" falls through to the
+    introducer path untouched.
+    """
+    text = _strip_diarization_tag(raw or "").strip()
+    if not text:
+        return None
+    m = _SPELL_CUE_RE.search(text)
+    if not m:
+        return None
+    tokens = [t.lower() for t in re.findall(r"[a-zA-Z]+", m.group(1))]
+    tokens = [t for t in tokens if t not in _SPELL_FILLER]
+    if len(tokens) < 2:
+        return None
+    letters = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if len(tok) == 1:
+            letters.append(tok)
+            # "R as in Romeo" — filler stripped leaves the confirming
+            # word; consume it when it restates the same letter.
+            if (
+                i + 1 < len(tokens)
+                and tokens[i + 1] in _SPELLING_ALPHABET
+                and tokens[i + 1][0] == tok
+            ):
+                i += 1
+        elif tok in _SPELLING_ALPHABET:
+            letters.append(tok[0])
+        else:
+            return None
+        i += 1
+    if len(letters) < 2:
+        return None
+    name = "".join(letters)
+    if not lily_is_valid_name(name):
+        return None
+    return name.capitalize()
+
 
 def _strip_diarization_tag(raw: str) -> str:
     """Strip Speechmatics diarization tag: '[S1] Jack' -> 'Jack'."""
@@ -137,12 +217,18 @@ def lily_extract_name(raw: str) -> Optional[str]:
 def lily_extract_explicit_name(raw: str) -> Optional[str]:
     """Extract only direct self-identification, never conversational nouns.
 
-    Accepted: introducer forms ("my name is Rami", "call me Rami") or a
-    bare one-token name. This is the durable-binding provenance gate.
+    Accepted: introducer forms ("my name is Rami", "call me Rami"), a
+    spelled-out name behind a name cue (HOTFIX-009 W7 — tried FIRST,
+    because the introducer regex would otherwise grab the first NATO word
+    as the name), or a bare one-token name. This is the durable-binding
+    provenance gate.
     """
     text = _strip_diarization_tag(raw or "").strip()
     if not text:
         return None
+    spelled = lily_extract_spelled_name(text)
+    if spelled:
+        return spelled
     tokens_raw = text.split()
     if (
         len(tokens_raw) > 1

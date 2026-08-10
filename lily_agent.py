@@ -3057,6 +3057,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             "LILY_BIND | NAME_EVIDENCE | session=%s label=%s name=%s",
             self.sk.session_id, label, name,
         )
+        # HOTFIX-009 W7: a correction propagates to the glass in ONE seam
+        # update. When this label is already bound under a different
+        # spelling, the player's own corrected words re-drive the EXISTING
+        # bind path (rename-migrate + on_speaker_bound -> attribute
+        # publish) instead of waiting on the model to re-call the tool —
+        # live 2026-08-10, the NATO correction changed nothing on the
+        # glass until the player complained a second time.
+        holder = next(
+            (
+                n for n, st in self.sk.players.items()
+                if st.get("speaker_label") == label
+            ),
+            None,
+        )
+        if holder is not None and holder != name:
+            self.sk.bind_speaker(label, name, rename=True)
+            self.on_speaker_bound(label, name)
 
     def confirmed_name_for_label(self, speaker_label: str) -> str | None:
         label = (speaker_label or "").strip().strip("[]")
@@ -11849,7 +11866,20 @@ class LilyAgent(Agent):
                 "name lightly when you greet them.)"
             )
             name = snapped
-        self._game.sk.bind_speaker(label, name)
+        # HOTFIX-009 W7: every name that reaches this bind is anchored to
+        # the voice itself (confirmed evidence, the snap of it, or a
+        # biometric label) — so a different current holder of this label
+        # is the same person under a wrong spelling. Migrate, don't fork.
+        holder = next(
+            (
+                n for n, st in self._game.sk.players.items()
+                if st.get("speaker_label") == label
+            ),
+            None,
+        )
+        self._game.sk.bind_speaker(
+            label, name, rename=bool(holder is not None and holder != name)
+        )
         note = self._game.on_speaker_bound(label, name)
         return f"Bound: voice {label} is {name}.{snap_note}{note}"
 
