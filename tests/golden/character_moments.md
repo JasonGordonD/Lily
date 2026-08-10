@@ -124,13 +124,14 @@ the transcript timestamps above (all UTC, `lily_transcripts.created_at`):
 
 # WO-LILY-HOTFIX-009 PINS — Session `RM_RQTZZanrHURF` (M6–M11)
 
-Six moments from the 2026-08-10 solo session in room `RM_RQTZZanrHURF`
-(operator clock 01:29–01:42 EDT = 05:29–05:42 UTC). Rows exported from the
-production `lily_transcripts` table on 2026-08-10 and committed verbatim as
+Six moments from the 2026-08-10 solo session `lily-5E3036-b56b5eb4` in
+room `RM_RQTZZanrHURF` (operator clock 01:29–01:42 EDT = 05:29–05:42 UTC).
+Rows exported from the production `lily_transcripts` table on 2026-08-10
+and committed verbatim as
 `tests/golden/rm_rqtzzanrhurf_lily_transcripts.json` — the suite reads the
 moments FROM those rows (row ids cited below), so suite, registry, and
-export cannot drift apart. This export carries no `session_id` column (the
-export was already scoped to the room); provenance is the row `id`.
+export cannot drift apart. The export is room-scoped and carries no
+`session_id` column; provenance is the row `id`.
 
 Several rows end with the ` …[cut off]` barge-in stamp (HOTFIX-008 Z1: the
 stamp marks a real interruption appended to the delivered buffer). The
