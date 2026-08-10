@@ -262,6 +262,9 @@ def test_source_needles_timer_topology_and_self_cancel_guard():
     )
     adjudicate_src = inspect.getsource(LilyGame.adjudicate)
     assert "is not asyncio.current_task()" in adjudicate_src
+    # The steal-branch replacement site carries the same guard: open_window
+    # runs from adjudicate INSIDE the timer task it replaces.
+    assert "is not asyncio.current_task()" in open_window_src
 
 
 # ===========================================================================
@@ -316,6 +319,58 @@ def test_timeout_adjudication_survives_its_own_timer():
         "reveal", "verdict", "next_delivery"
     ]
     assert game._open_transition_qnum is None
+
+
+# ===========================================================================
+# 1b. The 05:34:47 shape — the STEAL branch replaces the timer from inside
+#     the timer task (open_window's cancel site). The outer timer must
+#     survive the replacement, and the steal-expiry adjudication that
+#     follows (the 05:34:52 death) must complete its beat.
+# ===========================================================================
+
+
+def test_steal_branch_timer_replacement_does_not_cancel_its_own_task():
+    import lily_config
+
+    game = _make_game()
+    _arm_incident_q4(game)
+    qnum = game.sk.question_number
+    # A second, unjudged player makes the steal branch reachable (the live
+    # session's roster made stealers_exist true at 05:34:47).
+    game.sk.bind_speaker("S2", "Maria")
+    assert game.next_question is None
+
+    real_steal_seconds = lily_config.steal_window_seconds
+    lily_config.steal_window_seconds = lambda: 0.05
+    try:
+        async def _timer():
+            await asyncio.sleep(0.01)
+            if game.sk.answer_window_open and not game._adjudicating:
+                await game.adjudicate(steal_allowed=True)
+
+        async def _go():
+            outer = asyncio.ensure_future(_timer())
+            game._window_timer = outer
+            await asyncio.gather(outer, return_exceptions=True)
+            # The steal branch replaced the timer WITHOUT cancelling the
+            # task it was running in.
+            assert not outer.cancelled()
+            steal_timer = game._window_timer
+            assert steal_timer is not outer
+            assert game._steal_window
+            # The steal window expires with no stealer — the follow-on
+            # adjudication (the one that died at 05:34:52) completes.
+            await asyncio.gather(steal_timer, return_exceptions=True)
+            assert not steal_timer.cancelled()
+
+        _run(_go)
+    finally:
+        lily_config.steal_window_seconds = real_steal_seconds
+
+    assert game.transition_stages(qnum)[:2] == ["reveal", "verdict"]
+    assert len(_verdict_beats(game)) == 1
+    assert game.armed_question is None
+    assert game._is_burned(Q_CURIE)
 
 
 # ===========================================================================

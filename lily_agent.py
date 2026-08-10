@@ -6445,7 +6445,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # means the table heard the question.
             self.record_question_asked(reason="window_open")
         self._start_bed()
-        if self._window_timer and not self._window_timer.done():
+        # HOTFIX-009 W6: same self-cancel class as the adjudicate head —
+        # this runs from adjudicate's steal branch INSIDE the timer task
+        # being replaced (it survived live only because the steal branch
+        # returns synchronously, so the pending cancel never got a
+        # suspension point to land on). The current task never needs
+        # cancelling; the reassignment below already retires it.
+        if (
+            self._window_timer
+            and not self._window_timer.done()
+            and self._window_timer is not asyncio.current_task()
+        ):
             self._window_timer.cancel()
 
         async def _expire() -> None:
