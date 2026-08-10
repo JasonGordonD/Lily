@@ -6502,7 +6502,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 registered.get("id"),
             )
             return
-        dur = duration if duration is not None else self._answer_window_duration()
+        # HOTFIX-009 W4: relaxed pacing runs no clock. An ordinary relaxed
+        # window (no explicit duration, not a steal) opens UNTIMED — no
+        # deadline, no _expire task — and the beat closes on the roster
+        # instead (_maybe_close_relaxed_beat). A steal window and any
+        # explicitly-timed caller keep their clock; relaxed disarms the
+        # steal branch upstream, so a relaxed steal window never opens here.
+        relaxed_untimed = (
+            self.sk.pacing == "relaxed" and duration is None and not steal
+        )
+        dur = (
+            None
+            if relaxed_untimed
+            else (
+                duration if duration is not None
+                else self._answer_window_duration()
+            )
+        )
         # N3 invariant 2: the question id is CAPTURED HERE, at window-open,
         # and carried through to the ledger write — never inferred at
         # adjudication time from whatever is armed by then. A steal window
@@ -6513,6 +6529,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             question_id=registered.get("id"),
             question_index=self.sk.question_number,
             registered=True,
+            untimed=relaxed_untimed,
         )
         self._steal_window = steal
         # M4: the window opening IS the stem's completion — terminal.
@@ -6563,16 +6580,52 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         ):
             self._window_timer.cancel()
 
-        async def _expire() -> None:
-            await asyncio.sleep(dur)
-            if self.sk.answer_window_open and not self._adjudicating:
-                await self.adjudicate(steal_allowed=not steal)
+        # HOTFIX-009 W4: an untimed relaxed window arms NO expiry task —
+        # there is no clock to close it. The prior timer (if any) is
+        # cancelled above and the handle is cleared, so nothing lingers to
+        # expire a window that must stay open until the roster completes.
+        if relaxed_untimed:
+            self._window_timer = None
+        else:
+            async def _expire() -> None:
+                await asyncio.sleep(dur)
+                if self.sk.answer_window_open and not self._adjudicating:
+                    await self.adjudicate(steal_allowed=not steal)
 
-        self._window_timer = asyncio.ensure_future(_expire())
+            self._window_timer = asyncio.ensure_future(_expire())
         # Early-buzz replay (fixture Q5): answers spoken during the
         # delivery playout become candidates NOW that the window is live.
         if not steal:
             self._replay_pre_window_answers()
+
+    def _maybe_close_relaxed_beat(self) -> None:
+        """HOTFIX-009 W4: with no clock, the relaxed answer beat closes on
+        PEOPLE. Once every rostered player has an answer in and no clarify
+        is pending, adjudication fires through the same seam the instant-
+        Tier-1 path uses — right, wrong, or a pass, one per rostered voice
+        closes the beat. Timed mode never reaches here in practice (its
+        window closes on the _expire clock), and the pacing guard makes it
+        a no-op there regardless. Runs on every final that recorded a
+        candidate in an open relaxed window."""
+        if self.sk.pacing != "relaxed":
+            return
+        if not self.sk.answer_window_open or self._adjudicating:
+            return
+        if getattr(self, "pending_clarify", None):
+            # A clarify is out to a player — the beat waits on their reply,
+            # not the roster count.
+            return
+        roster = self.sk.players
+        if not roster:
+            return
+        if not all(name in self.sk.answer_candidates for name in roster):
+            return
+        logger.info(
+            "LILY_WINDOW | RELAXED_BEAT_CLOSE | session=%s q=%d roster=%d — "
+            "every rostered player answered; adjudicating with no clock",
+            self.sk.session_id, self.sk.question_number, len(roster),
+        )
+        asyncio.ensure_future(self.adjudicate(steal_allowed=False))
 
     def _start_bed(self) -> None:
         path = lily_config.thinking_bed_path()
@@ -7883,6 +7936,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                                 nbest=self._nbest_lookup(key),
                             )
                         )
+            # HOTFIX-009 W4: relaxed pacing has no clock to close this beat,
+            # so it closes on the roster instead — once this candidate
+            # completes the rostered set, adjudicate now (no-op in timed
+            # mode, and when the roster is not yet complete).
+            self._maybe_close_relaxed_beat()
 
     async def _speculative_judge(
         self,
@@ -8510,9 +8568,16 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             stealers_exist = any(
                 name not in self._judged_keys for name in self.sk.players
             )
+            # HOTFIX-009 W4: relaxed pacing arms no steal clock. The
+            # 05:32:11 five-second steal window fired on a relaxed solo
+            # table ("You asked for relaxed, and I tossed a five-second
+            # steal clock at you anyway"). Relaxed reads the same steal
+            # gate every other pacing does — it just never passes it: the
+            # missed beat falls through to the ordinary reveal.
             steal_possible = (
                 missed and ordered and steal_allowed
                 and stealers_exist and not self.game_over
+                and self.sk.pacing != "relaxed"
             )
             if steal_possible and question_revealed:
                 # N8: every steal precondition is met EXCEPT the one that
@@ -8974,6 +9039,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
         Returns the late-answer record, or None when nothing applies.
         """
+        # HOTFIX-009 W4: relaxed pacing files NOTHING late. The gate behind
+        # "diamond is right. You had it. Just past the window, so it doesn't
+        # score." rejects on timing; relaxed has no window to be past, so
+        # this path is closed entirely in relaxed mode — no record, no
+        # ledger row, no announced miss.
+        if self.sk.pacing == "relaxed":
+            return None
         binding = self.sk.window_binding()
         if not binding.get("registered"):
             return None

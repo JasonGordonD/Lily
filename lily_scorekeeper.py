@@ -1821,11 +1821,20 @@ class LilyScorekeeper:
         question_id: Optional[str] = None,
         question_index: Optional[int] = None,
         registered: Optional[bool] = None,
+        untimed: bool = False,
     ) -> None:
         """Open the answer window (called on TTS playback-completion).
         reset_candidates=False reopens for a steal window: prior candidates
         are kept so one-candidate-per-player still holds and only new
         players can commit.
+
+        HOTFIX-009 W4: untimed=True opens the window with NO deadline —
+        relaxed pacing runs no clock ("No timers. Relaxed means relaxed."),
+        so is_window_open/window_contains never expire it and no _expire
+        task is armed against it; the beat closes on the roster instead. An
+        explicit numeric duration still sets a deadline even in relaxed mode
+        (the late-answer path measures lateness against remembered
+        deadlines) — untimed is the flag, not the pacing.
 
         WINDOW BINDING (WO-LILY-HOTFIX-006 N3, invariant 2): the question
         this window belongs to is captured HERE, at open, and carried on
@@ -1839,7 +1848,7 @@ class LilyScorekeeper:
         t = now if now is not None else time.time()
         self.answer_window_open = True
         self.answer_window_opened_at = t
-        self.answer_window_deadline = t + (
+        self.answer_window_deadline = None if untimed else t + (
             duration if duration is not None else self.answer_window_seconds
         )
         # Captured identity. The id is the question's own id when it has
@@ -1877,9 +1886,13 @@ class LilyScorekeeper:
         self._window_addressee_confidences = []
         self._last_addressee_confidence = None
         logger.info(
-            "LILY_STATE | ANSWER_WINDOW_OPEN | session=%s q=%d deadline_in=%.1fs",
+            "LILY_STATE | ANSWER_WINDOW_OPEN | session=%s q=%d deadline_in=%s",
             self.session_id, self.question_number,
-            (self.answer_window_deadline - t),
+            (
+                "untimed"
+                if self.answer_window_deadline is None
+                else f"{self.answer_window_deadline - t:.1f}s"
+            ),
         )
 
     def close_answer_window(self) -> None:

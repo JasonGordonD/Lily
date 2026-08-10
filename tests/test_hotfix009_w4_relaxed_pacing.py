@@ -37,12 +37,6 @@ Same import boundary note as test_hotfix006_transitions.py.
 
 import pytest
 
-pytest.skip(
-    "HOTFIX-009 W4: tests land ahead of the implementation (push-per-task). "
-    "W4 implementer: delete this module-level skip when the fix is in.",
-    allow_module_level=True,
-)
-
 import asyncio
 import time
 from pathlib import Path
