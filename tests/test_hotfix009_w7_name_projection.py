@@ -203,6 +203,11 @@ def test_correction_reaches_the_glass_in_one_update():
     assert game.attribute_publishes[-1] == ["Rummy"]
 
     publishes_before = len(game.attribute_publishes)
+    # The ONE agent-side name snapshot outside sk.players (review-round
+    # derivation sweep): prewager_standings is compared BY NAME at
+    # wrap-up — a rename between final wager and wrap-up must re-key it
+    # or a false "took the crown" highlight mints.
+    game.prewager_standings = [{"name": "Rummy", "score": 2}]
 
     # 05:29:53 — the NATO correction final, through the same site.
     _transcript_final(game, "S1", NATO_CORRECTION, t0 + 24.0)
@@ -222,6 +227,7 @@ def test_correction_reaches_the_glass_in_one_update():
     assert game.sk.roster_size() == 1
     assert set(game.sk.players) == {"Rami"}
     assert set(game.sk.ledger_scores()) == {"Rami"}
+    assert game.prewager_standings == [{"name": "Rami", "score": 2}]
 
 
 def test_midgame_dissimilar_call_me_does_not_auto_rebind():

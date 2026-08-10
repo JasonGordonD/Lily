@@ -3081,12 +3081,26 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             and lily_names_probably_same(holder, name)
         ):
             self.sk.bind_speaker(label, name, rename=True)
+            self._migrate_agent_name_refs(holder, name)
             note = self.on_speaker_bound(label, name)
             if note and note.strip():
                 # A make-good committed during the auto-rebind must reach
                 # the model — same one-shot state-note surface as the
                 # honesty assists (context only, leak-filtered).
                 self._state_note = f"[state note:{note}]"
+
+    def _migrate_agent_name_refs(self, old: str, new: str) -> None:
+        """Post-rename sweep of agent-side name snapshots living OUTSIDE
+        sk.players. The derivation sweep found exactly one:
+        prewager_standings, compared BY NAME at wrap-up — unmigrated, a
+        rename between the final wager and wrap-up mints a false "took
+        the crown" highlight. No-op when the migration writer refused
+        (old still rostered) or nothing renamed."""
+        if old == new or old in self.sk.players:
+            return
+        for row in getattr(self, "prewager_standings", None) or ():
+            if row.get("name") == old:
+                row["name"] = new
 
     def confirmed_name_for_label(self, speaker_label: str) -> str | None:
         label = (speaker_label or "").strip().strip("[]")
@@ -11903,6 +11917,8 @@ class LilyAgent(Agent):
                 and lily_names_probably_same(holder, name)
             ),
         )
+        if holder is not None:
+            self._game._migrate_agent_name_refs(holder, name)
         note = self._game.on_speaker_bound(label, name)
         return f"Bound: voice {label} is {name}.{snap_note}{note}"
 
