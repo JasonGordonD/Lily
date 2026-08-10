@@ -1,0 +1,77 @@
+[
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=1 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:41:03.737353+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=2 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:41:35.339828+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=3 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:42:10.242044+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=4 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:42:51.347775+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=5 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:43:10.719039+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=6 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:43:54.299151+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=7 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:44:15.547780+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=8 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:44:40.716758+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=9 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:44:55.956829+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=10 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:45:11.741954+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=11 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:45:31.118798+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=12 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:45:52.092123+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=13 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:46:04.315047+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=14 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:46:14.329185+00:00",
+  "room": "lily-938EFF-2260354c"
+ },
+ {
+  "message": "LILY_METRICS | PREEMPTIVE_INVALIDATED | total=15 — speculative reply discarded at turn commit (context/transcript/tools changed)",
+  "timestamp": "2026-08-10T03:47:18.114970+00:00",
+  "room": "lily-938EFF-2260354c"
+ }
+]

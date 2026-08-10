@@ -5,6 +5,60 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-10 — WO-LILY-HOTFIX-008 Z1: phantom `…[cut off]` double-record — the itemless fallback DELETED
+
+P0. Live `lily-938EFF-2260354c`: 20 of 36 LILY rows ended `…[cut off]`
+against `PREEMPTIVE_INVALIDATED total=15`, none a verbatim dup of a
+prior row — because each phantom REPLACED the real row. Mechanism (RCA,
+all at `c6769f6`): an invalidated preemptive generation reaches the
+`speech_created` playout watcher ITEMLESS with `interrupted=True`; the
+watcher's fallback (`if not spoken and not had_items: spoken =
+game._last_assistant_text`, 14357–14358) fabricated the PREVIOUS
+committed turn — whose item hits the buffer at `conversation_item_added`
+(generation commit), BEFORE its own playout record — and the
+`interrupted` branch recorded/published it marked cut off (record-only,
+no TTS). The real turn's record then died on the verbatim-dup belt
+against the phantom already sitting in `sk.agent_turns` — which is also
+her own context and the repeat-lint window.
+
+Fix is elimination at source, no new suppressor (the fallback was
+already one narrowing — `541dcff` — and HOTFIX-007 forbids stacking
+another):
+
+1. **Deleted** the fallback. An itemless handle's truth is empty:
+   `record_agent_turn` and `publish_agent_transcription_nowait` both
+   no-op on empty text, so invalidated-preemptive handles record and
+   publish NOTHING; a genuine barge-in (`had_items=True`) still records
+   its real partial, marked. Item collection extracted to module-level
+   `_handle_spoken_text(handle)` so the fixture drives the exact
+   watcher-tail path.
+2. **Stamped the buffer**: `_last_assistant_turn = (chat_item_id, text)`
+   written at `conversation_item_added`; `_last_assistant_text` stays as
+   a property for the readers that genuinely want "her previous turn"
+   (verdict/reveal/journal), and `last_assistant_text_for(item_ids)` is
+   the only generation-keyed read — any other generation gets `""`, so
+   the stale-read race is closed at the buffer, not the reader.
+3. `[cut off]` append sites untouched (agent:2234/:2432,
+   scorekeeper:3030) — after the deletion the marker only ever attaches
+   to genuinely truncated aired text. The suppressed-AND-interrupted
+   `cancel_speech` residual documented in GUARD_MAP §7 stands, out of
+   Z1 scope.
+
+Fixtures (REAL data only): `tests/fixtures/lily-938EFF-2260354c
+.transcripts.json` (all 59 rows) + `.preemptive_log.json` (the 15
+invalidation events), driven by
+`tests/test_hotfix008_z1_phantom_cutoff.py` (11 tests): live-shape pin,
+itemless/tool-call-only/aired handle truth, phantom records-and-
+publishes-nothing, full-session replay (one record per generation, zero
+phantoms, context window clean), exhaustive-interleaving stale-read
+race, stamp scoping, genuine-barge-in marker, no-marker-without-
+truncation.
+
+Suite: 2078 → 2089 green (Z1 +11, zero regressions; all 83 character
+pins green). Mandate numbers: lily_agent.py 14,926 → 14,976 lines;
+prompt untouched; main tip `c6769f6` → this commit. NOT deployed (WO:
+push only).
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 phase 2 integration: Y7 + Y10 composed, both independently reviewed
 
 Both items implemented by sub-agents in isolated worktrees, each passed

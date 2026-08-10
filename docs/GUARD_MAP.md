@@ -164,6 +164,25 @@ A:5690–5726), the G1 preemptive-generation switch (`set_game_live_preemptive` 
 
 ## 7. Two exact-match dedup guards, and the record path that defeats both
 
+**Amendment 2026-08-10 (WO-LILY-HOTFIX-008 Z1): the itemless-fallback arm of this record path is
+RESOLVED — by deletion, not by another guard.** What was deleted: the playout watcher's
+last-assistant-text fabrication (`if not spoken and not had_items: spoken = game._last_assistant_text`,
+HOTFIX-002's narrowing of an older unconditional `spoken.strip() or game._last_assistant_text`). At
+1.6.8 an invalidated preemptive generation reaches the watcher ITEMLESS with `interrupted=True`; the
+fallback fabricated the PREVIOUS committed turn — whose item lands in the buffer at generation commit,
+BEFORE that turn's own playout record — so the phantom recorded that text marked `…[cut off]`
+(record-only, no TTS) and the real turn's record then died on `record_agent_turn`'s verbatim-dup belt
+against the phantom already in `sk.agent_turns`. Live: 20 phantom `…[cut off]` rows in
+`lily-938EFF-2260354c` vs `PREEMPTIVE_INVALIDATED total=15`, each phantom REPLACING the real row and
+riding her own context/repeat-lint window. Now an itemless handle records and publishes nothing (both
+sinks no-op on empty text); a genuine barge-in (`had_items=True`) still records its real partial,
+marked. The buffer itself is STAMPED: `_last_assistant_turn = (chat_item_id, text)`, written at
+`conversation_item_added`; any generation-scoped reader MUST use `last_assistant_text_for(item_ids)`,
+which returns `""` for any other generation — reading `_last_assistant_text` from a per-speech
+callback is this bug class. Fixture: `test_hotfix008_z1_phantom_cutoff.py`. The trace below is kept
+for the record; its "consume_post_tts_text falls back to RAW prose" and suppressed-AND-interrupted
+consequences still stand (out of Z1's scope).
+
 This is the structural finding that Deliverable 2 depends on, so it is stated here in full.
 
 **Both duplicate guards compare for exact equality:**

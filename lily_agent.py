@@ -395,6 +395,25 @@ def _message_text(msg) -> str:
     return str(content or "")
 
 
+def _handle_spoken_text(handle) -> tuple[str, bool]:
+    """Assistant text a finished SpeechHandle actually carried, plus
+    whether it carried ANY chat items. ("", False) is a handle that never
+    materialized — at 1.6.8 the invalidated-preemptive shape (speculative
+    reply discarded at user-turn commit, interrupted=True, no items). Its
+    truth is empty; see the HOTFIX-008 Z1 note at the playout-watcher
+    call site."""
+    spoken = ""
+    had_items = False
+    try:
+        for item in handle.chat_items:
+            had_items = True
+            if getattr(item, "role", None) == "assistant":
+                spoken += " " + _message_text(item)
+    except Exception:
+        pass
+    return spoken.strip(), had_items
+
+
 def _current_speech_id() -> str | None:
     """Return the pinned LiveKit 1.6.6 SpeechHandle id for this TTS task."""
     try:
@@ -793,7 +812,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._bed_handle = None
         self._pending_reveal_event: dict | None = None
         self._pending_unbound_award: dict | None = None
-        self._last_assistant_text = ""
+        # HOTFIX-008 Z1: her last committed turn, STAMPED with the chat-item
+        # id it belongs to ("" = manual/unstamped write). One atomic tuple —
+        # id and text can never be observed mismatched, so no reader can
+        # pair one generation's id with a neighboring turn's text.
+        self._last_assistant_turn: tuple[str, str] = ("", "")
         self._suppressed_speech_ids: set[str] = set()
         # PATCH-001 T1/T2 (RETIRE_WITH_WS6): live speech handles by id
         # (cancellation reach) + the answered-question set (an answered
@@ -1049,6 +1072,31 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.acoustic = lily_audeering_consumers.lily_get_acoustic_state()
         self.audeering_pipeline = None
         self._user_turn_index = 0
+
+    # -- last-assistant-turn buffer (HOTFIX-008 Z1) --------------------------
+
+    @property
+    def _last_assistant_text(self) -> str:
+        """Text of her most recent committed turn, stamp dropped — for
+        readers that genuinely want "her previous turn" with no generation
+        of their own (_verdict_already_spoken, _reveal_already_on_air,
+        transition journaling)."""
+        return getattr(self, "_last_assistant_turn", ("", ""))[1]
+
+    @_last_assistant_text.setter
+    def _last_assistant_text(self, text: str) -> None:
+        self._last_assistant_turn = ("", text or "")
+
+    def last_assistant_text_for(self, item_ids) -> str:
+        """Stamp-checked read: the buffered text ONLY if it belongs to one
+        of the caller's own chat items. A caller keyed to a different
+        generation — or holding no items at all, the invalidated-preemptive
+        shape — gets "", never a neighboring turn's words. Any future
+        generation-scoped reader of this buffer MUST come through here;
+        reading `_last_assistant_text` from a per-speech callback is the
+        phantom-`[cut off]` bug class (GUARD_MAP: HOTFIX-008 Z1)."""
+        item_id, text = getattr(self, "_last_assistant_turn", ("", ""))
+        return text if item_id and item_id in item_ids else ""
 
     # -- state transport (seam contract) ------------------------------------
 
@@ -14038,7 +14086,12 @@ async def entrypoint(ctx: JobContext) -> None:
         report = getattr(msg, "metrics", None)
         session_metrics.collect_turn(report)
         if role == "assistant":
-            game._last_assistant_text = _message_text(msg)
+            # HOTFIX-008 Z1: stamped write — the buffer carries the id of
+            # the chat item it came from, so a reader keyed to any other
+            # generation can never borrow this text (last_assistant_text_for).
+            game._last_assistant_turn = (
+                str(getattr(msg, "id", "") or ""), _message_text(msg)
+            )
             # HOTFIX-005 X1: SCORE_DIVERGENCE — if her spoken turn narrates a
             # score matching no committed-ledger total, the number is
             # fabricated. Log at ERROR (the state block feeds her the truth;
@@ -14336,26 +14389,23 @@ async def entrypoint(ctx: JobContext) -> None:
                     "LILY_SPEECH | exception() probe failed on speech_id=%s: %r",
                     getattr(handle, "id", "?"), e,
                 )
-            spoken = ""
-            had_items = False
-            try:
-                for item in handle.chat_items:
-                    had_items = True
-                    if getattr(item, "role", None) == "assistant":
-                        spoken += " " + _message_text(item)
-            except Exception:
-                pass
-            spoken = spoken.strip()
-            # WO-LILY-HOTFIX-002 Defect 1: the last-assistant-text fallback
-            # applies ONLY to an unreadable handle (no chat items at all).
-            # A handle that carried items but no assistant text is a
-            # tool-call-only turn — it aired no new words, and falling back
-            # re-recorded the PREVIOUS spoken turn as a duplicate LILY row
-            # (4 verbatim dups in lily-AAC431, each right after a tool
-            # turn). An empty record is correct there; a fabricated one is
-            # the defect.
-            if not spoken and not had_items:
-                spoken = game._last_assistant_text
+            spoken, _had_items = _handle_spoken_text(handle)
+            # HOTFIX-008 Z1: the itemless fallback that stood here
+            # (`if not spoken and not had_items: spoken =
+            # game._last_assistant_text`, HOTFIX-002's narrowing of an
+            # older unconditional one) is DELETED, not narrowed again. An
+            # invalidated preemptive generation reaches this watcher
+            # itemless with interrupted=True; the fallback fabricated the
+            # PREVIOUS committed turn — whose item lands in the buffer at
+            # generation commit, BEFORE its own playout record — so the
+            # phantom recorded that turn's text marked "…[cut off]" and
+            # then the real turn's own record died on the verbatim-dup
+            # guard (20 phantom rows in lily-938EFF-2260354c, each
+            # replacing the real row). Empty is the truth for a handle
+            # that aired nothing: record_agent_turn and
+            # publish_agent_transcription_nowait both no-op on empty
+            # text, while a genuine barge-in still carries its real
+            # partial (had_items=True).
             suppressed_ids = getattr(game, "_suppressed_speech_ids", set())
             suppressed = handle.id in suppressed_ids
             suppressed_ids.discard(handle.id)
