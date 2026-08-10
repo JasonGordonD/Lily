@@ -353,6 +353,9 @@ def test_explain_memory_tool_offline_shape():
 def test_returning_greet_carries_disclosure_once_on_first_rematch():
     game = _make_game()
     game.memory_total_games = 1  # first rematch -> disclose
+    # HOTFIX-010 V3: recognition + disclosure ride the beat that composes
+    # after the first utterance, not the cold opener.
+    game._first_human_utterance_seen = True
     greet = game.greeting_instructions()
     # Composition order: the one-breath self-intro is ALWAYS part one —
     # never skipped for a returning table (the live 'welcome back
@@ -360,11 +363,15 @@ def test_returning_greet_carries_disclosure_once_on_first_rematch():
     assert "PART ONE, always" in greet
     assert "Hi, I'm Lily" in greet
     assert greet.index("I'm Lily") < greet.index("welcome back")
-    # Memory KNOWS -> act on it, never ask; per-player composition with
-    # the mixed-table nuance
+    # Memory KNOWS the TABLE -> act on it, never ask if first-time.
     assert "Do NOT ask if it's their first time" in greet
-    assert "welcome back, all of you" in greet
-    assert "hello to the new faces" in greet
+    # HOTFIX-010 V1: the GROUP match yields a TABLE acknowledgment; naming
+    # routes through the present-voice ROSTER, never a memory roster — the
+    # old "welcome back, <name> / hello to the new faces" recital is gone.
+    assert "welcome back, all of you" not in greet
+    assert "hello to the new faces" not in greet
+    assert "ROSTER field is the sole naming authority" in greet
+    assert "reciting a roster of names from memory" in greet
     # Refresher (not walkthrough) for returners, from the single block
     assert "refresher" in greet
     assert "WHAT THE TABLE CAN ASK FOR" in greet
@@ -378,18 +385,22 @@ def test_returning_greet_carries_disclosure_once_on_first_rematch():
 def test_returning_greet_disclosure_respects_frequency_cap():
     game = _make_game()
     game.memory_total_games = 3  # not 1, not a multiple of 5 -> no clause
+    game._first_human_utterance_seen = True  # V3: beat is post-utterance
     greet = game.greeting_instructions()
     assert "disclosure" not in greet
     assert "refresher" in greet  # the refresher offer still happens
     assert "Hi, I'm Lily" in greet  # the intro survives regardless
 
 
-def test_cold_greet_asks_first_time_and_never_discloses():
+def test_no_memory_branch_asks_first_time_and_never_discloses():
+    # HOTFIX-010 V3: the no-memory branch (first-time question) composes after
+    # the first utterance; the cold opener never asks (pinned separately in
+    # test_hotfix010_identity_resequence).
     game = _make_game()
     game.memory_block = ""
     game.memory_total_games = 0
+    game._first_human_utterance_seen = True
     greet = game.greeting_instructions()
-    # Intro first, always — then memory gives no answer, so she asks
     assert "Hi, I'm Lily" in greet
     assert "memory gives no answer" in greet
     assert "first time" in greet

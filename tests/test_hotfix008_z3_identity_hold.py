@@ -112,7 +112,7 @@ def test_the_match_landing_closes_the_hold_and_recognition_speaks_first(
     assert g.identity_probe_outstanding() is False
     assert g.can_claim_empty_memory() is False
     text = g.greeting_instructions()
-    assert "your memory KNOWS this table" in text
+    assert "memory KNOWS this TABLE" in text
     assert "MEMORY IS UNRESOLVED" not in text
 
 

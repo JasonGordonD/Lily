@@ -240,6 +240,8 @@ def test_feature_stamp_joins_the_forget_cascade():
 def test_memory_branch_never_asks_first_time():
     game = _make_game()
     game.memory_block = "[RETURNING TABLE] Rami, 4 wins"
+    # HOTFIX-010 V3: the recognition beat composes after the first utterance.
+    game._first_human_utterance_seen = True
     text = game.greeting_instructions()
     assert "Do NOT ask if it's their first time" in text
     assert "welcome back" in text
@@ -247,6 +249,10 @@ def test_memory_branch_never_asks_first_time():
 
 def test_cold_branch_reserves_the_first_time_question():
     game = _make_game()
+    # HOTFIX-010 V3: the first-time question is deferred to the no-memory
+    # branch, which composes after the first utterance (never in the cold
+    # opener — that contract is pinned in test_hotfix010_identity_resequence).
+    game._first_human_utterance_seen = True
     text = game.greeting_instructions()
     assert "whether it's their first time" in text
     assert "Never claim you remember them" in text

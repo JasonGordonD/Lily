@@ -30,10 +30,15 @@ from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
 
 
-def _game(*, resolved, supabase=object(), memory_block=""):
+def _game(*, resolved, supabase=object(), memory_block="", spoken=True):
     """Built on the harness test_recognition_variety already uses to drive
     greeting_instructions — LilyGame is constructed via __new__, so every
-    attribute the greeting reads has to be supplied explicitly."""
+    attribute the greeting reads has to be supplied explicitly.
+
+    HOTFIX-010 V3: the recognition / first-time / gap-naming beats compose
+    only after the first human utterance. These N1 fixtures assert on that
+    deferred content, so they default spoken=True; the cold-opener contract
+    is pinned separately in test_hotfix010_identity_resequence."""
     from test_recognition_variety import _make_game
 
     g = _make_game()
@@ -44,6 +49,7 @@ def _game(*, resolved, supabase=object(), memory_block=""):
     g.device_candidate_group_id = None
     g._voice_identity_resolved = resolved
     g._recognized_at_greet = False
+    g._first_human_utterance_seen = spoken
     g.forget_state = None
     g.group_prefs = None
     # The recognition branch stamps a feature version, which persists
@@ -86,8 +92,11 @@ def test_the_gap_naming_beat_is_suppressed_while_the_probe_is_out(monkeypatch):
     monkeypatch.setattr(lily_config, "voice_identity_enabled", lambda: True)
     out = _game(resolved=False).greeting_instructions()
     # The gap-naming beat may still appear in the base text, but the
-    # override that forbids speaking it must come after it.
-    assert out.index("MEMORY IS UNRESOLVED") > out.index("table card")
+    # override that forbids speaking it must come after it. (HOTFIX-010 V1:
+    # the gap beat is now voice-framed.)
+    assert out.index("MEMORY IS UNRESOLVED") > out.index(
+        "I don't recognise the voice yet"
+    )
 
 
 def test_a_resolved_probe_may_speak_the_gap(monkeypatch):
@@ -121,7 +130,7 @@ def test_a_known_table_still_gets_recognition_not_silence(monkeypatch):
     monkeypatch.setattr(lily_config, "voice_identity_enabled", lambda: True)
     g = _game(resolved=False, memory_block="[RETURNING TABLE] 12 games")
     text = g.greeting_instructions()
-    assert "your memory KNOWS this table" in text
+    assert "memory KNOWS this TABLE" in text
     assert "MEMORY IS UNRESOLVED" not in text, (
         "a table we DO recognise must not be gagged"
     )

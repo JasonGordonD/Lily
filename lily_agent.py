@@ -982,8 +982,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # collected for the lily_memories highlights column.
         self.memory_block: str = ""
         # Remembered player names for STT name-snapping at bind time
-        # (the "Romney"-for-"Rami" class).
+        # (the "Romney"-for-"Rami" class). NON-SPEECH consumer only
+        # (lily_known_name_correction); never a source for spoken naming.
         self.memory_player_names: list[str] = []
+        # V3 (HOTFIX-010): the cold opener is a bare self-intro + one
+        # orienting beat, then silence. Recognition / walkthrough / prefs /
+        # what's-new are deferred until a human has actually spoken; this
+        # latch flips on the first user turn (on_user_turn_completed).
+        self._first_human_utterance_seen = False
         # A device key may point at a returning table, but it does not prove
         # who is in the room now. Candidate data is quarantined from the
         # vocal context until a current voiceprint overlaps.
@@ -2249,27 +2255,38 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 self.publish_attributes_nowait()
         except Exception:
             pass
-        names = ", ".join((self.memory_player_names or [])[:4])
+        # V1 (HOTFIX-010): a match on the GROUP is not per-person recognition.
+        # The old beat injected memory_player_names[:4] — a multi-session
+        # union never scrubbed of STT conflations — and recited it as the
+        # present table (the "Rami, Rhonda, Chris, Miranda" leak). Delete the
+        # roster injection: name a person ONLY from the present-voice source
+        # (sk.players, read from the ROSTER field in the state block), never
+        # from memory.
         ack = (
             "Recognition just landed MID-SESSION: the [RETURNING TABLE] "
-            "block now carries who this table really is"
-            + (f" ({names})" if names else "")
-            + ". ONE warm, specific acknowledgment beat — the shape of "
-            "'wait — Rami! NOW I've got you: reigning champion, four "
-            "wins.' Own the late catch lightly ('took me a second'); "
-            "never pretend you knew all along, and never apologize in a "
-            "spiral. THEN STOP AND LET THEM ANSWER. This turn is the "
-            "acknowledgment and at most ONE offer ('want a refresher on "
-            "the options, or straight in?') — it does NOT contain a "
+            "block now confirms this is a TABLE you have played with before. "
+            "That is a match on the TABLE, not proof of who is on the mic "
+            "right now. ONE warm acknowledgment beat that you know this "
+            "table — own the late catch lightly ('took me a second'). Name a "
+            "person ONLY when THEIR voice is matched present this session "
+            "(the ROSTER field is the sole naming authority) or they have "
+            "stated their name tonight; a remembered name is NOT a present "
+            "person, so do not read any roster of names from memory. If no "
+            "voice is matched present yet, name no one — just welcome the "
+            "table back. Never pretend you knew all along, and never "
+            "apologize in a spiral. THEN STOP AND LET THEM ANSWER. This turn "
+            "is the acknowledgment and at most ONE offer ('want a refresher "
+            "on the options, or straight in?') — it does NOT contain a "
             "question from the game, and it does not answer its own offer. "
             "Asking someone what they want and then telling them is worse "
             "than never asking."
             + self.prefs_offer_instruction()
             + self.whats_new_instruction()
         )
+        present = ",".join(list(getattr(self.sk, "players", []) or [])) or "-"
         logger.info(
-            "LILY_MEMORY | LATE_RECOGNITION | session=%s group=%s names=%s",
-            self.sk.session_id, getattr(self, "group_id", None), names or "-",
+            "LILY_MEMORY | LATE_RECOGNITION | session=%s group=%s present=%s",
+            self.sk.session_id, getattr(self, "group_id", None), present,
         )
         self.instructed_reply(ack)
         return True
@@ -3366,6 +3383,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             "self-introduction in one breath — 'Hi, I'm Lily —' you host "
             "trivia. Never skip it, never stretch it into a monologue. "
         ]
+        # V3 (HOTFIX-010): the OPENING turn is PART ONE + ONE bare orienting
+        # beat, then silence until a human speaks. The orienting beat is
+        # always NAME-SAFE — a device/group token identifies a device or a
+        # GROUP, never the people at the mic, so it never recites remembered
+        # names. Recognition, the walkthrough, prefs and what's-new are
+        # deferred: they ride the persistent [RETURNING TABLE] context, the
+        # late-recognition beat, and the game-start ride-along once a voice
+        # is actually present.
         if getattr(self, "device_candidate_group_id", None):
             parts.append(
                 "PART TWO — the DEVICE looks familiar, but no current voice "
@@ -3376,82 +3401,100 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "Different people may share a device; voice verification "
                 "must happen first."
             )
-        elif self.memory_block:
-            # PATCH-003 P5: the greeting itself recognizes this table — the
-            # late-recognition catch-up beat must NOT fire later (the live
-            # double: recognized at greet, then "NOW I've got you" two
-            # minutes on, over an open question).
-            self._recognized_at_greet = True
-            parts.append(
-                "PART TWO — your memory KNOWS this table (the "
-                "[RETURNING TABLE] context has who they are), so act on it "
-                "instead of asking: compose the recognition per player. "
-                "Whole table returning: '...welcome back, all of you.' "
-                "MIXED table (voices or names the memory doesn't list, "
-                "alongside the regulars): welcome the returners BY NAME "
-                "and the newcomers separately — '...welcome back, Rami — "
-                "and hello to the new faces.' Reference last game's winner "
-                "and lean into the rematch energy. Do NOT ask if it's "
-                "their first time. Returners get no walkthrough — offer "
-                "ONCE, 'want a refresher on the options, or straight in?', "
-                "and respect the answer; newcomers at a mixed table get "
-                "the short version of the options, aimed at them. The "
-                "walkthrough or refresher draws on WHAT THE TABLE CAN ASK "
-                "FOR and happens at most once tonight."
-                + self.memory_disclosure_instruction()
-                + self.prefs_offer_instruction()
-                + self.whats_new_instruction()
-            )
         else:
-            # Neutral-history rule: without memory data, never claim OR deny
-            # prior contact (memory may still resolve mid-lobby via a
-            # group-id upgrade).
             parts.append(
-                "PART TWO — your memory gives no answer about this table, "
-                "so ask: a plain warm welcome, then whether it's their "
-                "first time playing with you. FIRST TIME: walk them "
-                "through their options naturally, drawing on the WHAT THE "
-                "TABLE CAN ASK FOR block — conversational, folded into the "
-                "banter, never a feature list read aloud. CLAIMED "
-                "RETURNER — they say it's NOT their first time but your "
-                "memory has nothing: BELIEVE THEM and name the gap plainly in "
-                "ONE light beat, WITHOUT diagnosing a cause — 'my table "
-                "card doesn't have you tonight, and I don't know why' — "
-                "never 'new device', never 'cleared browser', never "
-                "anything on their end (you cannot see which link "
-                "dropped, and a confident wrong cause blames a player "
-                "for a backend fault) and IN THE SAME TURN offer the "
-                "refresher exactly as a recognized returner would get it "
-                "— 'want a refresher on the options, or straight in?' — "
-                "and respect the answer. Never perform vague amnesia you "
-                "could explain, never claim recognition you don't have, "
-                "and never argue with their memory of you. If recognition "
-                "catches up mid-game (the [RETURNING TABLE] block "
-                "appears), you'll get an instruction beat for it. Either "
-                "way the walkthrough or refresher happens at most once "
-                "tonight. Never claim you remember them, and never "
-                "announce it's their first time — let them tell you."
+                "PART TWO — one light orienting beat: ask who's at the mic "
+                "tonight, then STOP and let them speak. Do NOT recite names, "
+                "winners, counts, dates, or history, and do NOT announce "
+                "whether it's their first time — no voice has been matched "
+                "present yet, so there is no one to name."
             )
-            if self.identity_probe_outstanding():
-                # HOTFIX-006 N1: the probe has NOT come back. "My card
-                # doesn't have you" is a claim about memory, and right now
-                # its truth is unknown. Override the gap-naming beat: say
-                # nothing about memory at all.
+        # Deferred rich beats — recognition / walkthrough / claimed-returner /
+        # prefs / what's-new — are NOT part of the cold opener. This block is
+        # gated on the first human utterance, which is false at the cold-open
+        # dispatch, so the opener stays a bare intro + orienting beat and the
+        # beats land through their mid-session paths. No _recognized_at_greet
+        # is set: recognition is single-sourced through the late-recognition /
+        # game-start paths, which closes the greet-dispatch↔memory-promotion
+        # race without a mirrored guard.
+        if getattr(self, "_first_human_utterance_seen", False):
+            if self.memory_block:
                 parts.append(
-                    " OVERRIDE — MEMORY IS UNRESOLVED, NOT ABSENT. Your "
-                    "recognition check has not finished. You therefore do "
-                    "NOT know whether you have played with this table "
-                    "before, and you must not speak as if you do. Say "
-                    "NOTHING about your memory, your card, your ledger or "
-                    "a clean slate — no 'blank slate', no 'clean slate', "
-                    "no 'my card doesn't have you', not even to concede a "
-                    "gap. If they say they have played before, take it at "
-                    "face value warmly and move on ('good to have you "
-                    "back') without characterising what you do or do not "
-                    "hold. Recognition may land within the next minute and "
-                    "you will get a beat for it; a denial spoken now is a "
-                    "denial you will have to retract."
+                    "Your memory KNOWS this TABLE (the [RETURNING TABLE] "
+                    "context carries this group's history), but that is a "
+                    "GROUP match, not proof of who is at the mic right now. "
+                    "Acknowledge the TABLE — 'I know this table', rematch "
+                    "energy, that you've played here before — WITHOUT "
+                    "reciting a roster of names from memory. Name a person "
+                    "ONLY when THEIR voice is matched present this session "
+                    "(the ROSTER field is the sole naming authority) or they "
+                    "have stated their name tonight; a remembered name is NOT "
+                    "a present person. If no voice is matched present yet, "
+                    "name no one and ask who's at the mic. Do NOT ask if "
+                    "it's their first time — your memory already answers "
+                    "that. Lean into the rematch, but do NOT say 'welcome "
+                    "back, <name>', and do NOT list prior players, winners, "
+                    "or newcomers by name off the record. Returners get no "
+                    "walkthrough — offer "
+                    "ONCE, 'want a refresher on the options, or straight in?', "
+                    "and respect the answer. The walkthrough or refresher "
+                    "draws on WHAT THE TABLE CAN ASK FOR and happens at most "
+                    "once tonight."
+                    + self.memory_disclosure_instruction()
+                    + self.prefs_offer_instruction()
+                    + self.whats_new_instruction()
                 )
+            else:
+                # Neutral-history rule: without memory data, never claim OR
+                # deny prior contact (memory may still resolve mid-lobby via a
+                # group-id upgrade).
+                parts.append(
+                    "Your memory gives no answer about this table, so ask: a "
+                    "plain warm welcome, then whether it's their first time "
+                    "playing with you. FIRST TIME: walk them through their "
+                    "options naturally, drawing on the WHAT THE TABLE CAN ASK "
+                    "FOR block — conversational, folded into the banter, "
+                    "never a feature list read aloud. CLAIMED RETURNER — they "
+                    "say it's NOT their first time but your memory has "
+                    "nothing: BELIEVE THEM and name the gap plainly in ONE "
+                    "light beat, WITHOUT diagnosing a cause — 'I don't "
+                    "recognise the voice yet, and I don't know why' — never "
+                    "'my table card doesn't have you', never 'new device', "
+                    "never 'cleared browser', never anything on their end "
+                    "(you cannot see which link dropped, and a confident "
+                    "wrong cause blames a player for a backend fault) and IN "
+                    "THE SAME TURN offer the refresher exactly as a "
+                    "recognized returner would get it — 'want a refresher on "
+                    "the options, or straight in?' — and respect the answer. "
+                    "Never perform vague amnesia you could explain, never "
+                    "claim recognition you don't have, and never argue with "
+                    "their memory of you. If recognition catches up mid-game "
+                    "(the [RETURNING TABLE] block appears), you'll get an "
+                    "instruction beat for it. Either way the walkthrough or "
+                    "refresher happens at most once tonight. Never claim you "
+                    "remember them, and never announce it's their first time "
+                    "— let them tell you."
+                )
+                if self.identity_probe_outstanding():
+                    # HOTFIX-006 N1: the probe has NOT come back. "My card
+                    # doesn't have you" is a claim about memory, and right now
+                    # its truth is unknown. Override the gap-naming beat: say
+                    # nothing about memory at all.
+                    parts.append(
+                        " OVERRIDE — MEMORY IS UNRESOLVED, NOT ABSENT. Your "
+                        "recognition check has not finished. You therefore do "
+                        "NOT know whether you have played with this table "
+                        "before, and you must not speak as if you do. Say "
+                        "NOTHING about your memory, your card, your ledger or "
+                        "a clean slate — no 'blank slate', no 'clean slate', "
+                        "no 'my card doesn't have you', not even to concede a "
+                        "gap. If they say they have played before, take it at "
+                        "face value warmly and move on ('good to have you "
+                        "back') without characterising what you do or do not "
+                        "hold. Recognition may land within the next minute and "
+                        "you will get a beat for it; a denial spoken now is a "
+                        "denial you will have to retract."
+                    )
         parts.append(
             " Bind names as people speak. At least one confirmed name is "
             "required. Only clear start language authorizes calling "
@@ -10334,6 +10377,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 # offer "the usual, or change anything?" — already-applied
                 # flags make a "the usual" answer a pure no-op.
                 + self.prefs_offer_instruction()
+                # V3 (HOTFIX-010): what's-new no longer rides the pre-utterance
+                # greet. For a table recognized at the door (no late-recognition
+                # beat fires) this is its post-utterance carrier; the seen-stamp
+                # advances after it airs, so a second call is a pure no-op.
+                + self.whats_new_instruction()
             )
         # Structural delivery claim (desync WO Sub-agent B): when question
         # one is already armed, the kickoff turn IS its delivery.
@@ -13338,6 +13386,11 @@ class LilyAgent(Agent):
         # pending auto-resume watchdog stands down — the reply this user
         # turn produces owns the recovery (no double-speak).
         self._game.note_user_turn()
+        # V3 (HOTFIX-010): a human has now spoken. The cold opener was intro +
+        # one orienting beat; recognition / walkthrough / prefs / what's-new
+        # ride the mid-session paths from here on, never the pre-utterance
+        # greet.
+        self._game._first_human_utterance_seen = True
         consume_reply = getattr(self._game, "consume_deterministic_reply", None)
         message_text = _message_text(new_message)
         event_owned = (

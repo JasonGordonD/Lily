@@ -708,6 +708,9 @@ def test_prefs_offer_empty_for_cold_groups():
 def test_returning_greeting_carries_the_ask_once():
     game = _make_game()
     game.prefs = {"pacing": "relaxed"}
+    # HOTFIX-010 V3: the prefs offer rides the recognition beat, which composes
+    # after the first utterance.
+    game._first_human_utterance_seen = True
     greet = game.greeting_instructions()
     assert "play the usual" in greet
     assert "relaxed pacing" in greet

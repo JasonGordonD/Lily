@@ -129,9 +129,14 @@ def test_greeting_wait_picks_up_late_memory_within_budget():
 
     assert len(game.session.instructions) == 1
     first = game.session.instructions[0]
-    # Recognition composed from memory, not the cold first-time question:
-    assert "memory KNOWS this table" in first
-    assert "memory gives no answer" not in first
+    # HOTFIX-010 V3: the opener is a bare intro + orienting beat regardless of
+    # memory — recognition is deferred to the first human utterance. What the
+    # in-budget await buys is a LOADED memory_block (ready for the persistent
+    # [RETURNING TABLE] context on the first turn), NOT a recited greeting.
+    assert game.memory_block  # settled within budget
+    assert "who's at the mic tonight" in first
+    assert "memory KNOWS" not in first          # not recited in the opener
+    assert "memory gives no answer" not in first  # nor the cold first-time ask
     assert game.say_registry.state("session_greet") is not None
 
 
@@ -147,8 +152,12 @@ def test_greeting_times_out_cold_and_never_blocks_beyond_budget():
 
     assert elapsed < 1.0  # budget 0.05s, generous CI margin — never 1.5s+
     assert len(game.session.instructions) == 1
-    # Cold greet: the neutral-history part, exactly as before the gate.
-    assert "memory gives no answer" in game.session.instructions[0]
+    # HOTFIX-010 V3: the timed-out cold greet is the same minimal opener as
+    # every session — a bare intro + orienting beat, never the neutral-history
+    # first-time question (that is deferred to the first human utterance).
+    first = game.session.instructions[0]
+    assert "who's at the mic tonight" in first
+    assert "memory gives no answer" not in first
 
 
 def test_zero_budget_disables_the_wait():

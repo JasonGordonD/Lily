@@ -217,7 +217,12 @@ def test_late_recognition_fires_once_after_greet():
     assert len(game.instructed_replies) == 1
     ack = game.instructed_replies[0]
     assert "MID-SESSION" in ack and "refresher" in ack
-    assert "Rami" in ack
+    # HOTFIX-010 V1: a GROUP match is not per-person recognition. No voice is
+    # matched present (sk.players is empty), so the beat names NO ONE — it must
+    # NOT recite the remembered name from memory_player_names.
+    assert "Rami" not in ack
+    assert "ROSTER field is the sole naming authority" in ack
+    assert "do not read any roster of names from memory" in ack
     assert game.sk.pacing == "relaxed"  # stored usual honored
     # One-shot.
     game.maybe_fire_late_recognition()
@@ -240,12 +245,25 @@ def test_late_recognition_silent_for_new_groups_and_door_path():
 # -- Task 2: claimed-returner branch -------------------------------------------
 
 
-def test_cold_greeting_carries_the_claimed_returner_state():
+def test_claimed_returner_state_is_deferred_to_first_utterance():
+    # HOTFIX-010 V3: the cold opener carries NO claimed-returner beat — it is
+    # a bare intro + one orienting beat. The beat composes once a human has
+    # spoken, and V1 reframes the failure line to voice-framing.
     game = _make_game()
     game.game_started = False
+    game._first_human_utterance_seen = False
+    cold = game.greeting_instructions()
+    assert "CLAIMED RETURNER" not in cold
+    assert "I don't recognise the voice yet" not in cold
+
+    game._first_human_utterance_seen = True
     text = game.greeting_instructions()
     assert "CLAIMED RETURNER" in text
-    assert "my table card doesn't have you tonight" in text
+    # V1: voice-framing, not card-framing. The old "my table card doesn't have
+    # you tonight" instruction is gone; the card phrasing survives only as a
+    # banned example.
+    assert "I don't recognise the voice yet" in text
+    assert "my table card doesn't have you tonight" not in text
     assert "refresher" in text
     assert "Never perform vague amnesia" in text
 
