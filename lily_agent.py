@@ -7820,7 +7820,20 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # classify under SCORING (backchannels expected, nothing scoreable).
         self.sk.adjudicating = True
         try:
-            if self._window_timer and not self._window_timer.done():
+            # HOTFIX-009 W6: a window-timeout adjudication RUNS INSIDE the
+            # timer task (open_window's _expire awaits adjudicate), so
+            # cancelling the timer here cancelled the running adjudication
+            # itself — CancelledError landed at the first await (the reveal
+            # publish gather), the beat died between the reveal and verdict
+            # journal entries with no CRASHED line, and the wedged
+            # transition later re-narrated an already-aired reveal
+            # (lily-5E3036 q4, "Nobody landed it. Marie Curie" 2m16s after
+            # the organic reveal). The expired timer needs no cancel.
+            if (
+                self._window_timer
+                and not self._window_timer.done()
+                and self._window_timer is not asyncio.current_task()
+            ):
                 self._window_timer.cancel()
             self.sk.close_answer_window()
             self._stop_bed()
@@ -8355,6 +8368,51 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 == transition_qnum
                 and self.transition_narration_complete(transition_qnum)
             )
+            # HOTFIX-009 W6: the narration-PARTIAL sibling of Z2c's resume.
+            # A first adjudication that dies between the reveal journal and
+            # the verdict journal leaves stages=[reveal] with no air-proof,
+            # so recovery re-entry fell through to the 1C53C6 reclaim and
+            # RE-NARRATED the whole beat — re-revealing an answer that was
+            # already on the air. Burn is the one-way "answer went to air"
+            # state every other seam gates on (arm, draw, steal,
+            # reconnect); the transition owner now gates on it too: a
+            # BURNED question resumes as bookkeeping, never re-narrates.
+            # An unburned dead journal keeps the reclaim — there, nothing
+            # aired and re-narration is the cure.
+            resumed_burned = (
+                not resumed_complete
+                and reclaim_transition
+                and getattr(self, "_open_transition_qnum", None)
+                == transition_qnum
+                and self._is_burned(question)
+            )
+            if resumed_burned:
+                logger.warning(
+                    "LILY_TRANSITION | RESUMED_BURNED | session=%s q=%d "
+                    "stages=%s — recovery re-entered a partial transition "
+                    "for a question whose answer already went to air; "
+                    "refusing re-narration, journaling the missing stages "
+                    "as already-on-air and running bookkeeping only "
+                    "(HOTFIX-009 W6)",
+                    self.sk.session_id, transition_qnum,
+                    ",".join(self.transition_stages(transition_qnum)),
+                )
+                # Complete the journal so the release seams (Z2c) read the
+                # beat as narration-complete: the reveal content is on the
+                # air even though no journaled stage can prove it. The
+                # narration detail is the air-proof _transition_reached_air
+                # keys on.
+                for _stage in ("reveal", "verdict"):
+                    if not self.transition_narrated(transition_qnum, _stage):
+                        self.journal_transition(
+                            transition_qnum, _stage,
+                            detail={
+                                "source": "already_on_air",
+                                "narration": "(aired before recovery; "
+                                "journaled at resume — HOTFIX-009 W6)",
+                            },
+                        )
+                resumed_complete = True
             if resumed_complete:
                 logger.warning(
                     "LILY_TRANSITION | RESUMED_COMPLETE | session=%s q=%d "

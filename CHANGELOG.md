@@ -5,6 +5,40 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-10 — WO-LILY-HOTFIX-009 W6: the timeout adjudication survives its own timer; a burned question never re-reveals
+
+P0. Live `lily-5E3036-b56b5eb4` (RAN ON the deployed 4e902cb tip —
+HOTFIX-008 was live, contrary to the WO's stated assumption), q4 kb_491
+Marie Curie: organic reveal 05:34:35 ("Pass locked. Marie Curie" — no
+verdict cue, so `lily_verdict_narration` matched nothing and no burn was
+written), steal-timer adjudication 05:34:52 journaled `reveal` and died
+silently, ARMED_LIMBO recovery 05:36:42 hit `RECLAIMED_UNAIRED` (the
+[reveal]-only journal carries no air-proof) and RE-NARRATED the beat —
+"Nobody landed it. Marie Curie." aired 05:36:51, 2m16s after the answer
+went to air, with the q5 diamond delivery landing on top of it 4s later.
+
+Root cause, closing the Z2c changelog's open question of WHO cancelled
+the 938EFF adjudication inside the reveal-publish await: adjudicate
+cancelled ITSELF. A window-timeout adjudication runs INSIDE the timer
+task (`open_window._expire` awaits `adjudicate`), and adjudicate's own
+head unconditionally cancelled `self._window_timer` — the task it was
+running in — so CancelledError landed at the first await (the reveal
+publish gather). Every timeout adjudication that reached an await died
+there; the 05:34:47 steal branch survived only because it returns before
+any await. Fix 1: the timer is not cancelled when it IS the current
+task. Fix 2 (mech 81, the Z2c residue): recovery re-entry over a
+narration-PARTIAL transition of a BURNED question — burn being the
+one-way "answer went to air" state every other seam already gates on —
+resumes as bookkeeping (`RESUMED_BURNED`: missing stages journaled
+`source=already_on_air`, which is mech 56 air-proof, so the Z2c release
+seams work), never re-narrates. An UNBURNED dead journal keeps the
+1C53C6 reclaim unchanged — there nothing aired and re-narration is the
+cure. Draw-side verified, no code: `lily_asked_history` records Marie
+Curie exactly once; burn was already authoritative at draw, arm, steal
+and reconnect — the transition owner was the one seam that never
+consulted it. Fixture `tests/test_hotfix009_w6_burned_reserve.py` from
+the real session rows; needles proven to bite on 4e902cb.
+
 ## 2026-08-10 — WO-LILY-HOTFIX-008 Z2c: release the question transition when narration is complete but supply is empty
 
 P0. Live `lily-938EFF-2260354c` 03:42:56→03:47:28, the other half of the
