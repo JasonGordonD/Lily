@@ -9566,6 +9566,39 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
         asyncio.ensure_future(_warm())
 
+    def _preload_voice_identities(self) -> None:
+        """V2: fetch the centroid pool at CONNECT, off the first-utterance
+        path. The pool DB round-trip used to sit INSIDE
+        _voice_identity_match_at_start, AFTER the embedding — a serial fetch on
+        the recognition critical path that grows with fleet enrollment. Kicked
+        here (concurrent with the embedder prewarm, before any voice), the
+        match reads an in-memory pool and does no DB round-trip. Fire-and-
+        forget and idempotent; a slow load just leaves the match's own
+        cold-path fetch as the fallback."""
+        if getattr(self, "_voice_identity_pool_loading", False):
+            return
+        if not lily_config.voice_identity_enabled() or self.supabase is None:
+            return
+        self._voice_identity_pool_loading = True
+        tag = lily_config.voice_identity_model_tag()
+
+        async def _load() -> None:
+            try:
+                pool = await lily_persistence.lily_load_voice_identities(
+                    self.supabase, tag
+                )
+                self._voice_identity_pool = pool
+                self._voice_identity_pool_loaded = True
+                logger.info(
+                    "LILY_VOICE_ID | POOL_PRELOAD | count=%d tag=%s — centroid "
+                    "pool cached at connect, off the first-utterance path",
+                    len(pool), tag,
+                )
+            except Exception as e:
+                logger.warning("LILY_VOICE_ID | POOL_PRELOAD_FAILED | %s", e)
+
+        asyncio.ensure_future(_load())
+
     def _voice_identity_audio_probe(self):
         """Captured mono PCM for embedding, or None when unavailable. Reads a
         buffer a track frame sink fills (`_voice_identity_pcm`); None keeps the
@@ -9611,15 +9644,47 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             emb = await lily_voice_embedder.lily_extract_embedding_async(probe)
             if emb is None:
                 return False
-            tag = lily_config.voice_identity_model_tag()
-            identities = await lily_persistence.lily_load_voice_identities(
-                self.supabase, tag
-            )
+            # V2 instrumentation: t1 = embedding produced. t0 was stamped in
+            # the frame sink at the first match_ready crossing, so embed_ms
+            # spans utterance-ready -> embedding and folds in any wait on a
+            # still-warming model (a large embed_ms points straight at the
+            # model-load/STT dependency).
+            t1 = time.monotonic()
+            # V2: the centroid pool is preloaded at CONNECT (in-memory, no DB
+            # round-trip on the recognition path). Cold-path fallback ONLY
+            # when the first utterance beat the preload — fetch inline so the
+            # feature is never silently inert.
+            if getattr(self, "_voice_identity_pool_loaded", False):
+                identities = getattr(self, "_voice_identity_pool", None) or []
+            else:
+                tag = lily_config.voice_identity_model_tag()
+                identities = await lily_persistence.lily_load_voice_identities(
+                    self.supabase, tag
+                )
+                logger.info(
+                    "LILY_VOICE_ID | POOL_COLD_FETCH | session=%s — preload "
+                    "not ready at first utterance; fetched inline",
+                    self.sk.session_id,
+                )
             match = lily_voice_identity.lily_match_voice(
                 emb, identities,
                 threshold=lily_config.voice_identity_match_threshold(),
                 margin=lily_config.voice_identity_match_margin(),
             )
+            # V2 instrumentation: t2 = identity resolved. resolve_ms spans
+            # embedding -> match decision; a large resolve_ms is the DB
+            # round-trip on the path (exactly what the preload above removes).
+            t2 = time.monotonic()
+            t0 = getattr(self, "_voice_identity_match_t0", None)
+            if t0 is not None:
+                embed_ms = round((t1 - t0) * 1000, 1)
+                resolve_ms = round((t2 - t1) * 1000, 1)
+                self._voice_id_embed_ms = embed_ms
+                self._voice_id_resolve_ms = resolve_ms
+                logger.info(
+                    "LILY_VOICE_ID | LATENCY | embed_ms=%s resolve_ms=%s "
+                    "session=%s", embed_ms, resolve_ms, self.sk.session_id,
+                )
             self._voice_identity_resolved = True
             if match is None or match["group_id"] == self.group_id:
                 if match is None:
@@ -14559,6 +14624,13 @@ async def _lily_voice_probe_fork(track, game) -> None:
                 # night: live 2026-08-08 it landed correctly at 3m36s,
                 # long after the greeting had called a four-win regular a
                 # blank slate.
+                # V2 instrumentation: t0 = the FIRST match_ready crossing,
+                # stamped once. embed_ms is measured from here, so a model
+                # still warming when the voice arrives shows up in that delta
+                # instead of hiding. Never re-stamped (the pipeline that reads
+                # it wants the earliest ready-instant).
+                if getattr(game, "_voice_identity_match_t0", None) is None:
+                    game._voice_identity_match_t0 = time.monotonic()
                 game._voice_identity_pcm = probe.match_pcm()
                 game.maybe_start_voice_identity_match()
             if probe.ready():
@@ -14792,6 +14864,11 @@ async def entrypoint(ctx: JobContext) -> None:
         ctx, scorekeeper, reasoning, supabase, transcripts,
         group_id, group_id_source=group_id_source,
     )
+
+    # V2: preload the voice-identity centroid pool NOW (concurrent with the
+    # embedder prewarm above, before any voice), so the first-utterance match
+    # compares against an in-memory pool with no DB round-trip on the path.
+    game._preload_voice_identities()
 
     # Acoustic pipeline state (WO-LILY-AUDEERING-001): fresh per session.
     # The child-signal veto callback is wired BEFORE any capture can land —
@@ -15124,6 +15201,11 @@ async def entrypoint(ctx: JobContext) -> None:
         "first_token_latency_ms": [],
         "tts_first_frame_ms": [],
         "e2e_latency_ms": [],
+        # V2: the two voice-identity stage timings (one match per session,
+        # so single-element buckets). embed_ms = utterance-ready -> embedding;
+        # resolve_ms = embedding -> match decision.
+        "voice_id_embed_ms": [],
+        "voice_id_resolve_ms": [],
     }
     _METRICS_CAP = 500
 
@@ -15603,6 +15685,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 standings = sorted(
                     game._players_payload(), key=lambda p: -p["score"]
                 )
+                # V2: fold the session's single voice-identity stage timings
+                # into pipeline_latency (stamped on the game during the match).
+                for _field, _attr in (
+                    ("voice_id_embed_ms", "_voice_id_embed_ms"),
+                    ("voice_id_resolve_ms", "_voice_id_resolve_ms"),
+                ):
+                    _v = getattr(game, _attr, None)
+                    if _v is not None:
+                        metrics_raw[_field].append(_v)
                 metadata = {
                     "pipeline_latency": {
                         k: (round(sum(v) / len(v), 1) if v else None)
