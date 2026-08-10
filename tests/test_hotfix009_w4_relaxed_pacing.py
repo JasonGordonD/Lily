@@ -434,19 +434,28 @@ def test_relaxed_multiplayer_waits_for_the_roster():
 
 
 # ===========================================================================
-# 5. Timed mode steal machinery is untouched: same miss, same ghost
-#    roster, pacing timed -> the steal window arms exactly as today.
+# 5. Timed mode steal machinery is untouched for a LEGITIMATE steal: a real
+#    second hearable player (S2/Maria) has not answered, so the missed
+#    question opens the steal window exactly as today. The ghost shape rides
+#    along (Rummy's label was nulled by the NATO correction) to prove W5
+#    discounts it: two ROSTERED names but two HEARABLE people, and the steal
+#    arms on the real second voiceprint, not on the ghost.
+#    (Before W5 this test rostered only the ghost solo table and still armed
+#    a steal — that was the W5 defect; a table of one hearable person now
+#    never steals, in any pacing. See test_hotfix009_w5_solo_steal.py.)
 # ===========================================================================
 
 
 def test_timed_missed_question_still_opens_the_steal_window():
     game = _make_game()
     now = _arm_q2(game, ghost_roster=True)
+    game.sk.bind_speaker("S2", "Maria")  # a real, distinct second voiceprint
     assert game.sk.pacing == "timed"
     game.sk.open_answer_window(
         duration=15.0, now=now, question_id=Q_MITO["id"],
         question_index=game.sk.question_number, registered=True,
     )
+    # Only Rami answers (and misses); Maria stays silent -> eligible stealer.
     game.sk.on_transcript_segment(
         text=SURRENDER, speaker_label="S1", is_final=True,
         now=now + 4, segment_start_time=now + 4, segment_end_time=now + 6,

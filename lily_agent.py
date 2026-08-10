@@ -8565,9 +8565,37 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # silent seconds and re-adjudicated an empty set. Solo tables
             # therefore never steal; multiplayer steals only while an
             # unjudged player exists.
+            #
+            # HOTFIX-009 W5: read the stealer pool by LIVE VOICEPRINT, not
+            # by roster name. Only a player currently holding a diarization
+            # label can be heard, so only such a player can answer or steal.
+            # The 05:32:11 solo steal window armed because the roster carried
+            # the real ghost shape — "Rummy" mis-captured at 05:29:30, then
+            # NATO-corrected to "Rami": bind_speaker rebinds S1 to "Rami" and
+            # NULLS "Rummy"'s label, leaving two rostered names but one
+            # hearable person. Counting by name read stealers_exist True on a
+            # table of one. Counting distinct non-null labels collapses the
+            # ghost (label-less "Rummy" cannot produce audio) and a set folds
+            # any pathological shared-label duplicate to one. A table of one
+            # hearable person has no one to steal, in ANY pacing — the read
+            # that fixes the spoken player count fixes the steal window.
+            hearable_labels = {
+                st.get("speaker_label")
+                for st in self.sk.players.values()
+                if st.get("speaker_label")
+            }
+            judged_labels = {
+                (self.sk.players.get(name) or {}).get("speaker_label")
+                for name in self.sk.players
+                if name in self._judged_keys
+            }
             stealers_exist = any(
-                name not in self._judged_keys for name in self.sk.players
+                lbl not in judged_labels for lbl in hearable_labels
             )
+            # A roster of one hearable person disarms the steal window
+            # independent of pacing — the W4 relaxed gate and this gate are
+            # siblings on the same steal expression, not alternatives.
+            table_has_stealer_pool = len(hearable_labels) > 1
             # HOTFIX-009 W4: relaxed pacing arms no steal clock. The
             # 05:32:11 five-second steal window fired on a relaxed solo
             # table ("You asked for relaxed, and I tossed a five-second
@@ -8576,7 +8604,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # missed beat falls through to the ordinary reveal.
             steal_possible = (
                 missed and ordered and steal_allowed
-                and stealers_exist and not self.game_over
+                and stealers_exist and table_has_stealer_pool
+                and not self.game_over
                 and self.sk.pacing != "relaxed"
             )
             if steal_possible and question_revealed:
