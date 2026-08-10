@@ -631,6 +631,16 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     # Self-knowledge Task 3: a lagged returning table's delta rode the
     # greeting; the stamp persists after the greet confirms.
     _whats_new_pending: bool = False
+    # HOTFIX-010 V4 edge (A): the delta rides whichever carrier reaches it
+    # first — the late-recognition beat, the game-start ride-along, or a
+    # re-dispatched greet. The durable stamp only advances on greet-confirm,
+    # so a cut/never-confirmed greet used to leave EVERY carrier composing the
+    # delta (double-disclosure). This session-scoped latch — same idempotency
+    # pattern as _prefs_offer_made / _memory_disclosure_offered — makes the
+    # delta compose exactly once regardless of carrier; the stamp still gates
+    # durable advance, so a session where the sole carrier was cut re-discloses
+    # next session rather than losing it.
+    _whats_new_emitted: bool = False
     # RECOGNITION-VARIETY Task 1: the mid-session recognition catch-up
     # acknowledgment fires at most once per session.
     _late_recognition_fired: bool = False
@@ -2149,6 +2159,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if not delta:
             self._stamp_feature_version()
             return ""
+        # Edge (A): emit the delta through the FIRST carrier only. Without this
+        # latch, a cut greet leaves the stamp lagged and both the
+        # late-recognition beat and the game-start ride-along compose it.
+        if getattr(self, "_whats_new_emitted", False):
+            return ""
+        self._whats_new_emitted = True
         self._whats_new_pending = True
         listed = "; ".join(delta)
         return (
@@ -3417,7 +3433,18 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # is set: recognition is single-sourced through the late-recognition /
         # game-start paths, which closes the greet-dispatch↔memory-promotion
         # race without a mirrored guard.
-        if getattr(self, "_first_human_utterance_seen", False):
+        # HOTFIX-010 V4 edge (B): when a DEVICE candidate is pending (device
+        # looks familiar, no present voice verified), PART TWO above already
+        # owns the turn — "ask who's playing, verify voice first". The
+        # deferred first-time / claimed-returner framing below contradicts it
+        # (it asks whether it's their first time, off an unverified device),
+        # so it must NOT also compose. Recognition rides the mid-session
+        # late-recognition / game-start beats once the candidate promotes or
+        # clears. Gating here removes the contradictory co-composition rather
+        # than layering a reconciler on top.
+        if getattr(self, "_first_human_utterance_seen", False) and not getattr(
+            self, "device_candidate_group_id", None
+        ):
             if self.memory_block:
                 parts.append(
                     "Your memory KNOWS this TABLE (the [RETURNING TABLE] "
@@ -5230,10 +5257,24 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         no watchdog resurrection), enter the hold, one brief
         acknowledgment, then yield."""
         already_stopped = self.game_delivery_stopped()
+        # HOTFIX-010 V4 item 2: another lane may already have reached this
+        # stop and aired its acknowledgment. The narration lane — an outbound
+        # turn that narrated a stopped state, backed by back_hold_narration —
+        # enters a `narrated_stop` hold WITHOUT setting the sticky latch, so
+        # the mechanical brake's old idempotency read (game_delivery_stopped,
+        # sticky only) missed it and added a SECOND acknowledgment. That is
+        # the live double-ack: two lanes each discovering the stop and each
+        # acking. Read the SHARED hold state (no new flag) so whichever lane
+        # reached the stop first owns the single acknowledgment.
+        already_acked = already_stopped or (
+            getattr(self, "_hold_active", False)
+            and getattr(self, "_hold_reason", None) == "narrated_stop"
+        )
         logger.warning(
             "LILY_STOP | PRIMITIVE | session=%s text=%r — halting playout, "
-            "cancelling dispatches, entering hold sticky=%s",
+            "cancelling dispatches, entering hold sticky=%s already_acked=%s",
             self.sk.session_id, (source_text or "")[:60], already_stopped,
+            already_acked,
         )
         # 1. Halt anything airing + cancel every tracked handle.
         for speech_id in list(getattr(self, "_speech_handles", {})):
@@ -5262,11 +5303,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 logger.warning("LILY_STOP | session interrupt failed: %s", e)
         # 4. Enter the hold and speak ONE short acknowledgment.
         self.enter_hold(reason="stop_primitive")
-        if already_stopped:
+        if already_acked:
             logger.info(
-                "LILY_STOP | REASSERTED | session=%s — sticky STOP remains; "
-                "no second acknowledgment",
-                self.sk.session_id,
+                "LILY_STOP | REASSERTED | session=%s — stop already "
+                "acknowledged (sticky=%s narrated_stop_hold=%s); no second "
+                "acknowledgment",
+                self.sk.session_id, already_stopped,
+                already_acked and not already_stopped,
             )
             return
         self.gated_say(
