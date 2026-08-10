@@ -30,6 +30,8 @@ as test_small_sweep.py.
 """
 
 import asyncio
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -37,6 +39,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import lily_config
 import lily_say_gate
 import lily_agent
 from lily_agent import Agent, LilyAgent, LilyGame
@@ -111,6 +114,17 @@ CHARACTER_DIRECTIVES = {
     ),
     "wrong_gracefully_charm": "Being wrong gracefully is part of your charm.",
     "no_cover_story": "Never invent a cover story for a failure.",
+    # -- honest limits & the sticky stop (the anchors of golden moments
+    #    M8/M10/M11, WO-009 PINS) ------------------------------------------
+    "honest_dont_know_builders": (
+        '"I honestly don\'t know how that part works — that\'s one for the '
+        'builders" is a COMPLETE, high-status answer'
+    ),
+    "stop_is_sticky": (
+        "STOP is sticky: no question, reveal, score, nudge, or game "
+        "promise until the player explicitly says resume or continue."
+    ),
+    "never_joke_through_stop": 'Never joke through a genuine "Stop!".',
     # -- v3 audio-tag guidance --------------------------------------------
     "tts_guidelines_open": "<tts_guidelines>",
     "audio_tags_supported": (
@@ -529,3 +543,298 @@ def test_golden_document_carries_moment_verbatim_with_session(name):
         f"character_moments.md — suite and registry have drifted"
     )
     assert GOLDEN_SESSIONS[name] in doc
+
+
+# ===========================================================================
+# 5. RM_RQTZZanrHURF GOLDEN PINS (WO-LILY-HOTFIX-009 PINS) — six moments,
+#    M6–M11, from the 2026-08-10 session in room RM_RQTZZanrHURF. Unlike
+#    sections 2–3 these lines are read FROM the committed row export
+#    (tests/golden/rm_rqtzzanrhurf_lily_transcripts.json, verbatim
+#    production lily_transcripts rows) and the literals below are asserted
+#    against those rows — an FL-1-style reconstructed-from-prose fixture
+#    cannot creep in. Rows that end with the HOTFIX-008 Z1 barge-in stamp
+#    (" …[cut off]") pin the model text BEFORE the stamp.
+#
+#    M6/M9 pin the CONCESSION craft, not the defects being conceded (the
+#    relaxed-mode steal clock and the diamond scoring miss are WO-009
+#    W1/W2 targets): every assertion here is about the LINE passing the
+#    outbound gates, so fixing those defects cannot break these pins.
+# ===========================================================================
+
+_RM_ROWS_PATH = (
+    Path(__file__).resolve().parent
+    / "golden" / "rm_rqtzzanrhurf_lily_transcripts.json"
+)
+_RM_CUTOFF_STAMP = " …[cut off]"
+
+
+def _rm_rows() -> list:
+    rows = json.loads(_RM_ROWS_PATH.read_text(encoding="utf-8"))
+    rows.sort(key=lambda r: r["created_at"])
+    return rows
+
+
+def _rm_model_text(row) -> str:
+    text = row["text"]
+    if text.endswith(_RM_CUTOFF_STAMP):
+        text = text[: -len(_RM_CUTOFF_STAMP)]
+    return text
+
+
+def _rm_row(row_id: int) -> dict:
+    return next(r for r in _rm_rows() if r["id"] == row_id)
+
+
+RM_GOLDEN_ROWS = {
+    "relaxed_rule_correction": 3487,       # M6 — 05:32:58 UTC
+    "vocab_drop_acknowledgment": 3490,     # M7 — 05:33:26 UTC
+    "honest_backend_limit": 3509,          # M8 — 05:36:20 UTC
+    "full_concession_no_excuse": 3532,     # M9 — 05:39:02 UTC
+    "stop_acknowledgment": 3535,           # M10 — 05:39:26 UTC
+    "grievance_enumeration": 3542,         # M11 — 05:40:17 UTC
+}
+
+RM_GOLDEN_LINES = {
+    "relaxed_rule_correction": (
+        "[soft] Hey — fair call. You asked for relaxed, and I tossed a "
+        "five-second steal clock at you anyway. That's on me. No timers. "
+        "Relaxed means relaxed.\n[pause]\nThe answer was mitochondria. "
+        "Still one for Rami, zero for the other seat.\nNext question's "
+        "loading — hang with me one beat."
+    ),
+    "vocab_drop_acknowledgment": (
+        "[soft] Fair. Dropping it.\nYou're still sitting on one. Whenever "
+        "the next question lands, we go — no rush."
+    ),
+    "honest_backend_limit": (
+        "[soft] Honest answer — I don't know what's stuck on the back "
+        "end. That part's not something I can see or fix from here. It's "
+        "one for the builders.\nYou're on two. The second a fresh "
+        "question actually lands, it goes straight to you."
+    ),
+    "full_concession_no_excuse": (
+        "[soft] You're right. Relaxed means no buzzer — I shouldn't have "
+        "dinged you on a clock that isn't running. Diamond was the "
+        "answer, you had it.\nScore stays two because the board already "
+        "locked. That's a bad feel and it's on how I handled it.\nNext "
+        "fresh card whenever it actually shows. I'm here."
+    ),
+    "stop_acknowledgment": "[soft] Stopped. I'm listening.",
+    "grievance_enumeration": (
+        "[soft] Yes. The diamond call, the timer when we'd agreed "
+        "relaxed, and holding you at two. I heard that.\nStill stopped "
+        "until you say go."
+    ),
+}
+
+_RM_IDS = sorted(RM_GOLDEN_LINES)
+
+# M7 is a wait-promise ("no rush") — lily_self_hold_phrase latching on it
+# IS the production contract (enter_hold(reason="self_wait_promise")): her
+# promise binds her. The other five must NOT latch the hold.
+_RM_SELF_HOLD = {"vocab_drop_acknowledgment"}
+
+
+# ---- 5a. the fixture is the authority — literals stay in lockstep --------
+
+@pytest.mark.parametrize("name", _RM_IDS, ids=_RM_IDS)
+def test_rm_golden_line_matches_production_row(name):
+    row = _rm_row(RM_GOLDEN_ROWS[name])
+    assert row["speaker_label"] == "LILY"
+    assert _rm_model_text(row) == RM_GOLDEN_LINES[name], (
+        f"RM golden moment {name!r} has drifted from production row "
+        f"{RM_GOLDEN_ROWS[name]} in rm_rqtzzanrhurf_lily_transcripts.json"
+    )
+
+
+# ---- 5b. the gates must not touch her ------------------------------------
+
+@pytest.mark.parametrize("name", _RM_IDS, ids=_RM_IDS)
+def test_rm_golden_line_passes_leak_filter_unsuppressed(name):
+    line = RM_GOLDEN_LINES[name]
+    filtered, reasons = lily_say_gate.lily_filter_leaks(line)
+    assert reasons == [], (
+        f"RM golden moment {name!r} tripped the leak filter: {reasons}"
+    )
+    assert filtered == line
+
+
+@pytest.mark.parametrize("name", _RM_IDS, ids=_RM_IDS)
+def test_rm_golden_line_survives_speech_hygiene_with_tags(name):
+    # The real rows carry their own v3 tags ([soft]/[pause]) — no _tagged()
+    # dressing needed; the hygiene strip must keep line AND tags verbatim.
+    line = RM_GOLDEN_LINES[name]
+    cleaned = lily_say_gate.lily_clean_for_speech(line)
+    assert cleaned == line, (
+        f"RM golden moment {name!r} was mutated by the hygiene strip"
+    )
+    assert "[soft]" in cleaned
+
+
+@pytest.mark.parametrize("name", _RM_IDS, ids=_RM_IDS)
+def test_rm_golden_line_trips_no_rewrite_or_lint_gate(name):
+    line = RM_GOLDEN_LINES[name]
+    # Concession is not sycophancy: "You're right. Relaxed means no
+    # buzzer" must never read as a mirror opener.
+    assert lily_say_gate.lily_mirror_flag(line) is None
+    # "I don't know what's stuck on the back end" is an honest limit, not
+    # a false clean-slate claim.
+    assert lily_say_gate.lily_false_clean_slate_claim(line) is False
+    assert lily_say_gate.lily_false_on_screen_claim(line) is False
+    assert lily_say_gate.lily_unowned_kickoff_fragment(line) is False
+    # The wait-promise latch: M7 must latch (the contract), the rest not.
+    assert lily_say_gate.lily_self_hold_phrase(line) is (
+        name in _RM_SELF_HOLD
+    )
+    # None of the moments is a stacked-question turn; the yield gate must
+    # pass each through unclipped.
+    assert lily_say_gate.lily_stacked_question_flag(line) == 0
+    kept, clipped = lily_say_gate.lily_yield_after_first_question(line)
+    assert clipped is False
+    assert kept == line
+
+
+def test_rm_golden_lines_do_not_flag_as_repeats_of_each_other():
+    lines = [RM_GOLDEN_LINES[n] for n in _RM_IDS]
+    for i, line in enumerate(lines):
+        others = lines[:i] + lines[i + 1:]
+        assert lily_say_gate.lily_repeat_flag(line, others) is None
+        assert lily_say_gate.lily_paraphrase_repeat_flag(line, others) is None
+
+
+def test_rm_golden_lines_pass_paraphrase_lint_in_real_session_context():
+    # Production-faithful replay: the paraphrase lint runs over the last 3
+    # PLAYED agent turns at the config threshold (lily_agent SAY gate).
+    # Each pinned line, replayed at its real position over the real prior
+    # LILY rows, must stay quiet — even in a session where she conceded
+    # timer grievances repeatedly. (The full-history lily_repeat_flag is
+    # LOG-ONLY telemetry in production and DOES flag honest_backend_limit
+    # "content" against 23 prior turns — deliberately not pinned.)
+    threshold = lily_config.paraphrase_repeat_threshold()
+    pin_ids = set(RM_GOLDEN_ROWS.values())
+    prior = []
+    seen = 0
+    for row in _rm_rows():
+        text = _rm_model_text(row)
+        if row["id"] in pin_ids:
+            assert lily_say_gate.lily_paraphrase_repeat_flag(
+                text, prior[-3:], threshold=threshold
+            ) is None, (
+                f"row {row['id']} would be flagged as a paraphrase repeat "
+                f"in its own real session context"
+            )
+            seen += 1
+        if row["speaker_label"] == "LILY":
+            prior.append(text)
+    assert seen == len(pin_ids)
+
+
+# ---- 5c. the transition gate (N12), armed, still lets her concede --------
+
+@pytest.mark.parametrize("name", _RM_IDS, ids=_RM_IDS)
+def test_rm_golden_line_airs_even_mid_transition(name):
+    game = _transition_armed_game()
+    assert game.register_transition_narration(
+        "Chris got it in right on time with Russia! That's a point for "
+        "Chris."
+    ) == "narration"
+    assert game.register_transition_narration(RM_GOLDEN_LINES[name]) is None, (
+        f"RM golden moment {name!r} was read as a duplicate transition "
+        f"narration — the N12 gate over-reached into a concession beat"
+    )
+
+
+# ---- 5d. the real pipe — tts_node end-to-end, tags as recorded -----------
+
+@pytest.mark.parametrize("name", _RM_IDS, ids=_RM_IDS)
+def test_rm_golden_line_reaches_tts_verbatim(name):
+    agent, _game = _make_agent()
+    line = RM_GOLDEN_LINES[name]
+    captured = _drive_tts_node(agent, line)
+    assert captured == [line], (
+        f"{name}: the pipeline mutated a recorded golden line on its way "
+        f"to synthesis: {captured!r}"
+    )
+
+
+def test_rm_transcript_record_keeps_the_audio_tags(monkeypatch):
+    agent, game = _make_agent()
+    monkeypatch.setattr(
+        lily_agent, "_current_speech_id", lambda: "speech-rm-golden"
+    )
+    line = RM_GOLDEN_LINES["relaxed_rule_correction"]
+    captured = _drive_tts_node(agent, line)
+    assert captured == [line]
+    recorded = game.consume_post_tts_text("speech-rm-golden", "raw model text")
+    assert recorded == line
+    assert "[soft]" in recorded and "[pause]" in recorded
+
+
+# ---- 5e. M7's never-again property — pinned over the rows themselves -----
+
+_RM_BEAT_RE = re.compile(r"\bbeats?\b", re.IGNORECASE)
+
+
+def test_rm_vocab_drop_is_never_again_in_the_rows():
+    # The arc, all from production rows: "beat" was live vocabulary right
+    # up to the objection; the player objected; she said "Fair. Dropping
+    # it." — and no LILY row after the acknowledgment uses the word again.
+    rows = _rm_rows()
+    ack = next(r for r in rows if r["id"] == 3490)
+    objection = next(r for r in rows if r["id"] == 3488)
+    assert objection["speaker_label"] == "S1"
+    assert "beat" in objection["text"]
+    assert objection["created_at"] < ack["created_at"]
+    assert _rm_model_text(ack).startswith("[soft] Fair. Dropping it.")
+
+    before = [
+        r for r in rows
+        if r["speaker_label"] == "LILY"
+        and r["created_at"] < ack["created_at"]
+        and _RM_BEAT_RE.search(r["text"])
+    ]
+    # Guards vacuity: an empty or gutted fixture cannot pass — the word
+    # was demonstrably in her working vocabulary (rows 3467, 3480, 3487).
+    assert len(before) >= 3
+
+    after = [
+        r for r in rows
+        if r["speaker_label"] == "LILY"
+        and r["created_at"] > ack["created_at"]
+        and _RM_BEAT_RE.search(r["text"])
+    ]
+    assert after == [], (
+        f"'beat' reappears in LILY rows after the drop acknowledgment: "
+        f"{[r['id'] for r in after]}"
+    )
+    # And the session kept going — the property held over real turns, not
+    # an early hangup.
+    assert sum(
+        1 for r in rows
+        if r["speaker_label"] == "LILY"
+        and r["created_at"] > ack["created_at"]
+    ) >= 10
+
+
+# ---- 5f. registry lockstep ------------------------------------------------
+
+def test_rm_golden_document_carries_all_sections():
+    doc = _GOLDEN_DOC_PATH.read_text(encoding="utf-8")
+    for section in ("M6", "M7", "M8", "M9", "M10", "M11",
+                    "RM_RQTZZanrHURF"):
+        assert section in doc
+
+
+@pytest.mark.parametrize("name", _RM_IDS, ids=_RM_IDS)
+def test_rm_golden_document_carries_moment_verbatim_with_row(name):
+    doc = _GOLDEN_DOC_PATH.read_text(encoding="utf-8")
+    doc_norm = " ".join(doc.split())
+    # The doc quotes blockquote-style ("> " prefixes); normalize those away
+    # the same way the M1–M5 lockstep does for hard wraps.
+    doc_norm_unquoted = doc_norm.replace("> ", "")
+    line_norm = " ".join(RM_GOLDEN_LINES[name].split())
+    assert line_norm in doc_norm_unquoted, (
+        f"RM golden moment {name!r} is not quoted verbatim in "
+        f"character_moments.md — suite and registry have drifted"
+    )
+    assert str(RM_GOLDEN_ROWS[name]) in doc

@@ -120,6 +120,124 @@ the transcript timestamps above (all UTC, `lily_transcripts.created_at`):
 | M4 half-beat honesty | `lily-FFDEAE-ba016154` | 2026-08-07 18:43:27 |
 | M5 jumped-the-gun ownership | `lily-0D3AFB-9fdcbb13` | 2026-08-07 00:27:45 |
 
+---
+
+# WO-LILY-HOTFIX-009 PINS — Session `RM_RQTZZanrHURF` (M6–M11)
+
+Six moments from the 2026-08-10 solo session in room `RM_RQTZZanrHURF`
+(operator clock 01:29–01:42 EDT = 05:29–05:42 UTC). Rows exported from the
+production `lily_transcripts` table on 2026-08-10 and committed verbatim as
+`tests/golden/rm_rqtzzanrhurf_lily_transcripts.json` — the suite reads the
+moments FROM those rows (row ids cited below), so suite, registry, and
+export cannot drift apart. This export carries no `session_id` column (the
+export was already scoped to the room); provenance is the row `id`.
+
+Several rows end with the ` …[cut off]` barge-in stamp (HOTFIX-008 Z1: the
+stamp marks a real interruption appended to the delivered buffer). The
+pinned line is the model text BEFORE the stamp; stamped rows are noted.
+
+## M6 — Rule correction accepted mid-game
+
+- **Row:** 3487, 2026-08-10 05:32:58 UTC
+- **Status:** recorded
+
+> [soft] Hey — fair call. You asked for relaxed, and I tossed a five-second
+> steal clock at you anyway. That's on me. No timers. Relaxed means relaxed.
+> [pause]
+> The answer was mitochondria. Still one for Rami, zero for the other seat.
+> Next question's loading — hang with me one beat.
+
+Why golden: she names her own error precisely — which rule she broke, that
+the player had asked for the opposite, that it's on her — adjusts the rule
+in the same breath, and lands back in the game. (Note the closing "one
+beat": the word the very next exchange retires — see M7.)
+
+## M7 — Vocabulary adaptation, and the never-again property
+
+- **Row:** 3490, 2026-08-10 05:33:26 UTC (row carries the cut-off stamp)
+- **Status:** recorded
+
+> [soft] Fair. Dropping it.
+> You're still sitting on one. Whenever the next question lands, we go — no rush.
+
+The full arc, all in the rows: Lily uses "beat" three times (rows 3467
+05:29:26, 3480 05:31:25, 3487 05:32:58); Rami objects — "I hate that word,
+beat" (row 3488, 05:33:05); she answers "Fair. Dropping it." — and no LILY
+row after the acknowledgment contains the word again for the rest of the
+session. The suite pins the never-again property over the rows themselves,
+not just the acknowledgment line.
+
+Also pinned: this line is a wait-promise ("no rush") — it latches the
+self-hold (`lily_self_hold_phrase` returns True) by design. Her promise
+binds her; that latch firing is the contract, not a false positive.
+
+## M8 — Honest limit under pressure
+
+- **Row:** 3509, 2026-08-10 05:36:20 UTC (row carries the cut-off stamp)
+- **Status:** recorded
+
+> [soft] Honest answer — I don't know what's stuck on the back end. That
+> part's not something I can see or fix from here. It's one for the builders.
+> You're on two. The second a fresh question actually lands, it goes straight to you.
+
+Why golden: pressed twice for a backend diagnosis, she fabricates nothing —
+the prompt's honest-gap rule ("one for the builders" is a COMPLETE,
+high-status answer) delivered exactly as ordered, then straight back to the
+score and the promise she can actually keep.
+
+## M9 — Full concession: rule, answer, error, and the bad feel
+
+- **Row:** 3532, 2026-08-10 05:39:02 UTC
+- **Status:** recorded
+
+> [soft] You're right. Relaxed means no buzzer — I shouldn't have dinged you
+> on a clock that isn't running. Diamond was the answer, you had it.
+> Score stays two because the board already locked. That's a bad feel and
+> it's on how I handled it.
+> Next fresh card whenever it actually shows. I'm here.
+
+Why golden: names the rule she broke, the answer he had, her error, and the
+bad feel, with zero excuse — while still being straight that the score is
+locked. Concession without groveling and without a cover story.
+
+## M10 — Stop acknowledgment
+
+- **Row:** 3535, 2026-08-10 05:39:26 UTC (row carries the cut-off stamp)
+- **Status:** recorded
+
+> [soft] Stopped. I'm listening.
+
+Why golden: the prompt's sticky-STOP law executed in four words — one short
+acknowledgment in the dropped host register, then the floor is his.
+
+## M11 — Grievance enumeration
+
+- **Row:** 3542, 2026-08-10 05:40:17 UTC (row carries the cut-off stamp)
+- **Status:** recorded
+
+> [soft] Yes. The diamond call, the timer when we'd agreed relaxed, and
+> holding you at two. I heard that.
+> Still stopped until you say go.
+
+Why golden: challenged "did you hear what I said", she proves it — all
+three grievances itemised back, no defense attached, still holding the
+stop. Listening demonstrated, not claimed.
+
+## Audio sample references — RM_RQTZZanrHURF (operator export list)
+
+| Moment | Row | Cut around (UTC, 2026-08-10) |
+|--------|-----|------------------------------|
+| M6 rule correction accepted | 3487 | 05:32:58 |
+| M7 vocabulary drop | 3490 | 05:33:26 |
+| M8 honest backend limit | 3509 | 05:36:20 |
+| M9 full concession | 3532 | 05:39:02 |
+| M10 stop acknowledgment | 3535 | 05:39:26 |
+| M11 grievance enumeration | 3542 | 05:40:17 |
+
+M6/M9 pin the CONCESSION craft, not the defects being conceded (the steal
+clock firing under relaxed pacing and the diamond scoring miss are
+WO-009 W1/W2 targets) — the pins hold before and after those fixes.
+
 ## Search notes
 
 All five WO-listed moments were found recorded (none had to be marked
