@@ -87,6 +87,26 @@ def test_spelled_trivia_answer_is_not_name_evidence():
     assert lily_extract_explicit_name("It's spelled C. A. T.") is None
 
 
+def test_informal_word_run_is_a_stated_name_not_an_assembly():
+    # LOW #3: the informal spelling words are real first names — a run of
+    # them alone is somebody stating a full name, never "Rose". Majority
+    # of units must be single letters or canonical NATO words.
+    assert (
+        lily_extract_explicit_name("my name is Robert Oscar Sam Edward")
+        == "Robert"
+    )
+
+
+def test_rename_gate_similarity():
+    # The same-person gate: respellings match, unrelated names never do.
+    from lily_binding import lily_names_probably_same
+
+    assert lily_names_probably_same("Rummy", "Rami") is True
+    assert lily_names_probably_same("Romney", "Rami") is True
+    assert lily_names_probably_same("Alice", "Bob") is False
+    assert lily_names_probably_same("Rummy", "Robin") is False
+
+
 # ---------------------------------------------------------------------------
 # Scorekeeper: a same-voice correction renames, never forks
 # ---------------------------------------------------------------------------
@@ -110,6 +130,23 @@ def test_plain_rebind_still_releases_not_renames():
     sk.bind_speaker("S1", "Alice")
     sk.bind_speaker("S1", "Bob")
     assert set(sk.players) == {"Alice", "Bob"}
+    assert sk.players["Alice"]["speaker_label"] is None
+    assert sk.players["Bob"]["speaker_label"] == "S1"
+
+
+def test_second_voice_on_reused_label_never_takes_score_history():
+    # MEDIUM (coordinator ruling): rename=True asserted for a DISSIMILAR
+    # name — the migration writer refuses (diarization mis-capture class:
+    # a second voice reusing a label must not inherit the first player's
+    # ledger). Falls back to release semantics.
+    sk = LilyScorekeeper("test-room")
+    sk.bind_speaker("S1", "Alice")
+    sk.apply_score_event("Alice", cause="bonus", points=3)
+
+    sk.bind_speaker("S1", "Bob", rename=True)
+
+    assert set(sk.players) == {"Alice", "Bob"}
+    assert sk.ledger_scores() == {"Alice": 3, "Bob": 0}
     assert sk.players["Alice"]["speaker_label"] is None
     assert sk.players["Bob"]["speaker_label"] == "S1"
 
@@ -185,6 +222,28 @@ def test_correction_reaches_the_glass_in_one_update():
     assert game.sk.roster_size() == 1
     assert set(game.sk.players) == {"Rami"}
     assert set(game.sk.ledger_scores()) == {"Rami"}
+
+
+def test_midgame_dissimilar_call_me_does_not_auto_rebind():
+    # Reviewer LOW #1 + MEDIUM, agent level: a bound player (or a second
+    # voice on their label) saying "call me Bob" mid-game records evidence
+    # but auto-rebinds NOTHING — a dissimilar name is a new binding
+    # decision owned by the tool path, not a correction.
+    game = _make_game()
+    t0 = time.time()
+    _transcript_final(game, "S1", "call me Alice please", t0)
+    game.sk.bind_speaker("S1", "Alice")
+    game.on_speaker_bound("S1", "Alice")
+    game.sk.apply_score_event("Alice", cause="bonus", points=2)
+    publishes_before = len(game.attribute_publishes)
+
+    _transcript_final(game, "S1", "call me Bob", t0 + 30.0)
+
+    assert set(game.sk.players) == {"Alice"}
+    assert game.sk.players["Alice"]["speaker_label"] == "S1"
+    assert game.sk.ledger_scores() == {"Alice": 2}
+    assert game.confirmed_name_for_label("S1") == "Bob"  # evidence recorded
+    assert len(game.attribute_publishes) == publishes_before
 
 
 def test_complaint_alone_changes_nothing():

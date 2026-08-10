@@ -86,19 +86,27 @@ _INTRODUCER_RE = re.compile(
 # NATO alphabet plus the common informal "as in" words; the implied letter
 # is always the word's first letter. Cue-gated on a NAME introducer (never
 # bare "spelled"/"it's spelled"), so a trivia answer being spelled out can
-# never become name evidence.
-_SPELLING_ALPHABET = {
+# never become name evidence. Canonical NATO words are STRONG spelling
+# units; the informal extensions are WEAK — many of them are real first
+# names, so a run of them alone ("Robert Oscar Sam Edward") must read as
+# a stated full name, never assemble into "Rose".
+_NATO_CANONICAL = {
     "alfa", "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
     "golf", "hotel", "india", "indigo", "juliet", "juliett", "kilo",
     "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
     "sierra", "tango", "uniform", "victor", "whiskey", "whisky", "xray",
     "yankee", "zulu",
+}
+
+_SPELLING_INFORMAL = {
     "able", "adam", "apple", "baker", "boy", "cat", "david", "dog",
     "easy", "edward", "frank", "fox", "george", "henry", "how", "ida",
     "item", "jack", "john", "king", "lincoln", "love", "mary", "nancy",
     "nora", "ocean", "peter", "queen", "robert", "roger", "sam", "sugar",
     "thomas", "tom", "uncle", "union", "william", "young", "zebra",
 }
+
+_SPELLING_ALPHABET = _NATO_CANONICAL | _SPELLING_INFORMAL
 
 _SPELL_FILLER = {
     "as", "in", "like", "for", "and", "then", "uh", "um", "dash",
@@ -132,11 +140,13 @@ def lily_extract_spelled_name(raw: str) -> Optional[str]:
     if len(tokens) < 2:
         return None
     letters = []
+    strong = 0
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if len(tok) == 1:
             letters.append(tok)
+            strong += 1
             # "R as in Romeo" — filler stripped leaves the confirming
             # word; consume it when it restates the same letter.
             if (
@@ -147,10 +157,17 @@ def lily_extract_spelled_name(raw: str) -> Optional[str]:
                 i += 1
         elif tok in _SPELLING_ALPHABET:
             letters.append(tok[0])
+            if tok in _NATO_CANONICAL:
+                strong += 1
         else:
             return None
         i += 1
     if len(letters) < 2:
+        return None
+    # Majority of units must be STRONG (single letters or canonical NATO):
+    # "Romeo Alpha Mike Indigo" is 3/4 canonical and assembles; "Robert
+    # Oscar Sam Edward" is 1/4 and stays a stated full name.
+    if strong * 2 < len(letters):
         return None
     name = "".join(letters)
     if not lily_is_valid_name(name):
@@ -178,6 +195,37 @@ def lily_is_valid_name(candidate: str) -> bool:
     if lowered in RESERVED_AGENT_NAMES:
         return False
     return True
+
+
+def lily_names_probably_same(bound: str, corrected: str) -> bool:
+    """Whether `corrected` is plausibly the SAME person as `bound`
+    respelled (HOTFIX-009 W7 rename gate — the same conservative family
+    as lily_memory's "Romney class" snap, with run-collapse so
+    "Rummy"/"Rami" match on skeleton rmy/rm).
+
+    Rename-migration of a player's score history fires ONLY when this
+    holds; a second voice self-introducing an unrelated name on a reused
+    diarization label ("call me Bob" on Alice's label) is a new binding
+    decision, never a migration.
+    """
+    a = "".join(ch for ch in (bound or "").lower() if ch.isalpha())
+    b = "".join(ch for ch in (corrected or "").lower() if ch.isalpha())
+    if len(a) < 2 or len(b) < 2:
+        return False
+    if a == b:
+        return True
+    if a[0] != b[0]:
+        return False
+
+    def _skel(s: str) -> str:
+        consonants = "".join(ch for ch in s if ch not in "aeiou")
+        return re.sub(r"(.)\1+", r"\1", consonants)
+
+    sa, sb = _skel(a), _skel(b)
+    if sa and sb and (sa.startswith(sb) or sb.startswith(sa)):
+        return True
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.75
 
 
 def lily_extract_name(raw: str) -> Optional[str]:

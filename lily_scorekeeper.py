@@ -35,6 +35,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import lily_binding
 import lily_config
 import lily_evaluation
 
@@ -1518,13 +1519,29 @@ class LilyScorekeeper:
         ledger history travel to the corrected name — instead of forking
         a fresh entry and leaving a misspelled ghost on the glass. Only
         callers whose name provenance is that voice's own words (confirmed
-        evidence, the known-name snap of it) may assert it.
+        evidence, the known-name snap of it) may assert it, and the
+        migration writer verifies plausibility itself: the names must
+        pass lily_names_probably_same, because this program's defect
+        history IS diarization mis-capture — a second voice reusing a
+        label and self-introducing an unrelated name must never silently
+        take the first player's score history. A refused rename falls
+        back to release semantics (logged RENAME_REFUSED).
         """
         name = player_name.strip()
         # If this label was bound to someone else, release it there —
         # or migrate the identity when this is a same-voice correction.
         for other_name, state in list(self.players.items()):
             if other_name != name and state.get("speaker_label") == speaker_label:
+                if rename and name not in self.players and not (
+                    lily_binding.lily_names_probably_same(other_name, name)
+                ):
+                    logger.info(
+                        "LILY_STATE | RENAME_REFUSED | session=%s label=%s "
+                        "from=%s to=%s (dissimilar — new binding, not a "
+                        "correction)",
+                        self.session_id, speaker_label, other_name, name,
+                    )
+                    rename = False
                 if rename and name not in self.players:
                     migrated = self.players.pop(other_name)
                     for entry in self.score_ledger:

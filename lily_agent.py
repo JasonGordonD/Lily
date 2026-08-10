@@ -88,6 +88,7 @@ from lily_binding import (
     LilyFragmentAccumulator,
     lily_extract_explicit_name,
     lily_is_valid_name,
+    lily_names_probably_same,
 )
 from lily_reasoning import LilyReasoning
 import lily_scorekeeper
@@ -3058,12 +3059,15 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self.sk.session_id, label, name,
         )
         # HOTFIX-009 W7: a correction propagates to the glass in ONE seam
-        # update. When this label is already bound under a different
-        # spelling, the player's own corrected words re-drive the EXISTING
+        # update. When this label is already bound under a plausibly-same
+        # name, the player's own corrected words re-drive the EXISTING
         # bind path (rename-migrate + on_speaker_bound -> attribute
         # publish) instead of waiting on the model to re-call the tool —
         # live 2026-08-10, the NATO correction changed nothing on the
-        # glass until the player complained a second time.
+        # glass until the player complained a second time. A DISSIMILAR
+        # name on a bound label (second voice on a reused label, mid-game
+        # "call me X") is a new binding decision: evidence is recorded,
+        # nothing auto-rebinds — the tool path owns that call.
         holder = next(
             (
                 n for n, st in self.sk.players.items()
@@ -3071,9 +3075,18 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             ),
             None,
         )
-        if holder is not None and holder != name:
+        if (
+            holder is not None
+            and holder != name
+            and lily_names_probably_same(holder, name)
+        ):
             self.sk.bind_speaker(label, name, rename=True)
-            self.on_speaker_bound(label, name)
+            note = self.on_speaker_bound(label, name)
+            if note and note.strip():
+                # A make-good committed during the auto-rebind must reach
+                # the model — same one-shot state-note surface as the
+                # honesty assists (context only, leak-filtered).
+                self._state_note = f"[state note:{note}]"
 
     def confirmed_name_for_label(self, speaker_label: str) -> str | None:
         label = (speaker_label or "").strip().strip("[]")
@@ -11869,7 +11882,11 @@ class LilyAgent(Agent):
         # HOTFIX-009 W7: every name that reaches this bind is anchored to
         # the voice itself (confirmed evidence, the snap of it, or a
         # biometric label) — so a different current holder of this label
-        # is the same person under a wrong spelling. Migrate, don't fork.
+        # that PLAUSIBLY matches (lily_names_probably_same, verified again
+        # by the migration writer) is the same person under a wrong
+        # spelling. Migrate, don't fork; a dissimilar name keeps release
+        # semantics (a second voice on a reused label never takes the
+        # first player's score history).
         holder = next(
             (
                 n for n, st in self._game.sk.players.items()
@@ -11878,7 +11895,13 @@ class LilyAgent(Agent):
             None,
         )
         self._game.sk.bind_speaker(
-            label, name, rename=bool(holder is not None and holder != name)
+            label,
+            name,
+            rename=bool(
+                holder is not None
+                and holder != name
+                and lily_names_probably_same(holder, name)
+            ),
         )
         note = self._game.on_speaker_bound(label, name)
         return f"Bound: voice {label} is {name}.{snap_note}{note}"
