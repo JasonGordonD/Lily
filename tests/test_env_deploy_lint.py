@@ -114,6 +114,10 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_VOICE_IDENTITY_MATCH_THRESHOLD",
     "LILY_VOICE_IDENTITY_MATCH_MARGIN",
     "LILY_VOICE_IDENTITY_ENROLL_MIN_SPEECH_SECONDS",
+    # HOTFIX-008 Z3 — how long a biometric no-match keeps the identity
+    # probe open for the stated-name door. Ships on its in-code default
+    # (180s); tune via deploy.yml `vars.` if a room needs it.
+    "LILY_IDENTITY_NO_MATCH_HOLD_SECONDS",
     # WS-3 cut-recovery grace (WO-LILY-STREAM-INTEGRITY-002): the dead-air
     # window before an auto-resume fires. Default-backed threshold (3.5s);
     # ships on its in-code default, tune via deploy.yml `vars.` if needed.

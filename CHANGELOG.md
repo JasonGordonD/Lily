@@ -5,6 +5,67 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-10 — WO-LILY-HOTFIX-008 Z3: a biometric NO_MATCH is not the probe resolving — the Y9 hold now outlasts it
+
+P0 honesty-timing. Live `lily-938EFF-2260354c` (RM_V7MnLQBeFMi9): the
+embedder returned `NO_MATCH best=0.6968 threshold=0.75` three seconds
+into the session and `_voice_identity_match_at_start` flipped
+`_voice_identity_resolved` True — closing `identity_probe_outstanding()`
+and with it EVERY N1/Y9 hold surface. Forty seconds later a reply turn,
+conditioned by the CLAIMED RETURNER gap-naming beat with no override in
+force, aired "You say you've played before, and my table card doesn't
+have you tonight, and I don't know why" — a NEGATIVE memory claim made
+while the identity question was still genuinely open. At +125s the
+player said "call me Rami", the stated-name door matched
+`grp_0b07f989`, and the full callback landed ("Reigning champ, last
+time you took it with three questions, underwater basket weaving and
+all"). Ninety seconds of "I don't know you" followed by knowing him
+completely; the recognition beat was correct and simply arrived too
+late to be used. (The claim detector never fired on the live claim
+"No. It's not." — so no claim-gated fix could have held; the hold has
+to ride the probe itself.)
+
+Fix is resolution semantics at the emitting source — no new text-filter
+suppressor, no prompt-copy rewrite:
+
+1. **The no-match keeps the probe OPEN.** `identity_probe_outstanding()`
+   now defers to `_no_match_awaiting_name_door()` when resolved: a
+   biometric NO_MATCH (stamped `_voice_identity_no_match_at`, also on
+   probe failure) is one route reporting, not the question closing —
+   name binding is mandatory lobby flow, so the stated-name lookup is a
+   probe route that WILL run. The hold releases when the name door
+   reports (`_identity_name_door_checked`, stamped when
+   `maybe_recognize_by_stated_name`'s lookup completes), when memory
+   lands, or when `LILY_IDENTITY_NO_MATCH_HOLD_SECONDS` (default 180s —
+   the live gap was 125s) expires. All existing hold surfaces (greet
+   OVERRIDE, still-checking state note, false-clean-slate TTS rewrite)
+   re-arm for free; none was modified in mechanism.
+2. **The still-checking state note names the card-gap class** — "do not
+   say your card/ledger doesn't have anyone … not even to concede a gap
+   to a claimed returner" — since the per-turn note was the only hold
+   text live on the defect turn and "empty memory / clean slate" did
+   not obviously cover Y9's own gap-naming phrasing.
+3. **Y9's honesty is timing-scoped, never regressed**: once the name
+   door reports empty (or the hold expires), the honest "table card
+   doesn't have you" beat is permitted exactly as before — the fixtures
+   pin that the live line's class is NOT rewritten post-resolution, and
+   that a match landing means the FIRST memory-bearing statement is the
+   callback. Nothing was deleted.
+
+Fixtures (REAL data, reusing Z1's `tests/fixtures/lily-938EFF-2260354c
+.transcripts.json`): `tests/test_hotfix008_z3_identity_hold.py` (9
+tests) — probe held at the moment the live line aired (override
+ordering asserted, not wording), match-landing closes the hold with
+recognition first, name-door-empty permits the honest gap line under a
+returner claim, per-turn note carries the card-gap class, hold bounded
+(expiry + default-outlasts-125s + config-off restores pre-Z3), plain
+resolved-no-stamp probe unchanged (N1 protected).
+
+Suite: 2098 → 2107 green (Z3 +9, zero regressions; all 83 character
+pins green and unmodified). Mandate numbers: lily_agent.py 15,266 →
+15,320 lines; prompt copy untouched (state-note conditioning text only);
+main tip `bc36e4a` → this commit. NOT deployed (WO: push only).
+
 ## 2026-08-10 — WO-LILY-HOTFIX-008 Z2: supply recovery decoupled from delivery state
 
 P0. Live `lily-938EFF-2260354c` (RCA at `c6769f6`): q2's prefetch

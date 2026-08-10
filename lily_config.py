@@ -574,6 +574,17 @@ def voice_identity_match_margin() -> float:
     return _get_float("LILY_VOICE_IDENTITY_MATCH_MARGIN", 0.06)
 
 
+def identity_no_match_hold_seconds() -> float:
+    """HOTFIX-008 Z3: how long a biometric NO_MATCH keeps the identity
+    probe OPEN while the stated-name door is untried. Live 2026-08-10
+    (`lily-938EFF-2260354c`): no-match at +3s, "my table card doesn't have
+    you" at +43s, name-door match at +128s — the hold must outlast that
+    gap. On expiry the question resolves empty and honest gap-naming is
+    permitted; <=0 disables the hold (no-match closes the probe
+    immediately, the pre-Z3 behaviour)."""
+    return _get_float("LILY_IDENTITY_NO_MATCH_HOLD_SECONDS", 180.0)
+
+
 def voice_identity_enroll_min_speech_seconds() -> float:
     """A player is enrolled at session close only above this much captured
     speech — short utterances yield noisy embeddings that would blur the

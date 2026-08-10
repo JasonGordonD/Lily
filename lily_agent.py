@@ -1009,6 +1009,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # absence of memory is UNKNOWN, not established — and an unknown
         # may not be spoken as a fact.
         self._voice_identity_resolved: bool = False
+        # HOTFIX-008 Z3: a biometric NO_MATCH is one route reporting, not
+        # the identity question closing — the stated-name door is still an
+        # untried probe route (name binding is mandatory lobby flow). The
+        # stamp opens a bounded hold on memory-characterising speech; the
+        # checked flag records that the name door has reported.
+        self._voice_identity_no_match_at: float | None = None
+        self._identity_name_door_checked: bool = False
         # GROUP PREFERENCES (group prefs WO): the OPAQUE per-group prefs
         # dict (lily_group_prefs.prefs, migration 013), loaded at session
         # start for a returning group and persisted whole on every
@@ -2887,7 +2894,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         you". Saying nothing about memory is always available and always
         honest."""
         if getattr(self, "_voice_identity_resolved", False):
-            return False
+            return self._no_match_awaiting_name_door()
         if not lily_config.voice_identity_enabled():
             return False
         if getattr(self, "supabase", None) is None:
@@ -2895,6 +2902,41 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # A device candidate already staged means recognition is in flight
         # by another route; either way the question is open, not closed.
         return True
+
+    def _no_match_awaiting_name_door(self) -> bool:
+        """HOTFIX-008 Z3: a biometric NO_MATCH keeps the probe OPEN while
+        the stated-name door is untried.
+
+        Live 2026-08-10, `lily-938EFF-2260354c` (RM_V7MnLQBeFMi9): the
+        embedder returned NO_MATCH at 0.6968 against a 0.75 threshold three
+        seconds into the session, `_voice_identity_resolved` flipped True,
+        and forty seconds later the greeting said "my table card doesn't
+        have you tonight, and I don't know why" — with every N1/Y9 hold
+        surface dark because the probe read as closed. At +125s the player
+        said "call me Rami", the name door matched grp_0b07f989, and the
+        full callback landed ("reigning champ … underwater basket
+        weaving"). Ninety seconds of "I don't know you" followed by
+        knowing him completely.
+
+        The no-match was one route reporting, not the question closing:
+        name binding is mandatory lobby flow, so the stated-name lookup is
+        a probe route that WILL run. Until it reports (or memory lands, or
+        the bounded hold expires), absence of memory is still UNKNOWN and
+        may not be spoken as a fact. The hold is time-bounded so an
+        anonymous table is never gagged about memory forever — on expiry
+        the question resolves empty and Y9's honest gap-naming is
+        permitted exactly as before."""
+        stamp = getattr(self, "_voice_identity_no_match_at", None)
+        if stamp is None:
+            return False
+        if getattr(self, "memory_block", None):
+            return False
+        if getattr(self, "_identity_name_door_checked", False):
+            return False
+        hold = lily_config.identity_no_match_hold_seconds()
+        if hold <= 0:
+            return False
+        return (time.time() - stamp) < hold
 
     def can_claim_empty_memory(self) -> bool:
         """P0-A: True only when absence of memory is a *settled* fact.
@@ -9030,6 +9072,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             )
             self._voice_identity_resolved = True
             if match is None or match["group_id"] == self.group_id:
+                if match is None:
+                    # Z3: no-match is not resolution while the name door
+                    # is untried — hold memory-characterising speech.
+                    self._voice_identity_no_match_at = time.time()
                 return False
             logger.info(
                 "LILY_VOICE_ID | MATCH_AT_START | session=%s group=%s score=%.3f",
@@ -9044,6 +9090,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return False
         except Exception as e:
             self._voice_identity_resolved = True
+            # Z3: a failed probe gave no answer either — same hold shape.
+            self._voice_identity_no_match_at = time.time()
             logger.warning("LILY_VOICE_ID | MATCH_AT_START_FAILED | %s", e)
             return False
 
@@ -9401,6 +9449,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         except Exception as e:
             logger.warning("LILY_MEMORY | NAME_DOOR_FAILED | %s", e)
             return False
+        # Z3: the stated-name route has now REPORTED for this table —
+        # whatever the result, the identity question is no longer waiting
+        # on this door, so the no-match hold may release.
+        self._identity_name_door_checked = True
         groups = [g for g in groups if g and g != self.group_id]
         if len(groups) != 1:
             if len(groups) > 1:
@@ -10874,8 +10926,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if self.identity_probe_outstanding():
             extra.append(
                 "identity: STILL CHECKING — do not claim empty memory or "
-                "clean slate; say you are still checking / the card is not "
-                "connected yet if asked"
+                "clean slate, and do not say your card/ledger doesn't have "
+                "anyone (absence is UNKNOWN, not established — not even to "
+                "concede a gap to a claimed returner); say you are still "
+                "checking / the card is not connected yet if asked"
             )
         if getattr(self, "_returner_claim_seen", False):
             extra.append(

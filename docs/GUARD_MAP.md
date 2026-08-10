@@ -153,6 +153,7 @@ Executed top to bottom in `tts_node` (A:12466–12960). Each numbered step can r
 | 76 | N2 custom-round registration ledger / `LILY_CUSTOM_ROUND \| REGISTERED`, `TOPIC_EXHAUSTED` | A:713–738, A:3291–3500, A:3770ff | Custom/topic round | Registration is the only proof a custom round exists | HOTFIX-006 N2 |
 | 77 | N9 late-answer / `LATE_MISS`, `LATE_CHECK_FAILED` | A:6919ff, A:8017 | Correct answer past the closed window | One warm announcement, one-shot | HOTFIX-006 N9 |
 | 78 | X12 explain-on-request / verdict contest | A:926–930, A:6688–6740 | Player asks why / contests | One-shot conditioning notes consumed at A:5546–5550 | HOTFIX-005 X12 |
+| 79 | Z3 no-match identity hold / `LILY_VOICE_ID \| NO_MATCH` + open probe | `identity_probe_outstanding` A:2879, `_no_match_awaiting_name_door` A:2906; stamps A:8788 (no-match), A:8804 (probe failure); release A:9165 (name door reported), memory landing, or `identity_no_match_hold_seconds` C:577 (default 180s) | Biometric probe returns NO_MATCH while the stated-name door is untried | The probe stays OUTSTANDING — every N1/Y9 hold surface (greet override A:3333, still-checking state note A:10638, false-clean-slate TTS rewrite via `can_claim_empty_memory`) remains in force; no line may characterise memory, positive or negative, until the name door reports, memory lands, or the bounded hold expires | HOTFIX-008 Z3 |
 
 Also present and load-bearing but not separately numbered: the WS-5 MC answer-aborts-read pair
 (`_note_mc_delivery_start` SD:915, `_mc_stem_protected` SD:937, `mc_early_answer_check` SD:963,
