@@ -1040,6 +1040,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # resolves the pending confirmation; None accepts any voice
         # (tool-initiated flow, where the requester is unattributed).
         self.forget_requester: str | None = None
+        # W3 confirmation beat: a pacing command that CONTRADICTS a pacing
+        # the player already stated this session (self.prefs["pacing"]) is
+        # held here instead of flipping silently — one beat asks, the next
+        # assent applies. None = nothing awaiting. Requester scopes the
+        # yes/no like the forget flow.
+        self._pending_pacing: str | None = None
+        self._pending_pacing_requester: str | None = None
         # The group id the cascade targets — captured on the FIRST attempt,
         # BEFORE the fresh-anonymous re-bind, so a retry after partial
         # failure still deletes the ORIGINAL identity, never the fresh one.
@@ -7410,6 +7417,59 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 self.sk.session_id, player, str(text)[:120],
             )
 
+        # W3 confirmation beat resolution: a pacing change was held because
+        # it contradicted a stated preference. The requester's next
+        # parseable yes applies it, a no keeps the current pacing, anything
+        # ambiguous stays pending. Runs before command dispatch (like the
+        # forget flow) so "yes" resolves the beat rather than reading as a
+        # fresh command. A brand-new pacing command (not yes/no) falls
+        # through to dispatch, which clears the pending slot on apply.
+        if (
+            getattr(self, "_pending_pacing", None) is not None
+            and command not in ("pacing_relaxed", "pacing_timed")
+        ):
+            speaker_key = player or speaker_label
+            if (
+                self._pending_pacing_requester is None
+                or speaker_key == self._pending_pacing_requester
+            ):
+                verdict = lily_forget.lily_parse_forget_confirmation(text)
+                if verdict == "yes":
+                    target = self._pending_pacing
+                    self._pending_pacing = None
+                    self._pending_pacing_requester = None
+                    if self.set_pacing(target, source="voice_confirm"):
+                        note = (
+                            "answer windows now run about twice as long — "
+                            "loose tempo from here, no countdown talk"
+                            if target == "relaxed"
+                            else "the standard answer clock is back on"
+                        )
+                        self.gated_say(
+                            None,
+                            "pacing_set",
+                            f"They confirmed the switch to {target} pacing — "
+                            f"committed, in code, saved as this table's "
+                            f"usual: {note}. One light line, then keep the "
+                            "night moving.",
+                            source="voice_confirm",
+                        )
+                    return
+                if verdict == "no":
+                    kept = self.sk.pacing
+                    self._pending_pacing = None
+                    self._pending_pacing_requester = None
+                    self.gated_say(
+                        None,
+                        "pacing_kept",
+                        f"They said no — pacing stays {kept}, nothing "
+                        "changed. One light line honoring the earlier "
+                        "choice, then straight back into the game. Never "
+                        "re-raise it.",
+                        source="voice_confirm",
+                    )
+                    return
+
         # WO-LILY-FORGETME-001: pending forget confirmation resolves
         # DETERMINISTICALLY (same pattern as the clarify resolution) — the
         # requester's next parseable yes fires the cascade, a no drops it
@@ -7479,6 +7539,34 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # (flag + persisted prefs) before Lily says a word about it —
             # same contract as "back to normal".
             pacing = "relaxed" if command == "pacing_relaxed" else "timed"
+            # W3 confirmation beat: if this contradicts a pacing the player
+            # already stated this session, do NOT flip silently — hold it
+            # and ask once (the incident: a relaxed table should never have
+            # a clock re-enabled without asking). A re-stated command while
+            # a beat is already pending reads as assent (falls through to
+            # apply below and clears the slot).
+            stated = (self.prefs or {}).get("pacing")
+            if (
+                getattr(self, "_pending_pacing", None) is None
+                and stated in ("timed", "relaxed")
+                and stated != pacing
+            ):
+                self._pending_pacing = pacing
+                self._pending_pacing_requester = player or speaker_label
+                self.gated_say(
+                    None,
+                    "pacing_confirm",
+                    f"A player asked for {pacing} pacing, but this table "
+                    f"already chose {stated} earlier this session — that is "
+                    "a contradiction, so confirm before switching, never "
+                    "flip it silently. One light line naming the earlier "
+                    f"choice and asking if they want to switch to {pacing}. "
+                    "Nothing changes until they say yes.",
+                    source="voice_command",
+                )
+                return
+            self._pending_pacing = None
+            self._pending_pacing_requester = None
             if self.set_pacing(pacing, source="voice_command"):
                 if pacing == "relaxed":
                     note = (

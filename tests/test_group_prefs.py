@@ -604,10 +604,17 @@ def test_spoken_pacing_choice_commits_and_acknowledges():
     ack = game.session.instructions[0]
     assert "relaxed" in ack
     assert "usual" in ack
-    # Flipping back by voice works the same way.
+    # W3: flipping back by voice now CONTRADICTS the relaxed choice this
+    # table just stated, so it is confirmed before it applies (never a
+    # silent flip). One beat asks; the explicit yes commits.
     asyncio.run(_drive_one(game, "timed rounds please"))
+    assert game.sk.pacing == "relaxed"          # held, not flipped
+    assert game.prefs["pacing"] == "relaxed"
+    assert game._pending_pacing == "timed"
+    asyncio.run(_drive_one(game, "yes"))
     assert game.sk.pacing == "timed"
     assert game.prefs["pacing"] == "timed"
+    assert game._pending_pacing is None
 
 
 async def _drive_one(game: LilyGame, text: str) -> None:
@@ -762,3 +769,145 @@ def test_forget_teardown_clears_prefs_but_keeps_live_pacing():
     assert game.sk.pacing == "relaxed"
     # A fresh choice after the deletion persists under the fresh id only.
     assert game.group_id.startswith("anon_")
+
+
+# ---------------------------------------------------------------------------
+# WO-LILY-HOTFIX-009 W3 — a negated/refused mode must never invert into the
+# thing it refuses, and a mode change that contradicts a preference already
+# stated this session is confirmed before it applies. Fixtures are the REAL
+# session rows from RM_RQTZZanrHURF (05:38:11 / 05:38:31), where "I'm not
+# playing with the timer" was parsed as "enable the timer" and aired
+# "Timed clock's back on — noted."
+# ---------------------------------------------------------------------------
+
+# The two verbatim player utterances from the live session.
+_W3_TIMER_REFUSALS = (
+    "Shut up! I'm not playing with the timer.",
+    "I'm not playing with the timer. I'm not playing with the timer. "
+    "You've judged me on timer like I missed the timer, and I had not, "
+    "because there's no timer in the first place, let alone that I had "
+    "said it earlier that.",
+)
+
+
+def test_w3_timer_refusal_reads_as_relaxed_never_timed():
+    # The core inversion: a protest against the clock must resolve to
+    # relaxed (or nothing), and NEVER to pacing_timed.
+    for txt in _W3_TIMER_REFUSALS:
+        cmd = lily_detect_control_command(txt)
+        assert cmd == "pacing_relaxed", (txt, cmd)
+        assert cmd != "pacing_timed"
+    # A spread of refusal phrasings the brief names — none may enable timed.
+    for txt in (
+        "I'm not playing with the timer",
+        "not doing the timer",
+        "stop with the timer",
+        "stop the clock",
+        "I don't want the timer",
+        "I don't want a countdown",
+        "ditch the clock",
+        "no more countdown",
+        "kill the timer",
+        "we're not playing with the clock",
+    ):
+        assert lily_detect_control_command(txt) != "pacing_timed", txt
+
+
+def test_w3_real_utterance_never_enables_the_clock_on_the_wire():
+    # Production path: the table set relaxed at the top of the session, then
+    # protested the timer. The live bug flipped the clock ON and aired
+    # "Timed clock's back on." After the fix the clock stays OFF and no such
+    # line is dispatched.
+    db = _FakeSupabase({"lily_group_prefs": []})
+    game = _make_game(supabase=db)
+    game.sk.set_pacing("relaxed")
+    game.prefs = {"pacing": "relaxed"}
+
+    async def _run():
+        for txt in _W3_TIMER_REFUSALS:
+            _segment(game, txt)
+            await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
+    assert game.sk.pacing == "relaxed"          # never flipped to timed
+    assert game._pending_pacing is None          # no spurious confirm beat
+    joined = " ".join(game.session.instructions).lower()
+    assert "clock is back on" not in joined
+    assert "standard answer clock" not in joined
+
+
+def test_w3_contradicting_change_asks_before_applying():
+    # A GENUINE, correctly-parsed timed request that contradicts the stated
+    # relaxed choice is held for one confirmation beat, not applied silently.
+    db = _FakeSupabase({"lily_group_prefs": []})
+    game = _make_game(supabase=db)
+    game.sk.set_pacing("relaxed")
+    game.prefs = {"pacing": "relaxed"}
+
+    asyncio.run(_drive_one(game, "let's do timed rounds"))
+    assert game.sk.pacing == "relaxed"           # held
+    assert game._pending_pacing == "timed"
+    assert len(game.session.instructions) == 1   # exactly one beat
+    beat = game.session.instructions[0].lower()
+    assert "timed" in beat and ("confirm" in beat or "switch" in beat)
+    # Nothing persisted while it is only pending.
+    assert game.prefs["pacing"] == "relaxed"
+
+
+def test_w3_confirmation_assent_applies_the_change():
+    db = _FakeSupabase({"lily_group_prefs": []})
+    game = _make_game(supabase=db)
+    game.sk.set_pacing("relaxed")
+    game.prefs = {"pacing": "relaxed"}
+
+    asyncio.run(_drive_one(game, "let's do timed rounds"))
+    asyncio.run(_drive_one(game, "yes, switch it"))
+    assert game.sk.pacing == "timed"
+    assert game.prefs["pacing"] == "timed"
+    assert game._pending_pacing is None
+
+
+def test_w3_confirmation_decline_keeps_the_stated_choice():
+    db = _FakeSupabase({"lily_group_prefs": []})
+    game = _make_game(supabase=db)
+    game.sk.set_pacing("relaxed")
+    game.prefs = {"pacing": "relaxed"}
+
+    asyncio.run(_drive_one(game, "let's do timed rounds"))
+    asyncio.run(_drive_one(game, "no, leave it"))
+    assert game.sk.pacing == "relaxed"
+    assert game.prefs["pacing"] == "relaxed"
+    assert game._pending_pacing is None
+
+
+def test_w3_first_pacing_choice_never_asks_to_confirm():
+    # No prior stated preference -> the first spoken choice applies silently,
+    # exactly as before. The confirmation beat only guards contradictions,
+    # so it must not over-fire on a fresh table.
+    db = _FakeSupabase({"lily_group_prefs": []})
+    game = _make_game(supabase=db)  # prefs empty, pacing default "timed"
+
+    asyncio.run(_drive_one(game, "let's play relaxed"))
+    assert game.sk.pacing == "relaxed"
+    assert game._pending_pacing is None
+
+
+def test_w3_picture_refusal_never_enables_pictures():
+    # The same asymmetry on the sibling media surface (adult deck rides it):
+    # a verb-separated refusal of pictures/images must resolve to voice_only,
+    # never to "pictures". "no pictures / I don't want the picture deck"
+    # cannot turn the screen on.
+    from lily_scorekeeper import lily_detect_media_choice
+    for txt in (
+        "I'm not playing with pictures",
+        "I don't want the pictures",
+        "I don't want the picture deck",
+        "stop with the images",
+        "no pictures",
+        "ditch the screen",
+        "we're not doing images",
+    ):
+        assert lily_detect_media_choice(txt) != "pictures", txt
+    # Un-negated enables still work.
+    assert lily_detect_media_choice("turn the pictures on") == "pictures"
+    assert lily_detect_media_choice("with pictures") == "pictures"

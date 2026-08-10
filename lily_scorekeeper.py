@@ -259,12 +259,35 @@ _PACING_TIMED_PATTERNS = (
 )
 _PACING_RELAXED_RE = _re.compile("|".join(_PACING_RELAXED_PATTERNS))
 _PACING_TIMED_RE = _re.compile("|".join(_PACING_TIMED_PATTERNS))
-# Negated timed is a relaxed request: "no timed rounds", "don't want it
-# timed", "not timed". The negation word must IMMEDIATELY precede "timed"
-# (give or take a want/the/it) so "timed rounds, not relaxed" never
-# misreads. (Apostrophes normalize to spaces: "don t".)
-_PACING_TIMED_NEGATION_RE = _re.compile(
-    r"\b(?:no|not|don t want|dont want|do not want|won t do|without)"
+# A REFUSED timer is a relaxed request. The timed-enable patterns above key
+# on the noun vocabulary (timer/clock/countdown) AND the adjective (timed);
+# this refusal guard must cover the SAME vocabulary or it re-inverts. The
+# live W3 failure was exactly the gap: "I'm not playing with the timer"
+# hit the enable substring "with the timer" while an adjective-only
+# negation guard ("not timed") missed the noun three tokens away, so a
+# protest against the clock turned it ON. Explicit refusal CONSTRUCTIONS
+# (not a wildcard window) so "timed rounds, not relaxed" never misreads:
+#   - "[neg] … playing|doing|using|messing|dealing with … timer/clock"
+#   - "stop|kill|lose|drop|ditch|cut|cancel|scrap|forget … the timer/clock"
+#   - "not/no with|on the clock/timer"
+#   - "[neg] … timed" (the old adjacent-adjective case, folded in)
+# (Apostrophes normalize to spaces: "don t".)
+_PACING_TIMER_REFUSAL_RE = _re.compile(
+    r"\b(?:not|no|don t|dont|do not|won t|wont|never|ain t)\b"
+    r"(?:\s+(?:gonna|going to|want to|wanna|here to|about to))?"
+    r"\s+(?:playing|play|doing|do|using|use|messing|dealing|bothering"
+    r"|working|running|down for|into)"
+    r"(?:\s+(?:with|around with|around))?"
+    r"\s+(?:the\s+|a\s+|any\s+|that\s+|this\s+)?"
+    r"(?:timer|timed|clock|countdown)s?\b"
+    r"|\b(?:stop|kill|lose|drop|ditch|cut|cancel|scrap|forget|kill off"
+    r"|no more|ditch the|skip)"
+    r"(?:\s+(?:the|that|this|with(?: the)?|about(?: the)?))?"
+    r"\s+(?:timer|timed(?:\s+clock)?|clock|countdown)s?\b"
+    r"|\b(?:not|no)\s+(?:with|on)\s+(?:the\s+|a\s+)?(?:timer|clock|countdown)s?\b"
+    r"|\b(?:don t want|dont want|do not want|not want|won t do|no need for)"
+    r"(?:\s+(?:the|any|a))?\s+(?:timer|clock|countdown)s?\b"
+    r"|\b(?:no|not|don t want|dont want|do not want|won t do|without)"
     r"\s+(?:the\s+|it\s+|any\s+|them\s+)?timed\b"
 )
 
@@ -300,11 +323,14 @@ def lily_detect_pace_request(text: str) -> Optional[str]:
 
 def lily_detect_pacing_choice(text_normalized: str) -> Optional[str]:
     """Classify a normalized utterance as a pacing choice. Returns
-    "pacing_relaxed", "pacing_timed", or None. A negated timed ("no timed
-    rounds") is a relaxed request; when BOTH directions fire un-negated
-    the utterance is ambiguous — returns None (the prompt/tool layer sorts
-    it out conversationally; nothing flips on ambiguity)."""
-    if _PACING_TIMED_NEGATION_RE.search(text_normalized):
+    "pacing_relaxed", "pacing_timed", or None. A REFUSED timer ("no timed
+    rounds", "I'm not playing with the timer") is a relaxed request and is
+    checked FIRST so OFF wins the collision — the enable patterns key on
+    the same timer/clock nouns, and a refusal must never lose to the
+    substring it contains. When BOTH directions fire un-negated the
+    utterance is ambiguous — returns None (the prompt/tool layer sorts it
+    out conversationally; nothing flips on ambiguity)."""
+    if _PACING_TIMER_REFUSAL_RE.search(text_normalized):
         return "pacing_relaxed"
     relaxed = _PACING_RELAXED_RE.search(text_normalized) is not None
     timed = _PACING_TIMED_RE.search(text_normalized) is not None
@@ -935,6 +961,29 @@ _MEDIA_VOICE_ONLY_RE = _re.compile(
     r")\b"
 )
 
+# A REFUSED picture/screen is a voice_only request — same asymmetry the W3
+# pacing fix closes: the pictures-enable patterns key on "with pictures" /
+# "images live", so a verb-separated refusal ("I'm not playing with
+# pictures", "I don't want the pictures / the picture deck", "stop with the
+# images") would otherwise hit the enable substring and turn the screen ON.
+# Explicit refusal constructions over the picture/screen/image nouns;
+# checked FIRST in lily_detect_media_choice so OFF wins the collision.
+_MEDIA_REFUSAL_RE = _re.compile(
+    r"\b(?:not|no|don t|dont|do not|won t|wont|never|ain t)\b"
+    r"(?:\s+(?:gonna|going to|want to|wanna|here to|about to))?"
+    r"\s+(?:playing|play|doing|do|using|use|messing|dealing|bothering"
+    r"|working|down for|into)"
+    r"(?:\s+(?:with|around with|around))?"
+    r"\s+(?:the\s+|a\s+|any\s+|that\s+|this\s+)?"
+    r"(?:pictures?|images?|screen|picture (?:deck|round|lane))s?\b"
+    r"|\b(?:stop|kill|lose|drop|ditch|cut|cancel|scrap|forget|no more|skip)"
+    r"(?:\s+(?:the|that|this|with(?: the)?|about(?: the)?))?"
+    r"\s+(?:pictures?|images?|screen|picture (?:deck|round|lane))s?\b"
+    r"|\b(?:don t want|dont want|do not want|not want)"
+    r"(?:\s+(?:the|any|these|those))?"
+    r"\s+(?:pictures?|images?|picture (?:deck|round|lane))s?\b"
+)
+
 
 def lily_detect_media_choice(text: str) -> Optional[str]:
     """
@@ -948,7 +997,7 @@ def lily_detect_media_choice(text: str) -> Optional[str]:
     normalized = _normalize_command_text(text)
     if not normalized:
         return None
-    if _MEDIA_VOICE_ONLY_RE.search(normalized):
+    if _MEDIA_REFUSAL_RE.search(normalized) or _MEDIA_VOICE_ONLY_RE.search(normalized):
         return "voice_only"
     if _MEDIA_PICTURES_RE.search(normalized):
         return "pictures"
