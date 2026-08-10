@@ -5,6 +5,77 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-10 — WO-LILY-HOTFIX-008 Z2: supply recovery decoupled from delivery state
+
+P0. Live `lily-938EFF-2260354c` (RCA at `c6769f6`): q2's prefetch
+FAILED loudly and bounded at 03:43:12 (`PREFETCH_FAILED
+error_class=TimeoutError`, 20s wall, honest status note set, returned
+None) — and NOTHING recovered for the rest of the session. ALL supply
+recovery (IDLE_REARM, the WS-6 SUPPLY_STALL→`arm_supply_fallback` rung,
+IDLE_REPREFETCH, PREFETCH_HARD_TIMEOUT) lived ONLY in the watchdog's
+idle branch, reachable when nothing is armed and no window is open. q1
+stayed `delivery=armed`/window-cycling the whole session (its
+transition deadlock is a separate RCA, untouched here), so the watchdog
+took the healthy path every tick; the fire-and-forget prefetch task was
+done-and-dead with `next_question=None`, invisible — zero WATCHDOG
+lines, exactly one prefetch attempt all session, while `lily_questions`
+held 464 active rows. The inline insurance draw ran inside the same
+dead task and emitted zero telemetry.
+
+The fix moves existing recovery out from behind the wrong gate — no new
+suppressors:
+
+1. **Self-heal from the failure itself.** The prefetch wrapper marks a
+   genuine supply failure (generation AND insurance produced nothing —
+   deliberate mode/category/duplicate discards deliberately do NOT
+   count) and schedules `ensure_supply_recovery` directly; no idle tick
+   required. Ladder (`_recover_supply`): ONE de-escalated re-prefetch
+   (adult high → medium, general medium → low, threaded as a one-shot
+   `_prefetch_effort_override` → `prefetch_question(effort=)`) → curated
+   bank → ONE honest line + explicit pause offer (`supply_exhausted`
+   act through the gated_say funnel), never an open-ended wait.
+2. **Watchdog supply-health check on its own tick**, ahead of the
+   armed/window branches: `next_question` None + prefetch task
+   done/absent + past the first arm, for 2 consecutive ticks, in a
+   non-idle phase → `SUPPLY_SILENT_WINDOW` WARN (once) + recovery. The
+   idle branch keeps its existing ladder unchanged.
+3. **`_bank_to_supply`** — the draw half of `arm_supply_fallback`,
+   factored out delivery-state-independent (MOVED, not rewritten: same
+   draw, same N2 strict-topic release, same G2 idempotency, same
+   image-strip). It lands the row on `next_question` ONLY; arming +
+   nudging stay behind `arm_supply_fallback`'s idle guards. One
+   behavior delta: the honest-vamp status note now clears when supply
+   LANDS (matching the insurance path) rather than only after a
+   successful arm.
+4. **Telemetry**: `INSURANCE_BANK_HIT/EMPTY/ERROR` on the insurance
+   leg (an insurance exception no longer kills the task trackless),
+   `SUPPLY_BANK_EMPTY` carries the trigger, `BANK_TO_SUPPLY`,
+   `LILY_SUPPLY | RETRY`, `SUPPLY_EXHAUSTED`, `RECOVERY_FAILED`.
+   Incident state resets when any question lands on the supply line;
+   `stop_idle_watchdog` cancels the ladder with the loop.
+
+Deletions: none — `arm_supply_fallback`'s draw body moved verbatim into
+`_bank_to_supply`; its guards, return codes, and arm/nudge tail are
+unchanged (all 17 pre-existing WS-6 fixtures pass unmodified).
+
+Recovery budget (asserted): from the failure event a fallback question
+lands on the supply line within one retry
+(`prefetch_total_budget_seconds` ≈ 45s) + one 20s bank draw ≈ 65s; the
+watchdog backstop adds ≤ 2 ticks (~20s) of detection when the failure
+event itself was missed. The 03:42:56 → 03:47:28 spine is encoded in
+`tests/test_supply_recovery_z2.py` (9 tests): spine regression (q2 arms
+on the supply line while q1's window cycles, delivery untouched),
+de-escalation pin, total-failure honest line + pause offer (exactly
+one, no re-fire), discard-is-not-failure, insurance telemetry ×2,
+watchdog silent-window WARN + recovery, 28-tick no-unbounded-wait
+timeline, predicate boundaries. GUARD_MAP: mechs 32/61 amended
+(recovery no longer idle-gated), new mech 79.
+
+Suite: 2089 → 2098 green (Z2 +9, zero regressions; all 83 character
+pins green, unmodified). Mandate numbers: lily_agent.py 14,976 →
+15,266 lines; prompt untouched; main tip `194889e` → this commit. NOT
+deployed (WO: push only).
+
 ## 2026-08-10 — WO-LILY-HOTFIX-008 Z1: phantom `…[cut off]` double-record — the itemless fallback DELETED
 
 P0. Live `lily-938EFF-2260354c`: 20 of 36 LILY rows ended `…[cut off]`

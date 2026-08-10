@@ -621,6 +621,7 @@ class LilyReasoning:
         avoid_questions: list[str],
         multiple_choice: bool = False,
         avoid_answers: Optional[list] = None,
+        effort: Optional[str] = None,
     ) -> Optional[dict]:
         avoid_block = "\n".join(f"- {q}" for q in avoid_questions[-20:]) or "- (none yet)"
         prompt = _GENERATION_PROMPT.format(
@@ -666,7 +667,9 @@ class LilyReasoning:
                 if mode == "adult"
                 else lily_config.reasoning_model()
             ),
-            effort=(
+            # Z2 (HOTFIX-008): a supply-recovery retry passes a de-escalated
+            # effort so a hard draw does not reproduce the stall verbatim.
+            effort=effort or (
                 lily_config.adult_reasoning_effort("high")
                 if mode == "adult"
                 else lily_config.reasoning_effort()
@@ -836,6 +839,7 @@ class LilyReasoning:
         from_bank: Optional[dict] = None,
         multiple_choice: bool = False,
         avoid_answers: Optional[list] = None,
+        effort: Optional[str] = None,
     ) -> Optional[dict]:
         """Prefetch the N+1 question. KB-bank questions bypass verification
         (spec §4.5); when the round runs multiple choice, bank questions
@@ -853,7 +857,7 @@ class LilyReasoning:
                 self.generate_question(
                     category, difficulty_tier, scorekeeper.mode,
                     avoid_questions, multiple_choice=multiple_choice,
-                    avoid_answers=avoid_answers,
+                    avoid_answers=avoid_answers, effort=effort,
                 ),
                 timeout=PREFETCH_TIMEOUT_SECONDS,
             )

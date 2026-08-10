@@ -29,7 +29,7 @@ floor read before firing. Everything else in this document remains as analysed.
 `file:line` is the definition site. Where a mechanism is a *decision + call site* pair, both are given.
 `A` = `lily_agent.py`, `SD` = `lily_speech_delivery.py`, `SG` = `lily_say_gate.py`.
 
-**Mechanism count: 78** (see §9 for the tally by kind and by owning WO).
+**Mechanism count: 79** (see §9 for the tally by kind and by owning WO).
 
 ---
 
@@ -82,7 +82,7 @@ floor read before firing. Everything else in this document remains as analysed.
 | 29 | Delivery nudge / `LILY_WINDOW \| DELIVERY_NUDGE`, `NUDGE_NEAR_MISS` | A:5588–5677; `WINDOW_FALLBACK_AGENT_TURNS = 2` A:503 | Armed, window closed, no delivery claim after 2 finished agent turns, `ui_phase == "question"` | Dispatches ONE structural delivery nudge (or confirms via mech. 27 if ratio ≥ 0.9) | desync WO Sub-agent B | Replaced the old ghost-window fallback. Another re-air producer feeding Chain A |
 | 30 | WS-2 registered-undelivered reconciliation / `UNDELIVERED_NEAR_MISS`, `UNDELIVERED_REFIRE`, `UNDELIVERED_RELEASE`, `ANSWERED_NO_REAIR` | A:4186–4314; contract note A:4084–4096; `UNDELIVERED_MAX_REFIRES = 2` A:507 | Armed, window closed, delivery claim unconfirmed, ≥ `undelivered_reconcile_seconds()/10` ticks, room quiet for `undelivered_refire_quiet_seconds()` | Re-fires the delivery (releasing the stale claim + `cancel_speech` first), then after 2 re-fires releases the question to supply | WS-2, OMNIBUS-003 | Guarded in sequence by mech. 17 (T2), the playout ledger (T1, A:4239–4245), `host_speaking`, and the room-quiet hold (A:4246–4257, added because the watchdog used to stack copies onto banter). Feeds mech. 31 |
 | 31 | `_stuck_delivery_present` / `no_stuck_claims` | A:4110–4146 | Delivery re-fired ≥ once and still unconfirmed | Blocks WS-6's supply fallback (mech. 32) | WS-2/WS-6 | Deliberately keys off `_undelivered_refires`, not `_undelivered_ticks`, because the tick counter resets inside the same synchronous call that crosses the threshold — a zero-duration observable window |
-| 32 | WS-6 supply-stall fallback / `SUPPLY_STALL`, `SUPPLY_FALLBACK_ARMED`, `SUPPLY_BANK_EMPTY`, `SUPPLY_FALLBACK_ERROR` | A:4027–4054, `arm_supply_fallback` A:4830–5011 | Nothing armed, nothing prefetched, past `_supply_fallback_ticks()` **and** `no_stuck_claims()` | Arms straight from the curated bank | WS-6, OMNIBUS-003 | Explicitly ordered behind mech. 31 "so a fallback never queues behind a ghost" |
+| 32 | WS-6 supply-stall fallback / `SUPPLY_STALL`, `SUPPLY_FALLBACK_ARMED`, `SUPPLY_BANK_EMPTY`, `SUPPLY_FALLBACK_ERROR` | A:4027–4054, `arm_supply_fallback` A:4830–5011 | Nothing armed, nothing prefetched, past `_supply_fallback_ticks()` **and** `no_stuck_claims()` | Arms straight from the curated bank | WS-6, OMNIBUS-003 | Explicitly ordered behind mech. 31 "so a fallback never queues behind a ghost". **HOTFIX-008 Z2:** this rung is no longer the only reach into the bank — its draw half is factored into `_bank_to_supply` (delivery-state-independent, mech. 79); the ARM + nudge stay behind this mechanism's idle guards. The 2260354c stall class (supply dead while a question is armed / a window cycles) is now mech. 79's trigger, not a gap |
 | 33 | STOP primitive / `LILY_STOP \| PRIMITIVE`, `RESUMED` | `handle_stop_primitive` A:4680–4737; `_freeze_game_delivery_for_stop` A:4616 | STOP utterance | Retires armed/prefetched content, kills the watchdog's ability to resurrect the turn, enters the hold, one brief ack | PATCH-002 A5/T12, P0-B | Checked at the very top of the user-final path (A:6471) so it bypasses every other gate |
 | 34 | `invalidate_deliveries_for` / `LILY_DELIVERY \| INVALIDATED` | A:4395–4409 | Question answered while a delivery claim is still PENDING | Releases the claim and `cancel_speech` mid-playout | PATCH-001 T1 | With mech. 35 closes the "starts-after-release" hole |
 | 35 | `cancel_speech` / `LILY_SPEECH \| CANCELLED` | A:4411–4437 | Any released claim whose handle may still start | Marks suppressed + `handle.interrupt(force=True)` | PATCH-001 T1 | **A suppression that produces an `interrupted=True` handle** — see §7, this is how a cancelled turn still lands in the transcript as `[cut off]` |
@@ -127,11 +127,12 @@ Executed top to bottom in `tts_node` (A:12466–12960). Each numbered step can r
 | 58 | P9 responsiveness floor / `ADDRESS_UNANSWERED` | A:3887–3902; `address_unanswered` A:4583 | A direct address unanswered past `responsiveness_budget_seconds()` | WARN once | PATCH-003 P9 | Sets `_awaiting_address_since`, which is one of the **two** states mechs. 7/18 still pause on |
 | 59 | P10 question re-offer + hold conversion / `QUESTION_PENDING` | A:3903–3923 | Pending conversational question timed out | ONE gentle re-offer (exempt from mech. 6), then `release_question_pending` + `enter_hold` | PATCH-003 P10 | The re-offer is a re-air producer that is **deliberately exempt** from the gate that would block it |
 | 60 | `IDLE_REARM` | A:4005–4026 | Nothing armed, no window, a prefetched question in hand | `arm_next_question()` + `expect_delivery()` + `question_nudge` | 2026-07-15 stall class | Another re-air producer feeding Chain A |
-| 61 | `IDLE_REPREFETCH` / `PREFETCH_HARD_TIMEOUT` | A:4055–4080; `PREFETCH_HARD_TIMEOUT_TICKS = 9` (~90 s) A:3839 | Prefetch task absent/done, or alive past 90 s | Restarts / cancels the supply task; sets an honest vamp status note | 2026-07-15 stall class | The 583a0f16 five-minute stall lived in the interaction between this and mech. 32 (`task.done()` each tick kept the hard timeout from ever climbing) |
+| 61 | `IDLE_REPREFETCH` / `PREFETCH_HARD_TIMEOUT` | A:4055–4080; `PREFETCH_HARD_TIMEOUT_TICKS = 9` (~90 s) A:3839 | Prefetch task absent/done, or alive past 90 s | Restarts / cancels the supply task; sets an honest vamp status note | 2026-07-15 stall class | The 583a0f16 five-minute stall lived in the interaction between this and mech. 32 (`task.done()` each tick kept the hard timeout from ever climbing). **HOTFIX-008 Z2:** no longer the only re-prefetch — supply recovery is decoupled from the idle branch: a failed prefetch schedules its own bounded retry (mech. 79) instead of waiting for an idle tick that may never come (the 2260354c session had zero idle ticks all session) |
 | 62 | Mode-switch flush + re-arm / `MODE_FLUSH`, `MODE_SWITCH_DISCARD`, `CATEGORY_SWITCH_DISCARD`, `REARM_BLOCKED` | A:5032–5136 | Deck/mode/category switch | Flushes armed+prefetched, keeps them in the drawn-set, resets the stall counter "so the idle watchdog cooperates" | DESYNC-HONESTY-001 D | Explicit cooperation contract with mech. 54 |
 | 63 | Lobby empty-STOP recover / `EMPTY_STOP_LOBBY_RECOVER` | A:12368–12441; `_llm_node_with_empty_stop_guard` A:12185 | Gemini empty/STOP fail-closed pre-game | Sleeps 150 ms so `GENERATION_FAILED` releases the claim, then one re-`gated_say` of the opener | F1 | Documents its own one-emission reasoning: "keyed release on GENERATION_FAILED does not arm cut recovery; this recover is the sole second attempt for the opener" (A:12374–12376) |
 | 64 | WS-8 enrollment retry / `ENROLL_*` | `_maybe_retry_enrollment` A:8354–8407; driver A:6581 | Bound player below the voiceprint threshold, past cooldown | Re-fires enrollment | WS-8 | — |
 | 65 | Wrapup/score reconciliation / `SCORE_DIVERGENCE`, `ROSTER_DIVERGENCE`, `CUSTOM_ROUND_DIVERGENCE` | A:9304–9372 | Wrap-up | Compares ledger-derived standings to the live board and records the divergence | WS-7 | Detection only at this layer |
+| 79 | Z2 phase-independent supply recovery / `SUPPLY_SILENT_WINDOW`, `LILY_SUPPLY \| RETRY`, `BANK_TO_SUPPLY`, `SUPPLY_EXHAUSTED`, `RECOVERY_FAILED`, plus `INSURANCE_BANK_HIT/EMPTY/ERROR` on the prefetch insurance leg | `ensure_supply_recovery` / `_recover_supply` / `_bank_to_supply` / `_supply_silent_window`; watchdog check ahead of the armed/window branches; failure hook at the tail of `start_prefetch`'s wrapper | (a) A prefetch that produced nothing (genuine failure, not a mode/category discard) schedules recovery from the failure itself; (b) watchdog: `next_question` None + prefetch task done/absent + past the first arm, for 2 consecutive ticks, in a NON-idle phase (idle keeps mechs. 60/32/61) | Ladder: one de-escalated re-prefetch (adult high→medium, general medium→low) → `_bank_to_supply` (lands the row on `next_question` WITHOUT arming — delivery stays phase-owned) → ONE honest line + explicit pause offer (`supply_exhausted` act via `gated_say`), never an open-ended wait | HOTFIX-008 Z2, session `lily-938EFF-2260354c` | Exists because mechs. 32/60/61 were ALL idle-gated: q1 armed/window-cycling made a dead supply line invisible for 4.5 min with the bank full. Incident state (`_supply_retry_attempts`, `_supply_exhausted_notified`, `_supply_silent_ticks`) resets when any question lands on the supply line; `stop_idle_watchdog` cancels the ladder with the loop |
 
 ---
 
@@ -404,8 +405,8 @@ therefore serialized through a counter whose observable lifetime had to be hand-
 
 ## 9. Tally
 
-**By kind:** GATE 31 · WATCHDOG 8 · RECOVERY 14 · SUPPRESSION 9 · LINT 5 · REWRITE 6
-(some mechanisms count in two kinds; the 78 rows are the authoritative count).
+**By kind:** GATE 31 · WATCHDOG 8 · RECOVERY 15 · SUPPRESSION 9 · LINT 5 · REWRITE 6
+(some mechanisms count in two kinds; the 79 rows are the authoritative count).
 
 **By owning WO:**
 
@@ -425,6 +426,7 @@ therefore serialized through a counter whose observable lifetime had to be hand-
 | desync WO (Sub-agents B/C/E) | 13, 29, 43, 48-adjacent, honesty note lifecycle A:5527–5545 |
 | 2026-07-15 stall class | 54, 55, 60, 61 |
 | lily-1C53C6 deadlock | 55, 56 |
+| HOTFIX-008 Z2 (2260354c supply starvation) | 79 (extends 32, 61) |
 | lily-2C489B triple re-read | 28 |
 | lily-A070E8 quadruple greeting | 23 |
 

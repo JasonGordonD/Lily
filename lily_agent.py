@@ -3612,7 +3612,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
     def start_prefetch(self) -> None:
         """Prefetch N+1 in the background while the current question plays
-        out. Failure writes an honest status note (§11.2)."""
+        out. Failure writes an honest status note (§11.2). Z2 (HOTFIX-008):
+        a supply-recovery retry sets `_prefetch_effort_override` (one-shot,
+        consumed here) to de-escalate authoring effort on the retry draw."""
+        effort = getattr(self, "_prefetch_effort_override", None)
+        self._prefetch_effort_override = None
         if getattr(self, "_delivery_stop_sticky", False):
             return
         if self._prefetch_task and not self._prefetch_task.done():
@@ -3621,6 +3625,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return
 
         async def _prefetch() -> None:
+            # Z2: distinguishes a genuine supply failure (generation AND the
+            # inline insurance produced nothing) from a deliberate discard
+            # (mode/category switch, duplicate) — only the former self-heals.
+            self._prefetch_supply_failed = False
             try:
                 await _prefetch_inner()
             except asyncio.CancelledError:
@@ -3639,6 +3647,18 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     "arrive — tell the table honestly and vamp; do not "
                     "invent an explanation"
                 )
+                self._prefetch_supply_failed = True
+            # Z2 (HOTFIX-008): the failure schedules its OWN recovery. The
+            # 2260354c session proved the alternative — every recovery rung
+            # lived behind the watchdog's idle guards, q1 stayed armed and
+            # window-cycling all session, so a failed q2 prefetch was never
+            # retried and the game starved with the bank full.
+            if (
+                getattr(self, "_prefetch_supply_failed", False)
+                and self.next_question is None
+                and self.game_started and not self.game_over
+            ):
+                self.ensure_supply_recovery(trigger="prefetch_failed")
 
         async def _prefetch_inner() -> None:
             # Deck identity for THIS draw (WO-LILY-DESYNC-HONESTY-001 D):
@@ -3747,6 +3767,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     from_bank=from_bank,
                     multiple_choice=mc,
                     avoid_answers=history_answers,
+                    effort=effort,
                 )
                 if question is not None and not str(
                     question.get("id", "")
@@ -3773,22 +3794,55 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 # the OTHER door the generic round came through — for a
                 # named topic it stays strict, so a failed build surfaces as
                 # a refusal instead of a stranger's question wearing the
-                # topic's name.
-                question = await asyncio.wait_for(
-                    lily_persistence.lily_fetch_bank_question(
-                        self.supabase, category, tier, self.used_prompts,
-                        mode=supply_mode,
-                        exclude_ids=history_ids, exclude_hashes=history_hashes,
-                        exclude_answers=set(history_answers),
-                        strict_category=strict,
-                    ),
-                    timeout=20.0,
-                )
+                # topic's name. Z2 (HOTFIX-008): the draw logs its outcome —
+                # the 2260354c RCA found this leg ran inside a dead task and
+                # left zero telemetry about what it did — and a failure here
+                # no longer kills the whole task (the recovery ladder in the
+                # wrapper owns what happens next).
+                try:
+                    question = await asyncio.wait_for(
+                        lily_persistence.lily_fetch_bank_question(
+                            self.supabase, category, tier, self.used_prompts,
+                            mode=supply_mode,
+                            exclude_ids=history_ids, exclude_hashes=history_hashes,
+                            exclude_answers=set(history_answers),
+                            strict_category=strict,
+                        ),
+                        timeout=20.0,
+                    )
+                except Exception:
+                    logger.exception(
+                        "LILY_PREFETCH | INSURANCE_BANK_ERROR | session=%s "
+                        "q=%d category=%r — generation failed and the "
+                        "insurance draw itself failed",
+                        self.sk.session_id, self.sk.question_number, category,
+                    )
+                    question = None
                 if question is not None:
+                    logger.warning(
+                        "LILY_PREFETCH | INSURANCE_BANK_HIT | session=%s q=%d "
+                        "id=%s — generation failed; the curated bank covered "
+                        "the draw",
+                        self.sk.session_id, self.sk.question_number,
+                        question.get("id"),
+                    )
                     self.sk.clear_status_notes()
                     if mc:
                         # Bank rows carry no choices — synthesize here too.
                         await self.reasoning.ensure_choices(question)
+                else:
+                    logger.error(
+                        "LILY_PREFETCH | INSURANCE_BANK_EMPTY | session=%s "
+                        "q=%d category=%r mode=%s — generation failed and "
+                        "the curated bank has no eligible row (supply low)",
+                        self.sk.session_id, self.sk.question_number,
+                        category, supply_mode,
+                    )
+            if question is None:
+                # Z2: nothing landed from generation, pictures, or the
+                # insurance bank — a genuine supply failure (the discard
+                # guards below deliberately do NOT set this).
+                self._prefetch_supply_failed = True
             # G2 final idempotency gate: whatever the supply source, a
             # question that was already drawn this session is a duplicate
             # — discard it rather than prefetch it twice. (Generated
@@ -3842,6 +3896,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 and not getattr(self, "_delivery_stop_sticky", False)
             ):
                 self.next_question = question
+                # Z2: supply landed — the incident (if any) is over.
+                self._note_supply_landed()
                 # HOTFIX-006 N2 — THE registration point. This is the moment
                 # a named topic stops being a promise: a real, verified,
                 # category-matched question is committed to the supply line
@@ -3912,6 +3968,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
     WATCHDOG_INTERVAL_SECONDS = 10.0
     PREFETCH_HARD_TIMEOUT_TICKS = 9  # ~90s: past every internal timeout
+    # Z2 (HOTFIX-008) — phase-independent supply recovery:
+    SUPPLY_RETRY_MAX = 1          # de-escalated re-prefetch attempts per incident
+    SUPPLY_SILENT_WARN_TICKS = 2  # silent-window ticks before WARN + recovery
 
     def start_idle_watchdog(self) -> None:
         # getattr: test harnesses build LilyGame via __new__ without the
@@ -3924,6 +3983,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._undelivered_ticks = 0
         self._undelivered_refires = 0
         self._supply_stall_ticks = 0
+        self._supply_silent_ticks = 0
+        self._supply_retry_attempts = 0
+        self._supply_exhausted_notified = False
         self._watchdog_task = asyncio.ensure_future(self._idle_watchdog())
 
     def stop_idle_watchdog(self) -> None:
@@ -3937,6 +3999,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if task is not None and not task.done():
             task.cancel()
         self._watchdog_task = None
+        # Z2: a supply-recovery ladder must not outlive the session either.
+        rec = getattr(self, "_supply_recovery_task", None)
+        if rec is not None and not rec.done():
+            rec.cancel()
+        self._supply_recovery_task = None
 
     async def _idle_watchdog(self) -> None:
         while not self.game_over and not getattr(self, "_session_closed", False):
@@ -3996,6 +4063,55 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                             self.release_question_pending(reason="reoffer_timeout")
                             self.enter_hold(reason="question_unanswered")
                     continue
+                # Z2 (HOTFIX-008): supply health on its OWN tick, independent
+                # of delivery state. Every recovery rung below this point
+                # lives behind the idle guards — session 2260354c proved a
+                # dead supply line is invisible while a question is armed or
+                # a window is open (q1 cycled all session; q2's failed
+                # prefetch was never retried; zero WATCHDOG lines). This
+                # check extends recovery's REACH into the non-idle phases;
+                # it only ever lands SUPPLY (next_question) — delivery stays
+                # owned by the arm/nudge machinery of whatever phase the
+                # game is in, and the idle branch keeps its own ladder.
+                if self._supply_silent_window():
+                    self._supply_silent_ticks = (
+                        getattr(self, "_supply_silent_ticks", 0) + 1
+                    )
+                    idle_phase = (
+                        self.armed_question is None
+                        and not self.sk.answer_window_open
+                        and not self._adjudicating
+                        and not getattr(self, "_question_transitioning", False)
+                    )
+                    if not idle_phase:
+                        if (
+                            self._supply_silent_ticks
+                            == self.SUPPLY_SILENT_WARN_TICKS
+                        ):
+                            logger.warning(
+                                "LILY_SUPPLY | SUPPLY_SILENT_WINDOW | "
+                                "session=%s q=%d ticks=%d (~%ds) armed=%s "
+                                "window=%s — no prefetched question and no "
+                                "prefetch in flight while delivery is busy; "
+                                "starting supply recovery",
+                                self.sk.session_id, self.sk.question_number,
+                                self._supply_silent_ticks,
+                                int(
+                                    self._supply_silent_ticks
+                                    * self.WATCHDOG_INTERVAL_SECONDS
+                                ),
+                                self.armed_question is not None,
+                                self.sk.answer_window_open,
+                            )
+                        if (
+                            self._supply_silent_ticks
+                            >= self.SUPPLY_SILENT_WARN_TICKS
+                        ):
+                            self.ensure_supply_recovery(
+                                trigger="watchdog_silent_window"
+                            )
+                else:
+                    self._supply_silent_ticks = 0
                 paused = self.progression_paused_reason()
                 if paused:
                     logger.info(
@@ -5077,6 +5193,194 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return "idle"
         if self.supabase is None:
             return "empty"
+        # Z2 (HOTFIX-008): the draw itself is delivery-state-independent —
+        # _bank_to_supply lands the row on the supply line; only the ARM +
+        # nudge below stay behind this method's idle guards.
+        drew = await self._bank_to_supply(trigger="idle_watchdog")
+        if drew != "supplied":
+            return drew
+        armed_id = (self.next_question or {}).get("id")
+        if not self.arm_next_question():
+            return "idle"
+        logger.error(
+            "LILY_WATCHDOG | SUPPLY_FALLBACK_ARMED | session=%s q=%d id=%s — "
+            "generation starved; armed a curated-bank question",
+            self.sk.session_id, self.sk.question_number, armed_id,
+        )
+        if self.session is not None:
+            # Structural delivery claim: the nudged turn IS the delivery and
+            # claims q_{N}_delivery at dispatch — exactly one active claim.
+            self.expect_delivery()
+            self.gated_say(
+                None,
+                "question_nudge",
+                (
+                    "The next question just landed in the state block from "
+                    "the curated bank. Bridge in one short beat and ask it "
+                    "now — its question sentence exactly as written, whole, "
+                    "in one breath."
+                ),
+                source="supply_fallback",
+            )
+        return "armed"
+
+    # -- Z2 phase-independent supply recovery (WO-LILY-HOTFIX-008) -------------
+    #
+    # RCA, session lily-938EFF-2260354c: q2's prefetch failed loudly at
+    # 03:43:12 (PREFETCH_FAILED, TimeoutError, honest status note set) and
+    # NOTHING recovered — every supply-recovery rung (IDLE_REARM, the WS-6
+    # SUPPLY_STALL fallback, IDLE_REPREFETCH, PREFETCH_HARD_TIMEOUT) lived
+    # exclusively in the watchdog's idle branch, reachable only with nothing
+    # armed and no window open. q1 stayed armed/window-cycling the whole
+    # session, so the watchdog took the healthy path every tick while the
+    # supply line was dead and the fallback bank sat full (464 active rows).
+    # Supply health is now its own concern: a failed prefetch schedules its
+    # own bounded recovery, and the watchdog detects the silent window from
+    # ANY phase. Recovery lands questions on the SUPPLY line only
+    # (next_question) — delivery stays owned by the phase machinery.
+
+    def _note_supply_landed(self) -> None:
+        """A question landed on the supply line: the supply incident (if
+        any) is over — reset the retry budget, the silent-window counter,
+        and the one-shot exhaustion line."""
+        self._supply_retry_attempts = 0
+        self._supply_silent_ticks = 0
+        self._supply_exhausted_notified = False
+
+    def _supply_silent_window(self) -> bool:
+        """True when the supply line is silently dead: no prefetched
+        question, no prefetch task in flight, game live past the first
+        question arm. Deliberately phase-independent — an armed question or
+        an open window says nothing about supply health (the 2260354c
+        blindness)."""
+        if not getattr(self, "game_started", False) or self.game_over:
+            return False
+        if getattr(self, "_delivery_stop_sticky", False):
+            return False
+        if self.next_question is not None or self.sk.question_number < 1:
+            return False
+        task = self._prefetch_task
+        return task is None or task.done()
+
+    def ensure_supply_recovery(self, trigger: str) -> None:
+        """Start the supply-recovery ladder unless one is already running,
+        supply is actually fine, or the incident already ended in the
+        honest exhaustion line (organic supply events reset that). Safe to
+        call from any phase, including from inside the dying prefetch task
+        itself."""
+        if not getattr(self, "game_started", False) or self.game_over:
+            return
+        if getattr(self, "_delivery_stop_sticky", False):
+            return
+        if self.next_question is not None:
+            return
+        if getattr(self, "_supply_exhausted_notified", False):
+            return
+        task = getattr(self, "_supply_recovery_task", None)
+        if task is not None and not task.done():
+            return
+        pf = self._prefetch_task
+        if pf is not None and not pf.done() and pf is not asyncio.current_task():
+            return  # a live prefetch owns supply; the hard timeout owns hangs
+        self._supply_recovery_task = asyncio.ensure_future(
+            self._recover_supply(trigger)
+        )
+
+    async def _recover_supply(self, trigger: str) -> None:
+        """The recovery ladder: bounded de-escalated re-prefetch → curated
+        bank → ONE honest line with an explicit pause offer. Never an
+        open-ended wait."""
+        try:
+            # Let a prefetch task that scheduled this recovery from its own
+            # tail finish before the ladder inspects/relaunches it.
+            await asyncio.sleep(0)
+            retry_budget = lily_config.prefetch_total_budget_seconds() + 25.0
+            while (
+                getattr(self, "_supply_retry_attempts", 0)
+                < self.SUPPLY_RETRY_MAX
+            ):
+                if getattr(self, "_session_closed", False):
+                    return
+                if self.next_question is not None or self.game_over:
+                    return
+                self._supply_retry_attempts = (
+                    getattr(self, "_supply_retry_attempts", 0) + 1
+                )
+                # De-escalate: adult authoring runs high by default, general
+                # runs medium — the retry drops a band so a hard draw does
+                # not reproduce the stall verbatim.
+                effort = "medium" if self.sk.mode == "adult" else "low"
+                logger.warning(
+                    "LILY_SUPPLY | RETRY | session=%s q=%d attempt=%d/%d "
+                    "trigger=%s effort=%s — re-running the failed prefetch",
+                    self.sk.session_id, self.sk.question_number,
+                    self._supply_retry_attempts, self.SUPPLY_RETRY_MAX,
+                    trigger, effort,
+                )
+                self._prefetch_effort_override = effort
+                self.start_prefetch()
+                task = self._prefetch_task
+                if task is not None and not task.done():
+                    try:
+                        await asyncio.wait_for(task, timeout=retry_budget)
+                    except asyncio.TimeoutError:
+                        pass  # wait_for cancelled the hung task
+                if self.next_question is not None:
+                    return  # landed; the commit path reset the incident
+            drew = await self._bank_to_supply(trigger=f"recovery:{trigger}")
+            if drew in ("supplied", "idle"):
+                return
+            # Ladder exhausted: generation retries and the bank both came
+            # back empty. One honest line + an explicit pause offer — the
+            # table never waits open-ended on silence.
+            if getattr(self, "_supply_exhausted_notified", False):
+                return
+            self._supply_exhausted_notified = True
+            logger.error(
+                "LILY_SUPPLY | SUPPLY_EXHAUSTED | session=%s q=%d trigger=%s "
+                "bank=%s — retries and the curated bank both failed; "
+                "delivering the honest line and pause offer",
+                self.sk.session_id, self.sk.question_number, trigger, drew,
+            )
+            self.sk.set_status_note(
+                "the question machine is down and the backup deck came back "
+                "empty — be honest in one sentence and offer the table a "
+                "short pause while it recovers; never stall wordlessly"
+            )
+            self.gated_say(
+                None,
+                "supply_exhausted",
+                (
+                    "The question supply is genuinely stuck: say ONE honest "
+                    "sentence that the next question is delayed, then "
+                    "explicitly offer the table a short pause or a breather "
+                    "while it recovers. One line total, then yield — no "
+                    "vamping loop, no invented explanation."
+                ),
+                source="supply_recovery",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "LILY_SUPPLY | RECOVERY_FAILED | session=%s q=%d trigger=%s",
+                self.sk.session_id, self.sk.question_number, trigger,
+            )
+
+    async def _bank_to_supply(self, *, trigger: str) -> str:
+        """Draw one curated-bank question and land it on the SUPPLY line
+        (`next_question`) — the delivery-state-independent half of the
+        WS-6 fallback, factored out of arm_supply_fallback by Z2 so the
+        recovery ladder can reach the bank while a question is armed or a
+        window is open. Arming/nudging stays with callers that own a phase
+        where delivery is legal. Returns "supplied", "empty", "error", or
+        "idle" (nothing to do)."""
+        if getattr(self, "_delivery_stop_sticky", False) or self.game_over:
+            return "idle"
+        if self.next_question is not None:
+            return "idle"
+        if self.supabase is None:
+            return "empty"
         rnd = self._round_for_next_question()
         category = self._category_for_round(rnd)
         tier = self._difficulty_for_round(rnd)
@@ -5128,11 +5432,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     self.sk.session_id, category, rnd,
                 )
                 self._category_override.pop(rnd, None)
-                # Held aside, not set here: the arm tail below clears status
-                # notes to retire the stall vamp, and this is a different
-                # fact with a different lifetime — it has to outlive the
-                # clear or she introduces a deck question as the next Cape
-                # Cod question.
+                # Held aside, not set here: the landing tail below clears
+                # status notes to retire the stall vamp, and this is a
+                # different fact with a different lifetime — it has to
+                # outlive the clear or she introduces a deck question as the
+                # next Cape Cod question.
                 released_note = (
                     f"the {category!r} round is out of questions — say so "
                     "plainly ('that's everything I've got on "
@@ -5153,16 +5457,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 )
         except Exception:
             logger.exception(
-                "LILY_WATCHDOG | SUPPLY_FALLBACK_ERROR | session=%s q=%d",
-                self.sk.session_id, self.sk.question_number,
+                "LILY_WATCHDOG | SUPPLY_FALLBACK_ERROR | session=%s q=%d "
+                "trigger=%s", self.sk.session_id, self.sk.question_number,
+                trigger,
             )
             return "error"
         if question is None:
             logger.error(
-                "LILY_WATCHDOG | SUPPLY_BANK_EMPTY | session=%s q=%d — supply "
-                "stalled and the curated bank has no eligible row; holding "
-                "the honest vamp",
-                self.sk.session_id, self.sk.question_number,
+                "LILY_WATCHDOG | SUPPLY_BANK_EMPTY | session=%s q=%d "
+                "trigger=%s — supply stalled and the curated bank has no "
+                "eligible row; holding the honest vamp",
+                self.sk.session_id, self.sk.question_number, trigger,
             )
             return "empty"
         # G2 idempotency: a bank row already drawn this session is a
@@ -5187,8 +5492,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             if question.get("image_source"):
                 question["image_source"] = "none"
         self.next_question = question
-        if not self.arm_next_question():
-            return "idle"
+        self._note_supply_landed()
         # The stall is over: clear the honest-vamp status note the watchdog
         # or prefetch-crash path may have set.
         self.sk.clear_status_notes()
@@ -5196,27 +5500,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # ...but a released custom round is not a stall note, and the
             # table is owed the sentence (N2).
             self.sk.set_status_note(released_note)
-        logger.error(
-            "LILY_WATCHDOG | SUPPLY_FALLBACK_ARMED | session=%s q=%d id=%s — "
-            "generation starved; armed a curated-bank question",
+        logger.warning(
+            "LILY_SUPPLY | BANK_TO_SUPPLY | session=%s q=%d id=%s trigger=%s "
+            "— curated-bank row landed on the supply line",
             self.sk.session_id, self.sk.question_number, question.get("id"),
+            trigger,
         )
-        if self.session is not None:
-            # Structural delivery claim: the nudged turn IS the delivery and
-            # claims q_{N}_delivery at dispatch — exactly one active claim.
-            self.expect_delivery()
-            self.gated_say(
-                None,
-                "question_nudge",
-                (
-                    "The next question just landed in the state block from "
-                    "the curated bank. Bridge in one short beat and ask it "
-                    "now — its question sentence exactly as written, whole, "
-                    "in one breath."
-                ),
-                source="supply_fallback",
-            )
-        return "armed"
+        return "supplied"
 
     # -- mode-switch flush + re-arm (WO-LILY-DESYNC-HONESTY-001 D) -------------
     #

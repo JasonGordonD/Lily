@@ -184,7 +184,8 @@ class _StubReasoning:
 
     async def prefetch_question(self, sk, category=None, difficulty_tier=None,
                                 avoid_questions=None, from_bank=None,
-                                multiple_choice=False, avoid_answers=None):
+                                multiple_choice=False, avoid_answers=None,
+                                effort=None):
         self.calls += 1
         return dict(self._q)
 
