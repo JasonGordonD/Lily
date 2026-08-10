@@ -107,6 +107,25 @@ def test_rename_gate_similarity():
     assert lily_names_probably_same("Rummy", "Robin") is False
 
 
+def test_rename_gate_homophone_respellings():
+    # Delta review MEDIUM: the spelled inlet assembles "Kris"/"Geoff"-
+    # shaped corrections — leading-sound classes {c,k},{g,j},{f,ph},{s,sh}
+    # must not bail on the first grapheme.
+    from lily_binding import lily_names_probably_same
+
+    assert lily_names_probably_same("Chris", "Kris") is True
+    assert lily_names_probably_same("Jeff", "Geoff") is True
+    assert lily_names_probably_same("Sean", "Shawn") is True
+    # Different people sharing a leading sound still refuse.
+    assert lily_names_probably_same("Chris", "Carol") is False
+    assert lily_names_probably_same("Kris", "Karen") is False
+    assert lily_names_probably_same("Jeff", "George") is False
+    assert lily_names_probably_same("Sean", "Sam") is False
+    # Nickname map deliberately NOT built (close-out residual): stays a
+    # refusal -> fork, identical to pre-fix behavior.
+    assert lily_names_probably_same("Bob", "Robert") is False
+
+
 # ---------------------------------------------------------------------------
 # Scorekeeper: a same-voice correction renames, never forks
 # ---------------------------------------------------------------------------

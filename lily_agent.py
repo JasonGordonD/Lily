@@ -3087,7 +3087,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 # A make-good committed during the auto-rebind must reach
                 # the model — same one-shot state-note surface as the
                 # honesty assists (context only, leak-filtered).
-                self._state_note = f"[state note:{note}]"
+                self._state_note = f"[state note: {note.strip()}]"
 
     def _migrate_agent_name_refs(self, old: str, new: str) -> None:
         """Post-rename sweep of agent-side name snapshots living OUTSIDE

@@ -165,8 +165,8 @@ def lily_extract_spelled_name(raw: str) -> Optional[str]:
     if len(letters) < 2:
         return None
     # Majority of units must be STRONG (single letters or canonical NATO):
-    # "Romeo Alpha Mike Indigo" is 3/4 canonical and assembles; "Robert
-    # Oscar Sam Edward" is 1/4 and stays a stated full name.
+    # "Romeo Alpha Mike Indigo" is 4/4 canonical and assembles; "Robert
+    # Oscar Sam Edward" is 1/4 (only oscar) and stays a stated full name.
     if strong * 2 < len(letters):
         return None
     name = "".join(letters)
@@ -212,6 +212,21 @@ def lily_names_probably_same(bound: str, corrected: str) -> bool:
     b = "".join(ch for ch in (corrected or "").lower() if ch.isalpha())
     if len(a) < 2 or len(b) < 2:
         return False
+    if a == b:
+        return True
+
+    # Leading-sound equivalence (delta review): the spelled-name inlet
+    # assembles "Kris"/"Geoff"-shaped corrections, so the gate must not
+    # refuse a respelling purely on the first GRAPHEME — {c,k}, {g,j},
+    # {f,ph}, {s,sh} normalize to one representative before the
+    # first-letter bail and the downstream skeleton/ratio checks.
+    def _lead_norm(s: str) -> str:
+        for digraph, rep in (("ph", "f"), ("sh", "s")):
+            if s.startswith(digraph):
+                return rep + s[len(digraph):]
+        return {"k": "c", "j": "g"}.get(s[0], s[0]) + s[1:]
+
+    a, b = _lead_norm(a), _lead_norm(b)
     if a == b:
         return True
     if a[0] != b[0]:
