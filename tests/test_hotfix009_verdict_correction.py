@@ -121,13 +121,18 @@ def test_contest_detector_stays_conservative():
 # ============================================================================
 
 def test_diamond_correction_restores_the_point_appends_row_with_grounds():
+    # Canonical grounds = "answer_denied". The durable record (addressee_log
+    # id=819: window_open=true, seconds_into_window=0.0, fuzzy_matched=true,
+    # agent_action=ignored) proves the correct answer arrived IN window and
+    # was ignored — Lily's "past the window" narration was confabulated. The
+    # re-adjudication anchors on that row, not on her narration.
     sk = _rami_on_two_diamond_denied()
     assert sk.players["Rami"]["score"] == 2
     original = sk.ledger_row_for("Rami", "q_7391")
     assert original["correct"] is False and original["points"] == 0
 
     entry = sk.correct_verdict(
-        "Rami", grounds="wrong_rule", actor="player_contest", delta=1
+        "Rami", grounds="answer_denied", actor="player_contest", delta=1
     )
     assert entry is not None
     # Append-only: the original denial row is untouched.
@@ -135,7 +140,7 @@ def test_diamond_correction_restores_the_point_appends_row_with_grounds():
     # A NEW correction row carries the delta, grounds, actor and provenance.
     assert entry["cause"] == "verdict_correction"
     assert entry["points"] == 1
-    assert entry["grounds"] == "wrong_rule"
+    assert entry["grounds"] == "answer_denied"
     assert entry["actor"] == "player_contest"
     assert entry["corrects"]["question_id"] == "q_7391"
     assert entry["corrects"]["utterance_id"] == "utt_q_7391"
