@@ -627,3 +627,49 @@ def test_hold_release_clears_the_payload_directive():
     game.release_hold(reason="user_go")
     assert game._hold_active is False
     assert "held: you have PAUSED" not in game.build_state_block_split()[0]
+
+
+# -- W8 review Finding 3: recap/scorekeeping patter must never enter a hold ----
+# The bare `\bstill\b` cue tripped whenever a past-tense "stopped" shared a turn
+# with the very common word "still" ("still tied", "still your turn", "still on
+# question four"). Because back_hold_narration runs before register_delivery_claim,
+# that false hold would return a legitimate same-turn delivery "held". Coordinator
+# ruling: the brake may over-fire recoverably but must NEVER suppress a real
+# payload — the cue is bound to the "still stopped" adjacency.
+
+_RECAP_PATTER_NOT_A_HOLD = [
+    "You stopped Rami cold — still tied at two.",
+    "You stopped for a sec, but we're still on question four.",
+    "We stopped the clock, still your turn.",
+    "recap: you stopped, he answered, still nobody's ahead.",
+]
+
+
+def test_recap_still_patter_does_not_detect_or_enter_hold():
+    """Finding 3 needle. Recap/scorekeeping lines that pair a past-tense
+    'stopped' with 'still' are NOT the stop-ack register and must not enter a
+    hold; the four genuine confabulations still do (regression guard)."""
+    for line in _RECAP_PATTER_NOT_A_HOLD:
+        assert lily_scorekeeper.lily_detect_hold_narration(line) is False, line
+        game = _armed_q6_game()
+        assert game.back_hold_narration(line) is False, line
+        assert game._hold_active is False, line
+    # The narration register is unchanged — each real line still fires.
+    for line in _REAL_HOLD_NARRATIONS:
+        assert lily_scorekeeper.lily_detect_hold_narration(line) is True, line
+
+
+def test_recap_still_patter_never_suppresses_a_real_question():
+    """The suppression vector this closes: a recap mentioning 'still tied at
+    two' shares a turn with a real question. The recap must not enter a hold,
+    so the armed q_6 delivery is NOT returned 'held' — the legitimate payload
+    airs. The mirror of test_confabulated_narration_path_suppresses_freudian_
+    delivery, proving the latch fires only on a genuine stopped-state claim."""
+    game = _armed_q6_game()
+    assert game.back_hold_narration("You stopped him cold — still tied at two.") is False
+    assert game._hold_active is False
+
+    game._pending_delivery_qnum = 6
+    result = game.register_delivery_claim(_Q6_FREUDIAN, speech_id="s6")
+    assert result != "held", result
+    assert game._hold_active is False

@@ -622,8 +622,19 @@ def lily_detect_resume_game(text: str) -> bool:
 # Runs on Lily's OWN outbound text (real casing/punctuation), not user STT,
 # so it is not routed through _normalize_command_text.
 _HOLD_NARRATION_STATE_RE = _re.compile(r"\bstopped\b", _re.IGNORECASE)
+# W8 review Finding 3: a bare `\bstill\b` cue tripped on recap/scorekeeping
+# patter ("still tied at two", "still your turn", "still on question four")
+# whenever it shared a turn with a past-tense "stopped", entering a hold on
+# ordinary speech. Because this latch runs before register_delivery_claim, a
+# combined recap+question turn ("You stopped him — still tied. Next: who…")
+# then had its legitimate same-turn delivery returned "held". The narration
+# register never says "still <anything>" except "still stopped", so the cue
+# is bound to that adjacency — the genuine confabulations keep firing (each
+# also carries "I'm listening" or a release invitation), recap patter does
+# not. Per the coordinator ruling the brake may over-fire recoverably but
+# must never suppress a legitimate payload.
 _HOLD_NARRATION_CUE_RE = _re.compile(
-    r"\bstill\b"
+    r"\bstill\s+stopped\b"
     r"|\bi'?m listening\b"
     r"|\b(?:say (?:the word|when|go)|until you say|you say (?:when|go))\b",
     _re.IGNORECASE,
@@ -632,10 +643,11 @@ _HOLD_NARRATION_CUE_RE = _re.compile(
 
 def lily_detect_hold_narration(text: str) -> bool:
     """True when an outbound turn narrates a stopped/hold state — a
-    "stopped" assertion paired with a hold cue ('still', "I'm listening",
-    a 'say the word / until you say go' release invitation). Deliberately
-    conservative: a bare "stopped" with no hold cue ("the clock stopped")
-    does not fire."""
+    "stopped" assertion paired with a hold cue ("still stopped", "I'm
+    listening", a 'say the word / until you say go' release invitation).
+    Deliberately conservative: a bare "stopped" with no hold cue ("the
+    clock stopped"), or a recap that merely says "still" ("still tied at
+    two"), does not fire."""
     if not text:
         return False
     return bool(
