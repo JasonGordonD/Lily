@@ -10289,12 +10289,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     # Z3: no-match is not resolution while the name door
                     # is untried — hold memory-characterising speech.
                     self._voice_identity_no_match_at = time.time()
-                    # V7 resolve-before-mint: the enrolled-voice route has
-                    # now REPORTED (no match). If the roster is already
+                    # V7/V1c resolve-before-propose: the enrolled-voice route
+                    # has now REPORTED (no match). If the roster is already
                     # stable (game started) on a weak group, resolve_group_
-                    # identity may have DEFERRED the name-set mint waiting on
-                    # exactly this answer — re-invoke it so the deterministic
-                    # fallback mints now, never ahead of the biometric.
+                    # identity may have DEFERRED the name-set proposal waiting
+                    # on exactly this answer — re-invoke it so the name-set
+                    # hash is quarantined now (never ahead of the biometric,
+                    # and never minted from a heard name alone).
                     if (
                         getattr(self, "game_started", False)
                         and self.group_id_source not in _STRONG_GROUP_SOURCES
@@ -10793,22 +10794,51 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             ):
                 logger.info(
                     "LILY_MEMORY | GROUP_ID_RESOLVE | trigger=%s deferring "
-                    "name-set mint — enrolled-voice match in flight "
-                    "(resolve before mint)", trigger,
+                    "name-set proposal — enrolled-voice match in flight "
+                    "(resolve before propose)", trigger,
                 )
                 return
+            # V1c IDENTITY — ONE AUTHORITY: a heard name set may PROPOSE a
+            # group, never MINT or SWITCH one. This is N5's structural half.
+            # The symptom (voice_identity_match missing from
+            # _STRONG_GROUP_SOURCES) was patched, but a name-set hash could
+            # still slam group_id from under a live biometric — whoever wrote
+            # last won, except when it didn't. A single mishearing ("Hi, I'm
+            # Miranda") changes the heard set, changes the hash, and minted a
+            # SECOND memory for one table. The name-set hash is now quarantined
+            # exactly like late device metadata: stage_device_candidate loads
+            # history ONLY when that group already exists on file and returns
+            # False on an empty/new hash, so a genuinely-new table — or a
+            # one-off mishearing — creates NOTHING and stays on its anonymous
+            # session id. Only a biometric confirmation (verify_device_
+            # candidate) may promote the candidate to the authoritative
+            # group_id. Env-override and voice remain the SOLE authorities
+            # that create or switch a group.
             hashed = lily_memory.lily_name_set_group_id(names)
-            if hashed and hashed != self.group_id:
-                new_id, source = hashed, "name_set_hash"
-                logger.info(
-                    "LILY_MEMORY | NAME_SET_MINT | trigger=%s group=%s "
-                    "reason=%s — no device token and no enrolled-voice "
-                    "match; minting deterministic name-set group",
-                    trigger, hashed,
-                    "voice_disabled"
-                    if not lily_config.voice_identity_enabled()
-                    else "voice_no_match_or_absent",
+            if (
+                hashed
+                and hashed != self.group_id
+                and not getattr(self, "device_candidate_group_id", None)
+            ):
+                staged = await self.stage_device_candidate(
+                    hashed, "name_set_hash"
                 )
+                if staged:
+                    logger.info(
+                        "LILY_MEMORY | NAME_SET_QUARANTINED | trigger=%s "
+                        "group=%s — heard name set matches a table on file; "
+                        "quarantined until a voice confirms it, never minted "
+                        "from a name alone", trigger, hashed,
+                    )
+                    self.request_device_verification(trigger)
+                else:
+                    logger.info(
+                        "LILY_MEMORY | NAME_SET_NO_TABLE | trigger=%s "
+                        "group=%s — heard name set has no table on file; "
+                        "creating nothing, staying anonymous on %s",
+                        trigger, hashed, self.group_id,
+                    )
+            return
         if new_id is None or new_id == self.group_id:
             return
         await self.upgrade_group_id(new_id, source)
