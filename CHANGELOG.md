@@ -5,6 +5,51 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — REFACTOR W1c: identity has one authority; tools speak only results
+
+Steps 5–6 of the ordered refactor. Two structural fixes.
+
+**Identity — one authority.** A heard name set may PROPOSE a group but may
+never MINT or SWITCH one. `resolve_group_identity`'s name-set-hash branch no
+longer calls `upgrade_group_id`; it stages the hash through the existing
+device-metadata quarantine (`stage_device_candidate(hash, "name_set_hash")` +
+`request_device_verification`). `stage_device_candidate` loads history only
+when that group already exists and returns `False` for an empty/new hash, so a
+genuinely-new table — or a single mishearing — creates nothing and stays on
+its anonymous session id (`NAME_SET_QUARANTINED` / `NAME_SET_NO_TABLE`). Only a
+biometric confirmation (`verify_device_candidate`) or the `LILY_GROUP_ID` env
+override may create or switch `group_id`. This closes N5's structure: the
+earlier patch (adding `voice_identity_match` to `_STRONG_GROUP_SOURCES`) fixed
+the symptom while a name-set hash could still clobber a live biometric —
+whoever wrote last won. `"Hi, I'm Miranda"` misheard once can no longer mint a
+second memory.
+
+- Tests: `test_hotfix006_n5_group_binding.py` (weak binding now proposes a
+  quarantined candidate; **new** `test_a_misheard_name_cannot_mint_a_second_
+  memory`), `test_hotfix010_v7_group_binding.py` (3b/3c rewritten from "mints"
+  to "quarantines"). 80 identity-suite tests green.
+
+**Tools — result-derived speech, always.** Every mutating tool's return is
+derived from committed state, and a failure string is the only speakable
+output (the other half of the say-gate's grok tool-call-as-speech defense).
+
+| tool | failure string (leads with) | success (result-derived) |
+|---|---|---|
+| `lily_begin_round` | `NOT STARTED (<reason>) — …` per `start_blocked_reason` | `STARTED — …` + authoritative delivery sheet |
+| `lily_set_category` | `lily_custom_round_line(result)` refusal (unchanged) | `lily_custom_round_line(result)` |
+| `lily_award_bonus` | `NO BONUS — …` (not started / unrostered / ledger declined); no screen event | `BONUS COMMITTED: +1 to <name>, now on <N>; state no other number` (ledger-derived total) |
+| `lily_correct_verdict` | honest refusal reason, no mutation (unchanged) | `CORRECTED: the point is back with <name>, now on <N>; state no other number` (ledger-derived total) |
+
+The `lily_award_bonus` fabrication hole is closed: it previously returned
+`"Bonus point to <name>."` even when the ledger write returned `None`. Both
+`award_bonus` and `correct_verdict` write through the ledger and read the new
+total back off it, so the model cannot invent a number. Tests: `test_award_gate.py`,
+`test_hotfix009_verdict_correction.py` updated to the new contract.
+
+Full suite **2449 green** (baseline 2448 + 1 new fixture); contract tests
+`test_bargein_cancels` / `test_bargein_is_normal` / `test_cut_recovery` green.
+Not deployed (operator-gated).
+
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 8: hygiene sweep
 
 Fixture `lily-639007-f80aa6bf`.

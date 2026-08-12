@@ -772,6 +772,41 @@ log `LILY_SAY` for the audit trail. Note: `key=None` on `question_nudge`
 bypasses the dup key — barge release of a pending claim also reopens the
 door (see triage table below).
 
+### Result-derived tool speech (REFACTOR W1c)
+
+Every mutating tool returns **result-derived speech**: the return string is
+derived from what actually happened to state, and **if the tool can fail,
+the failure string is the ONLY speakable output.** `lily_custom_round_line`
+is the gold standard — its one confirmation branch is "questions actually
+registered," everything else is a refusal. The vocal model must never invent
+progress from the operator's words; this is also the other half of the
+say-gate's defense against the grok tool-call-as-spoken-JSON hazard
+(`c6d7dac`) — a tool that fails hands back a refusal, never a shape that
+reads as success.
+
+- **`lily_begin_round`** — every branch leads with an explicit discriminator:
+  `STARTED — …` (armed, with the authoritative delivery sheet) or
+  `NOT STARTED (<reason>) — …` for each `start_blocked_reason` (`game_stopped`,
+  `identity_unconfirmed`, `recognition_dispute`, `ambiguous_yes`,
+  `user_speaking`, `setup_pending`, `intake_active`). A blocked start can
+  never be narrated as a kickoff.
+- **`lily_set_category`** — routes its confirmation through
+  `lily_custom_round_line(result)`; an unregistered category returns the
+  refusal, not a category announcement.
+- **`lily_award_bonus`** — a foot-gun next to a ledger that is meant to be the
+  only writer, now hardened: when the ledger (the sole score writer) declines,
+  it returns `NO BONUS — …`, emits no screen event, and is the only speakable
+  output; on commit it leads with the ledger-derived total
+  (`BONUS COMMITTED: +1 to <name>, now on <N>; state no other number`) so the
+  model cannot invent a different number.
+- **`lily_correct_verdict`** — the audited correction path: the model requests
+  a correction, `scorekeeper.correct_verdict` validates it against the last
+  ledger row (a correction can only amend a verdict that happened; grounds
+  fail closed; `answer_denied` is mechanically corroborated) and the ledger
+  writes; the return reads the new total off that row
+  (`CORRECTED: the point is back with <name>, now on <N>; state no other
+  number`). On any refusal it returns the honest reason and mutates nothing.
+
 ### Delivery re-fire triage (double question / double congrats)
 
 Silence was treated as worse than a second ask — several watchdogs can
@@ -1313,21 +1348,40 @@ source=... group_id=...` is logged every session, upgrades as
    its own biometric match recognizes the voice
    (`lily_candidate_labels_confirmed`, logged as
    `DEVICE_VERIFY_LABEL_MATCH`). Transient S-number labels never count.
-3. **(c) name-set hash fallback**: `grp_` + sha1 of the normalized sorted
-   player-name set joined with `|` (e.g. `sha1("carly|kali|rami")`) —
-   deterministic, so the same table of names re-keys to the same group every
-   night (`source=name_set_hash`). This resolves only after names bind, so
-   it runs as a **mid-session upgrade at game start**: the session begins
-   under the room name, re-resolves when `start_game` fires, re-keys this
-   session's rows already written (`lily_sessions`, this session's
-   `lily_group_facts`, and — only when upgrading off the room-random id —
-   `lily_speaker_voiceprints`; `LILY_MEMORY | REKEY | table=...`), reloads
-   the `[RETURNING TABLE]` memory if no questions have been played, and
-   re-fires enrollment so voiceprints land under the resolved id.
-   Voiceprint rekey is schema-exact to migration 001 (`id`, group/label/name,
+3. **(c) name-set hash — a PROPOSAL only, never an authority (REFACTOR
+   W1c)**: `grp_` + sha1 of the normalized sorted player-name set joined
+   with `|` (e.g. `sha1("carly|kali|rami")`) — deterministic, so the same
+   table of names hashes to the same id every night. **A heard name set may
+   PROPOSE a group; it may never MINT or SWITCH one.** The hash is
+   quarantined exactly like late device metadata (a): `resolve_group_
+   identity` stages it via `stage_device_candidate(hash, "name_set_hash")`
+   and requests biometric verification. `stage_device_candidate` loads
+   history only when that group already exists on file and returns `False`
+   for an empty/new hash — so a genuinely-new table, **or a single
+   mishearing** ("Hi, I'm Miranda" heard once), stages nothing, mints
+   nothing, and stays on its anonymous session id (`NAME_SET_QUARANTINED` /
+   `NAME_SET_NO_TABLE` are the two logged outcomes). Only a **biometric
+   confirmation** (`verify_device_candidate`) promotes the candidate to the
+   authoritative `group_id`, at which point the standard rekey runs
+   (`lily_sessions`, this session's `lily_group_facts`, and — only off the
+   room-random id — `lily_speaker_voiceprints`; `LILY_MEMORY | REKEY |
+   table=...`), the `[RETURNING TABLE]` memory reloads if no questions have
+   been played, and enrollment re-fires under the resolved id. Voiceprint
+   rekey is schema-exact to migration 001 (`id`, group/label/name,
    identifier array, timestamps)—`sample_count` belongs only to the separate
    ECAPA `lily_voice_identity` table. On label collision, target identifiers
    commit before the provisional row is deleted; reruns are idempotent.
+
+   *Why this is the N5 fix, not another patch.* The symptom (a
+   `voice_identity_match` group being clobbered) was earlier patched by
+   adding it to `_STRONG_GROUP_SOURCES`, but the structure remained: a
+   name-set hash could still slam `group_id` from under a live biometric —
+   whoever wrote last won. Making the hash a quarantined candidate closes the
+   structure: **only a biometric match or `LILY_GROUP_ID` env override may
+   create or switch a group**; a stated name may bind a speaker on the
+   current roster and propose a candidate, nothing more. Fixture:
+   `tests/test_hotfix006_n5_group_binding.py::
+   test_a_misheard_name_cannot_mint_a_second_memory`.
 4. **(d)** `LILY_GROUP_ID` env override, then room name (random per session
    — nothing re-keys on it; the upgrade path exists exactly to escape it).
 
