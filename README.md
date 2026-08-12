@@ -134,6 +134,44 @@ not executed, and the feed went quiet.
   narrated-but-frozen state is reachable
   (`tests/test_livefire_class5_resume_command.py`).
 
+### CLASS 6 — named-category supply
+
+**6a diagnosis (two independent resource problems).** The 5 PREFETCH_FAILED
+TimeoutErrors are question-driven generation-latency events
+(17:54:15.3, 17:56:50.0, 17:57:30.4, 17:58:12.2, 17:59:21.6 UTC,
+`LILY_REASONING`). The 5 memory-pressure warnings fire on a FIXED 120s
+livekit.agents monitor (17:54:00.1, 17:56:00.2, 17:58:00.2, 18:00:00.3,
+18:02:00.3 UTC) — a static RSS baseline crossed 8s after connect (the ECAPA
+voiceprint pool preload at 17:53:53) and held for the whole session, the last
+one firing after play had ended. The two series do not align: the prefetch
+timeouts track question cadence, the memory warnings track a wall clock. They
+are **two independent problems** — the timeouts are generation latency, not
+memory pressure. Memory tuning is out of scope (reported under 8d, not tuned).
+
+**6b/6c — a named topic keeps generating.** In `_bank_to_supply`, when an
+operator-named topic's bank comes up dry, the state machine now attempts one
+fresh generation for the topic (`reasoning.prefetch_question(from_bank=None)`)
+before it would ever surrender the name — a dry bank / upstream timeout is a
+supply defect, not an end state (`LILY_CUSTOM_ROUND | TOPIC_BACKFILLED`).
+
+**6d — no silent flip.** Only a true generation failure AFTER that retry
+drops the override, and the honest templated note ("that's everything I've got
+on X") is now set AT the flip transition, so it survives even the
+fixed-rotation-also-empty early return that previously dropped it — the live
+"silent flip to academic" path is closed.
+
+**6e — duplicate-id draws are a generator defect.** `_shape_question` in
+`lily_reasoning` overrides the model-supplied `q_<4 digits>` id (which the
+model reuses across generations — the live q_4821 Parthenon-under-Crete
+collision) with a process-unique `q_gen_<counter><uuid>` id at allocation, so
+the collision is impossible rather than discarded at draw.
+
+- Fixture replay + acceptance: `tests/test_livefire_class6_named_category.py`;
+  the pre-Class-6 "fallback releases the named round" assertion in
+  `test_hotfix006_category.py` updated to the keep-generating contract, and
+  the generated-id assertion in `test_reasoning_schema.py` updated to the
+  allocated id.
+
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
 Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)

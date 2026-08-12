@@ -593,8 +593,16 @@ def test_the_supply_stall_fallback_never_fills_a_named_round_with_a_stranger():
     """The third door into the generic round. WS-6 arms a bank question
     straight into a starving game, and for the fixed families "anything" is
     the right answer — but the live complaint was a specific one: "what does
-    that have to do with Cape Cod?". Inside a named round the fallback loses
-    the NAME rather than the honesty."""
+    that have to do with Cape Cod?". Inside a named round the fallback must
+    never serve a stranger.
+
+    LIVEFIRE-001 CLASS 6 (6b/6c): a dry bank is a SUPPLY DEFECT, not an end
+    state — so the fallback now KEEPS GENERATING for the named topic before
+    it would ever release the name. Here generation still has Cape Cod
+    questions, so the round keeps its name and serves an on-topic question;
+    no stranger, and (unlike the old behavior) no unnecessary flip. The
+    generation-genuinely-fails path (flip, announced) is covered by
+    tests/test_livefire_class6_named_category.py."""
     sb = _Supabase(questions=LIVE_GENERIC_ROWS)
     game = _make_game(_reasoning(CAPE_COD_GENERATED), sb)
     _ask_for(game, "Cape Cod")           # round 1 is genuinely built
@@ -610,12 +618,15 @@ def test_the_supply_stall_fallback_never_fills_a_named_round_with_a_stranger():
         return out
 
     asyncio.run(_drive())
-    # The round is released rather than mislabelled, and she is told to say
-    # so — the armed question is a plain deck question under its own name.
-    assert "Cape Cod" not in game._category_override.values()
-    assert any("out of questions" in n for n in game.sk.status_notes)
+    # The named topic kept generating: the round keeps its name and the
+    # armed question is an on-topic Cape Cod question, never a generic
+    # stranger from the deck.
+    assert "Cape Cod" in game._category_override.values()
     armed = game.armed_question
-    assert armed is None or armed["category"] != "Cape Cod"
+    assert armed is not None
+    assert armed["id"] in {"q_cc1", "q_cc2"}
+    generic_ids = {q["id"] for q in LIVE_GENERIC_ROWS}
+    assert armed["id"] not in generic_ids
 
 
 def test_the_two_live_sentences_are_flagged_as_divergences():

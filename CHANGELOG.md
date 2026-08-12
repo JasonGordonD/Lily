@@ -5,6 +5,33 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 6: named-category supply
+
+Fixture `lily-639007-f80aa6bf`.
+
+- **6a diagnosis — TWO independent resource problems.** 5 PREFETCH_FAILED
+  TimeoutErrors are question-driven generation latency (17:54:15, 17:56:50,
+  17:57:30, 17:58:12, 17:59:21 UTC, LILY_REASONING). 5 memory warnings fire on
+  a FIXED 120s livekit.agents monitor (17:54:00, 17:56:00, 17:58:00, 18:00:00,
+  18:02:00 UTC) — static RSS baseline crossed 8s post-connect (ECAPA pool
+  preload), held all session, last one after play ended. Series do not align;
+  the timeouts are latency, not memory. Memory tuning out of scope (see 8d).
+- **6b/6c** (`lily_agent._bank_to_supply`): an operator topic whose bank is dry
+  gets one fresh generation attempt (`prefetch_question(from_bank=None)`)
+  before any flip — `LILY_CUSTOM_ROUND | TOPIC_BACKFILLED`; a dry bank/timeout
+  is not "round over".
+- **6d**: the flip's honest templated note is set AT the flip transition, so it
+  survives the fixed-rotation-also-empty early return that previously dropped
+  it — the "silent flip to academic" is closed.
+- **6e** (`lily_reasoning._shape_question`): the model-supplied `q_<4 digits>`
+  id (reused across generations — the q_4821 collision) is overridden with a
+  process-unique `q_gen_...` id at allocation.
+- Tests: `tests/test_livefire_class6_named_category.py` (4);
+  `test_hotfix006_category.py` + `test_reasoning_schema.py` updated to the new
+  contracts. Suite green (2445). Closes the Class-6 "done when": a named topic
+  survives past 5 questions (backfill) or flips with an honest templated
+  explanation; no silent category flip in code.
+
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 5: resume is a command
 
 Fixture `lily-639007-f80aa6bf` ~14:01: "Continue with Greece, dude. Make more

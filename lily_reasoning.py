@@ -23,10 +23,12 @@ question machine" instead of inventing an explanation.
 """
 
 import asyncio
+import itertools
 import json
 import logging
 import random
 import re
+import uuid
 from typing import Optional
 
 import aiohttp
@@ -353,6 +355,21 @@ def _strip_fences(text: str) -> str:
     return t
 
 
+_GEN_ID_COUNTER = itertools.count(1)
+
+
+def _alloc_generated_id() -> str:
+    """WO-LILY-LIVEFIRE-001 CLASS 6 (6e): a process-unique id for a generated
+    question. The model's own ``id`` (schema shape ``q_<4 digits>``) collides
+    — live lily-639007 drew q_4821 (Parthenon) under a Crete question's id and
+    the duplicate was discarded at draw. The transient id exists only for
+    in-session dedupe (banking assigns the durable ``kb_`` id later), so a
+    guaranteed-unique value fixes the collision at ALLOCATION rather than
+    papering over it at draw. Still ``q_``-prefixed, so the generated-vs-bank
+    ``kb_`` discriminator downstream is unchanged."""
+    return f"q_gen_{next(_GEN_ID_COUNTER):06d}{uuid.uuid4().hex[:6]}"
+
+
 def _shape_question(data) -> Optional[dict]:
     """Shape-check + default-fill one parsed question dict (spec §4.2)."""
     if not isinstance(data, dict):
@@ -361,7 +378,9 @@ def _shape_question(data) -> Optional[dict]:
         return None
     if not isinstance(data.get("acceptable_answers"), list) or not data["acceptable_answers"]:
         data["acceptable_answers"] = [str(data["canonical_answer"]).lower()]
-    data.setdefault("id", "q_0000")
+    # CLASS 6 (6e): override the model-supplied id with a process-unique one —
+    # the model reuses 4-digit ids across generations (the q_4821 collision).
+    data["id"] = _alloc_generated_id()
     data.setdefault("category", "potpourri")
     data.setdefault("difficulty_tier", 2)
     data.setdefault("reveal_color", "")

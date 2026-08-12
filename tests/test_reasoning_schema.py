@@ -154,7 +154,10 @@ def test_schema_mode_output_parses_without_fence_stripper():
     seen: dict = {}
     r = _reasoning_with_stub(seen, json.dumps(VALID_QUESTION))
     q = _run(r.generate_question("pop culture", 2, "general", []))
-    assert q["id"] == "q_7294"
+    # LIVEFIRE-001 CLASS 6 (6e): the model's own id (q_7294) is overridden
+    # with a process-unique id at shape time — the model reuses 4-digit ids
+    # across generations (the live q_4821 collision), so allocation owns it.
+    assert q["id"].startswith("q_gen_")
     assert q["acceptable_answers"] == ["back to the future"]
 
 

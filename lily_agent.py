@@ -6004,22 +6004,65 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 timeout=20.0,
             )
             if question is None and self._is_operator_category(category):
-                # The topic is dry and the game is starving. The round loses
-                # its NAME rather than its honesty: drop the override, tell
-                # the table the custom round is out of questions, and pull
-                # from the fixed rotation like any other stalled round.
+                # CLASS 6 (LIVEFIRE-001) 6b/6c: a dry bank is a SUPPLY DEFECT,
+                # not an end state, and an upstream timeout is not "round
+                # over". A named topic KEEPS GENERATING — try one fresh
+                # generation for the topic before surrendering its name. Only
+                # a true generation failure AFTER this retry flips the round,
+                # and the flip is announced (6d, the released_note below).
+                gen = None
+                try:
+                    gen = await asyncio.wait_for(
+                        self.reasoning.prefetch_question(
+                            self.sk,
+                            category=category,
+                            difficulty_tier=tier,
+                            avoid_questions=self.used_prompts,
+                            from_bank=None,
+                            multiple_choice=mc,
+                            avoid_answers=sorted(history_answers),
+                        ),
+                        timeout=20.0,
+                    )
+                except Exception:
+                    gen = None
+                if gen is not None and not str(
+                    gen.get("id", "")
+                ).startswith("kb_"):
+                    gen["category"] = category
+                    gen = self._curate_generated_question(
+                        gen, category, history_hashes
+                    )
+                if gen is not None:
+                    logger.warning(
+                        "LILY_CUSTOM_ROUND | TOPIC_BACKFILLED | session=%s "
+                        "topic=%r q=%d — bank dry, generation refilled the "
+                        "named topic; NO flip",
+                        self.sk.session_id, category,
+                        self.sk.question_number,
+                    )
+                    # Fall through to the shared landing tail (register,
+                    # choices, next_question, settle) — the topic survives.
+                    question = gen
+            if question is None and self._is_operator_category(category):
+                # Generation ALSO failed after the backfill retry — the topic
+                # genuinely cannot serve. Only NOW does the round lose its
+                # NAME rather than its honesty: drop the override, tell the
+                # table the custom round is out of questions (templated, 6d),
+                # and pull from the fixed rotation like any other stalled
+                # round. There is no silent flip: this path always sets the
+                # released_note the landing tail speaks.
                 logger.error(
                     "LILY_CUSTOM_ROUND | TOPIC_EXHAUSTED | session=%s "
-                    "topic=%r round=%d — releasing the round to the fixed "
-                    "rotation rather than serving a stranger under its name",
+                    "topic=%r round=%d — bank dry AND generation failed; "
+                    "releasing the round to the fixed rotation rather than "
+                    "serving a stranger under its name",
                     self.sk.session_id, category, rnd,
                 )
                 self._category_override.pop(rnd, None)
-                # Held aside, not set here: the landing tail below clears
-                # status notes to retire the stall vamp, and this is a
-                # different fact with a different lifetime — it has to
-                # outlive the clear or she introduces a deck question as the
-                # next Cape Cod question.
+                # Held aside for the landing tail (which clears stall vamps
+                # then re-sets this — a different fact with a different
+                # lifetime, so it outlives the clear).
                 released_note = (
                     f"the {category!r} round is out of questions — say so "
                     "plainly ('that's everything I've got on "
@@ -6027,6 +6070,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     "next question is NOT about that topic; never introduce "
                     "it as one."
                 )
+                # CLASS 6 (LIVEFIRE-001) 6d: announce the flip AT the
+                # transition, not only if the fixed-rotation draw then lands.
+                # If that draw also comes up empty the method returns "empty"
+                # before the landing tail — without this the flip would be
+                # SILENT (the live "silent flip to academic"). Set the honest
+                # note here so the announcement survives the early return.
+                self.sk.set_status_note(released_note)
                 category = self._category_for_round(rnd)
                 question = await asyncio.wait_for(
                     lily_persistence.lily_fetch_bank_question(
