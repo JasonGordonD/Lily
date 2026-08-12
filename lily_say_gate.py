@@ -129,6 +129,22 @@ LILY_STATE_SENTINEL_CLOSE = "</lily_state>"
 _TOOL_CALL_LEAK_RE = re.compile(
     r'\{\s*"name"\s*:\s*"[A-Za-z0-9_]+"\s*,\s*"arguments"\s*:',
 )
+# Tool-call leak, XML PSEUDO-FORM (live 2026-08-12 15:26 ET: the vocal
+# model emitted its lily_bind_speaker call as literal <tool_call> XML in
+# the CONTENT stream and Lily read the whole block aloud — "Why are you
+# reading this stuff out loud?"). The JSON matcher above never saw it.
+# Two layers: the whole block (or truncated-to-end when the close tag
+# never arrived), then any stray fragment line so a half-streamed tag
+# can't air either. The call is NOT executed from here — a model-typed
+# call is untrusted formatting, and the deterministic bind lanes re-fire
+# on the next turn.
+_TOOL_CALL_XML_BLOCK_RE = re.compile(
+    r"<tool_call\b.*?(?:</tool_call>|\Z)", re.DOTALL | re.IGNORECASE
+)
+_TOOL_CALL_XML_FRAGMENT_RE = re.compile(
+    r"</?\s*(?:tool_call|tool_name|parameter_name|parameter_value)\b[^>\n]*>?",
+    re.IGNORECASE,
+)
 
 # Envelope fragments: any partial/whole spelling of the sentinel tag.
 _SENTINEL_FRAGMENT_RE = re.compile(r"<\s*/?\s*lily_state\b|lily_state\s*>", re.IGNORECASE)
@@ -216,6 +232,15 @@ def lily_filter_leaks(text: str) -> tuple[str, list[str]]:
     if _tc is not None:
         t = t[: _tc.start()] + _rest_after_json_object(t, _tc.start())
         reasons.append("tool_call")
+    # XML pseudo-form (2026-08-12 live: the bind call read aloud) — whole
+    # block first, then stray fragments a half-streamed tag leaves behind.
+    if _TOOL_CALL_XML_BLOCK_RE.search(t):
+        t = _TOOL_CALL_XML_BLOCK_RE.sub("", t)
+        reasons.append("tool_call")
+    if _TOOL_CALL_XML_FRAGMENT_RE.search(t):
+        t = _TOOL_CALL_XML_FRAGMENT_RE.sub("", t)
+        if "tool_call" not in reasons:
+            reasons.append("tool_call")
 
     kept_lines: list[str] = []
     for line in t.splitlines():
