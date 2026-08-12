@@ -52,9 +52,15 @@ from lily_scorekeeper import (
 class _FakeSession:
     def __init__(self) -> None:
         self.instructions: list[str] = []
+        self.said: list[str] = []
 
     def generate_reply(self, instructions: str) -> None:
         self.instructions.append(instructions)
+
+    def say(self, text, *a, **k):
+        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
+        self.said.append(text)
+        return None
 
 
 class _FakeAgentHandle:
@@ -804,9 +810,14 @@ def test_round_transition_reveal_and_question_use_separate_strict_turns():
     # verdict word, then the standings flourish that never restates it.
     # The strict q7 delivery dispatches only at reveal playout completion
     # (delivery_scenario below).
-    assert len(game.session.instructions) == 2
-    verdict, reveal = game.session.instructions
-    assert "VERDICT BEAT" in verdict
+    # REFACTOR W2a: still TWO beats, now split across lanes — the DETERMINISTIC
+    # verdict sheet on direct_say, then the standings flourish (LLM) that never
+    # restates it.
+    assert len(game.session.said) == 1
+    assert len(game.session.instructions) == 1
+    verdict = game.session.said[0]
+    reveal = game.session.instructions[0]
+    assert "femur" in verdict.lower()
     assert "separate authoritative delivery turn follows" in reveal
     assert "do NOT restate" in reveal
     verdict_owner = game.say_registry.owner_of("q_6_verdict")
@@ -824,15 +835,17 @@ def test_round_transition_reveal_and_question_use_separate_strict_turns():
         game.on_agent_speech_finished(
             "Correct — femur.", speech_id=verdict_owner
         )
-        assert len(game.session.instructions) == 2
+        # W2a: the verdict was a say; completing it adds no instruction — the
+        # lone standings flourish still stands, q7 not yet dispatched.
+        assert len(game.session.instructions) == 1
         assert game._pending_delivery_qnum is None
 
         # The round-scores flourish owns the transition to q7.
         game.on_agent_speech_finished(
             "Round one standings.", speech_id=scores_owner
         )
-        assert len(game.session.instructions) == 3
-        delivery = game.session.instructions[2]
+        assert len(game.session.instructions) == 2
+        delivery = game.session.instructions[1]
         assert ROUND_TWO_MC["prompt"] in delivery
         for choice in ROUND_TWO_MC["choices"]:
             assert choice in delivery
@@ -868,7 +881,15 @@ def test_013754_replay_score_published_before_the_verdict_speaks():
         timeline.append(("reveal_speech", instructions))
         game.session.instructions.append(instructions)
 
+    def _say(text, *a, **k):
+        # REFACTOR W2a: the verdict beat now speaks via direct_say; record it
+        # on the same timeline so the score-before-verdict ordering still holds.
+        timeline.append(("reveal_speech", text))
+        game.session.said.append(text)
+        return None
+
     game.session.generate_reply = _speak
+    game.session.say = _say
 
     async def slow_metadata(question_text, **kwargs):
         timeline.append(("meta_start", question_text or ""))

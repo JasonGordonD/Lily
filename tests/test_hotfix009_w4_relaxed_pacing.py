@@ -55,9 +55,15 @@ from lily_scorekeeper import LilyScorekeeper
 class _FakeSession:
     def __init__(self) -> None:
         self.instructions: list[str] = []
+        self.said: list[str] = []
 
     def generate_reply(self, instructions: str) -> None:
         self.instructions.append(instructions)
+
+    def say(self, text, *a, **k):
+        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
+        self.said.append(text)
+        return None
 
 
 class _FakeAgentHandle:
@@ -265,8 +271,10 @@ def test_relaxed_missed_question_never_arms_steal_clock():
     # The beat fell through to the ordinary reveal instead of parking on
     # a clock: the ruling committed and the transition ran.
     assert not game.sk.answer_window_open
+    # REFACTOR W2a: the reveal answer now airs in the deterministic verdict
+    # sheet ("Nobody landed it — it was mitochondria.") on the direct_say lane.
     assert any(
-        "mitochondria" in i.lower() for i in game.session.instructions
+        "mitochondria" in s.lower() for s in game.session.said
     )
 
 
@@ -406,8 +414,10 @@ def test_relaxed_solo_wrong_answer_adjudicates_without_any_clock():
     # The beat closed: ruling committed, window gone, reveal aired — with
     # no timer anywhere (the only closure was the roster completing).
     assert not game.sk.answer_window_open
+    # REFACTOR W2a: the reveal answer now airs in the deterministic verdict
+    # sheet ("Nobody landed it — it was mitochondria.") on the direct_say lane.
     assert any(
-        "mitochondria" in i.lower() for i in game.session.instructions
+        "mitochondria" in s.lower() for s in game.session.said
     )
     assert game._steal_window is False
 

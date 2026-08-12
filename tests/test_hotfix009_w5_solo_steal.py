@@ -83,7 +83,7 @@ def test_timed_ghost_solo_missed_question_never_arms_steal():
     # Fell through to the ordinary reveal instead of parking on a clock.
     assert not game.sk.answer_window_open
     assert any(
-        "mitochondria" in i.lower() for i in game.session.instructions
+        "mitochondria" in s.lower() for s in game.session.said
     )
 
 
@@ -114,7 +114,7 @@ def test_timed_true_solo_missed_question_never_arms_steal():
     assert _steal_beats(game) == []
     assert not game.sk.answer_window_open
     assert any(
-        "mitochondria" in i.lower() for i in game.session.instructions
+        "mitochondria" in s.lower() for s in game.session.said
     )
 
 

@@ -9661,9 +9661,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                             "NOT rule a second time; carry straight on from "
                             "it to the answer and the point."
                         )
+                    # REFACTOR W2a: the verdict beat is a DETERMINISTIC sheet
+                    # composed from the committed ruling — direct_say via the
+                    # text= lane, never the 8-13s instructed_reply composite.
+                    # winner_scored is the ledger truth (a correct row was
+                    # committed), receipt_aired carries the C6 anti-double.
+                    # verdict_instr is retained as the fallback the regen gate
+                    # would use only if the sheet came back empty.
+                    verdict_sheet = lily_scorekeeper.lily_verdict_sheet(
+                        answer=answer_text,
+                        winner=winner,
+                        winner_scored=winner_candidate is not None,
+                        receipt_aired=bool(receipt),
+                    )
                     self.gated_say(
                         verdict_key, "verdict", verdict_instr,
                         source="adjudicate_verdict",
+                        text=verdict_sheet or None,
                     )
                     # N12: the verdict stage of THIS transition is now spoken
                     # for. Its narration is bound by the first turn that

@@ -75,9 +75,15 @@ from lily_scorekeeper import LilyScorekeeper
 class _FakeSession:
     def __init__(self) -> None:
         self.instructions: list[str] = []
+        self.said: list[str] = []
 
     def generate_reply(self, instructions: str) -> None:
         self.instructions.append(instructions)
+
+    def say(self, text, *a, **k):
+        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
+        self.said.append(text)
+        return None
 
 
 class _FakeAgentHandle:
@@ -469,7 +475,11 @@ def test_a_second_adjudication_lane_narrates_nothing(caplog):
 
     game = _make_game()
     _run(_adjudicate_q3(game), game)
-    verdicts = len(_dispatched(game, "VERDICT BEAT"))
+    # REFACTOR W2a: the verdict is the deterministic sheet on the direct_say
+    # lane. N12 unchanged: one transition, one owner, ONE verdict beat — the
+    # second lane speaks nothing further (say-registry claim + journal own the
+    # suppression, both independent of the speech lane).
+    verdicts = len(game.session.said)
     assert verdicts == 1
 
     # The second lane, still holding question three (the live shape: two
@@ -484,7 +494,9 @@ def test_a_second_adjudication_lane_narrates_nothing(caplog):
     with caplog.at_level(logging.ERROR):
         _run(_second_lane, game)
 
-    assert len(_dispatched(game, "VERDICT BEAT")) == verdicts
+    # W2a: the second lane speaks nothing further — the verdict-beat count on
+    # the direct_say lane is unchanged.
+    assert len(game.session.said) == verdicts
     assert game.transition_stages(3).count("verdict") == 1
     assert "SECOND_LANE_REFUSED" in "\n".join(
         r.getMessage() for r in caplog.records

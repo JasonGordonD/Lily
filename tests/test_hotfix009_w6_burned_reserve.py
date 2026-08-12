@@ -66,9 +66,15 @@ from lily_scorekeeper import LilyScorekeeper
 class _FakeSession:
     def __init__(self) -> None:
         self.instructions: list[str] = []
+        self.said: list[str] = []
 
     def generate_reply(self, instructions: str) -> None:
         self.instructions.append(instructions)
+
+    def say(self, text, *a, **k):
+        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
+        self.said.append(text)
+        return None
 
 
 class _FakeAgentHandle:
@@ -240,9 +246,12 @@ def _run(step):
 
 
 def _verdict_beats(game: LilyGame) -> list[str]:
+    # REFACTOR W2a: a verdict beat is now the deterministic sheet on the
+    # direct_say lane; scan BOTH lanes so the count is mechanism-agnostic (the
+    # canonical answer names the beat whichever lane carried it).
     return [
-        i for i in game.session.instructions
-        if "VERDICT BEAT" in i or Q_CURIE["canonical_answer"] in i
+        x for x in (game.session.instructions + game.session.said)
+        if "VERDICT BEAT" in x or Q_CURIE["canonical_answer"] in x
     ]
 
 

@@ -48,9 +48,11 @@ def test_normal_question_airs_exactly_one_acknowledgment(caplog):
     game = _answered_game()
     with caplog.at_level(logging.INFO):
         _run(_adjudicate_and_drain(game), game)
-    assert len(game.session.instructions) == 1
-    verdict = game.session.instructions[0]
-    assert "VERDICT BEAT" in verdict
+    # REFACTOR W2a: exactly one acknowledgment still airs, now as the
+    # DETERMINISTIC verdict sheet on the direct_say lane (no LLM composite).
+    assert len(game.session.instructions) == 0
+    assert len(game.session.said) == 1
+    verdict = game.session.said[0]
     assert "femur" in verdict.lower()
     assert "Rami" in verdict
     # Budget telemetry present and inside the ~1.5s dispatch budget

@@ -1544,6 +1544,40 @@ def lily_ledger_score_line(
     return f"On the board: {body}."
 
 
+def lily_verdict_sheet(
+    *,
+    answer: str,
+    winner: Optional[str],
+    winner_scored: bool,
+    receipt_aired: bool = False,
+) -> str:
+    """REFACTOR W2a. The deterministic verdict beat — the spine's own words,
+    composed from the COMMITTED ruling, replacing the 8-13s LLM composite.
+
+    RULINGS-001 R1 register anchor: the verdict word FIRST, then at most one
+    short flourish (the answer and the point). HOSTLOOP-001 C6 anti-double: if
+    the instant receipt already put the verdict word on the air
+    (``receipt_aired``), the sheet carries straight on from it to the answer
+    and point and never rules a second time.
+
+    `winner_scored` is the ledger truth (a winner_candidate committed a correct
+    row), not merely that a name was passed — nobody-landed-it is a stated
+    outcome, never a silent loss. Pure and model-free; unit-tested without a
+    LilyGame."""
+    answer = (answer or "").strip()
+    who = (winner or "").strip()
+    if winner_scored and who:
+        if receipt_aired:
+            # The room already heard the verdict word; go to answer + point.
+            return f"It's {answer} — point to {who}." if answer else f"Point to {who}."
+        return f"Correct — {answer}! Point to {who}." if answer else f"Correct — point to {who}!"
+    # Nobody landed it. Never credit a late/close answer here (a late-but-
+    # correct outcome arrives on its own note, not this beat).
+    if receipt_aired:
+        return f"It was {answer} — no point this time." if answer else "No point this time."
+    return f"Nobody landed it — it was {answer}." if answer else "Nobody landed it."
+
+
 def lily_score_line_gate(
     text: str,
     ledger_scores: dict,

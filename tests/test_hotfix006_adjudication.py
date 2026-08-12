@@ -75,9 +75,16 @@ from lily_scorekeeper import LilyScorekeeper
 class _FakeSession:
     def __init__(self) -> None:
         self.instructions: list[str] = []
+        self.said: list[str] = []
 
     def generate_reply(self, instructions: str) -> None:
         self.instructions.append(instructions)
+
+    def say(self, text, *a, **k):
+        # REFACTOR W2a: the deterministic direct_say lane. The verdict beat is
+        # now a fixed sheet, not an LLM instruction.
+        self.said.append(text)
+        return None
 
 
 class _FakeAgentHandle:
@@ -958,13 +965,15 @@ def test_the_verdict_beat_is_written_from_the_committed_row(monkeypatch):
 
     _run(_scenario)
 
-    verdict = [
-        i for i in game.session.instructions if "VERDICT BEAT" in i
-    ]
-    assert verdict, "no verdict beat was dispatched"
-    assert "THE COMMITTED ROW" in verdict[0]
-    assert "Okay. It's Jupiter." in verdict[0]
-    assert "Go." not in verdict[0]
+    # REFACTOR W2a: the verdict is a DETERMINISTIC sheet composed from the
+    # committed ruling — it names the canonical answer and the winner, and
+    # never quotes an utterance at all, so it cannot describe a different one
+    # than the ledger (a strictly stronger guarantee than the old instruction
+    # that had to be TOLD not to credit "Go.").
+    verdict_says = [s for s in game.session.said if "Jupiter" in s]
+    assert verdict_says, "no verdict beat naming the committed answer"
+    assert "Point to Rami" in verdict_says[-1]
+    assert not any("Go." in s for s in game.session.said)
 
 
 def test_a_missed_question_forbids_narrating_anyone_correct(monkeypatch):
@@ -985,9 +994,12 @@ def test_a_missed_question_forbids_narrating_anyone_correct(monkeypatch):
 
     _run(_scenario)
 
-    verdict = [i for i in game.session.instructions if "VERDICT BEAT" in i]
-    assert verdict
-    assert "NO committed row for this question is correct" in verdict[0]
+    # REFACTOR W2a: with no correct committed row the deterministic sheet is
+    # the nobody-landed-it beat — it credits no one and names no player.
+    said = game.session.said
+    assert any("Nobody landed it" in s for s in said), said
+    assert not any("Rami" in s for s in said)
+    assert not any("Correct" in s or "Point to" in s for s in said)
 
 
 def test_the_ledger_row_lookup_is_per_player_and_per_question():

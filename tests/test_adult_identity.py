@@ -39,9 +39,15 @@ from lily_scorekeeper import LilyScorekeeper
 class _FakeSession:
     def __init__(self) -> None:
         self.instructions: list[str] = []
+        self.said: list[str] = []
 
     def generate_reply(self, instructions: str) -> None:
         self.instructions.append(instructions)
+
+    def say(self, text, *a, **k):
+        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
+        self.said.append(text)
+        return None
 
 
 class _FakeAgentHandle:
@@ -345,8 +351,10 @@ def test_adult_reveal_keyed_once_zero_suppressions(caplog):
         asyncio.run(game.adjudicate(steal_allowed=False))
 
     assert game.say_registry.state("q_1_reveal") is not None
-    reveals = [i for i in game.session.instructions if "COMMITTED" in i]
-    assert len(reveals) == 1
+    # REFACTOR W2a: the verdict/reveal beat airs once as the deterministic
+    # sheet on the direct_say lane; the second adjudicate is a structural
+    # no-op and adds nothing.
+    assert len(game.session.said) == 1
     assert not any(
         "LILY_SAY_SUPPRESSED" in r.message for r in caplog.records
     )

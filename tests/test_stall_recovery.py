@@ -28,9 +28,15 @@ from lily_scorekeeper import LilyScorekeeper
 class _FakeSession:
     def __init__(self) -> None:
         self.instructions: list[str] = []
+        self.said: list[str] = []
 
     def generate_reply(self, instructions: str) -> None:
         self.instructions.append(instructions)
+
+    def say(self, text, *a, **k):
+        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
+        self.said.append(text)
+        return None
 
 
 class _FakeAgentHandle:
@@ -464,7 +470,10 @@ def test_scripted_reveal_dispatches_when_verdict_not_spoken():
 
     asyncio.run(game.adjudicate(steal_allowed=False))
 
-    assert any("COMMITTED" in i for i in game.session.instructions)
+    # REFACTOR W2a: the beat that dispatches when the verdict was not spoken
+    # organically is the DETERMINISTIC verdict sheet on the direct_say lane.
+    assert game.session.said, "a verdict beat must dispatch when not spoken"
+    assert any("femur" in s.lower() for s in game.session.said)
 
 
 def test_curation_discards_replayed_answer_any_wording():
