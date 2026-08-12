@@ -2355,6 +2355,15 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         while len(mapping) > 32:
             mapping.pop(next(iter(mapping)))
 
+    def peek_post_tts_text(self, speech_id: str | None) -> str | None:
+        """Read the bound TTS text WITHOUT consuming it (transcript-sync:
+        the playout-start interim publish needs the text; the one-shot
+        consume stays with playout completion, Y5 contract untouched)."""
+        if not speech_id:
+            return None
+        mapping = getattr(self, "_post_tts_text_by_speech_id", None) or {}
+        return mapping.get(speech_id)
+
     def consume_post_tts_text(
         self, speech_id: str | None, fallback: str
     ) -> str:
@@ -2385,13 +2394,24 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         return final
 
     def publish_agent_transcription_nowait(
-        self, text: str, *, speech_id: str | None, interrupted: bool
+        self, text: str, *, speech_id: str | None, interrupted: bool,
+        final: bool = True,
     ) -> None:
-        """Publish one final RTC transcript from authoritative TTS text.
+        """Publish one RTC transcript from authoritative TTS text.
 
         Default RoomIO agent text output is disabled; otherwise the client
         sees the pre-TTS model prose and this corrected transcript as two
         different Lily turns.
+
+        Transcript sync (2026-08-09 live report: "what is being said and
+        what is displayed is off"): publishing ONLY at playout completion
+        meant a long turn showed nothing until she finished it — the panel
+        trailed the voice by the whole turn. note_playout_started now
+        publishes the same bound text as an INTERIM segment (final=False)
+        the moment audio starts; this completion publish (same
+        lk.segment_id, final=True, with any "…[cut off]" marker) replaces
+        it in place — the glass upserts interims by segment id and locks
+        on final. The durable record still binds at completion only (Y5).
         """
         clean = (text or "").strip()
         if not clean:
@@ -2417,6 +2437,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return
         value = clean + (" …[cut off]" if interrupted else "")
         segment_id = speech_id or f"lily-{uuid.uuid4().hex}"
+        final_attr = "true" if final else "false"
 
         async def _publish() -> None:
             try:
@@ -2431,7 +2452,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                                 start_time=0,
                                 end_time=0,
                                 language="en",
-                                final=True,
+                                final=final,
                             )
                         ],
                     )
@@ -2456,7 +2477,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 writer = await participant.stream_text(
                     topic="lk.transcription",
                     attributes={
-                        "lk.transcription_final": "true",
+                        "lk.transcription_final": final_attr,
                         "lk.segment_id": segment_id,
                         "lk.transcribed_track_id": track_sid,
                     },
