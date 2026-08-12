@@ -1542,6 +1542,48 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self._preemptive_paused = True
         return self.session.generate_reply(instructions=instructions)
 
+    def direct_say(self, text: str):
+        """HOSTLOOP-001 C6 — the DETERMINISTIC speech lane, sibling of
+        instructed_reply above.
+
+        instructed_reply is model-mediated (generate_reply), and the
+        measured cost of that is the whole clause: 8–13s from a finished
+        answer to a spoken verdict, acks landing a turn late. This lane
+        hands FIXED words straight to the synthesizer, so the only latency
+        left is TTS first-frame.
+
+        AgentSession.say() at 1.6.8 still routes its text through
+        Agent.tts_node (agent_activity._tts_task_impl ->
+        perform_tts_inference(node=self._agent.tts_node, ...)) and still
+        emits speech_created, so the say-gate hygiene, the leak filter, the
+        delivery/transition claim decisions, the suppressed-id bookkeeping
+        and the playout watcher all see this turn exactly as they see a
+        generated one — and Y5 transcript truth holds without a special
+        case: it is recorded at playout completion like any other aired
+        turn. add_to_chat_ctx defaults True, so her own context carries what
+        she just said (which is half of why the composite does not double
+        it).
+
+        The same preemptive pause/resume pair instructed_reply uses applies:
+        this speech commits assistant items too, so a speculative user-turn
+        run started under it is dead by construction."""
+        session = getattr(self, "session", None)
+        say = getattr(session, "say", None)
+        if session is None or not callable(say):
+            # No session, or a session without the say lane. Never raise
+            # into the dispatch path: gated_say has already logged LILY_SAY
+            # and the caller treats a handle-less dispatch the same way it
+            # treats instructed_reply returning None.
+            return None
+        if getattr(self, "agent", None) is not None:
+            self.agent.set_preemptive_generation(False)
+            self._preemptive_paused = True
+        try:
+            return say(text)
+        except Exception as e:
+            logger.warning("LILY_SAY | DIRECT_SAY_FAILED | %s", e)
+            return None
+
     def _resume_preemptive(self) -> None:
         # G1 (WO-LILY-DESYNC-HONESTY-001): while the game is LIVE the
         # playout-completion resume must not re-enable preemptive
@@ -5020,6 +5062,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     _GAME_LANE_ACTS = frozenset({
         "question_delivery", "question_nudge", "verdict", "reveal",
         "reveal_flourish", "reveal_scores", "reveal_finale", "steal_window",
+        # HOSTLOOP-001 C6: the instant answer receipt is a game-lane payload
+        # like the verdict it precedes — it may not air into a lobby, a
+        # finished game, or a STOP, and (like every other game act) its own
+        # window governs it rather than the conversational question-pending
+        # yield.
+        "answer_receipt",
     })
 
     def game_payload_blocked(self, act: str, source: str) -> bool:
@@ -6375,6 +6423,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             (getattr(self, "_delivery_speech_acts", None) or {}).pop(
                 speech_id, None
             )
+        # HOSTLOOP-001 C5: this turn's playout is over however it ended, so
+        # the host-composite lane is free. Released BEFORE the recovery
+        # branches below, which dispatch composites of their own (the C8
+        # verdict re-air is itself act="verdict" and would otherwise be
+        # refused as racing the very flight that just died).
+        self.clear_composite_flight(speech_id)
         spoken_text = self.consume_post_tts_text(speech_id, spoken_text)
         if interrupted or suppressed:
             released = (
@@ -6453,13 +6507,33 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # The window may already be open here (C3a arms it at core
             # completion), which is exactly why "window open" is not a guard:
             # what is owed is the REST OF THE CHOICES, not a window.
-            if (
-                barge_in
-                and interrupted
-                and getattr(self, "_mc_delivery_qnum", None)
-                == self.sk.question_number
+            #
+            # HOSTLOOP-001 C8 widens the MARK, not the policy. C3c marked
+            # only an in-flight MC options read; the clause is "any host
+            # utterance in phase=question". The predicate that replaces the
+            # MC-only test is exactly "the room does not have this question
+            # yet": phase=question, a question armed, and its delivery not
+            # CONFIRMED. That covers the freeform read, a nudge, and any
+            # other phase=question beat cut before the question landed —
+            # and it excludes the case that must never re-read, a question
+            # already confirmed delivered (delivery_reached_the_table above
+            # force-confirms exactly that case, so it self-excludes).
+            # mcq_barge_resume resumes from the interrupted choice where a
+            # resume point exists and re-offers the whole sheet where it
+            # does not.
+            if barge_in and interrupted and self._question_owed_recovery(
+                released
             ):
                 self.note_question_barge_cut(self.sk.question_number)
+            # HOSTLOOP-001 C8: a VERDICT beat cut by a barge-in re-airs the
+            # result as one deterministic line. Session B 36:25: the cut
+            # released q_{N}_reveal and Y7 (correctly, for conversation)
+            # recovered nothing — so the ruling was dropped silently AND
+            # the released key wedged N+1 behind an unconfirmable verdict.
+            # Y7's cancel-not-recover stays the policy outside
+            # phase=question / the verdict result.
+            if barge_in and interrupted:
+                self.reair_cut_verdict(released)
             # Cut-recovery contract (WS-3, STREAM-INTEGRITY-002): a cut or
             # mid-stream-FAILED organic turn (no keyed claim to drive a
             # game-loop re-dispatch) arms the auto-resume watchdog. It fires
@@ -7352,6 +7426,27 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
         asyncio.ensure_future(_apply())
 
+    def _receipt_yields_to_clarify(
+        self, t1: dict, tier1_threshold: float
+    ) -> bool:
+        """HOSTLOOP-001 C6: does the instant ack stand down in favour of the
+        clarify question? True when this Tier-1 result sits in the middle
+        BAND — the same read _maybe_fire_clarify makes, from the same values,
+        so there is one band rule and not two. Fails OPEN (receipt speaks)
+        on anything unreadable: the receipt existing is the clause."""
+        if t1.get("verdict") != "uncertain":
+            return False
+        similarity = t1.get("similarity")
+        if not isinstance(similarity, (int, float)):
+            return False
+        try:
+            return lily_evaluation.lily_tier1_band(
+                float(similarity), tier1_threshold,
+                lily_config.tier1_clarify_margin(),
+            ) == lily_evaluation.BAND_CLARIFY
+        except Exception:
+            return False
+
     def _maybe_fire_clarify(
         self,
         cand: dict,
@@ -8215,6 +8310,51 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 ),
                 self.sk.session_id, self.sk.question_number,
             )
+            # ── HOSTLOOP-001 C6: THE RECEIPT SEAM ─────────────────────────
+            # THIS is the moment "an answer utterance completed" and its
+            # Tier-1 verdict is knowable — deterministic string matching,
+            # microseconds. Everything downstream (Tier-2, the commit, the
+            # reveal publishes, the LLM composite) is what put the spoken
+            # verdict 8–13s behind the answer in Session B and put the ack
+            # for answer N behind answer N+1 in Session A. So the SHORT
+            # receipt is voiced here, ahead of all of it, and the styled
+            # composite follows unchanged.
+            #
+            # Keyed on THIS utterance's own candidate, not ordered[0]: the
+            # instant-scoring path below deliberately only looks at the
+            # earliest candidate (only it can win), but every answerer is
+            # owed a receipt for the words they just said — a second player
+            # answering into an open window used to hear nothing at all
+            # until the composite.
+            if acceptable:
+                mine = next(
+                    (c for c in ordered if c.get("text") == text), None
+                )
+                if mine is not None:
+                    receipt_t1 = self._tier1_question(
+                        mine["text"], question,
+                        key=mine["player"]
+                        or f"unrostered:{mine['speaker_label']}",
+                        threshold=tier1_threshold,
+                    )
+                    # ...unless she is about to ASK about this utterance
+                    # instead of acknowledging it. The Task-4 clarify fires
+                    # exactly on the middle BAND, which is a subset of the
+                    # uncertain verdict, and "Locked in—" followed by "was
+                    # that an answer, or thinking out loud?" contradicts
+                    # itself. The clarify question is that utterance's
+                    # receipt — deterministic, same sub-2s window — so the
+                    # ack stands down and the band read is the existing one,
+                    # not a second rule.
+                    if not self._receipt_yields_to_clarify(
+                        receipt_t1, tier1_threshold
+                    ):
+                        self.fire_answer_receipt(
+                            receipt_t1["verdict"],
+                            text=mine["text"],
+                            player=mine.get("player"),
+                            source="instant_tier1",
+                        )
             if ordered and acceptable:
                 first = ordered[0]
                 if first.get("text") == text or len(ordered) == 1:
@@ -9245,6 +9385,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                             "not 'that was right but late'. If someone was right "
                             "after the buzzer you will have been given a late-"
                             "answer note; without one, nobody was right."
+                        )
+                    # HOSTLOOP-001 C6 — THE ANTI-DOUBLE. The instant receipt
+                    # already put a word on the air for this ruling seconds
+                    # ago, so the composite is TOLD, by name, what the room
+                    # has already heard. Without this she rules twice ("Ooh,
+                    # no—" … "Nope, no points"), which is the doubling the
+                    # clause forbids; with it the receipt is the verdict word
+                    # and the composite is the reveal.
+                    receipt = self.answer_receipt_aired_for(verdict_qnum)
+                    if receipt:
+                        verdict_instr += (
+                            " NOTE: you ALREADY said "
+                            f"{receipt!r} out loud a moment ago, the instant "
+                            "the answer landed — the room has heard the "
+                            "verdict word. Do NOT open with it again and do "
+                            "NOT rule a second time; carry straight on from "
+                            "it to the answer and the point."
                         )
                     self.gated_say(
                         verdict_key, "verdict", verdict_instr,

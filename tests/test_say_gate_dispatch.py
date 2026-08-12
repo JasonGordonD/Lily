@@ -89,11 +89,25 @@ def test_rejoin_key_does_not_trip_greet_key():
 
 
 def test_keyless_dispatch_always_speaks():
+    """A keyless act is not KEY-gated — it claims nothing, so it never
+    dup-suppresses against a previous dispatch of a different beat.
+
+    HOSTLOOP-001 C5 amendment: the original body dispatched "steal_window"
+    TWICE and asserted both spoke. That was the hole, not the contract —
+    a keyless host composite claimed nothing, so two of them raced (Session
+    A's 04:52:50 / 04:52:54 double emission). The second one is now refused
+    as composite_in_flight, and the "keyless still speaks" contract is
+    pinned on a NON-composite act, which is what it was ever about.
+    """
     game = _make_game()
-    game.game_started = True  # P8: steal/lockout requires a live game
-    assert game.gated_say(None, "steal_window", "five seconds!", "adjudicate")
-    assert game.gated_say(None, "steal_window", "five seconds!", "adjudicate")
+    game.game_started = True
+    assert game.gated_say(None, "pace_ack", "slower it is", "voice_command")
+    assert game.gated_say(None, "pace_ack", "back up to speed", "voice_command")
     assert len(game.session.instructions) == 2
+    # C5: and a second composite for the same beat does NOT race the first.
+    assert game.gated_say(None, "steal_window", "five seconds!", "adjudicate")
+    assert not game.gated_say(None, "steal_window", "five seconds!", "adjudicate")
+    assert len(game.session.instructions) == 3
 
 
 def test_extra_keys_claimed_alongside_primary():
