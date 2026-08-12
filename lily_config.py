@@ -1111,6 +1111,14 @@ def job_memory_limit_mb() -> float:
 # Billing is audio-seconds, not per-module (JRVS Probe-C Q1 finding): the full
 # module set costs 1× quota. All tunables are STARTING POINTS.
 
+def board_on_playout_start() -> bool:
+    """C9 (HOSTLOOP-001): the glass question post is gated on TTS playout
+    START of that question's delivery (the lily-2C489B fix). DEFAULT TRUE.
+    False reverts to the legacy arm-time post — the documented rollback
+    position, in which the board can lead the voice."""
+    return _get_bool("LILY_BOARD_ON_PLAYOUT_START", True)
+
+
 def audeering_enabled() -> bool:
     """Master switch for the acoustic pipeline (HOSTLOOP-001 C11).
     DEFAULT FALSE: the 6-module 5s-cadence upload burned quota with no

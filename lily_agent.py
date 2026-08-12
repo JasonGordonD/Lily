@@ -6213,6 +6213,15 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # publish still led the voice by the length of any audio queued
         # ahead of the delivery turn (greetings, celebration) — screen
         # truth must equal SPOKEN truth, so the glass syncs at playout.
+        #
+        # HOSTLOOP-001 C9: that playout-start gating is now behind ONE
+        # reversible flag. LILY_BOARD_ON_PLAYOUT_START=true (default)
+        # keeps it; false reverts to the legacy ARM-TIME post (the glass
+        # leads the voice by the queued-audio length — the pre-2C489B
+        # behavior, kept only as the rollback position the WO requires).
+        if not lily_config.board_on_playout_start():
+            self._phase_hold = None
+            self.publish_question_to_glass(reason="serve_time_flag")
         self.start_prefetch()  # N+2 begins while N+1 plays out
         return True
 
