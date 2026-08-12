@@ -14535,6 +14535,33 @@ class LilyAgent(Agent):
                 len(raw) - len(full),
             )
 
+        # CLASS 1 (LIVEFIRE-001) — SPOKEN SCORE = LEDGER ONLY. The spine
+        # prints every number: any sentence narrating a total/streak/count is
+        # suppressed here and the ONE authoritative line is re-emitted from
+        # the ledger (ledger_scores / ledger_streaks). Suppress-and-reemit,
+        # never an in-place rewrite. The live 3-vs-2 Athens line ("you're at
+        # three, streak of three" over a committed 2/2) can no longer air.
+        # Only fires with a live ledger — pre-game greet/intake is untouched.
+        try:
+            _lscores = self._game.sk.ledger_scores()
+        except Exception:
+            _lscores = {}
+        if _lscores and any(v for v in _lscores.values()):
+            kept_text, _suppressed, _ledger_line = (
+                lily_scorekeeper.lily_score_line_gate(
+                    full, _lscores, self._game.sk.ledger_streaks()
+                )
+            )
+            if _suppressed:
+                logger.warning(
+                    "LILY_SAY_SUPPRESSED | reason=score_divergence | "
+                    "session=%s suppressed=%r ledger_line=%r",
+                    self._game.sk.session_id,
+                    [s[:80] for s in _suppressed], _ledger_line,
+                )
+                full = (kept_text + " " + _ledger_line).strip() if kept_text \
+                    else _ledger_line
+
         # A claimed returner / unsettled identity must never be told no
         # recorded game / clean slate exists. Live 2026-08-09: organic
         # intake asserted "no saved stats… clean slate" while the probe

@@ -17,6 +17,38 @@ Living documentation lives here. Dated work-order and fix entries live in
 Spoken-surface freeze before any speech/delivery extract:
 [docs/voice_inventory.md](docs/voice_inventory.md).
 
+## Live-fire fix classes (WO-LILY-LIVEFIRE-001)
+
+Eight ordered fix classes from session `lily-639007-f80aa6bf`. Governing
+principle: **the spine decides; the LLM narrates.** No LLM output may assert
+game state (scores, streaks, verdicts, stop/resume status, counts) — state is
+spoken only via template lines printed from the ledger / state machine, and
+commands are recognized by ONE intent path.
+
+### CLASS 1 — spoken score = ledger only
+
+The 17:58:45 reveal aired "you're at three, streak of three" while the
+committed ledger read score=2 streak=2 — the model read one answer ahead of
+the spine. The X1/N9 detectors logged the divergence but the sentence had
+already reached TTS; a post-hoc ERROR is not a gate.
+
+- **Streak authority**: every committed row now carries `streak_after`, and
+  `LilyScorekeeper.ledger_streaks()` reads it as a read-only authority the
+  same shape as `ledger_scores()` — the spine's streak, never the model's.
+- **Say-gate gate** (`lily_score_line_gate`, run in `tts_node` right after
+  `lily_clean_for_speech`): splits the turn into sentences and suppresses
+  every sentence that narrates a total, streak value, or count (the organic
+  lane is color only), re-emitting ONE template line from the ledger
+  authority (`lily_ledger_score_line`). Suppress-and-reemit, never an
+  in-place rewrite. Fires only with a live ledger, so pre-game greet/intake
+  is untouched.
+- **Grammar covered** (1c): "that's N for you", "on the board at N",
+  "N straight", "still at zero", "sitting on N", "streak of N", "you're at
+  N", "puts you at N", "score is N" — spelled and digit forms.
+- Logs `LILY_SAY_SUPPRESSED | reason=score_divergence`. Fixture replay: the
+  Athens 3-vs-2 line can no longer air; no organic total/streak reaches TTS
+  (`tests/test_livefire_class1_score_ledger.py`).
+
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
 Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)

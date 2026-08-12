@@ -5,6 +5,24 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 1: spoken score = ledger only
+
+Fixture `lily-639007-f80aa6bf`. The 17:58:45 reveal aired "you're at three,
+streak of three" over a committed ledger of 2/2 — the model narrated state
+one answer ahead of the spine, and the X1 detector only logged it post-hoc.
+
+- `lily_scorekeeper`: committed rows carry `streak_after`; new
+  `ledger_streaks()` read-only authority (parallel to `ledger_scores()`);
+  new pure `lily_score_line_gate` / `lily_ledger_score_line` /
+  `_sentence_narrates_state` covering her full score grammar (1c).
+- `lily_agent.tts_node`: Class-1 gate after `lily_clean_for_speech` —
+  suppresses any sentence narrating a total/streak/count and re-emits ONE
+  template line from the ledger authority (`LILY_SAY_SUPPRESSED |
+  reason=score_divergence`). Suppress-and-reemit, never in-place rewrite;
+  fires only with a live ledger.
+- Tests: `tests/test_livefire_class1_score_ledger.py` (8). Full suite green
+  (2416). Closes the Class-1 "done when": the Athens 3-vs-2 line cannot air.
+
 ## 2026-08-12 — WO-LILY-HOSTLOOP-001: host-loop overhaul, all clauses closed
 
 Full clause-by-clause detail in README.md ("Host-loop overhaul") and the
