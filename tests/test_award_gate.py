@@ -105,7 +105,12 @@ def test_award_bonus_refused_before_game_started():
 def test_award_bonus_allowed_once_game_started():
     agent, game = _make_agent(game_started=True, players=["Dave", "Sam"])
     msg = _call_award(agent, "Dave", "brilliant misfire")
-    assert msg == "Bonus point to Dave."
+    # Result-derived speech: the confirmation leads with the committed ledger
+    # fact (the point and the new total read off the ledger), so the model
+    # cannot invent a different number.
+    assert "BONUS COMMITTED" in msg
+    assert "Dave" in msg
+    assert "now on 1" in msg
     assert game.sk.players["Dave"]["score"] == 1
     assert len(game.events) == 1
     assert game.events[0][0] == "best_wrong_answer"
@@ -129,7 +134,10 @@ def test_award_bonus_unknown_name_after_game_started_still_refuses_by_name():
     # Once the loop is live the pre-existing roster-check message stays.
     agent, game = _make_agent(game_started=True, players=["Dave"])
     msg = _call_award(agent, "Ghost", "spectral vibes")
-    assert "No rostered player" in msg
+    # Failure string is the ONLY speakable output: an explicit NO BONUS token
+    # plus the reason, so a stray JSON-shaped tool leak can't read as success.
+    assert "NO BONUS" in msg
+    assert "rostered player" in msg.lower()
     assert "Ghost" in msg
     assert game.sk.players["Dave"]["score"] == 0
     assert game.events == []
@@ -162,7 +170,8 @@ def test_award_bonus_lands_ledger_entry_and_audit_row(monkeypatch):
         loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
-    assert msg == "Bonus point to Dave."
+    assert "BONUS COMMITTED" in msg
+    assert "now on 1" in msg
     assert game.sk.score_ledger[-1]["cause"] == "bonus"
     assert written == [("test-room", game.sk.score_ledger[-1])]
     assert written[0][1]["points"] == 1

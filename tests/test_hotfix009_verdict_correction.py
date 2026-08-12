@@ -400,8 +400,8 @@ def test_tool_corrects_the_diamond_verdict_and_narrates_the_fix():
         "diamond was yours, and I'd put a clock on a relaxed round",
     ))
     # She names the fix and the new standing — justice done, not "locked".
-    assert "goes back to Rami" in msg
-    assert "On 3" in msg
+    assert "back with Rami" in msg
+    assert "now on 3" in msg
     assert sk.players["Rami"]["score"] == 3
     assert game.publish_nowait_calls == 1
     assert game.events and game.events[0][0] == "verdict_corrected"
@@ -445,7 +445,7 @@ def test_tool_answer_denied_corroborated_via_asked_history():
     msg = _call(LilyAgent.lily_correct_verdict.__wrapped__(
         agent, None, "Rami", "answer_denied", "you had it",
     ))
-    assert "goes back to Rami" in msg
+    assert "back with Rami" in msg
     assert sk.players["Rami"]["score"] == 1
     assert game.events and game.events[0][1]["grounds"] == "answer_denied"
 
@@ -475,8 +475,8 @@ def test_tool_answer_denied_diamond_corroborated_via_addressee_fallback():
     msg = _call(LilyAgent.lily_correct_verdict.__wrapped__(
         agent, None, "Rami", "answer_denied", "diamond was yours",
     ))
-    assert "goes back to Rami" in msg
-    assert "On 3" in msg
+    assert "back with Rami" in msg
+    assert "now on 3" in msg
     assert sk.players["Rami"]["score"] == 3
     assert game.events and game.events[0][1]["grounds"] == "answer_denied"
 

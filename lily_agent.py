@@ -13334,46 +13334,52 @@ class LilyAgent(Agent):
         starts serving [NEXT QUESTION] and the answer window opens on your
         first ask. No-op if the game is already running."""
         if self._game.game_started:
-            return "Already running — the next question is in the state block."
+            return (
+                "STARTED (already running) — the next question is in the "
+                "state block; do not re-open Round One."
+            )
         blocked = self._game.start_blocked_reason()
         if blocked == "game_stopped":
             return (
-                "The game is STOPPED. Do not open Round One or deliver a "
-                "question. Wait for an explicit resume/continue command."
+                "NOT STARTED (game_stopped) — the game is STOPPED. Do not "
+                "open Round One or deliver a question. Wait for an explicit "
+                "resume/continue command."
             )
         if blocked == "identity_unconfirmed":
             return (
-                "Hold kickoff — no player has confirmed a name yet. Ask "
-                "'what should I call you?', bind that explicit answer, then "
-                "start. Do not treat a conversational word as a name."
+                "NOT STARTED (identity_unconfirmed) — no player has confirmed "
+                "a name yet. Ask 'what should I call you?', bind that explicit "
+                "answer, then start. Do not treat a conversational word as a "
+                "name; do not announce a category or a question."
             )
         if blocked == "recognition_dispute":
             return (
-                "Hold the kickoff — a recognition question is still open. "
-                "Answer WHY the clean-slate / empty claim happened first "
-                "(one sentence from the state note), then follow their lead. "
-                "Do NOT announce a category or say let's kick yet."
+                "NOT STARTED (recognition_dispute) — a recognition question is "
+                "still open. Answer WHY the clean-slate / empty claim happened "
+                "first (one sentence from the state note), then follow their "
+                "lead. Do NOT announce a category or say let's kick yet."
             )
         if blocked == "ambiguous_yes":
             return (
-                "That bare yes answered a choice, not a start. Do NOT open "
-                "round one yet. Ask one clear confirm — ready to start the "
-                "game? — or wait for an explicit 'let's start' / 'let's play'."
+                "NOT STARTED (ambiguous_yes) — that bare yes answered a "
+                "choice, not a start. Do NOT open Round One yet. Ask one clear "
+                "confirm — ready to start the game? — or wait for an explicit "
+                "'let's start' / 'let's play'."
             )
         if blocked == "user_speaking":
             return (
-                "Hold kickoff — the player is still speaking. Listen for "
-                "the rest of the turn; do not announce Round One."
+                "NOT STARTED (user_speaking) — the player is still speaking. "
+                "Listen for the rest of the turn; do not announce Round One."
             )
         if blocked == "setup_pending":
             jobs = ", ".join(sorted(self._game.pending_setup_jobs()))
             return (
-                "Hold kickoff — requested setup is incomplete: "
+                "NOT STARTED (setup_pending) — requested setup is incomplete: "
                 f"{jobs}. Apply those tools/latches first, then confirm "
                 "ready. Do NOT announce Round One or a category."
             )
         intake_hold = (
-            "Hold that thought — a name just landed and the intake "
+            "NOT STARTED (intake_active) — a name just landed and the intake "
             "round-robin is still going. Finish collecting names "
             "('who's next?', then 'that everyone?'), and once the "
             "roster is settled call lily_begin_round again."
@@ -13386,32 +13392,36 @@ class LilyAgent(Agent):
             blocked = self._game.start_blocked_reason()
             if blocked == "game_stopped":
                 return (
-                    "The game is STOPPED. Wait for an explicit resume "
+                    "NOT STARTED (game_stopped) — wait for an explicit resume "
                     "before any question."
                 )
             if blocked == "identity_unconfirmed":
                 return (
-                    "Hold kickoff — get and bind one explicit player name "
-                    "before Round One."
+                    "NOT STARTED (identity_unconfirmed) — get and bind one "
+                    "explicit player name before Round One."
                 )
             if blocked == "recognition_dispute":
                 return (
-                    "Hold the kickoff — a recognition question is still open. "
-                    "Answer WHY the clean-slate / empty claim happened first, "
-                    "then follow their lead."
+                    "NOT STARTED (recognition_dispute) — a recognition "
+                    "question is still open. Answer WHY the clean-slate / "
+                    "empty claim happened first, then follow their lead."
                 )
             if blocked == "ambiguous_yes":
                 return (
-                    "That bare yes answered a choice, not a start. Wait for "
-                    "an explicit 'let's start' / 'let's play'."
+                    "NOT STARTED (ambiguous_yes) — that bare yes answered a "
+                    "choice, not a start. Wait for an explicit 'let's start' "
+                    "/ 'let's play'."
                 )
             if blocked == "user_speaking":
-                return "Hold kickoff — the player is still speaking."
+                return (
+                    "NOT STARTED (user_speaking) — the player is still "
+                    "speaking."
+                )
             if blocked == "setup_pending":
                 jobs = ", ".join(sorted(self._game.pending_setup_jobs()))
                 return (
-                    "Hold kickoff — requested setup is incomplete: "
-                    f"{jobs}. Apply it before Round One."
+                    "NOT STARTED (setup_pending) — requested setup is "
+                    f"incomplete: {jobs}. Apply it before Round One."
                 )
             # A bind landed between the gate check above and start_game's
             # own gate — the start deferred (WS-1).
@@ -13430,17 +13440,17 @@ class LilyAgent(Agent):
             # first when it drifts from the question text).
             self._game.expect_delivery()
             return (
-                "Round one is armed and YOU deliver the first question in "
-                "this very turn — you are its sole deliverer. One short "
-                "transition beat (set the round-one category: "
+                "STARTED — Round one is armed and YOU deliver the first "
+                "question in this very turn; you are its sole deliverer. One "
+                "short transition beat (set the round-one category: "
                 f"{q.get('category', 'general')}), then ask exactly, word "
                 f"for word: {q.get('prompt', '')!r} Never re-ask it in a "
                 "later turn."
             )
         return (
-            "Round one is armed but the first question hasn't landed yet — "
-            "banter for a beat; deliver it when it appears in the state "
-            "block."
+            "STARTED — Round one is armed but the first question hasn't "
+            "landed yet; banter for a beat, and deliver it only when it "
+            "appears in the state block. Do not invent a question."
         )
 
     @function_tool()
@@ -13463,18 +13473,31 @@ class LilyAgent(Agent):
         # surfaces as empty scores instead of ghost bonuses.
         if not self._game.game_started:
             return (
-                "Bonus points can only be awarded once a round is underway. "
-                "Call lily_begin_round first or wait for auto-start."
+                "NO BONUS — bonus points can only be awarded once a round is "
+                "underway. Call lily_begin_round first or wait for auto-start; "
+                "do not tell the table a point landed."
             )
         name = (player_name or "").strip()
         if name not in self._game.sk.players:
-            return f"No rostered player named {name!r} — no point awarded."
+            return (
+                f"NO BONUS — no rostered player named {name!r}; no point "
+                "awarded. Do not tell the table a point landed."
+            )
         clean_reason = (reason or "").strip()[:200] or None
         entry = self._game.sk.award_bonus(name, transcript=clean_reason)
+        if entry is None:
+            # RESULT-DERIVED SPEECH: the ledger (the sole score writer)
+            # declined — no in-memory mutation happened, so no bonus is true.
+            # The failure string is the ONLY speakable output; never narrate a
+            # point the ledger did not commit, and do not emit the screen event.
+            return (
+                f"NO BONUS — the ledger did not record a point for {name!r}. "
+                "Do not tell the table a bonus landed; carry on with the game."
+            )
         # Bonus audit row (WS-7): every scoring mutation writes a
         # lily_answers row with a cause — the live bonus point had none.
         supabase = self._game.supabase
-        if entry is not None and supabase is not None:
+        if supabase is not None:
             asyncio.ensure_future(lily_persistence.lily_write_score_event(
                 supabase, self._game.sk.session_id, entry,
             ))
@@ -13491,7 +13514,14 @@ class LilyAgent(Agent):
         # Score is committed in-memory; event is nowait — don't block the
         # tool-return turn on attribute RTT.
         self._game.publish_attributes_nowait()
-        return f"Bonus point to {name}."
+        # Lead with the committed ledger fact so the model cannot invent a
+        # different number: the point is on the ledger, and the new total is
+        # what the ledger says — not what the model remembers.
+        new_score = self._game.sk.players[name]["score"]
+        return (
+            f"BONUS COMMITTED: +1 to {name}, now on {new_score}. Say the "
+            "bonus landed and that total; state no other number."
+        )
 
     @staticmethod
     def _answer_matches(attempt: str | None, canonical: str | None) -> bool:
@@ -13619,8 +13649,14 @@ class LilyAgent(Agent):
             },
         )
         self._game.publish_attributes_nowait()
+        # Lead with the committed ledger fact (the anti-invention rule the
+        # whole tool exists to serve): the score is read off the ledger row
+        # this correction just appended, never reconstructed by the model.
         new_score = self._game.sk.players[name]["score"]
-        return f"Corrected — the point goes back to {name}. On {new_score} now."
+        return (
+            f"CORRECTED: the point is back with {name}, now on {new_score}. "
+            "Say the correction landed and that total; state no other number."
+        )
 
     # Ungated by game_started (tool-gating principle: gate tools that
     # mutate game outcomes or emit game events — a pacing preference does

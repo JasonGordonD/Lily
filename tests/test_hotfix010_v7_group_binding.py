@@ -11,12 +11,15 @@ Locks the resolve-before-mint + rebind ordering:
      centroid all bind to ONE group — no fragmentation.
   3. resolve_group_identity does NOT mint a name-set-hash group while an
      enrolled-voice match is in flight (the race that fractures one table
-     into several grp_ hashes); it mints only after the voice route reports
-     no match, and the voice matcher's no-match branch re-invokes it so a
-     genuine new table still gets its deterministic group.
+     into several grp_ hashes). V1c IDENTITY — ONE AUTHORITY hardens this:
+     even after the voice route reports no match, the name-set hash may only
+     PROPOSE a quarantined candidate (staged like device metadata) that a
+     voice must confirm — it never mints or switches group_id on a heard
+     name alone. Only a biometric match or env_override creates or switches
+     a group.
 
-These fixtures FAIL on pre-V7 code (the match was dropped on empty staging;
-the name-set hash minted ahead of the biometric).
+These fixtures FAIL on pre-V7 code (the match was dropped on empty staging)
+and pin the V1c contract (the name-set hash is quarantined, never minted).
 
 Embedder / probe / supabase are injected fakes (same shape as
 test_hotfix010_v2_voice_id_latency.py).
@@ -165,10 +168,10 @@ def test_resolve_defers_name_set_mint_while_voice_in_flight(monkeypatch):
     assert g._upgrade_calls == []
 
 
-# -- 3b. name-set hash still mints once the voice route reports no match ------
+# -- 3b. name-set hash QUARANTINES once the voice route reports no match ------
 
 
-def test_name_set_mints_after_voice_reports(monkeypatch):
+def test_name_set_quarantines_after_voice_reports(monkeypatch):
     _enable(monkeypatch)
     g = _game("lily-ROOM4")
     g.sk.players["amanda"] = {}
@@ -177,21 +180,34 @@ def test_name_set_mints_after_voice_reports(monkeypatch):
     g._voice_identity_attempted = True
     g._voice_identity_resolved = True
 
+    staged, requested = [], []
+
+    async def _stage(candidate, source):
+        staged.append((candidate, source))
+        return True  # a table for this name set is on file
+
+    g.stage_device_candidate = _stage
+    g.request_device_verification = lambda trigger: requested.append(trigger)
+
     _run(g.resolve_group_identity("voice_no_match"))
 
     expected = lily_memory.lily_name_set_group_id(["amanda", "rami"])
-    assert g.group_id == expected
-    assert g.group_id_source == "name_set_hash"
-    assert (expected, "name_set_hash") in g._upgrade_calls
+    # PROPOSED, not minted: quarantined for a voice to confirm. group_id
+    # is untouched — the anonymous session id stands until biometry lands.
+    assert staged == [(expected, "name_set_hash")]
+    assert requested == ["voice_no_match"]
+    assert g._upgrade_calls == []
+    assert g.group_id == "lily-ROOM4"
+    assert g.group_id_source == "room_name"
 
 
-# -- 3c. a voice NO-MATCH mid-game re-invokes the resolver to mint ------------
+# -- 3c. a voice NO-MATCH mid-game re-invokes the resolver to PROPOSE ---------
 
 
-def test_voice_no_match_triggers_deferred_mint(monkeypatch):
+def test_voice_no_match_triggers_deferred_proposal(monkeypatch):
     # Non-matching centroid -> match is None. Game already started on a weak
-    # group: the no-match branch must re-invoke resolve_group_identity so the
-    # deferred name-set hash mints now.
+    # group: the no-match branch re-invokes resolve_group_identity, which now
+    # PROPOSES (quarantines) the name-set hash instead of minting it.
     _enable(monkeypatch, embedding=[1.0, 0.0, 0.0])
     g = _game("lily-ROOM5")
     g.sk.players["carly"] = {}
@@ -200,12 +216,20 @@ def test_voice_no_match_triggers_deferred_mint(monkeypatch):
     _preload(g, [{"group_id": "someone_else", "centroid": [0.0, 1.0, 0.0],
                   "sample_count": 5}])
 
-    async def _stage_should_not_run(gid, source):
-        raise AssertionError("no match -> staging must not be reached")
+    staged, requested = [], []
 
-    g.stage_device_candidate = _stage_should_not_run
+    async def _stage(candidate, source):
+        staged.append((candidate, source))
+        return True
+
+    g.stage_device_candidate = _stage
+    g.request_device_verification = lambda trigger: requested.append(trigger)
 
     assert _run(g._voice_identity_match_at_start()) is False
     expected = lily_memory.lily_name_set_group_id(["carly", "kali"])
-    assert g.group_id == expected
-    assert g.group_id_source == "name_set_hash"
+    # The re-invoked resolver quarantined the name-set hash — never minted it.
+    assert staged == [(expected, "name_set_hash")]
+    assert requested == ["voice_no_match"]
+    assert g.group_id == "lily-ROOM5"        # still anonymous, awaiting voice
+    assert g.group_id_source == "room_name"
+    assert g._upgrade_calls == []

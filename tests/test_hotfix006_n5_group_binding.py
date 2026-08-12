@@ -57,11 +57,26 @@ def _game(*, group_id, source):
     g.forget_state = None
     g.device_candidate_group_id = None
     g.upgraded = []
+    # V1c: the name-set hash may only PROPOSE a quarantined candidate. Record
+    # both the stage attempt and any verification request; `_staged_present`
+    # toggles whether the proposed group has a table on file to stage.
+    g.staged = []
+    g.verified_requests = []
+    g._staged_present = False
 
     async def _upgrade(new_id, src):
         g.upgraded.append((new_id, src))
 
+    async def _stage(candidate, source):
+        g.staged.append((candidate, source))
+        return g._staged_present
+
+    def _request_verify(trigger):
+        g.verified_requests.append(trigger)
+
     g.upgrade_group_id = _upgrade
+    g.stage_device_candidate = _stage
+    g.request_device_verification = _request_verify
     return g
 
 
@@ -104,16 +119,57 @@ def test_the_legacy_identifier_match_remains_authoritative():
     assert g.upgraded == []
 
 
-def test_a_weak_binding_is_still_allowed_to_resolve(monkeypatch):
-    """PROTECTED — the whole point of the resolver is that a room-random or
-    stale-hash session CAN still find its group. N5 narrows what may
-    override a biometric verdict; it must not freeze weak bindings."""
+def test_a_weak_binding_resolves_only_by_proposing_a_quarantined_candidate(
+    monkeypatch,
+):
+    """V1c — a room-random or stale-hash session CAN still find its group,
+    but a HEARD name set may only PROPOSE it. When the name-set hash matches
+    a table on file, it stages a quarantined candidate that a voice must
+    confirm — it never mints or switches group_id on the strength of a name
+    alone. N5's structural half: the hash is no longer an identity."""
     g = _game(group_id="lily-ROOM-random", source="room_name")
+    g._staged_present = True  # the hashed group has a table on file
     monkeypatch.setattr(
         lily_agent.lily_memory, "lily_name_set_group_id", lambda names: "grp_hashed"
     )
     _run(g.resolve_group_identity("game_start"))
-    assert g.upgraded == [("grp_hashed", "name_set_hash")]
+    # Proposed, not minted: quarantined for voice, group_id untouched.
+    assert g.upgraded == []
+    assert g.staged == [("grp_hashed", "name_set_hash")]
+    assert g.verified_requests == ["game_start"]
+    assert g.group_id == "lily-ROOM-random"
+    assert g.group_id_source == "room_name"
+
+
+def test_a_misheard_name_cannot_mint_a_second_memory(monkeypatch):
+    """THE V1c fixture — lily-4FB3B2 exactly, from the resolver side. STT
+    mishears one name, so the heard name set (and its hash) is one this
+    table has never produced before: there is NO table on file for it, and
+    stage_device_candidate returns False for an empty group. The mishearing
+    must therefore create NOTHING — no upgrade, no candidate, group_id stays
+    the anonymous session id. A single misheard name is structurally
+    incapable of minting a second grp_ memory."""
+    g = _game(group_id="lily-anon-session", source="room_name")
+    g._staged_present = False  # the misheard name set has no table on file
+    minted = []
+
+    def _hash(names):
+        h = "grp_from_a_misheard_set"
+        minted.append(h)
+        return h
+
+    monkeypatch.setattr(
+        lily_agent.lily_memory, "lily_name_set_group_id", _hash
+    )
+    _run(g.resolve_group_identity("game_start"))
+    # The hash was computed and the proposal was ATTEMPTED, but with no table
+    # on file nothing was quarantined and nothing was minted.
+    assert minted == ["grp_from_a_misheard_set"]
+    assert g.staged == [("grp_from_a_misheard_set", "name_set_hash")]
+    assert g.verified_requests == []          # nothing staged -> nothing to verify
+    assert g.upgraded == []                    # never minted
+    assert g.group_id == "lily-anon-session"   # still anonymous
+    assert g.group_id_source == "room_name"
 
 
 def test_post_forget_binding_is_still_suppressed():
