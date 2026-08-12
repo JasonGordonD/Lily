@@ -5,6 +5,65 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-HOSTLOOP-001: host-loop overhaul, all clauses closed
+
+Full clause-by-clause detail in README.md ("Host-loop overhaul") and the
+per-clause entries below/in git history. Summary of dispositions:
+
+- **C3+C4** (`57e2ea4`): window arms at core-sentence; answer-shaped
+  barges bind (NATO/letter/text via existing matchers); non-answer
+  barges resume from the interrupted choice; C3d invariant pinned; the
+  pre-window buffer requires answer shape. Walked example in the C3+C4
+  commit message (778735a). KNOWN LIMIT reported, not improvised:
+  Session A's q6 was FREEFORM (kb_428) and the WO's own "any content
+  answer" definition still admits fragments there — a
+  fragment/completeness rule needs its own clause.
+- **C5+C6+C8** (this merge): single-flight composites (keyless beats
+  carry a flight token; preempt-or-queue, never race); deterministic
+  ≤1.5s spoken receipt via gated_say(text=) → session.say → tts_node
+  (all gates kept, three structural receipt sheets, never a verdict
+  word on uncertain, composite told the receipt aired); barged verdicts
+  re-air one line keyed off the RELEASED claim (un-wedges N+1).
+- **C7** (`c44aca2`): bare start intent (utterance-shaped) fires;
+  recovery never re-greets past a start; rejoin reserved for genuine
+  reconnects.
+- **C9** (`9e45fb1`): board-on-playout-start behind
+  LILY_BOARD_ON_PLAYOUT_START (default true; archaeology: gating itself
+  shipped with the lily-2C489B fix).
+- **C11** (`29187ea`): audEERING behind LILY_AUDEERING_ENABLED (default
+  false); pipeline still registers so the child gate fails closed in
+  sensor mode; no code deleted.
+- **C12** (`78414a0`): settle-on-event fixes the 100% preemptive
+  discard; survival measurable at INFO deploys.
+- **C13** (`e48bf1e`): hold-equivalents ("hold on"/"wait"/"pause"/"one
+  sec") halt within one utterance, utterance-shaped only; a beat, not a
+  brake. W8/W2/V4 audited first — nothing duplicated.
+- **C14a** (REPORT-ONLY, confirmed live): lily_answers.question_id
+  (text: kb_428/q_4821) does not join lily_questions.id (bigint).
+  Proposed migration for the operator: nullable bigint question_ref
+  populated by the writer for kb_/bank ids + index; text column stays
+  for generated ids. NOT executed.
+- **C14b** (`e968c7d`): question_timeline (core_sentence_spoken_at,
+  delivery_confirmed_at, window_opened_at/closed_at, reopens separate)
+  persists via lily_sessions.metadata — no DDL.
+- **C10** (READ-ONLY, delivered as report): two unreconciled text lanes
+  — the LLM's context receives raw pre-gate text on every turn
+  (silence frames count as playback), the room receives tts_node
+  truth; four file:line-mapped defects incl. cancel_speech's
+  suppressed-then-interrupted override writing phantom transcript
+  rows, and the record-path dup guard lacking the air-path's delivery
+  exemption. The divergence safety nets audit Lane A (the phantom).
+  Recommended as the next work order. No fixes under this clause.
+- **C15** honored: zero STT surface touched. **C16** honored: no
+  features beyond clauses; .env greps files_with_matches only.
+- **C17** deviation, disclosed: implementation order differed (C12 and
+  the small clauses landed while C3+C4 was in its worktree) — every
+  clause still integrated and verified in sequence on main.
+
+Suite over the WO: 2305 → 2390 green (85 new tests; the 133-pin
+character suite untouched). Sub-agent slots used: 2 (C3+C4 implementer;
+C5+C6+C8 implementer) + the read-only C10 investigator.
+
 ## 2026-08-12 — WO-LILY-HOSTLOOP-001 C12: preemptive waste diagnosed and fixed (settle-on-event)
 
 Evidence (Session B lily-05BB92, first instrumented session): preemptive

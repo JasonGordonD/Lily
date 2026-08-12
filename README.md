@@ -17,6 +17,129 @@ Living documentation lives here. Dated work-order and fix entries live in
 Spoken-surface freeze before any speech/delivery extract:
 [docs/voice_inventory.md](docs/voice_inventory.md).
 
+## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
+
+Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)
+and Session B (lily-05BB92-6be4e81f, 2026-08-12 13:34 UTC). Every clause
+below cites which defect it closes.
+
+**C3+C4 — MCQ barge-in + answer-window integrity.** The answer window now
+arms at CORE-QUESTION completion (`_schedule_core_completion_window`,
+taking up the WS-5 documented interface), so the options read airs into an
+OPEN window. A barge that is answer-shaped for the live question — choice
+letter, choice text, or NATO spelling (`lily_evaluation.lily_answer_shaped`,
+NATO folded into the existing `_LETTER_INDEX`) — binds as the answer,
+truncates the remaining choices, and proceeds to verdict. A barge that is
+NOT answer-shaped cancels TTS and RESUMES the read from the interrupted
+choice (`mcq_barge_resume`; position estimated from words-per-second — a
+wrong estimate re-reads or skips one option, never loses the question).
+Invariant (C3d), pinned by fixture: after any barge during an MC read the
+question has either a bound answer or a resume owed — never neither. C4:
+the pre-window buffer now requires answer shape (`_seg_answer_shaped`), so
+conversational fragments are kept as context but can never reach
+adjudication. KNOWN LIMIT, reported not improvised: Session A's q6 was a
+FREEFORM question (kb_428), and the WO's own freeform answer-shape
+definition ("any content answer") still admits complaint fragments there —
+closing freeform needs a fragment/completeness rule a future clause must
+authorize. Y7's cancel-not-recover stays the policy outside
+phase=question.
+
+**C5+C6+C8 — emission discipline, receipt latency, verdict re-air.**
+C5: exactly one host composite (ack/verdict/question transition) in
+flight — keyless progression beats now carry a flight token through the
+existing `gated_say` choke point; a new trigger while one is in flight
+preempts the stale composite (the player lapped the queue) or queues,
+never races (Session A's 04:52:50/54 double emission was two keyless
+dispatches racing). C6: a deterministic spoken receipt airs within the
+answer turn — `gated_say(text=…)` routes fixed words through
+`session.say`, which passes through `Agent.tts_node` (verified at 1.6.8),
+so every gate keeps its grip and chain F stays closed; vocabulary is
+structurally three sheets (`LILY_RECEIPT_CORRECT/_INCORRECT/_NEUTRAL` —
+an UNCERTAIN tier-1 can never air a verdict word); the reveal composite
+is told the receipt aired (its exact words ride `verdict_instr`), no
+receipt carries the canonical answer, and no receipt fires once the
+transition has narrated its verdict. Target: answer→first-spoken-receipt
+<2s (was 8–13s). C8: a barged verdict re-airs ONE line derived from the
+RELEASED claim key and the journal's reveal detail — never live state,
+which has already advanced to N+1 (a real off-by-one found and pinned
+during implementation) — and re-claims the key so the next question is
+not wedged (the quiet half of Session B 36:25). Y7's cancel-not-recover
+stays the policy outside phase=question and the verdict beat.
+
+**C7 — start intent + false rejoin.** A bare start/starts/begin/kick-off
+AS the utterance (≤4 tokens, filler-tolerant; `lily_is_bare_start_intent`)
+fires `start_game` deterministically — "Starts." no longer produces dead
+air — while "before we start…" can never launch. Once a start intent is
+heard (or `start_game` runs, any source), the empty-STOP lobby recovery
+stands down entirely: the rejoin/"welcome back" script is reserved for the
+genuine reconnect re-entry at on_enter (Session A's false re-greet came
+from that recovery firing off a stale same-room checkpoint).
+
+**C9 — board render timing.** The question posts to the glass at TTS
+playout START of its delivery (the lily-2C489B fix — this shipped earlier;
+C9 adds reversibility). Flag: **`LILY_BOARD_ON_PLAYOUT_START`** (default
+`true`; `false` reverts to the legacy arm-time post in which the board can
+lead the voice).
+
+**C11 — audEERING cadence.** The 6-module pipeline
+(aed + audioQuality + expression + prosody + scene + speakerAttributes,
+continuous 5s window / 5s interval) is gated behind
+**`LILY_AUDEERING_ENABLED`** (default `false`). No pipeline code deleted;
+the pipeline still constructs and REGISTERS, so `lily_child_gate_ready`
+reads not-started and adult mode fails CLOSED under
+`adult_deck_gate_mode=sensor` exactly as before. Flag true restores
+everything, including the child-signal sensor.
+
+**C12 — preemptive generation.** Session B measured 100% discard
+(invalidated=10, used=0). Diagnosis: not the equality check (word-level,
+punctuation-blind) and not the trigger (the STT final at p50 1.57s beats
+the 1.82s commit) — ASYNC game events (prefetch landings, score commits)
+mutated the stable context between speculation and commit. Fix:
+`settle_context_nowait()` refreshes the persistent ctx at every
+state-change chokepoint (`publish_attributes_nowait`, 27 sites) plus the
+two async supply-landing sites. Survival is measurable at INFO deploys
+(`enable_preemptive_used_capture`); success reads from the next session's
+`preemptive.used > 0`.
+
+**C13 — STOP compliance.** The hard-STOP lane already existed
+(HOTFIX-009 W8/W2, HOTFIX-010 V4 — audited before writing, nothing
+duplicated). New: the softer equivalents. `lily_detect_hold_request`
+fires utterance-shaped only ("hold on", "wait wait", "pause", "one sec" —
+"wait, is it Saturn?!" is an answer and never fires);
+`handle_hold_request` interrupts airing speech, enters the hold (every
+dispatch lane yields via the existing gates), speaks ONE ack — no sticky
+latch: a beat, not a brake. Routed through the same pre-LLM deterministic
+consult as STOP, hard STOP checked first.
+
+**C14 — observability.** (a) REPORT-ONLY, confirmed live:
+`lily_answers.question_id` is text (`kb_428`, `q_4821`) against
+`lily_questions.id` bigint — unjoinable. Proposed migration (for the
+operator to run, NOT executed): add
+`lily_answers.question_ref bigint NULL` populated by the writer when the
+id parses (`kb_<n>`/bank rows → n), plus an index; the text column stays
+for generated (`q_*`) ids. (b) Per-question delivery timestamps persist to
+`lily_sessions.metadata.question_timeline`: `core_sentence_spoken_at`,
+`delivery_confirmed_at`, `window_opened_at`/`window_closed_at`
+(steal reopens land as `window_reopened_at`; first stamp wins).
+
+**C10 — text/voice divergence (read-only investigation).** Root cause:
+TWO outbound text lanes with no reconciliation. Lane A (the LLM's
+persistent context) commits RAW model text gated only on
+"playback started" — and every suppression path yields a 100ms silence
+frame, which counts. Lane B (glass + durable record) is the tts_node
+output at playout. Every tts_node gate corrects Lane B and never Lane A.
+Four defects, file:line mapped in the C10 report (CHANGELOG entry):
+(1) `generation.py` sets `played="full"` without checking audio was
+produced; (2) no suppression path repairs `_agent._chat_ctx`; (3) the
+air-path dup guard exempts deliveries but the record-path guard does not
+(a line can air and vanish from the record); (4) `cancel_speech` sets
+suppressed then force-interrupts, and interrupted overrides suppressed
+downstream — phantom transcript rows. The phantom "fun fact": no fun-fact
+code lane exists; it was organic prose clipped from air by the
+one-question yield while Lane A kept it. NOTE: the score/roster/verdict
+divergence safety nets read Lane A — they audit the phantom, not the air.
+No fixes under this clause; recommended as the next work order.
+
 ## Stack
 
 | Layer | Choice |
