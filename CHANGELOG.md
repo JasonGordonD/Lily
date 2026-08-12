@@ -5,6 +5,26 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 2: one speech owner after verdict
+
+Fixture `lily-639007-f80aa6bf`. 2a (organic double verdict) is owned by the
+data-side `StopResponse` landed in `000bfc2`; 2b (reveal/delivery fusion)
+is fixed here — the 17:59:34 reveal fused the q_5 delivery into one utterance
+("Crete… Next up. What… agoge?").
+
+- `lily_say_gate`: new pure `lily_clip_delivery_from_reveal` /
+  `_is_delivery_sentence` split a fused reveal+delivery turn at the first
+  sentence that opens the next question; a pure delivery turn (question at
+  sentence 0) is never clipped.
+- `lily_agent`: new `LilyGame.transition_awaiting_delivery()` (reveal+verdict
+  journaled, next_delivery not yet); `tts_node` clips a fused question in
+  that window (`LILY_SAY_SUPPRESSED | reason=reveal_delivery_fusion`). The
+  real delivery fires via the post_reveal seam, which journals next_delivery
+  before its tts_node and so reads False here.
+- Tests: `tests/test_livefire_class2_reveal_delivery.py` (7). Suite green
+  (2423). Closes the Class-2 "done when": one ruling per question; no reveal
+  content inside any delivery utterance.
+
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 1: spoken score = ledger only
 
 Fixture `lily-639007-f80aa6bf`. The 17:58:45 reveal aired "you're at three,

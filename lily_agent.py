@@ -2156,6 +2156,24 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 )
         return dispatched
 
+    def transition_awaiting_delivery(self) -> bool:
+        """CLASS 2 (LIVEFIRE-001): True while an open transition has aired its
+        reveal+verdict but has NOT yet delivered the next question. In this
+        window the floor belongs to the reveal — any question in the outbound
+        turn is a fused premature delivery (the live "Crete… Next up. What…
+        agoge?"). A turn dispatched by dispatch_armed_question journals
+        next_delivery BEFORE its tts_node, so the real delivery reads False
+        here and is never clipped."""
+        qnum = getattr(self, "_open_transition_qnum", None)
+        if qnum is None:
+            return False
+        stages = self.transition_stages(qnum)
+        return (
+            "reveal" in stages
+            and "verdict" in stages
+            and "next_delivery" not in stages
+        )
+
     def transition_narration_complete(self, qnum: int) -> bool:
         """True when q_{qnum}'s transition has narrated its whole beat to
         air — reveal and verdict journaled, the verdict provably played
@@ -14543,6 +14561,27 @@ class LilyAgent(Agent):
                 "LILY_SAY_GATE | stripped %d chars of markdown/emoji/leaks",
                 len(raw) - len(full),
             )
+
+        # CLASS 2 (LIVEFIRE-001) — NO REVEAL/DELIVERY FUSION. While an open
+        # transition has aired its reveal but not yet delivered the next
+        # question, the floor belongs to the reveal. A fused next question in
+        # this turn (the live "Crete… Next up. What… agoge?") is clipped; the
+        # real delivery fires on its own after the reveal confirms
+        # (post_reveal seam). The separate delivery turn journals
+        # next_delivery before its tts_node, so it reads False here.
+        if self._game.transition_awaiting_delivery():
+            _reveal_kept, _delivery_tail = (
+                lily_say_gate.lily_clip_delivery_from_reveal(full)
+            )
+            if _delivery_tail:
+                logger.warning(
+                    "LILY_SAY_SUPPRESSED | reason=reveal_delivery_fusion | "
+                    "session=%s q=%d dropped=%r — reveal turn may not deliver "
+                    "the next question; it fires after the reveal confirms",
+                    self._game.sk.session_id,
+                    self._game.sk.question_number, _delivery_tail[:120],
+                )
+                full = _reveal_kept
 
         # CLASS 1 (LIVEFIRE-001) — SPOKEN SCORE = LEDGER ONLY. The spine
         # prints every number: any sentence narrating a total/streak/count is

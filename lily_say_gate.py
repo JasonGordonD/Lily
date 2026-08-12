@@ -617,6 +617,70 @@ def lily_unowned_kickoff_fragment(text: str) -> bool:
     return bool(_UNOWNED_KICKOFF_RE.search(value))
 
 
+# ---------------------------------------------------------------------------
+# WO-LILY-LIVEFIRE-001 CLASS 2 — no reveal/delivery fusion.
+#
+# Live lily-639007 17:59:34: q_4's reveal fused the q_5 delivery into ONE
+# utterance — "Crete… labyrinth, Minotaur… That's yours. Rami, you're
+# sitting on three… Next up. What ancient Greek city-state… agoge?" A reveal
+# beat carries the ruling and its color; the next question is a SEPARATE
+# turn that fires only after the reveal is confirmed (post_reveal seam). The
+# split below runs at the say-gate choke point when the transition is still
+# awaiting its delivery, so a fused question is clipped and the real
+# delivery airs on its own.
+# ---------------------------------------------------------------------------
+
+_DELIVERY_LEADIN_RE = re.compile(
+    r"(?i)^(?:\s*\[[^\]]*\]\s*)*\s*(?:"
+    r"next\s+up\b"
+    r"|next\s+question\b"
+    r"|here\s*'?s\s+(?:your\s+)?next\b"
+    r"|moving\s+on\b"
+    r"|on\s+to\s+(?:the\s+)?next\b"
+    r"|(?:alright|okay|ok|now)\s*,?\s*(?:here\s*'?s|next)\b"
+    r")"
+)
+_TERMINAL_Q_RE = re.compile(r"\?(?=\s|$|[\"'’”)])")
+# Sentence split that keeps [audio tags] intact; splits on terminal . ! ?.
+_C2_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _is_delivery_sentence(sentence: str) -> bool:
+    """A sentence that OPENS the next question: a delivery lead-in phrase or
+    a sentence-terminal question mark (the question stem itself)."""
+    s = sentence.strip()
+    if not s:
+        return False
+    return bool(_DELIVERY_LEADIN_RE.search(s) or _TERMINAL_Q_RE.search(s))
+
+
+def lily_clip_delivery_from_reveal(text: str) -> tuple[str, str]:
+    """CLASS 2 gate. Split a fused reveal+delivery turn at the first sentence
+    that opens the next question. Returns (reveal_kept, delivery_dropped).
+
+    The delivery tail is dropped, not delivered here — the next question
+    fires as its own turn once the reveal confirms. If the first sentence is
+    itself the delivery (a pure question-delivery turn), nothing is clipped
+    (kept == text, dropped == ""), so a legitimate delivery is never eaten.
+    Pure; the caller scopes this to reveal turns via transition state."""
+    if not text:
+        return text or "", ""
+    sentences = _C2_SENTENCE_SPLIT_RE.split(text.strip())
+    boundary = None
+    for i, sentence in enumerate(sentences):
+        if _is_delivery_sentence(sentence):
+            boundary = i
+            break
+    if boundary is None or boundary == 0:
+        # No fused delivery, or the turn IS the delivery — leave it whole.
+        return text, ""
+    kept = " ".join(s.strip() for s in sentences[:boundary] if s.strip()).strip()
+    dropped = " ".join(
+        s.strip() for s in sentences[boundary:] if s.strip()
+    ).strip()
+    return kept, dropped
+
+
 def lily_mirror_flag(text: str) -> Optional[str]:
     """Return the matched mirror pattern when the turn OPENS with a
     flattery/agreement-echo reflex, else None. Only the first ~120 chars

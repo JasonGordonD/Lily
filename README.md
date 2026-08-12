@@ -49,6 +49,25 @@ already reached TTS; a post-hoc ERROR is not a gate.
   Athens 3-vs-2 line can no longer air; no organic total/streak reaches TTS
   (`tests/test_livefire_class1_score_ledger.py`).
 
+### CLASS 2 — one speech owner after verdict
+
+- **2a (organic double verdict)**: a user turn the scorekeeper consumed as
+  an answer candidate suppresses the organic LLM reply
+  (`recent_answer_text_matches` -> `StopResponse`, landed `000bfc2`), so the
+  keyed reveal is the sole ruling owner regardless of event ordering. Class
+  1's score gate additionally forbids the organic lane from any total/streak.
+- **2b (reveal/delivery fusion)**: the 17:59:34 reveal fused the next
+  delivery into one utterance ("Crete… Next up. What… agoge?"). New
+  `LilyGame.transition_awaiting_delivery()` is True while an open transition
+  has aired its reveal+verdict but not yet delivered the next question; in
+  that window `tts_node` runs `lily_clip_delivery_from_reveal` and clips any
+  fused question (`LILY_SAY_SUPPRESSED | reason=reveal_delivery_fusion`). The
+  real delivery fires on its own after the reveal confirms (post_reveal
+  seam), which journals `next_delivery` before its own `tts_node` and so
+  reads False here — a legitimate delivery is never eaten.
+- Fixture replay: one and only one ruling per question; no reveal content
+  inside any delivery utterance (`tests/test_livefire_class2_reveal_delivery.py`).
+
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
 Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)
