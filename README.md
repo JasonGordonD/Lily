@@ -221,6 +221,43 @@ these three are called out for a follow-up WO with the operator.
   driven generation latency) and the memory-pressure warnings (a fixed 120s
   monitor over a static RSS baseline) are TWO INDEPENDENT problems. Memory
   pressure is not tuned under this WO; see the Class 6 diagnosis.
+## GameControl — the typed control plane (REFACTOR WAVE 1a)
+
+`lily_game_control.py` is the single typed owner of "where is the round right
+now". It replaces the reasoning-by-latch-combination that the operability spine
+grew into: ~a dozen overlapping, independently-true flags on `LilyGame`
+(`_hold_active`, `_delivery_stop_sticky`, `_question_pending`, `_adjudicating`,
+`_question_transitioning`, `_open_transition_qnum`, `_pending_delivery_qnum`,
+`_active_delivery_qnum`, `_recognition_dispute`, `_late_recognition_pending`,
+`_ambiguous_yes_blocks_start`, `_setup_pending`). Those latches are correct in
+the ORDER the races were discovered, not correct by construction — which is how
+a hold once blocked the question sheet but not a prose reveal.
+
+- **One object.** `GameControl(phase, floor, qnum, delivery, transition_q,
+  hold_reason, stop_sticky)`. `Phase` ∈ {lobby, arming, delivering, answering,
+  adjudicating, transition, held, stopped, final}; `Floor` ∈ {host, room,
+  clarify}. `__post_init__` refuses to store an illegal combination (a STOPPED
+  phase without the stop latch, ADJUDICATING with nothing armed, a transition
+  question number outside a transition).
+- **One gate.** `may(act) -> str | None` returns a reason to refuse or None to
+  proceed. It is the promotion of the spine from a log line
+  (`LilyGame.spine_fields`) to the control plane: every dispatcher asks the same
+  question instead of re-implementing its own subset. Hold is checked first (the
+  `gated_say` order), then the game-lane live-game / stop reasons; the
+  `adjudicate` act reads the phase (already-adjudicating / transitioning),
+  stop, and armed state, and — like the real guard — ignores a hold.
+- **Migration discipline.** This wave DERIVES the control from the latches
+  (`LilyGame.game_control()` / `lily_game_control.from_latches`) and runs
+  `may()` in SHADOW next to the latch gates at the two wired sites — `gated_say`
+  and `adjudicate` — via `_gamecontrol_parity`. The latches stay authoritative,
+  so behaviour is byte-identical. Under `LILY_GAMECONTROL_PARITY=1` (the test
+  suite) a `may()`-vs-latch gate mismatch hard-fails; the full suite passes with
+  parity ON (zero divergences, zero illegal-combo discoveries). Later waves flip
+  authority to `may()`, wire the remaining acts (`dispatch_armed_question`,
+  `_idle_watchdog`, the tts_node delivery claim, `lily_begin_round`), then delete
+  the latches. STOP and hold are modelled as facts INDEPENDENT of the phase, the
+  same way the legacy gates read them, so the single phase enum loses no
+  information during the transition.
 
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 

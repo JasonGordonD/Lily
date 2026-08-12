@@ -18,6 +18,7 @@ import datetime
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -80,6 +81,7 @@ import lily_metrics
 import lily_nbest
 import lily_persistence
 import lily_reasoning
+import lily_game_control
 import lily_say_gate
 import lily_speech_delivery
 import lily_stt_tuning
@@ -1385,6 +1387,122 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._last_spine_line = line
         logger.info("%s", line)
         return line
+
+    # -- REFACTOR WAVE 1a: GameControl typed control plane ----------------
+    #
+    # The spine (spine_fields, above) is a log line. GameControl is the same
+    # snapshot promoted to a typed decision object with one gate — may(act).
+    # This wave DERIVES the control from the existing latches and runs it in
+    # SHADOW next to the latch gates (gated_say, adjudicate): the latches stay
+    # authoritative, may() is consulted, and a parity check records any
+    # divergence. Once may() reproduces the latch decisions across the suite
+    # (zero divergences), the next wave flips authority to may() and deletes
+    # the latches. Direction is control-FROM-latches so behavior is
+    # byte-identical while parity is proven.
+
+    def game_control(self) -> "lily_game_control.GameControl | None":
+        """Project the current latch state as a typed GameControl. Returns
+        None only if the latches form a combination the machine refuses to
+        store — recorded as a parity divergence, never raised into a live
+        dispatch."""
+        sk = self.sk
+        try:
+            delivery_confirmed = (
+                self.say_registry.state(
+                    f"q_{getattr(sk, 'question_number', None)}_delivery"
+                )
+                == lily_say_gate.CLAIM_CONFIRMED
+            )
+        except Exception:
+            delivery_confirmed = False
+        try:
+            return lily_game_control.from_latches(
+                game_started=getattr(self, "game_started", False),
+                game_over=getattr(self, "game_over", False),
+                delivery_stop_sticky=getattr(self, "_delivery_stop_sticky", False),
+                adjudicating=getattr(self, "_adjudicating", False),
+                question_transitioning=getattr(
+                    self, "_question_transitioning", False
+                ),
+                hold_active=getattr(self, "_hold_active", False),
+                hold_reason=getattr(self, "_hold_reason", None),
+                answer_window_open=getattr(sk, "answer_window_open", False),
+                active_delivery_qnum=getattr(self, "_active_delivery_qnum", None),
+                pending_delivery_qnum=getattr(
+                    self, "_pending_delivery_qnum", None
+                ),
+                open_transition_qnum=getattr(self, "_open_transition_qnum", None),
+                armed_question=getattr(self, "armed_question", None),
+                question_number=getattr(sk, "question_number", None),
+                recognition_dispute=getattr(self, "_recognition_dispute", False),
+                question_pending=getattr(self, "_question_pending", False),
+                delivery_confirmed=delivery_confirmed,
+                game_start_committed=getattr(
+                    self, "_game_start_committed", False
+                ),
+            )
+        except lily_game_control.IllegalControlState as exc:
+            logger.warning(
+                "LILY_GAMECONTROL | ILLEGAL_COMBO | session=%s q=%s reason=%s "
+                "— latch forest stored a combination the typed machine "
+                "forbids (surfaced by the W1a shadow, not fatal)",
+                getattr(sk, "session_id", "-"),
+                getattr(sk, "question_number", None), exc,
+            )
+            self._gamecontrol_divergence("illegal_combo", str(exc))
+            return None
+
+    def _gamecontrol_divergence(self, kind: str, detail: str) -> None:
+        """Record a shadow-parity divergence. In parity mode (the test suite
+        sets LILY_GAMECONTROL_PARITY) this raises so the mismatch is a hard
+        failure; live, it only counts and logs (the latches stay
+        authoritative this wave)."""
+        counts = getattr(self, "_gamecontrol_divergences", None)
+        if counts is None:
+            counts = self._gamecontrol_divergences = {}
+        counts[kind] = counts.get(kind, 0) + 1
+        # An illegal-combo discovery is a separate signal (a latch state the
+        # typed machine forbids), not a may()-vs-latch gate disagreement — it
+        # is recorded and reported, never raised. Only a genuine gate-decision
+        # divergence hard-fails the parity run.
+        if kind.startswith("illegal_combo"):
+            return
+        if os.environ.get("LILY_GAMECONTROL_PARITY"):
+            raise AssertionError(
+                f"GameControl parity divergence [{kind}]: {detail}"
+            )
+
+    def _gamecontrol_parity(
+        self, act: str, source: str, legacy_reason: str | None, site: str
+    ) -> None:
+        """Compare may(act) against the latch gate's decision at a wired call
+        site and record any mismatch. Only the reasons may() models are
+        compared (hold / game_stopped / no_live_game for dispatch acts; the
+        stop / already_adjudicating / transitioning / no_armed_question set
+        for the adjudicate act). Source-exempt dispatches skip the hold/stop
+        comparison — the exemption is dispatch context may() does not model."""
+        ctrl = self.game_control()
+        if ctrl is None:
+            return  # already recorded as an illegal-combo divergence
+        may_reason = ctrl.may(act)
+        # Exempt sources bypass the hold / game-lane state gates at the call
+        # site, so may()'s state verdict is not expected to match there.
+        if site == "gated_say" and (
+            source in self._HOLD_EXEMPT_SOURCES or source == "question_reoffer"
+        ):
+            return
+        if may_reason != legacy_reason:
+            logger.warning(
+                "LILY_GAMECONTROL | PARITY_DIVERGE | site=%s act=%s source=%s "
+                "may=%s legacy=%s phase=%s delivery=%s hold=%s stop=%s",
+                site, act, source, may_reason, legacy_reason,
+                ctrl.phase.value, ctrl.delivery, ctrl.hold_reason,
+                ctrl.stop_sticky,
+            )
+            self._gamecontrol_divergence(
+                f"{site}:{may_reason}!={legacy_reason}",
+                f"act={act} source={source}",
+            )
 
     def next_question_ready(self) -> bool:
         """WS-6 seam predicate (published as the `next_question_ready`
@@ -8655,12 +8773,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         open_question_transition release a journaled-but-never-aired
         transition (see RECLAIMED_UNAIRED) instead of dead-locking against
         it (lily-1C53C6)."""
-        if (
-            getattr(self, "_delivery_stop_sticky", False)
-            or self._adjudicating
-            or getattr(self, "_question_transitioning", False)
-            or self.armed_question is None
-        ):
+        # REFACTOR WAVE 1a: shadow the typed GameControl gate. may("adjudicate")
+        # is compared against this guard; the latch guard stays authoritative.
+        if getattr(self, "_delivery_stop_sticky", False):
+            _legacy_reason = "game_stopped"
+        elif self._adjudicating:
+            _legacy_reason = "already_adjudicating"
+        elif getattr(self, "_question_transitioning", False):
+            _legacy_reason = "transitioning"
+        elif self.armed_question is None:
+            _legacy_reason = "no_armed_question"
+        else:
+            _legacy_reason = None
+        self._gamecontrol_parity(
+            lily_game_control.ADJUDICATE_ACT, "adjudicate", _legacy_reason,
+            "adjudicate",
+        )
+        if _legacy_reason is not None:
             return
         # HOTFIX-005 X3: no reveal without delivery. Adjudication ends in a
         # verdict/reveal act; a question whose delivery never reached

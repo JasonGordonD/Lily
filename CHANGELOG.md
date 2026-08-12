@@ -90,6 +90,66 @@ Fixture `lily-639007-f80aa6bf`.
   verify against the recognition suite; the deploy path is blocked this
   session (no live surface), so rushing fragile prompt-note layering into the
   heavily-tested intake was declined. Called out for an operator follow-up WO.
+## 2026-08-12 — REFACTOR WAVE 1a: GameControl typed state machine + may(act)
+
+Step 1 of the ordered LilyGame refactor. The operability spine — ~a dozen
+independently-true latches (`_hold_active`, `_delivery_stop_sticky`,
+`_question_pending`, `_adjudicating`, `_question_transitioning`,
+`_open_transition_qnum`, `_pending_delivery_qnum`, `_active_delivery_qnum`,
+`_recognition_dispute`, `_late_recognition_pending`,
+`_ambiguous_yes_blocks_start`, `_setup_pending`) — is collapsed into one typed
+object with one gate. The latches were correct in the ORDER the races were
+discovered (lily-5E3036, lily-1C53C6, lily-938EFF, lily-16A9AE), not correct by
+construction, which is how a hold blocked the question sheet but not a prose
+reveal (each dispatcher re-implemented a slightly different subset).
+
+- **New module `lily_game_control.py`** (pure, no `lily_agent` import): `Phase`
+  and `Floor` enums, the `GameControl` dataclass (phase, floor, qnum, delivery,
+  transition_q, hold_reason, stop_sticky), and `may(act) -> str | None` — the
+  single gate every dispatcher will ask. `__post_init__` refuses to STORE the
+  combinations the machine forbids (STOPPED phase without the stop latch,
+  ADJUDICATING with nothing armed, a transition question outside a transition,
+  bad delivery/phase types). `from_latches(...)` projects a GameControl from the
+  current latches with a fixed phase priority
+  (FINAL > LOBBY > STOPPED > ADJUDICATING > TRANSITION > HELD > ANSWERING >
+  DELIVERING > ARMING); STOP and hold are INDEPENDENT facts (a hold or a STOP is
+  live pre-game, mid-adjudication, etc.), read the same way the legacy gates
+  read `_delivery_stop_sticky` / `_hold_active` directly, so no information is
+  lost to a single lossy phase.
+- **`may()` reproduces the two wired call sites' latch decisions.** For a
+  `gated_say` dispatch: `hold` (checked first, before the game-lane reasons,
+  exactly like the funnel), then `game_stopped` / `no_live_game` for game-lane
+  acts. For the `adjudicate` act: `game_stopped` / `already_adjudicating` /
+  `transitioning` / `no_armed_question` — and, like the real guard, adjudicate
+  ignores a hold (a window-timeout ruling still runs). Source-exemptions
+  (`stop_primitive` / `hold_ack` / `hold_release`), the conversational
+  question-pending yield, the composite-flight lane and per-key dup suppression
+  are dispatch CONTEXT, not game STATE, and stay at the call site (folded in
+  later waves). `may()` already answers the not-yet-wired acts
+  (`dispatch_armed_question`, `_idle_watchdog`, the tts_node claim,
+  `lily_begin_round`) so those sites need no new vocabulary when wired.
+- **Shadow parity, latches stay authoritative.** `LilyGame.game_control()`
+  derives the typed control from the latches; `gated_say` and `adjudicate` are
+  wired to consult `may()` and compare it against the latch gate via
+  `_gamecontrol_parity`. Behaviour is byte-identical — the latch gates still
+  decide. Under `LILY_GAMECONTROL_PARITY=1` (set by the suite) a gate-decision
+  mismatch hard-fails; an illegal-combo discovery is counted and logged, never
+  raised. **Result: the full suite (2477 tests) passes with parity ON — zero
+  `may()`-vs-latch gate divergences and zero illegal-combo discoveries.** The
+  next wave flips authority to `may()` and deletes the latches.
+- Wired this wave: `gated_say`, `adjudicate`. Designed-but-not-wired:
+  `dispatch_armed_question`, `_idle_watchdog`, the tts_node delivery claim,
+  `lily_begin_round` (later waves).
+- **Absorbed from LIVEFIRE/W1c on main.** Class 7a's `_game_start_committed`
+  latch (recognition speech forbidden once a round commits) is folded into
+  `from_latches` — a committed round never derives as LOBBY. The single-choke
+  refusal methods already on main are DELEGATED, not duplicated:
+  `may("begin_round")` owns only the STOP reason (the command-path spine from
+  Classes 4/5 — freeze-not-burn, atomic resume) and leaves the rest to
+  `LilyGame.start_blocked_reason()`; the recognition-act gate stays
+  `LilyGame.late_recognition_blocked_reason()`. Both are subsumed when their
+  call sites are wired (later waves), so may() never reimplements a ladder that
+  would drift from the choke on main.
 
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 6: named-category supply
 

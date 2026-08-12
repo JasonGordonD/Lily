@@ -202,6 +202,22 @@ class LilySpeechDeliveryMixin:
         (AgentSession.say routes through Agent.tts_node — verified in
         agent_activity._tts_task_impl's perform_tts_inference call). No new
         bypass: chain F stays closed."""
+        # REFACTOR WAVE 1a: shadow the typed GameControl gate next to the
+        # latch gates below. may(act) is consulted and compared; the latches
+        # stay authoritative this wave. Only the state reasons may() models
+        # (hold / game_stopped / no_live_game) are compared.
+        if hasattr(self, "_gamecontrol_parity"):
+            if self.hold_blocks_dispatch(act, source):
+                _legacy_reason = "hold"
+            elif self.game_payload_blocked(act, source):
+                _legacy_reason = (
+                    "game_stopped"
+                    if getattr(self, "_delivery_stop_sticky", False)
+                    else "no_live_game"
+                )
+            else:
+                _legacy_reason = None
+            self._gamecontrol_parity(act, source, _legacy_reason, "gated_say")
         # PATCH-002 A4: the hold state binds every dispatch lane. While
         # held (a decline/wait/STOP), NO unsolicited conversational turn
         # and NO question delivery airs until the hold releases. The
