@@ -333,6 +333,26 @@ class LilySpeechDeliveryMixin:
         if started is None:
             started = self._playout_started_ids = set()
         started.add(speech_id)
+        # Transcript sync (2026-08-09 live report): the glass used to see
+        # Lily's line only at playout COMPLETION — a long read trailed the
+        # voice by the whole turn. The exact aired text is already bound to
+        # this speech handle (tts_node clips BEFORE synthesis, Y5), so show
+        # it as an INTERIM segment the moment the audio starts; the
+        # completion publish (same segment id, final, cut marker if any)
+        # replaces it in place. Peek, never consume — the one-shot binding
+        # still belongs to playout completion (the durable record).
+        try:
+            airing = self.peek_post_tts_text(speech_id)
+            if airing:
+                self.publish_agent_transcription_nowait(
+                    airing, speech_id=speech_id, interrupted=False,
+                    final=False,
+                )
+        except Exception:
+            logger.exception(
+                "LILY_TRANSCRIPT | INTERIM_PUBLISH_FAILED — completion "
+                "publish still covers this turn"
+            )
         if getattr(self, "_awaiting_address_since", 0.0):
             # A dispatch is only an intention. Clear at real playout so a
             # queued, wedged, or suppressed handle cannot hide the

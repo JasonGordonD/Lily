@@ -5,6 +5,31 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-09 — Transcript sync: the glass shows the line when she STARTS saying it
+
+Live report: "the sync between what is being said and what is being
+displayed is off." **Archaeology:** the glass received Lily's turn ONLY
+from on_agent_speech_finished — playout COMPLETION — so a long read
+showed nothing while she spoke, then the whole paragraph landed late.
+The UI was already correct (segment-id upsert, finals lock; verified in
+agent-session-block.tsx) — it was simply never sent an interim. The
+aired text is knowable at playout START because tts_node binds the
+exact TTS input to the speech handle BEFORE synthesis (Y5's
+construction).
+
+**Fix (agent-side by necessity — the UI cannot display text it has not
+received):** note_playout_started publishes the bound text as an
+INTERIM segment (same lk.segment_id = speech id, final=false) the
+moment audio starts; the existing completion publish (final=true, with
+the "…[cut off]" marker when interrupted) replaces it in place. The
+interim path PEEKS the binding (new peek_post_tts_text) — Y5's one-shot
+consume still belongs to completion, so the durable record is
+unchanged. Turns with no binding (queued audio, SFX) publish nothing at
+start; completion still covers them.
+
+**Deletions:** none — one accessor, one guarded call, a `final=` param
+on the existing publisher. Suite 2078 → 2082 green.
+
 ## 2026-08-09 — WO-LILY-HOTFIX-007 phase 2 integration: Y7 + Y10 composed, both independently reviewed
 
 Both items implemented by sub-agents in isolated worktrees, each passed
