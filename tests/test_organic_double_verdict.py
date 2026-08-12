@@ -75,3 +75,16 @@ def test_hook_consults_the_data_check():
     src = inspect.getsource(lily_agent.LilyAgent.on_user_turn_completed)
     assert "recent_answer_text_matches" in src
     assert "candidate_owned" in src
+
+
+def test_start_composite_never_rewelcomes_after_the_late_beat():
+    """The second welcome-back (13:56:44, 11s after the recognition beat):
+    'if you haven't done one yet' left the decision to the model. The
+    fired flag now decides in code."""
+    import inspect
+
+    import lily_agent
+
+    src = inspect.getsource(lily_agent.LilyGame.start_game)
+    assert "_late_recognition_fired" in src
+    assert "do NOT welcome the table back again" in src

@@ -10979,27 +10979,41 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             "banter for a beat — it is on its way."
         )
         if self.memory_block:
-            instructions += (
-                " The [RETURNING TABLE] context shows this table has "
-                "played with you before — one quick welcome-back beat "
-                "if you haven't done one yet, then into the game."
-                # Task 4 disclosure ride-along: covers memory that resolved
-                # AFTER the greeting (mid-lobby group-id upgrade) — the
-                # once-per-session latch inside makes this a no-op when the
-                # greeting already carried it.
-                + self.memory_disclosure_instruction()
-                # Group prefs ask-once ride-along, same latch pattern: if
-                # the greeting never met stored prefs (they resolved with a
-                # mid-lobby upgrade), this is the last natural moment to
-                # offer "the usual, or change anything?" — already-applied
-                # flags make a "the usual" answer a pure no-op.
-                + self.prefs_offer_instruction()
-                # V3 (HOTFIX-010): what's-new no longer rides the pre-utterance
-                # greet. For a table recognized at the door (no late-recognition
-                # beat fires) this is its post-utterance carrier; the seen-stamp
-                # advances after it airs, so a second call is a pure no-op.
-                + self.whats_new_instruction()
-            )
+            # Live lily-639007 (2026-08-12): the late-recognition beat
+            # welcomed the table back at 13:56:33 and this composite
+            # welcomed them back AGAIN at 13:56:44 — "if you haven't done
+            # one yet" left the decision to the model, which cannot
+            # reliably know. Decide it in code: the fired flag is the
+            # authority.
+            if getattr(self, "_late_recognition_fired", False):
+                instructions += (
+                    " The welcome-back beat has ALREADY AIRED this session "
+                    "— do NOT welcome the table back again, do not repeat "
+                    "any recognition or 'last time' material; go straight "
+                    "into the game."
+                )
+            else:
+                instructions += (
+                    " The [RETURNING TABLE] context shows this table has "
+                    "played with you before — one quick welcome-back beat, "
+                    "then into the game."
+                )
+            # Task 4 disclosure ride-along: covers memory that resolved
+            # AFTER the greeting (mid-lobby group-id upgrade) — the
+            # once-per-session latch inside makes this a no-op when the
+            # greeting already carried it.
+            instructions += self.memory_disclosure_instruction()
+            # Group prefs ask-once ride-along, same latch pattern: if
+            # the greeting never met stored prefs (they resolved with a
+            # mid-lobby upgrade), this is the last natural moment to
+            # offer "the usual, or change anything?" — already-applied
+            # flags make a "the usual" answer a pure no-op.
+            instructions += self.prefs_offer_instruction()
+            # V3 (HOTFIX-010): what's-new no longer rides the pre-utterance
+            # greet. For a table recognized at the door (no late-recognition
+            # beat fires) this is its post-utterance carrier; the seen-stamp
+            # advances after it airs, so a second call is a pure no-op.
+            instructions += self.whats_new_instruction()
         # Structural delivery claim (desync WO Sub-agent B): when question
         # one is already armed, the kickoff turn IS its delivery.
         if self.armed_question is not None:
