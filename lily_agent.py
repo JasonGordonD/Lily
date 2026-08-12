@@ -5369,7 +5369,49 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if lily_scorekeeper.lily_detect_stop(text, solo=solo):
             self.handle_stop_primitive(text)
             return True
+        # HOSTLOOP-001 C13: the softer equivalents ("hold on", "wait",
+        # "pause", "one sec") halt within the SAME utterance, through the
+        # same deterministic consult — but as a HOLD, not the sticky STOP:
+        # no content retirement, no explicit-resume requirement; the
+        # existing hold release paths (player speaks on, timeout) apply.
+        # Utterance-shaped only — "wait, is it Saturn?!" is an answer and
+        # never fires (lily_detect_hold_request).
+        if lily_scorekeeper.lily_detect_hold_request(text):
+            self.handle_hold_request(text)
+            return True
         return False
+
+    def handle_hold_request(self, source_text: str) -> None:
+        """C13: a spoken hold-equivalent binds within one utterance —
+        interrupt anything airing, enter the hold (every dispatch lane
+        yields, W2/V4/Y10 gates), one short acknowledgment. The softer
+        sibling of handle_stop_primitive: no sticky latch, no claim
+        release, no content retirement — the table asked for a beat, not
+        a brake."""
+        already_held = getattr(self, "_hold_active", False)
+        logger.warning(
+            "LILY_HOLD | REQUESTED | session=%s text=%r already_held=%s — "
+            "player hold-equivalent; yielding within this utterance (C13)",
+            self.sk.session_id, (source_text or "")[:60], already_held,
+        )
+        session = getattr(self, "session", None)
+        interrupt = getattr(session, "interrupt", None)
+        if callable(interrupt):
+            try:
+                interrupt()
+            except Exception as e:
+                logger.warning("LILY_HOLD | session interrupt failed: %s", e)
+        self.enter_hold(reason="player_hold_request")
+        if already_held:
+            return  # one acknowledgment per hold, whichever lane got there
+        self.gated_say(
+            None,
+            "hold_ack",
+            "The table asked for a moment — committed, in code: you are "
+            "holding. ONE short warm acknowledgment (a few words, e.g. "
+            "'Take your time.') and then silence until they come back.",
+            source="hold_request",
+        )
 
     def back_hold_narration(self, spoken_text: str) -> bool:
         """W8 honest-narration integrity: a turn that narrates a stopped/

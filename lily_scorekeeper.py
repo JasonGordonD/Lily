@@ -632,6 +632,45 @@ def lily_detect_stop(text: str, *, solo: bool = False) -> bool:
     return bool(solo and _STOP_CORE_RE.search(normalized))
 
 
+# HOSTLOOP-001 C13 — the STOP EQUIVALENTS ("hold on", "wait", "pause",
+# "one sec", "give us a minute/second"). These have never had a user-side
+# detector: enter_hold fired only from STOP, declines and Lily's own
+# wait-promises, so a spoken "hold on" halted nothing (3.4/F report: STOP
+# defied ×4 — the defiance class includes the softer forms). DANGER SHAPE,
+# handled: "wait" is ANSWER vocabulary in trivia ("wait, is it Saturn?!")
+# — so equivalents fire only UTTERANCE-SHAPED (the request is essentially
+# the whole utterance, filler-tolerant), never embedded. "hold on a
+# second"/"hold on hold on" fire; "wait, Saturn!" and "hold on, I know
+# this one" never do (content after the request word = an answer coming).
+_HOLD_REQUEST_CORE_RE = _re.compile(
+    r"^(?:"
+    r"(?:hold|hang) on(?: (?:a )?(?:sec(?:ond)?|minute|moment|bit))?"
+    r"|wait(?: wait)*(?: (?:a )?(?:sec(?:ond)?|minute|moment|bit))?"
+    r"|pause(?: (?:it|that|the (?:game|quiz|trivia)))?"
+    r"|(?:one|two) sec(?:ond)?s?"
+    r"|(?:give (?:us|me) )?(?:a|one) (?:sec(?:ond)?|minute|moment)"
+    r")$"
+)
+_HOLD_REQUEST_FILLER = frozenset({
+    "lily", "please", "ok", "okay", "just", "uh", "um", "hey", "no",
+})
+
+
+def lily_detect_hold_request(text: str) -> bool:
+    """True when the utterance IS a hold request (C13) — never when the
+    request word merely leads into content ("wait, is it Saturn")."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    tokens = normalized.split()
+    if not tokens or len(tokens) > 6:
+        return False
+    core = [t for t in tokens if t not in _HOLD_REQUEST_FILLER]
+    if not core:
+        return False
+    return bool(_HOLD_REQUEST_CORE_RE.fullmatch(" ".join(core)))
+
+
 def lily_detect_resume_game(text: str) -> bool:
     """True only for an explicit whole-utterance resume after sticky STOP."""
     normalized = _normalize_command_text(text)
