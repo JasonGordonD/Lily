@@ -645,6 +645,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
     # acknowledgment fires at most once per session.
     _late_recognition_fired: bool = False
     _late_recognition_pending: bool = False
+    # CLASS 7 (LIVEFIRE-001) 7a: latched True when start_game commits. After
+    # the round has started, recognition speech ("welcome back, want relaxed
+    # pacing?") is FORBIDDEN — the live beat aired as act=game_start and stole
+    # q_1's kickoff. Distinct from game_started, which several call sites use
+    # as "greeting dispatched"; this is the round-start commit and persists
+    # across a recycle (once started, always started for recognition).
+    _game_start_committed: bool = False
     # RECOGNITION-VARIETY fixture Q5: answers spoken while the delivery
     # turn is still playing out (window not yet open) buffer here and
     # replay at window open — the "no early buzz-ins" v1 concession cost
@@ -2332,6 +2339,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
     def late_recognition_blocked_reason(self) -> str | None:
         """Return the live beat that makes recognition speech unsafe."""
+        # CLASS 7 (LIVEFIRE-001) 7a: once the round has started, recognition
+        # speech is forbidden outright — it belongs to the greeting/intake
+        # window, never inside or after game start. The live beat aired as
+        # act=game_start and suppressed q_1's kickoff.
+        if getattr(self, "_game_start_committed", False):
+            return "game_start_committed"
         if self.sk.answer_window_open:
             return "answer_window_open"
         if getattr(self, "_adjudicating", False):
@@ -2394,6 +2407,18 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # P0-4 BE8D8B: never fire over delivery/window/adjudication. Keep a
         # pending bit and flush it only at an explicit between-question seam.
         blocked = self.late_recognition_blocked_reason()
+        if blocked == "game_start_committed":
+            # CLASS 7 (LIVEFIRE-001) 7a: forbidden, not deferred — the round
+            # has started, so this beat is retired for the session rather than
+            # held for a seam it can never safely take.
+            self._late_recognition_fired = True
+            self._late_recognition_pending = False
+            logger.info(
+                "LILY_MEMORY | LATE_RECOGNITION_FORBIDDEN | session=%s "
+                "reason=game_start_committed — recognition retired post-start",
+                self.sk.session_id,
+            )
+            return False
         if blocked:
             self._late_recognition_pending = True
             logger.info(
@@ -11019,6 +11044,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             )
             return
         self.game_started = True
+        # CLASS 7 (LIVEFIRE-001) 7a: the round has started — recognition
+        # speech is forbidden from here on (no welcome-back/pacing beat may
+        # steal q_1's kickoff, the live act=game_start defect).
+        self._game_start_committed = True
         # Explicit start won — drop any leftover yes-block / or-offer.
         self.clear_ambiguous_yes_block(reason=f"start_{source}")
         # C7: the start owns the lobby regardless of source (voice, tool,

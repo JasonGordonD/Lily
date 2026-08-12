@@ -5,6 +5,28 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 7: recognition latch (7a; 7b/7c/7d flagged)
+
+Fixture `lily-639007-f80aa6bf`.
+
+- **7a (shipped)**: `_game_start_committed` latch set at the `start_game`
+  commit (distinct from `game_started` = "greeting dispatched"), persists
+  across recycle. `late_recognition_blocked_reason` returns
+  `game_start_committed` once set; `maybe_fire_late_recognition` RETIRES the
+  beat (fired=True) rather than deferring it — the live act=game_start
+  "welcome back... relaxed pacing?" that suppressed q_1's kickoff can no
+  longer air. Double-greeting / second-welcome-back already closed by
+  `ce76d06`/`6f31b26`. Tests: `tests/test_livefire_class7_recognition_latch.py`
+  (3); 59-test recognition suite green; full suite 2448.
+- **7b/7c/7d (flagged, NOT shipped)**: name double-ask (7b), fun-fact "still"
+  demand without this-session provenance (7c), and the "say start" second gate
+  after category+play (7d) are LLM-generated from the intake /
+  `greeting_instructions` / `prompts/lily_system.txt` persona directives. A
+  spine-authoritative fix needs persona-prompt review + a LIVE intake run to
+  verify against the recognition suite; the deploy path is blocked this
+  session (no live surface), so rushing fragile prompt-note layering into the
+  heavily-tested intake was declined. Called out for an operator follow-up WO.
+
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 6: named-category supply
 
 Fixture `lily-639007-f80aa6bf`.

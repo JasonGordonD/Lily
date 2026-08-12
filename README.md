@@ -172,6 +172,32 @@ the collision is impossible rather than discarded at draw.
   the generated-id assertion in `test_reasoning_schema.py` updated to the
   allocated id.
 
+### CLASS 7 — recognition latch (7a shipped; 7b/7c/7d flagged)
+
+**7a — recognition forbidden after start (shipped).** The live LATE_RECOGNITION
+beat aired as act=game_start ("welcome back... want relaxed pacing?") and
+suppressed q_1's kickoff. New `_game_start_committed` latch is set when
+`start_game` commits (distinct from `game_started`, which several call sites
+use as "greeting dispatched") and persists across recycle;
+`late_recognition_blocked_reason` returns `game_start_committed` once set, and
+`maybe_fire_late_recognition` RETIRES the beat (fired=True, not pending) rather
+than deferring it to a seam it can never safely take. The double-greeting and
+second-welcome-back beats were already closed by `ce76d06` / `6f31b26`.
+Tests: `tests/test_livefire_class7_recognition_latch.py`; the 59-test
+recognition suite stays green.
+
+**7b/7c/7d — flagged for operator-reviewed follow-up (not shipped).** The
+name double-ask (7b), the "still want that tiny fun fact" demand with no
+this-session provenance (7c), and the "one question locked in, say start"
+second start gate after category+play (7d) are LLM-generated from the intake /
+`greeting_instructions` / `prompts/lily_system.txt` persona directives, not
+spine state. A spine-authoritative fix (per the governing principle) needs
+persona-prompt review plus a live intake run to verify against the 8+
+recognition test files — and the Class-1..8 deploy path is blocked in this
+session, so there is no live verification surface. Shipping fragile
+prompt-note layering into a heavily-tested intake was judged the wrong trade;
+these three are called out for a follow-up WO with the operator.
+
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
 Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)
