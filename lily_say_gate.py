@@ -400,6 +400,75 @@ def lily_still_checking_rewrite() -> str:
     return _STILL_CHECKING_REWRITE
 
 
+# ---------------------------------------------------------------------------
+# HOSTLOOP-001 C6/C8 — RECEIPT SHEETS (deterministic, model-free).
+#
+# The measured cost of routing every acknowledgment through the LLM
+# composite: 8–13s from a finished answer to a spoken verdict (Session B,
+# lily-05BB92), and acks landing a whole turn late (Session A, 2026-08-12
+# 04:50 — the ack for answer N airing after answer N+1 was already in).
+# Adjudication itself is deterministic and instant at Tier 1; the seconds
+# are generation.
+#
+# So the RECEIPT is a sheet, not a generation — the same treatment
+# lily_still_checking_rewrite / lily_picture_pending_rewrite already get
+# for the other "say exactly this, now" cases. It travels the ordinary
+# dispatch funnel (gated_say -> hold/floor/live-game gates -> tts_node
+# hygiene), so nothing here is a bypass; only the words are fixed.
+#
+# Deliberately SHORT (< 15 chars for the acks): tts_node's air-path dup
+# guard already exempts short turns ("an honest 'Nice one!' may
+# legitimately recur"), and lily_repeat_flag / lily_paraphrase_repeat_flag
+# need 4 words / 3 content words to fire — so a receipt that recurs every
+# question is not a repetition defect and is not treated as one.
+#
+# NEVER a verdict word on an UNCERTAIN Tier-1 (the judge has not ruled):
+# an uncertain answer gets the neutral "locked in" ack, which commits to
+# nothing. Receipts never carry the canonical answer, so they can never
+# read as a reveal (lily_verdict_narration / _verdict_already_spoken both
+# require the answer to be present) — the composite still owns the reveal.
+# ---------------------------------------------------------------------------
+
+LILY_RECEIPT_CORRECT = "Correct!"
+LILY_RECEIPT_INCORRECT = "Ooh, no—"
+LILY_RECEIPT_NEUTRAL = "Locked in—"
+
+
+def lily_answer_receipt(verdict: str | None) -> Optional[str]:
+    """The SHORT spoken receipt for one adjudicated-at-Tier-1 answer.
+
+    "correct" / "incorrect" (a definitive MC pick of a wrong option) get
+    the verdict word; "uncertain" — the escalate-to-judge verdict — gets
+    the neutral ack, never a verdict word. Anything else returns None (no
+    receipt is owed). Pure."""
+    if verdict == "correct":
+        return LILY_RECEIPT_CORRECT
+    if verdict == "incorrect":
+        return LILY_RECEIPT_INCORRECT
+    if verdict == "uncertain":
+        return LILY_RECEIPT_NEUTRAL
+    return None
+
+
+def lily_verdict_reair_line(
+    *, correct: bool, answer: str, winner: str | None = None
+) -> str:
+    """ONE line that re-airs a verdict whose beat was cut by a barge-in
+    (C8 / Session B 36:25, where the cut released the claim and the result
+    was dropped silently).
+
+    Unlike the receipts above this DOES carry the answer — the dropped
+    thing was the result, and a re-air that omits it re-airs nothing. One
+    beat only: verdict word, the answer, the name when there is one. No
+    flourish, no next question."""
+    answer_text = str(answer or "").strip().rstrip(".!?")
+    if correct:
+        if winner:
+            return f"Correct, {winner} — {answer_text}."
+        return f"Correct — {answer_text}."
+    return f"Nobody had it — {answer_text}."
+
+
 # False on-screen picture claims (WO-B4) — "look at the screen" / "picture
 # is up" only when lily_control.image_shown confirmed the armed URL.
 _FALSE_ON_SCREEN_RE = re.compile(

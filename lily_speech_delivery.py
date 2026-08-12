@@ -92,6 +92,80 @@ _STALE_CLAIM_MAX_RETRIES = 2   # re-dispatches per key before declaring the audi
 _STALE_CLAIM_MAX_RECHECKS = 20  # bounded host_speaking re-check loop (no task leak)
 _PROGRESSION_ACTS = ("question_delivery", "question_nudge")
 
+# ---------------------------------------------------------------------------
+# HOSTLOOP-001 C5 — EMISSION DISCIPLINE (single-flight on the progression
+# loop).
+#
+# ARCHAEOLOGY. Four mechanisms already serialize parts of this, and the
+# hole is what none of them covers:
+#
+#   * lily_say_gate.SpeechActRegistry + gated_say's claim (say-gate WO §1)
+#     — idempotency PER KEY. Two dispatches of q_7_reveal cannot both
+#     speak. But the progression loop's own beats are largely KEYLESS
+#     (gated_say(None, ...) for question_nudge, steal_window, skip, the
+#     pace/media acks, cut_recovery) or carry DIFFERENT keys for the same
+#     beat (q_N_verdict vs q_N_reveal at a round boundary), and a keyless
+#     dispatch claims nothing at all — so two of them race freely.
+#   * N12's transition journal (open_question_transition /
+#     journal_transition / register_transition_narration /
+#     _transition_holds_next_delivery, HOTFIX-006) — one narration per
+#     transition, and N+1 cannot overtake an airing verdict. It is the
+#     right shape, but it only exists from the reveal onward: the journal
+#     is opened inside adjudicate, register_transition_narration returns
+#     None until the verdict stage is journaled, and it governs NARRATION
+#     TEXT rather than dispatch. It does not cover the ack class, and it
+#     covers nothing before a transition is open.
+#   * the framework's speech scheduling queue (agent_activity
+#     _schedule_speech, SPEECH_PRIORITY_NORMAL) — serializes PLAYOUT, not
+#     generation. Two composites generated concurrently both reach the air,
+#     back to back, each written against state the other has already
+#     changed: Session A's 04:52:50 / 04:52:54 double emission.
+#   * air_dup_guard / lily_repeat_flag / the WS-3 regen gate — catch the
+#     SAME WORDS twice, never two differently-worded composites of one beat.
+#
+# THE HOLE, therefore: nothing refuses a second host composite while a
+# first is in flight when the two are keyless or differently keyed. This
+# closes exactly that, in the mechanism that already owns dispatch (the
+# gated_say choke point + the registry's own claim lifecycle) — no
+# scheduler, no queue, no second gate implementation.
+#
+# THE RULE (three cases, no others):
+#   1. flight belongs to an EARLIER question  -> PREEMPT. The table has
+#      lapped the queue; the stale composite is cancelled through the
+#      existing T1 cancel_speech path and the new one speaks current state.
+#   2. same question, SAME act               -> REFUSE. That beat's
+#      composite is already in flight; this is the keyless sibling of the
+#      registry's dup suppression.
+#   3. same question, different act          -> ALLOW. This is the
+#      DESIGNED staged pair (T4's verdict beat then its flourish/standings;
+#      the reveal then N+1) and the framework's queue plus N12's journal
+#      already order it.
+#
+# Failure direction is SPEAK: a flight whose claim was released, or whose
+# playout never started inside the stale-claim deadline, is dead
+# bookkeeping and is cleared — because silence is her failure mode and no
+# in-flight token may be allowed to mute the loop (WO-LILY-HOTFIX-001's
+# whole lesson, applied to this state too).
+# ---------------------------------------------------------------------------
+
+_HOST_COMPOSITE_ACTS = frozenset({
+    # the question transition's own beats
+    "question_delivery", "question_nudge", "question_reoffer",
+    "verdict", "reveal", "reveal_flourish", "reveal_scores",
+    "reveal_finale", "steal_window", "skip", "game_start",
+})
+
+# HOSTLOOP-001 C6: how many instant receipts one question may air. A table
+# where four people answer gets four receipts; a stuck recognizer emitting
+# finals in a loop does not get a machine gun.
+_ANSWER_RECEIPT_MAX_PER_QUESTION = 4
+
+# HOSTLOOP-001 C8: the verdict beat's own claim keys, as minted by the
+# reveal path (q_{N}_verdict at a round/final boundary, q_{N}_reveal
+# otherwise). The question number is read OUT of the key because by the time
+# a verdict's playout ends, sk.question_number already names N+1.
+_VERDICT_KEY_RE = re.compile(r"^q_(\d+)_(?:verdict|reveal)$")
+
 
 
 class LilySpeechDeliveryMixin:
@@ -104,6 +178,7 @@ class LilySpeechDeliveryMixin:
         instructions: str,
         source: str,
         extra_keys: tuple[str, ...] = (),
+        text: str | None = None,
     ) -> bool:
         """THE dispatch helper for code-triggered speech. Game-critical
         acts pass a state key (session_greet, session_rejoin,
@@ -114,7 +189,19 @@ class LilySpeechDeliveryMixin:
         speak. Keyless dispatches (steal window, skip, mode reverts,
         prefetch nudge) still log LILY_SAY for the audit trail.
         extra_keys are claimed alongside (e.g. the finale rides the final
-        reveal's dispatch) without gating it."""
+        reveal's dispatch) without gating it.
+
+        HOSTLOOP-001 C6: `text` selects the DETERMINISTIC lane. With text
+        given, the words are already decided and go to the synthesizer as
+        written (direct_say / AgentSession.say) instead of through
+        generate_reply — which is what makes a sub-2s receipt possible at
+        all, since the 8–13s in the evidence is the LLM composite. It is
+        the SAME funnel otherwise: every gate above and below runs, the
+        claim happens here as usual, the stale-claim watchdog arms as
+        usual, and tts_node's hygiene/leak/claim gates still see the turn
+        (AgentSession.say routes through Agent.tts_node — verified in
+        agent_activity._tts_task_impl's perform_tts_inference call). No new
+        bypass: chain F stays closed."""
         # PATCH-002 A4: the hold state binds every dispatch lane. While
         # held (a decline/wait/STOP), NO unsolicited conversational turn
         # and NO question delivery airs until the hold releases. The
@@ -178,6 +265,12 @@ class LilySpeechDeliveryMixin:
                 self.sk.question_number, self.sk.answer_window_open,
             )
             return False
+        # HOSTLOOP-001 C5: exactly ONE host composite in flight. Runs after
+        # the refusal gates above (a composite that is not allowed to speak
+        # must not take the flight token either) and before the claim, so a
+        # preemption cancels the stale speech before this one is recorded.
+        if self.composite_flight_blocks_dispatch(act, source):
+            return False
         reservation = f"dispatch_{uuid.uuid4().hex}"
         if key is not None and not self.say_registry.claim(key, owner=reservation):
             # WO-LILY-HOTFIX-001: dup suppression is only legitimate against
@@ -207,15 +300,29 @@ class LilySpeechDeliveryMixin:
         # spoken fresh, never replayed. Question deliveries keep their exact
         # wording and take the clean-delivery variant. Consumed only once
         # the claim survived above — a dup dispatch never eats the arm.
-        if self.take_reair_dispatch():
-            if act in ("question_delivery", "question_nudge"):
-                instructions = instructions + _REGEN_DELIVERY_DIRECTIVE
-            else:
-                instructions = instructions + _REGEN_REAIR_DIRECTIVE
+        if text is None:
+            if self.take_reair_dispatch():
+                if act in ("question_delivery", "question_nudge"):
+                    instructions = instructions + _REGEN_DELIVERY_DIRECTIVE
+                else:
+                    instructions = instructions + _REGEN_REAIR_DIRECTIVE
+        elif getattr(self, "_reair_gate_armed", False):
+            # A DETERMINISTIC line is fresh by construction and must reach
+            # the air verbatim, so it neither needs the regeneration
+            # directive nor may hand tts_node's regen GATE a turn it would
+            # suppress. The arm is CLEARED rather than consumed (the Y10 F3
+            # discipline): consuming it would set _reair_turn_pending, and
+            # leaving it live would leak the "you were cut short" directive
+            # to an unrelated later dispatch.
+            self._reair_gate_armed = False
         logger.info(
-            "LILY_SAY | act=%s | key=%s | source=%s", act, key or "-", source
+            "LILY_SAY | act=%s | key=%s | source=%s | lane=%s",
+            act, key or "-", source, "text" if text is not None else "llm",
         )
-        handle = self.instructed_reply(instructions)
+        handle = (
+            self.direct_say(text) if text is not None
+            else self.instructed_reply(instructions)
+        )
         speech_id = getattr(handle, "id", None)
         if speech_id:
             self.say_registry.reassign_owner(reservation, speech_id)
@@ -229,6 +336,9 @@ class LilySpeechDeliveryMixin:
                 if delivery_acts is None:
                     delivery_acts = self._delivery_speech_acts = {}
                 delivery_acts[speech_id] = act
+        # C5: this dispatch now OWNS the composite lane (recorded after the
+        # claim survived, so a dup-suppressed dispatch never takes it).
+        self._note_composite_flight(act, speech_id or reservation, key=key)
         # WO-LILY-HOTFIX-001: every keyed act gets a playout watchdog. If
         # this claim is still PENDING past the deadline with its speech
         # never having started airing (the Krisp RoomIO wedge: no playout,
@@ -236,8 +346,340 @@ class LilySpeechDeliveryMixin:
         # the claim and re-dispatches — silence is her failure mode and a
         # frozen claim must never enforce it.
         if key is not None:
-            self._arm_stale_claim_watchdog(key, act, instructions, source)
+            self._arm_stale_claim_watchdog(
+                key, act, instructions, source, text=text
+            )
         return True
+
+    # -- HOSTLOOP-001 C5: the composite flight token ------------------------
+
+    def _composite_flight(self) -> dict | None:
+        """The live host-composite flight, or None. Self-cleaning in both
+        directions the say gate already defines a dead dispatch: a RELEASED
+        claim, and a dispatch whose speech never reached playout inside the
+        stale-claim deadline. No wedged token can mute the progression loop."""
+        flight = getattr(self, "_composite_flight_state", None)
+        if flight is None:
+            return None
+        owner = flight.get("owner")
+        key = flight.get("key")
+        if key is not None and self.say_registry.state(key) is None:
+            # Its claim was RELEASED — by the swallowed-turn path, the regen
+            # gate, a STOP, or the stale-claim watchdog. A released claim is
+            # a dead dispatch by the say gate's own lifecycle, so the lane is
+            # free and the legitimate redelivery is not refused as a race.
+            self._composite_flight_state = None
+            return None
+        started = owner in getattr(self, "_playout_started_ids", set())
+        if not started and (
+            time.monotonic() - float(flight.get("at") or 0.0)
+        ) >= _STALE_CLAIM_SECONDS:
+            logger.warning(
+                "LILY_COMPOSITE | FLIGHT_STALE_CLEARED | session=%s act=%s "
+                "owner=%s — dispatched but never reached playout; the lane is "
+                "free (a flight token may never enforce silence)",
+                self.sk.session_id, flight.get("act"), owner,
+            )
+            self._composite_flight_state = None
+            return None
+        return flight
+
+    def composite_flight_blocks_dispatch(self, act: str, source: str) -> bool:
+        """C5's whole decision. True = this composite must NOT dispatch
+        (its beat already has one in flight). A flight belonging to an
+        earlier question is PREEMPTED here — cancelled through the existing
+        T1 cancel_speech path — and this dispatch proceeds."""
+        if act not in _HOST_COMPOSITE_ACTS:
+            return False
+        flight = self._composite_flight()
+        if flight is None:
+            return False
+        qnum = self.sk.question_number
+        if flight.get("qnum") != qnum:
+            logger.warning(
+                "LILY_COMPOSITE | PREEMPTED | session=%s stale_act=%s "
+                "stale_q=%s new_act=%s q=%d source=%s — the table lapped the "
+                "queue; dropping the stale composite and emitting current "
+                "state (C5)",
+                self.sk.session_id, flight.get("act"), flight.get("qnum"),
+                act, qnum, source,
+            )
+            self.cancel_speech(
+                flight.get("owner"), reason="composite_preempted"
+            )
+            self._composite_flight_state = None
+            return False
+        if flight.get("act") == act:
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=composite_in_flight | act=%s | "
+                "source=%s | q=%d | owner=%s — this beat's composite is "
+                "already in flight; a second one would race it (C5)",
+                act, source, qnum, flight.get("owner"),
+            )
+            return True
+        # Same question, a DIFFERENT beat of the same transition (T4's
+        # verdict then its flourish, a reveal then N+1): the designed
+        # sequence. The framework's speech queue and N12's journal order it.
+        return False
+
+    def _note_composite_flight(
+        self, act: str, owner: str, key: str | None = None
+    ) -> None:
+        if act not in _HOST_COMPOSITE_ACTS:
+            return
+        self._composite_flight_state = {
+            "act": act,
+            "owner": owner,
+            "key": key,
+            "qnum": self.sk.question_number,
+            "at": time.monotonic(),
+        }
+
+    def clear_composite_flight(self, speech_id: str | None) -> None:
+        """Release the composite lane at PLAYOUT COMPLETION (confirmed,
+        interrupted or suppressed — all three end the flight). Wired from
+        on_agent_speech_finished, the one place every outbound turn ends."""
+        flight = getattr(self, "_composite_flight_state", None)
+        if flight is None:
+            return
+        if speech_id is not None and flight.get("owner") != speech_id:
+            return
+        self._composite_flight_state = None
+
+    # -- HOSTLOOP-001 C6: the instant spoken receipt -------------------------
+    #
+    # WHY HERE. Adjudication is deterministic and instant at Tier 1 — the
+    # 8–13s answer-to-verdict latency in Session B, and Session A's
+    # one-turn-lag acks, are the LLM COMPOSITE, not the ruling. So the
+    # receipt is split off the composite: the same Tier-1 verdict that
+    # already exists at the moment the final lands is spoken immediately as
+    # fixed words (the deterministic lane), and the styled reveal follows as
+    # normal.
+    #
+    # WHY NOT A NEW LANE. It rides gated_say, so the hold, the
+    # question-pending yield, the P0-G pause, the P8 live-game gate, the
+    # claim lifecycle and every tts_node gate all bind it. Chain F was just
+    # closed and this does not reopen it: there is no second dispatch path,
+    # only a second SOURCE OF WORDS for the one that exists.
+    #
+    # NOT DOUBLING WITH THE COMPOSITE — three independent reasons, all
+    # structural:
+    #   (a) the receipt never contains the canonical answer, and BOTH
+    #       "she already said it" detectors require the answer to be present
+    #       (_verdict_already_spoken, lily_verdict_narration via
+    #       register_transition_narration / _reveal_already_on_air) — so a
+    #       receipt can never preempt, suppress or satisfy the reveal beat;
+    #   (b) the composite is TOLD: answer_receipt_aired_for() feeds a line
+    #       into the verdict instructions naming the exact words that already
+    #       aired, so the beat opens on the reveal instead of ruling twice;
+    #   (c) direct_say adds the receipt to the chat context, so her own
+    #       transcript shows it before the composite generates.
+
+    def _label_owner(self, speaker_label: str | None) -> str | None:
+        """Rostered name currently holding one diarization label, else the
+        label itself (an unbound voice still deserves a receipt, and the
+        dedupe identity has to be stable for it too). Reads sk.players — the
+        same primary-label field bind_speaker maintains."""
+        if not speaker_label:
+            return None
+        for name, state in (getattr(self.sk, "players", None) or {}).items():
+            if state.get("speaker_label") == speaker_label:
+                return name
+        return speaker_label
+
+    def answer_receipt_aired_for(self, qnum: int) -> str | None:
+        """The receipt text already aired for question `qnum`, or None —
+        the input the verdict composite is conditioned on so it does not
+        rule twice."""
+        record = getattr(self, "_answer_receipt_aired", None) or {}
+        if record.get("qnum") != qnum:
+            return None
+        return record.get("text") or None
+
+    def _answer_receipt_owed(self, verdict: str, receipt_id: str) -> bool:
+        """Guards for one receipt, read at fire time. Deliberately narrow:
+        the receipt exists to be FAST, and anything that makes it uncertain
+        (no armed question, the composite already narrating this beat) means
+        the composite owns the words."""
+        if verdict not in ("correct", "incorrect", "uncertain"):
+            return False
+        if getattr(self, "_delivery_stop_sticky", False):
+            return False
+        if not getattr(self, "game_started", False):
+            return False
+        if getattr(self, "game_over", False):
+            return False
+        if self.armed_question is None:
+            return False
+        qnum = self.sk.question_number
+        # The transition owns the beat from its reveal onward (N12). Once a
+        # verdict stage is journaled the composite has been dispatched and a
+        # receipt would be a second ruling of the same committed row.
+        try:
+            if self.transition_narrated(qnum, "verdict"):
+                return False
+        except Exception:
+            pass
+        fired = getattr(self, "_answer_receipts_fired", None)
+        if fired is None or getattr(self, "_answer_receipts_qnum", None) != qnum:
+            fired, self._answer_receipts_qnum = set(), qnum
+            self._answer_receipts_fired = fired
+        if receipt_id in fired:
+            return False
+        if len(fired) >= _ANSWER_RECEIPT_MAX_PER_QUESTION:
+            logger.info(
+                "LILY_RECEIPT | CAPPED | session=%s q=%d fired=%d — no further "
+                "instant receipts on this question",
+                self.sk.session_id, qnum, len(fired),
+            )
+            return False
+        fired.add(receipt_id)
+        return True
+
+    def fire_answer_receipt(
+        self,
+        verdict: str,
+        *,
+        text: str,
+        player: str | None = None,
+        source: str = "instant_tier1",
+    ) -> bool:
+        """Voice the SHORT spoken receipt for one answer utterance, NOW.
+
+        `verdict` is the Tier-1 verdict the caller already computed — this
+        function never evaluates anything, so it adds no latency and owns no
+        matching logic. An UNCERTAIN verdict (the judge has not ruled) gets
+        the neutral ack, never a verdict word: lily_answer_receipt makes that
+        mapping the only one available.
+
+        Returns True when a receipt was dispatched."""
+        receipt = lily_say_gate.lily_answer_receipt(verdict)
+        if receipt is None:
+            return False
+        # Identity is (who, what they said) — NOT the utterance id: the two
+        # deterministic forks that reach here (the instant Tier-1 path and
+        # the C3b mid-read binding) see the same utterance through different
+        # carriers, and this is what keeps one answer to one receipt.
+        receipt_id = (
+            f"{player or 'floor'}:"
+            f"{lily_evaluation.lily_normalize_answer(text)}"
+        )
+        if not self._answer_receipt_owed(verdict, receipt_id):
+            return False
+        qnum = self.sk.question_number
+        dispatched = self.gated_say(
+            None,
+            "answer_receipt",
+            # The deterministic lane ignores instructions; this string is
+            # the audit line a keyless dispatch leaves in the log.
+            f"[deterministic receipt: {receipt!r}]",
+            source=f"answer_receipt:{source}",
+            text=receipt,
+        )
+        if not dispatched:
+            logger.info(
+                "LILY_RECEIPT | GATED | session=%s q=%d verdict=%s — the "
+                "dispatch gate refused the receipt (hold/floor/stop); the "
+                "composite still rules", self.sk.session_id, qnum, verdict,
+            )
+            return False
+        self._answer_receipt_aired = {
+            "qnum": qnum,
+            "text": receipt,
+            "verdict": verdict,
+            "player": player,
+            "at": time.monotonic(),
+        }
+        logger.warning(
+            "LILY_RECEIPT | AIRED | session=%s q=%d verdict=%s player=%s "
+            "source=%s text=%r — deterministic lane; the styled composite "
+            "follows and is told this already aired (C6)",
+            self.sk.session_id, qnum, verdict, player, source, receipt,
+        )
+        return True
+
+    # -- HOSTLOOP-001 C8: a cut verdict re-airs, one line ------------------
+
+    def _cut_verdict_keys(self, released: "list | None") -> list:
+        """Which of the keys just released by a cut ARE a verdict beat, as
+        (qnum, key) pairs. Reads the key vocabulary the reveal path already
+        mints — q_{N}_verdict at a round/final boundary, q_{N}_reveal
+        otherwise — and takes the question number FROM THE KEY.
+
+        Never from sk.question_number: adjudicate advances it (via
+        arm_next_question) in the same tick it dispatches the verdict, so by
+        the time that verdict's playout ends the counter already names N+1.
+        Reading current state here would look for the wrong key, find
+        nothing, and silently reproduce the very defect this fixes."""
+        found = []
+        for key in (released or []):
+            match = _VERDICT_KEY_RE.match(str(key))
+            if match:
+                found.append((int(match.group(1)), key))
+        return found
+
+    def reair_cut_verdict(self, released: "list | None") -> bool:
+        """C8: the verdict beat was cut by a barge-in — re-air the RESULT as
+        one deterministic line instead of dropping it.
+
+        Session B, 36:25: the cut released q_{N}_reveal (LILY_SAY | RELEASED
+        | reason=interrupted), Y7's BARGE_IN_CANCEL policy correctly declined
+        to recover a conversational line, and the ruling simply never
+        reached the room. Worse, the released claim wedged the beat: the
+        transition's verdict entry still names that key, so
+        _transition_holds_next_delivery reads state != CONFIRMED forever and
+        question N+1 is held.
+
+        Both are fixed by re-airing on the SAME KEY: the claim is retaken
+        here and confirmed at this line's playout, so the journal reads
+        narrated, N+1 is released by the existing seam, and
+        register_transition_narration binds the fresh words as THE narration
+        (the re-air holds the verdict key, which is the branch that gate
+        already has for exactly this case).
+
+        The RESULT itself comes from the transition journal's own reveal
+        entry, not from sk.current_question: adjudicate has already consumed
+        the revealed question and armed N+1 by the time this runs, so current
+        state would hand out the NEXT question's answer. The journal is the
+        record of what was committed for the question being revealed — and
+        requiring it also means a re-air can only ever state a result that
+        was actually journaled."""
+        if getattr(self, "_delivery_stop_sticky", False):
+            return False
+        for qnum, key in self._cut_verdict_keys(released):
+            try:
+                entry = self._transition_entry(qnum, "reveal")
+            except Exception:
+                entry = None
+            detail = (entry or {}).get("detail") or {}
+            answer = str(detail.get("answer") or "").strip()
+            if not answer:
+                logger.warning(
+                    "LILY_VERDICT | CUT_REAIR_SKIPPED | session=%s q=%d "
+                    "key=%s reason=no_journaled_result — nothing committed to "
+                    "re-air honestly", self.sk.session_id, qnum, key,
+                )
+                continue
+            correct = bool(detail.get("correct"))
+            winner = detail.get("winner") if correct else None
+            line = lily_say_gate.lily_verdict_reair_line(
+                correct=correct, answer=answer, winner=winner,
+            )
+            logger.error(
+                "LILY_VERDICT | CUT_REAIR | session=%s q=%d key=%s correct=%s "
+                "— the verdict beat was talked over and its claim released; "
+                "re-airing the result as one deterministic line rather than "
+                "dropping it (C8)",
+                self.sk.session_id, qnum, key, correct,
+            )
+            return self.gated_say(
+                key,
+                "verdict",
+                f"[deterministic verdict re-air: {line!r}]",
+                source="verdict_cut_reair",
+                text=line,
+            )
+        return False
 
     def _supersede_stale_claim(self, key: str) -> bool:
         """Release a PENDING claim that is provably wedged: older than the
@@ -257,7 +699,8 @@ class LilySpeechDeliveryMixin:
         return self.say_registry.release(key)
 
     def _arm_stale_claim_watchdog(
-        self, key: str, act: str, instructions: str, source: str
+        self, key: str, act: str, instructions: str, source: str,
+        text: str | None = None,
     ) -> None:
         """Arm the never-reached-playout watchdog for one keyed dispatch.
         No-op without a running loop (offline tests drive the registry
@@ -270,11 +713,14 @@ class LilySpeechDeliveryMixin:
         if owner is None:
             return
         asyncio.ensure_future(
-            self._stale_claim_watch(key, owner, act, instructions, source)
+            self._stale_claim_watch(
+                key, owner, act, instructions, source, text=text
+            )
         )
 
     async def _stale_claim_watch(
-        self, key: str, owner: str, act: str, instructions: str, source: str
+        self, key: str, owner: str, act: str, instructions: str, source: str,
+        text: str | None = None,
     ) -> None:
         """Release-and-retry a claim whose speech never started playout.
 
@@ -319,7 +765,8 @@ class LilySpeechDeliveryMixin:
                 return
             counts[key] = attempts + 1
             self.gated_say(
-                key, act, instructions, source=f"{source}+stale_retry"
+                key, act, instructions, source=f"{source}+stale_retry",
+                text=text,
             )
             return
 
@@ -1408,37 +1855,111 @@ class LilySpeechDeliveryMixin:
         half-delivered with nothing pending. Y7 stays as written; questions
         get their floor back.
 
-        Returns True if a resume was armed and dispatched."""
-        index = self._mc_choice_airing_index(now)
-        if index is None:
-            return False
-        remaining = self.rendered_armed_choices_from(index)
-        if not remaining:
-            return False
+        HOSTLOOP-001 C8 generalizes the same discipline to the rest of
+        phase=question. When there is no per-choice position to resume from
+        — a FREEFORM question read, or any other phase=question host beat
+        cut while the armed question has not landed — the read cannot be
+        picked up mid-list, so the question is RE-OFFERED whole from the
+        deterministic sheet instead. Resume where a resume exists, re-offer
+        where it does not; either way the question never ends half-aired.
+
+        Returns True if a resume or re-offer was armed and dispatched."""
         qnum = self.sk.question_number
-        logger.info(
-            "LILY_BARGE | QUESTION_RESUME | session=%s q=%d from_choice=%s — "
-            "non-answer barge during the read; cancelling TTS and resuming "
-            "the options from here (C3c carve-out from Y7 BARGE_IN_CANCEL)",
-            self.sk.session_id, qnum,
-            lily_evaluation.MC_CHOICE_LETTERS[index:index + 1] or index,
+        index = self._mc_choice_airing_index(now)
+        remaining = (
+            self.rendered_armed_choices_from(index) if index is not None else ""
         )
-        self._interrupt_current_speech()
-        self.arm_delivery_resume(remaining)
-        self.gated_say(
-            None,
-            "question_nudge",
-            (
+        if remaining:
+            logger.info(
+                "LILY_BARGE | QUESTION_RESUME | session=%s q=%d from_choice=%s "
+                "— non-answer barge during the read; cancelling TTS and "
+                "resuming the options from here (C3c carve-out from Y7 "
+                "BARGE_IN_CANCEL)",
+                self.sk.session_id, qnum,
+                lily_evaluation.MC_CHOICE_LETTERS[index:index + 1] or index,
+            )
+            instructions = (
                 "You were talked over part-way through reading the options. "
                 "Do not start the question again — the table already has the "
                 "stem and the options before this one. Read exactly the "
                 "remaining options, nothing else, then stop and let them "
                 "answer:\n" + remaining
-            ),
-            source="mcq_barge_resume",
+            )
+            resume_text = remaining
+            source = "mcq_barge_resume"
+        else:
+            # C8 re-offer arm. No estimable position inside the options (a
+            # freeform read, a cut before the first option, or a
+            # phase=question beat that was not the read at all), so the whole
+            # armed question goes back out — the same deterministic sheet the
+            # strict-rewrite path already speaks, never a model paraphrase.
+            resume_text = (self.rendered_armed_question() or "").strip()
+            if not resume_text:
+                return False
+            logger.info(
+                "LILY_BARGE | QUESTION_REOFFER | session=%s q=%d — "
+                "phase=question host speech cut by a barge with no resume "
+                "point; re-offering the armed question whole (C8)",
+                self.sk.session_id, qnum,
+            )
+            instructions = (
+                "You were talked over before the table had the question. "
+                "Ask it again now — its question sentence exactly as "
+                "written, with every option when there are options — then "
+                "stop and let them answer:\n" + resume_text
+            )
+            source = "question_barge_reoffer"
+        self._interrupt_current_speech()
+        self.arm_delivery_resume(resume_text)
+        self.expect_delivery()
+        self.gated_say(
+            None, "question_nudge", instructions, source=source,
         )
         self._delivery_barge_cut_qnum = None
         return True
+
+    def _question_owed_recovery(self, released: "list | None" = None) -> bool:
+        """HOSTLOOP-001 C8 — is a phase=question host utterance that was just
+        barge-cut owed a resume or a re-offer?
+
+        C3c asked only "was an MC options read in flight?", which left the
+        FREEFORM read (and a cut nudge that owned the delivery) falling
+        through to Y7's blanket cancel. The generalized test is "the room
+        does not have this question yet, and the speech that just died was
+        the speech that owed it":
+
+          * phase=question, a question armed, the game live;
+          * the delivery claim for it is NOT confirmed — a question the room
+            demonstrably heard is never re-read (delivery_reached_the_table
+            force-confirms exactly that case one branch above in
+            on_agent_speech_finished, so it self-excludes here);
+          * and the dead turn owed the question: it held the delivery claim
+            that was just released, or an MC read is still marked in flight.
+
+        The last clause is what keeps this from becoming a floor grab: a cut
+        conversational turn that never owed the question arms nothing, and
+        the pre-existing window-fallback nudge / idle watchdog still own a
+        question that stalls for any other reason."""
+        if getattr(self, "_delivery_stop_sticky", False):
+            return False
+        if not getattr(self, "game_started", False):
+            return False
+        if getattr(self, "game_over", False):
+            return False
+        if self.armed_question is None:
+            return False
+        if getattr(self, "ui_phase", None) != "question":
+            return False
+        qnum = self.sk.question_number
+        delivery_key = f"q_{qnum}_delivery"
+        if (
+            self.say_registry.state(delivery_key)
+            == lily_say_gate.CLAIM_CONFIRMED
+        ):
+            return False
+        if getattr(self, "_mc_delivery_qnum", None) == qnum:
+            return True
+        return delivery_key in (released or [])
 
     def note_question_barge_cut(self, qnum: int) -> None:
         """A question delivery was cut by a DELIBERATE barge-in and its
@@ -1686,6 +2207,18 @@ class LilySpeechDeliveryMixin:
         # resume, whichever way the barge is reported.
         self._delivery_barge_cut_qnum = None
         self._interrupt_current_speech()
+        # HOSTLOOP-001 C6: the SECOND deterministic fork an answer can bind
+        # through. When the barge lands before the window opened, the
+        # scorekeeper recorded no candidate, so on_transcript_event's receipt
+        # seam never sees this utterance — yet this is the fastest binding in
+        # the system and the one most owed an immediate word. The Tier-1
+        # verdict is already in hand above; dedupe is by (who, what) so the
+        # already_open case does not receipt twice.
+        self.fire_answer_receipt(
+            verdict, text=text,
+            player=self._label_owner(seg.get("speaker_label")),
+            source="mc_early_answer",
+        )
         if already_open:
             # C3a span: the window is live and the scorekeeper already
             # recorded this utterance as a candidate. Truncate the read and

@@ -252,7 +252,16 @@ def test_walked_example_barge_at_choice_2_binds_when_answer_shaped():
     assert game.adjudications == [False]            # proceeded to verdict
     # C3d: nothing is owed — the question was answered, not abandoned.
     assert game._question_barge_resume_still_owed(qnum) is False
-    assert game.said == []                          # no resume dispatched
+    # No RESUME dispatched. (HOSTLOOP-001 C6 amendment: `said` is no longer
+    # empty here — the same binding now also fires the instant receipt — so
+    # the pin names the act it was always about instead of counting
+    # dispatches.)
+    assert [s for s in game.said if s["act"] == "question_nudge"] == []
+    # C6: and the bound answer got its word inside the same tick, from the
+    # deterministic lane, with no LLM in the path.
+    receipts = [s for s in game.said if s["act"] == "answer_receipt"]
+    assert len(receipts) == 1
+    assert game.answer_receipt_aired_for(qnum) == lily_say_gate.LILY_RECEIPT_INCORRECT
 
 
 def test_walked_example_barge_at_choice_2_resumes_when_not_answer_shaped():
@@ -659,7 +668,12 @@ def test_invariant_a_barged_question_never_ends_with_nothing_pending():
         answer_bound = bool(
             game.sk.ordered_candidates() or game._pre_window_segments
         )
-        resume_pending = bool(game.said)
+        # C6 amendment: the receipt also dispatches through gated_say now, so
+        # "a resume is pending" is read off the resume's own act rather than
+        # off the dispatch count.
+        resume_pending = any(
+            s["act"] == "question_nudge" for s in game.said
+        )
 
         # THE INVARIANT.
         assert answer_bound or resume_pending, (
@@ -797,15 +811,27 @@ def test_y7_cancel_policy_is_untouched_for_non_question_turns():
 
 def test_barge_cut_marker_is_only_set_for_an_in_flight_question_read():
     """Source-order pin on the carve-out's scope in on_agent_speech_finished:
-    note_question_barge_cut is guarded by barge_in AND an in-flight MC
-    delivery for the CURRENT question."""
+    note_question_barge_cut is guarded by barge_in AND by the question not
+    being in the room yet.
+
+    HOSTLOOP-001 C8 amendment: the inline `_mc_delivery_qnum ==
+    question_number` test moved into `_question_owed_recovery`, which
+    generalizes it to the freeform read and to a cut nudge that owned the
+    delivery. The pin follows it there rather than pinning the MC-only
+    spelling C8 was written to widen."""
     src = inspect.getsource(LilyGame.on_agent_speech_finished)
     assert "note_question_barge_cut" in src
     guard = src.split("note_question_barge_cut")[0]
     tail = guard[guard.rindex("if ("):]
     assert "barge_in" in tail
-    assert "_mc_delivery_qnum" in tail
-    assert "self.sk.question_number" in tail
+    assert "_question_owed_recovery" in tail
+    owed = inspect.getsource(LilyGame._question_owed_recovery)
+    # The MC arm C3c had is still there, and the room-already-has-it
+    # exclusion is what keeps the generalization from re-reading a
+    # delivered question.
+    assert "_mc_delivery_qnum" in owed
+    assert "CLAIM_CONFIRMED" in owed
+    assert "ui_phase" in owed
     # Y7's own arms are still ahead of the carve-out, unchanged.
     assert src.index("arm_reair_gate") < src.index("note_question_barge_cut")
     assert "BARGE_IN_CANCEL" in inspect.getsource(
