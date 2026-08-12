@@ -628,6 +628,29 @@ _RESUME_GAME_RE = _re.compile(
     r"|let s (?:resume|continue|keep playing)"
     r")(?: please)?$"
 )
+# CLASS 5 (LIVEFIRE-001) 5a/5b — resume is a COMMAND, recognized ANYWHERE in
+# the utterance, not only as a bare anchored word. Live lily-639007: "Continue
+# with Greece, dude. Make more fucking questions." never matched the anchored
+# ^continue$ regex, so the sticky stayed True and the LLM narrated a resume the
+# state machine had not executed — the "feed's quiet" hang. The intent set
+# (5b): continue / continue with X / keep going / make more questions / resume,
+# plus the existing go-on / next-question / start-again family.
+_RESUME_INTENT_RE = _re.compile(
+    r"\b(?:"
+    r"resume"
+    r"|continue"
+    r"|keep (?:going|playing|it (?:going|up))"
+    r"|carry on"
+    r"|go on"
+    r"|next questions?"
+    r"|another questions?"
+    r"|(?:more|another|extra|additional)(?:\s+\w+){0,3}?\s+questions?"
+    r"|(?:make|ask|give|gimme|get|do|run|throw)(?:\s+\w+){0,4}?\s+questions?"
+    r"|start (?:the (?:quiz|game|trivia) )?(?:again|over)"
+    r"|back to (?:the )?(?:quiz|game|trivia|questions)"
+    r"|let s (?:resume|continue|keep (?:going|playing)|play (?:on|again))"
+    r")\b"
+)
 
 
 def lily_detect_stop(text: str, *, solo: bool = False) -> bool:
@@ -692,17 +715,26 @@ def lily_detect_hold_request(text: str) -> bool:
 
 
 def lily_detect_resume_game(text: str) -> bool:
-    """True only for an explicit whole-utterance resume after sticky STOP."""
+    """True for an explicit resume command after a sticky STOP. CLASS 5
+    (LIVEFIRE-001): the intent is recognized ANYWHERE in the utterance
+    ("Continue with Greece, dude. Make more fucking questions."), not only as
+    a bare anchored word — the command path owns it before the addressee
+    layer can misfile it as side_chatter. Negation-guarded ("not yet",
+    "don't continue")."""
     normalized = _normalize_command_text(text)
     if not normalized:
         return False
     if _re.search(
-        r"\b(?:do not|don t|dont|not yet|never)\b.{0,20}"
-        r"\b(?:resume|continue|start|go on|next question)\b",
+        r"\b(?:do not|don t|dont|not yet|never|hold off|later)\b.{0,20}"
+        r"\b(?:resume|continue|start|go on|keep|more|another|next)\b",
         normalized,
     ):
         return False
-    return bool(_RESUME_GAME_RE.match(normalized))
+    # The anchored whole-utterance form OR the intent found anywhere.
+    return bool(
+        _RESUME_GAME_RE.match(normalized)
+        or _RESUME_INTENT_RE.search(normalized)
+    )
 
 
 # Hold-narration integrity (WO-LILY-HOTFIX-009 W8) — the stop-ack register

@@ -108,6 +108,32 @@ question ABOUT stopping froze the game and cost the table its queued content.
   armed" assertion in `test_patch002_hold_stop.py` updated to the new
   freeze-not-burn contract).
 
+### CLASS 5 — resume is a command
+
+"Continue with Greece, dude. Make more fucking questions." never matched the
+anchored `^continue$` regex, so the addressee layer filed it side_chatter,
+`_delivery_stop_sticky` stayed True, the LLM narrated a resume the machine had
+not executed, and the feed went quiet.
+
+- **5a/5b — one path, recognized anywhere**: `_RESUME_INTENT_RE` widens
+  `lily_detect_resume_game` to find the intent anywhere in the utterance —
+  continue / continue with X / keep going / make more questions / resume,
+  plus the existing go-on / next-question / start-again family
+  (negation-guarded). The command path (`on_transcript_event` ->
+  `maybe_route_stop` sibling, before the LLM and before addressee routing)
+  owns it, so an explicit command can no longer be misfiled as side_chatter
+  (5c) — the five-layer split collapses to that single owner.
+- **5c — atomic transition**: `resume_game_delivery` clears the sticky latch
+  and releases the hold as one operation, with no window between them.
+- **5d — spine restarts delivery**: after the atomic clear, the state machine
+  dispatches the Class-4-preserved armed card via the deterministic sheet
+  (`dispatch_armed_question(source="resume")`); the LLM never announces a
+  resume the machine has not executed. No card armed -> prefetch refills and
+  the tick loop delivers.
+- Fixture replay: the resume line clears sticky and delivery restarts; no
+  narrated-but-frozen state is reachable
+  (`tests/test_livefire_class5_resume_command.py`).
+
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
 Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)

@@ -5301,20 +5301,34 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         return bool(getattr(self, "_delivery_stop_sticky", False))
 
     def resume_game_delivery(self, *, reason: str) -> bool:
-        """Clear sticky STOP only after an explicit resume utterance."""
+        """Clear sticky STOP after an explicit resume command. CLASS 5
+        (LIVEFIRE-001): sticky-clear and hold-release are ONE atomic
+        operation (5c), and the state machine — not the LLM — restarts
+        delivery. Class 4 preserves the armed card across a STOP, so the
+        resume dispatches it deterministically here (5d: the resume
+        transition emits the templated delivery; the LLM never announces a
+        resume the machine has not executed). If no card is armed, prefetch
+        refills the supply and the tick loop delivers when it lands."""
         if not self.game_delivery_stopped():
             return False
+        # 5c — atomic: sticky clear + hold release, no window between them.
         self._delivery_stop_sticky = False
         self.release_hold(reason=f"explicit_resume:{reason}")
         self.sk.clear_status_notes()
         logger.warning(
             "LILY_STOP | RESUMED | session=%s reason=%s — game delivery "
-            "may restart",
+            "restarting",
             self.sk.session_id, reason,
         )
         self.publish_attributes_nowait()
         if self.game_started and not self.game_over:
             self.start_prefetch()
+            # 5d — restart delivery from the spine. The preserved armed card
+            # (Class 4) delivers now via the deterministic sheet; a gated
+            # dispatch (open transition, no card yet) journals nothing, so the
+            # tick loop's own retry still owns the beat.
+            if self.armed_question is not None:
+                self.dispatch_armed_question(source="resume")
         return True
 
     # -- PATCH-003 P6/P10: yield-after-question ------------------------------

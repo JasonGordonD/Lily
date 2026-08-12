@@ -5,6 +5,25 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 5: resume is a command
+
+Fixture `lily-639007-f80aa6bf` ~14:01: "Continue with Greece, dude. Make more
+fucking questions." missed the anchored `^continue$` regex — sticky stayed
+True, addressee filed it side_chatter, the LLM narrated an unexecuted resume,
+the feed went quiet.
+
+- `lily_scorekeeper`: `_RESUME_INTENT_RE` widens `lily_detect_resume_game` to
+  find resume intent anywhere in the utterance (continue / continue with X /
+  keep going / make more questions / resume + existing family),
+  negation-guarded. The command path owns it before addressee routing (5c).
+- `lily_agent`: `resume_game_delivery` clears sticky + releases hold
+  atomically (5c) and dispatches the Class-4-preserved armed card via the
+  deterministic sheet (`dispatch_armed_question(source="resume")`, 5d) so the
+  spine — not the LLM — restarts delivery.
+- Tests: `tests/test_livefire_class5_resume_command.py` (5). Suite green
+  (2441). Closes the Class-5 "done when": the resume line clears sticky and
+  delivery restarts; no narrated-but-frozen state is reachable.
+
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 4: STOP is a brake, not a substring
 
 Fixture `lily-639007-f80aa6bf` 17:59:55: "Why why why stop? Why?" fired the
