@@ -2424,14 +2424,35 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             "than never asking."
             + self.prefs_offer_instruction()
             + self.whats_new_instruction()
+            # Live 2026-08-12 15:26 ET (the double greeting): this beat
+            # aired as a FULL second greeting — "Hi, I'm Lily — I host
+            # trivia..." verbatim again, with the recognition bolted on.
+            # Nothing forbade the reprise. Now something does.
+            + " CRITICAL: the table has ALREADY heard your greeting this "
+            "session — do NOT re-introduce yourself, do NOT repeat 'Hi, "
+            "I'm Lily' or any line of your opener, and do NOT re-ask a "
+            "question you already asked (like what to call them) unless it "
+            "is still unanswered. This beat STARTS at the recognition."
         )
         present = ",".join(list(getattr(self.sk, "players", []) or [])) or "-"
         logger.info(
             "LILY_MEMORY | LATE_RECOGNITION | session=%s group=%s present=%s",
             self.sk.session_id, getattr(self, "group_id", None), present,
         )
-        self.instructed_reply(ack)
-        return True
+        # Through the FUNNEL, not instructed_reply: the Y10 review's F5
+        # listed this as one of the five raw lanes skipping every dispatch
+        # gate — a late beat must respect a hold ("give us a minute")
+        # exactly like everything else. Keyless: no claim, no retry ladder;
+        # a refused beat re-arms via _late_recognition_pending as before.
+        dispatched = self.gated_say(
+            None, "late_recognition", ack, source="late_recognition"
+        )
+        if not dispatched:
+            # The gate refused (hold/floor/flight) — the beat is not
+            # burned; the seam flush retries it.
+            self._late_recognition_fired = False
+            self._late_recognition_pending = True
+        return dispatched
 
     def flush_late_recognition_at_seam(self) -> bool:
         """Emit a deferred recognition beat only when the game is between Qs."""
