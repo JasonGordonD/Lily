@@ -119,6 +119,17 @@ def lily_clean_for_speech(text: str) -> str:
 LILY_STATE_SENTINEL_OPEN = "<lily_state>"
 LILY_STATE_SENTINEL_CLOSE = "</lily_state>"
 
+# Tool-call leak (LILY-P0 2026-08-12): the Grok vocal model intermittently
+# emits a function call in the CONTENT stream instead of as a structured
+# tool_use, so the raw JSON `{"name": "lily_bind_speaker", "arguments":
+# {...}}` reaches TTS and is spoken aloud. Lily never legitimately opens a
+# spoken turn with a JSON object, so a turn whose content leads with a
+# tool-call-shaped object is metadata, not speech. Anchored to the object
+# lead and tolerant of barge-in truncation (arguments cut mid-object).
+_TOOL_CALL_LEAK_RE = re.compile(
+    r'\{\s*"name"\s*:\s*"[A-Za-z0-9_]+"\s*,\s*"arguments"\s*:',
+)
+
 # Envelope fragments: any partial/whole spelling of the sentinel tag.
 _SENTINEL_FRAGMENT_RE = re.compile(r"<\s*/?\s*lily_state\b|lily_state\s*>", re.IGNORECASE)
 # Whole envelope (open ... close), non-greedy, spans lines.
@@ -140,6 +151,35 @@ LEAK_LINE_MARKERS = (
     "[RETURNING TABLE]",
     "[state note:",
 )
+
+
+def _rest_after_json_object(t: str, start: int) -> str:
+    """Return the substring AFTER the brace-balanced JSON object that begins
+    at ``start``. String-aware (braces inside quoted values do not count).
+    A truncated/unterminated object (barge-in cut it mid-arguments) returns
+    "" — nothing after an unterminated tool call is speech."""
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(t)):
+        c = t[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return t[i + 1:]
+    return ""
 
 
 def lily_filter_leaks(text: str) -> tuple[str, list[str]]:
@@ -166,6 +206,16 @@ def lily_filter_leaks(text: str) -> tuple[str, list[str]]:
     if _SENTINEL_ENVELOPE_RE.search(t):
         t = _SENTINEL_ENVELOPE_RE.sub("", t)
         reasons.append("sentinel_envelope")
+
+    # Tool-call leak: excise a function-call JSON object that leaked into
+    # spoken content. Strip the balanced object (or to end, if truncated);
+    # a pure tool-call turn collapses to "" and the caller's empty-candidate
+    # retry regenerates instead of airing JSON. Carries no answer material,
+    # so the tts_node burn protocol must NOT fire on this reason alone.
+    _tc = _TOOL_CALL_LEAK_RE.search(t)
+    if _tc is not None:
+        t = t[: _tc.start()] + _rest_after_json_object(t, _tc.start())
+        reasons.append("tool_call")
 
     kept_lines: list[str] = []
     for line in t.splitlines():

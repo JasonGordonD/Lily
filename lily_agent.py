@@ -14457,9 +14457,12 @@ class LilyAgent(Agent):
             # material. The honesty state note (desync WO Sub-agent C)
             # holds committed scores, never answers — it is stripped
             # above, and burning a live question over it would punish the
-            # table for calling out the board.
+            # table for calling out the board. A leaked tool-call JSON
+            # (Grok emitted a function call as content) carries no answer
+            # either — stripping it must not burn a live question.
+            _non_answer_reasons = {"metadata:[state note:", "tool_call"}
             if any(
-                r != "metadata:[state note:" for r in leak_reasons
+                r not in _non_answer_reasons for r in leak_reasons
             ):
                 self._game.on_answer_leak()
 

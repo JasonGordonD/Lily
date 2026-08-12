@@ -356,6 +356,50 @@ def test_metadata_marker_case_insensitive():
     assert reasons
 
 
+# -- leak filter: tool-call JSON leaked into spoken content (LILY-P0 2026-08-12) --
+
+def test_tool_call_json_turn_stripped_to_empty():
+    # The exact live leak: Grok emitted the bind_speaker call as content.
+    leaked = '{"name": "lily_bind_speaker", "arguments": {"speaker_label": "S1", "player_name": "Rami"}}'
+    filtered, reasons = lily_filter_leaks(leaked)
+    assert "tool_call" in reasons
+    assert filtered == ""
+    assert "lily_bind_speaker" not in filtered
+    assert "arguments" not in filtered
+
+
+def test_truncated_tool_call_stripped():
+    # Barge-in cut the object mid-arguments — no closing brace.
+    leaked = '{"name": "lily_bind_speaker", "arguments": {"speaker_label": "S1"'
+    filtered, reasons = lily_filter_leaks(leaked)
+    assert "tool_call" in reasons
+    assert filtered == ""
+
+
+def test_tool_call_followed_by_speech_keeps_speech():
+    leaked = '{"name": "lily_award_point", "arguments": {"n": 1}} Nice one, you got it!'
+    filtered, reasons = lily_filter_leaks(leaked)
+    assert "tool_call" in reasons
+    assert "Nice one, you got it!" in filtered
+    assert "arguments" not in filtered
+    assert "lily_award_point" not in filtered
+
+
+def test_tool_call_with_nested_braces_balanced():
+    leaked = '{"name": "lily_x", "arguments": {"a": {"b": 1}, "c": "}"}} after'
+    filtered, reasons = lily_filter_leaks(leaked)
+    assert "tool_call" in reasons
+    assert filtered.strip() == "after"
+
+
+def test_normal_json_mention_in_speech_not_stripped():
+    # Ordinary speech that merely contains braces/quotes is not a tool call.
+    text = 'The set is written like {1, 2, 3} in math notation.'
+    filtered, reasons = lily_filter_leaks(text)
+    assert reasons == []
+    assert filtered == text
+
+
 # -- leak filter: clean text passes, audio tags preserved ------------------------------
 
 def test_clean_text_passes_untouched():
