@@ -5400,18 +5400,15 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self._stop_bed()
         self._steal_window = False
 
-        for question in (
-            getattr(self, "armed_question", None),
-            getattr(self, "next_question", None),
-        ):
-            if question is not None:
-                # Session-retire only. A table stopping must not globally
-                # burn a curated bank row for every future table.
-                self._burn_question(
-                    question, reason="stop_primitive", persist=False
-                )
-        self.armed_question = None
-        self.next_question = None
+        # CLASS 4 (LIVEFIRE-001) 4b: STOP FREEZES supply; it never burns or
+        # consumes armed/supplied content. The live stop burned kb_457 (the
+        # next Greece card) and nulled the armed question — so a genuine STOP
+        # cost the table its queued content. The armed and prefetched cards
+        # now SURVIVE the freeze (the sticky latch blocks delivery until an
+        # explicit resume, Class 5); the card is delivered when play resumes.
+        # Adult content keeps its consent-driven hard burn
+        # (_burn_pending_adult_questions, above) — that is a safety semantic,
+        # not the general kb_* retirement this clause removes.
         self.sk.current_question = None
 
         task = getattr(self, "_prefetch_task", None)

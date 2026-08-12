@@ -5,6 +5,26 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 4: STOP is a brake, not a substring
+
+Fixture `lily-639007-f80aa6bf` 17:59:55: "Why why why stop? Why?" fired the
+stop primitive (bare stop, solo room) and the freeze burned kb_457 (next
+Greece card).
+
+- `lily_scorekeeper`: `_STOP_META_RE` guard in `lily_detect_stop` — an
+  interrogative/reason lead-in before the stop-word ("why stop", "why did you
+  stop", "did you stop") is meta, never the brake; polite imperatives still
+  fire; "stop, why…" is untouched.
+- `lily_agent`: `_freeze_game_delivery_for_stop` no longer burns/nulls
+  `armed_question`/`next_question` — STOP freezes supply (sticky, closed
+  window, cancelled prefetch) but the armed and prefetched cards survive and
+  deliver on resume. Adult consent-burn unchanged.
+- Tests: `tests/test_livefire_class4_stop_brake.py` (6);
+  `test_patch002_hold_stop.py` updated to the freeze-not-burn contract; the
+  51 barge-in contract tests stay green. Suite green (2436). Closes the
+  Class-4 "done when": the "Why…stop?" line does not trigger the primitive;
+  an armed card survives a genuine STOP.
+
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 3: session write truth
 
 Fixture `lily-639007-f80aa6bf`: 5 delivered Greece questions, but q6 was

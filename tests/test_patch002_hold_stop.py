@@ -197,8 +197,14 @@ def test_stop_clears_all_question_delivery_state():
 
     game.handle_stop_primitive("I don't want to play anymore.")
 
-    assert game.armed_question is None
-    assert game.next_question is None
+    # LIVEFIRE-001 CLASS 4b: STOP FREEZES supply but never burns/consumes
+    # armed or supplied content — the armed and prefetched cards SURVIVE the
+    # freeze (they deliver on explicit resume). The live stop burned kb_457;
+    # it no longer does.
+    assert game.armed_question == {"id": "q4", "prompt": "Frankenstein?"}
+    assert game.next_question == {"id": "q5", "prompt": "Rosetta Stone?"}
+    # In-flight delivery state is still cleared; the window is closed and the
+    # sticky latch blocks any delivery until resume.
     assert game.sk.current_question is None
     assert game.sk.answer_window_open is False
     assert game.sk.answer_candidates == {}
@@ -207,6 +213,7 @@ def test_stop_clears_all_question_delivery_state():
     assert game._delivery_speech_acts == {}
     assert game._pre_window_segments == []
     assert game._recent_finals == []
+    # Delivery stays frozen (sticky) regardless of the preserved content.
     assert game.next_question_ready() is False
     assert game.arm_next_question() is False
 

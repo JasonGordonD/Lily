@@ -592,6 +592,22 @@ _STOP_ADDRESSED_RE = _re.compile(
     rf"|(?:{_STOP_WORD})\b[\s,.!]*\b(?:lily|lilly|lil)\b"
 )
 _STOP_NEGATION_RE = _re.compile(r"\b(?:do not|dont|don t|please dont|never)\s+st")
+# CLASS 4 (LIVEFIRE-001) 4a — a question or topic ABOUT stopping is meta,
+# never the brake. Live lily-639007 17:59:55: "Why why why stop? Why?" fired
+# the primitive (bare stop, solo room) and froze the game. The brake is an
+# IMPERATIVE; an interrogative/reason lead-in before the stop-word ("why
+# stop", "why did you stop", "when do you stop", "did you stop") is talk, not
+# a command. Polite imperatives ("can you stop", "would you stop", "please
+# stop") carry no reason/interrogative lead-in and still fire. The stop-word
+# must FOLLOW the meta lead-in — "stop, why are you…" is an imperative stop
+# followed by a question and is untouched.
+_STOP_META_RE = _re.compile(
+    rf"\b(?:why|when|whenever|whether|reason|what for|how come)\b"
+    rf"[a-z0-9\s,'’]*?\b(?:{_STOP_WORD})\b"
+    rf"|\b(?:did|do|does|are|is|was|were)\s+"
+    rf"(?:you|she|it|we|they|lily|lilly)\b"
+    rf"[a-z0-9\s,'’]*?\b(?:{_STOP_WORD})\b"
+)
 _QUIT_GAME_RE = _re.compile(
     r"\b(?:"
     r"stop (?:the )?(?:quiz|game|trivia)"
@@ -621,6 +637,10 @@ def lily_detect_stop(text: str, *, solo: bool = False) -> bool:
     ('don't stop')."""
     normalized = _normalize_command_text(text)
     if not normalized or _STOP_NEGATION_RE.search(normalized):
+        return False
+    # CLASS 4 (LIVEFIRE-001) 4a: a question/topic about stopping is not a
+    # brake ("why stop", "why did you stop", "did you stop").
+    if _STOP_META_RE.search(normalized):
         return False
     if _QUIT_GAME_RE.search(normalized):
         return True

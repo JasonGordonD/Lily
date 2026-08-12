@@ -83,6 +83,31 @@ armed/supply cursor. The live checkpoint keeps `question_number` as its
 resume cursor (not a played-count). Fixture replay: the session close writes
 "over 5 question(s)" (`tests/test_livefire_class3_session_write_truth.py`).
 
+### CLASS 4 — STOP is a brake, not a substring
+
+The 17:59:55 line "Why why why stop? Why?" fired the stop primitive (a bare
+stop in a solo room) and the freeze burned kb_457, the next Greece card — a
+question ABOUT stopping froze the game and cost the table its queued content.
+
+- **4a — meta is not a brake**: `_STOP_META_RE` in `lily_detect_stop` catches
+  an interrogative/reason lead-in before the stop-word ("why stop", "why did
+  you stop", "when do you stop", "did you stop") and returns False. Polite
+  imperatives ("can you stop", "please stop") carry no such lead-in and still
+  fire; "stop, why…" leads with the imperative and is untouched. (`don't
+  stop` was already negation-guarded.) The brake still fires only through the
+  single verbal command path (`maybe_route_stop` -> `handle_stop_primitive`),
+  distinct from acoustic barge-in (HOTFIX-007 Y7, unchanged).
+- **4b — freeze, never burn**: `_freeze_game_delivery_for_stop` no longer
+  burns/nulls `armed_question`/`next_question`. STOP freezes supply (sticky
+  latch, closed window, cancelled prefetch) but the armed and prefetched
+  cards SURVIVE and deliver on resume. Adult content keeps its consent-driven
+  hard burn (a safety semantic, not the general kb_* retirement removed here).
+- Fixture replay: "Why why why stop? Why?" does not trigger the primitive;
+  an armed card survives a genuine STOP
+  (`tests/test_livefire_class4_stop_brake.py`; the pre-Class-4 "stop clears
+  armed" assertion in `test_patch002_hold_stop.py` updated to the new
+  freeze-not-burn contract).
+
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
 Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)
