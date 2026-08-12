@@ -11049,6 +11049,20 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             None, "game_start", instructions, source=f"start_{source}"
         )
 
+    def questions_asked_count(self) -> int:
+        """CLASS 3 (LIVEFIRE-001): the count of questions actually DELIVERED
+        to the table — the player-facing question count. Derived from
+        asked_history (the session's delivered mirror), never from the
+        armed/supply cursor question_number.
+
+        Live lily-639007: five Greece questions were asked, but q6 was armed,
+        burned by a STOP, and never delivered — question_number reached 6 and
+        the winner write said "over 6 questions". asked_history drops a burned
+        card at release, so a burned/discarded card never inflates this count
+        (3b). This is the number every wrapup/winner/session write uses."""
+        hist = getattr(self, "asked_history", None)
+        return len(hist) if isinstance(hist, list) else 0
+
     async def finish_game(self) -> None:
         """Finale: event fires AT OR BEFORE the phase=final attribute flip,
         never after (frontend's single confetti trigger)."""
@@ -11097,7 +11111,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # shutdown callback writing again is safe.
             asyncio.ensure_future(lily_memory.lily_write_session_memory(
                 self.supabase, self.group_id, self.sk.session_id,
-                standings, self.sk.question_number, self.highlights,
+                # CLASS 3 (LIVEFIRE-001): delivered count, not the armed
+                # cursor — a burned/never-asked q6 must not read as played.
+                standings, self.questions_asked_count(), self.highlights,
                 round_reached=self.sk.round,
             ))
             # WS-12 report pipeline: report row + assessment on the WRAP-UP
@@ -11147,7 +11163,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         return {
             "final_standings": standings,
             "rounds_played": self.sk.round,
-            "questions_played": self.sk.question_number,
+            # CLASS 3 (LIVEFIRE-001): delivered count from asked_history, not
+            # the armed/supply cursor (burned/discarded never increment it).
+            "questions_played": self.questions_asked_count(),
             "per_player": per_player,
             "mode_changes": list(self.sk.mode_changes),
             "callouts": list(self.highlights),
@@ -16457,7 +16475,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 # upgrade may have re-keyed the group.
                 await lily_memory.lily_write_session_memory(
                     supabase, game.group_id, scorekeeper.session_id,
-                    standings, scorekeeper.question_number, game.highlights,
+                    # CLASS 3 (LIVEFIRE-001): delivered count, not the armed
+                    # cursor — mirrors the finish_game write.
+                    standings, game.questions_asked_count(), game.highlights,
                     round_reached=scorekeeper.round,
                 )
                 # B3 session report — one row per session, idempotent upsert

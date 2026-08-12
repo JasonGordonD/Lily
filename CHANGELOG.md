@@ -5,6 +5,21 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 3: session write truth
+
+Fixture `lily-639007-f80aa6bf`: 5 delivered Greece questions, but q6 was
+armed, burned by a STOP, and never asked — `question_number` reached 6 and
+the winner write said "over 6 questions".
+
+- `lily_agent`: new `LilyGame.questions_asked_count()` = `len(asked_history)`
+  (delivered mirror; burned/discarded dropped at release so they never
+  increment). `finish_game` `questions_played`, the finish-time and
+  shutdown-path `lily_write_session_memory` calls now use it; the live
+  checkpoint keeps `question_number` as its resume cursor.
+- Tests: `tests/test_livefire_class3_session_write_truth.py` (4). Suite green
+  (2430). Closes the Class-3 "done when": session close writes
+  "over 5 question(s)".
+
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 2: one speech owner after verdict
 
 Fixture `lily-639007-f80aa6bf`. 2a (organic double verdict) is owned by the

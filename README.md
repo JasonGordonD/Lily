@@ -68,6 +68,21 @@ already reached TTS; a post-hoc ERROR is not a gate.
 - Fixture replay: one and only one ruling per question; no reveal content
   inside any delivery utterance (`tests/test_livefire_class2_reveal_delivery.py`).
 
+### CLASS 3 — session write truth
+
+The live session delivered 5 Greece questions but armed a q6 that a STOP
+burned before it aired — the armed cursor `question_number` reached 6 and the
+winner write said "4 point(s) over 6 question(s)". New
+`LilyGame.questions_asked_count()` returns `len(asked_history)` (the session's
+delivered mirror; a burned/discarded card is dropped at release, so it never
+inflates the count). Every player-facing write — `finish_game`'s
+`questions_played`, the finish-time and shutdown-path
+`lily_write_session_memory` calls (which feed
+`lily_build_session_summary`) — now derives from that count, never from the
+armed/supply cursor. The live checkpoint keeps `question_number` as its
+resume cursor (not a played-count). Fixture replay: the session close writes
+"over 5 question(s)" (`tests/test_livefire_class3_session_write_truth.py`).
+
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
 Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)
