@@ -14788,7 +14788,13 @@ class LilyAgent(Agent):
             and bool(armed.get("choices"))
             and self._game.is_question_delivery_turn(full)
         )
-        if not mc_delivery:
+        # CLASS 8 (LIVEFIRE-001) 8b: the yield clips STACKED questions only.
+        # A single question with a plain declarative tail ("Got it, Rami?
+        # Let's set you up.") is a natural turn, not two competing questions —
+        # clipping it cut an 82-char non-question tail after name-bind. Only a
+        # SECOND question in the turn (n_questions >= 2) creates the
+        # unanswered-obligation the gate exists to end.
+        if not mc_delivery and n_questions >= 2:
             clipped, yielded = lily_say_gate.lily_yield_after_first_question(full)
             if yielded:
                 logger.warning(
@@ -16957,13 +16963,16 @@ async def entrypoint(ctx: JobContext) -> None:
         await game.publish_metadata("")
     game.start_prefetch()
 
-    # Session opener — SECOND trigger path (on_enter, inside session.start,
-    # was the first). Both route through gated_say under one key per act,
-    # so whichever path dispatched first wins and this one logs
-    # LILY_SAY_SUPPRESSED | reason=dup instead of producing the live
-    # double greeting. Kept as a belt-and-braces net: if on_enter ever
-    # fails to dispatch (M1 gate — silence is her failure mode), this
-    # path still opens the night.
+    # Session opener — the FALLBACK trigger path. on_enter (inside
+    # session.start, already run above) is the single PRIMARY greet source;
+    # this path opens the night ONLY if on_enter did not claim the opener
+    # (M1 gate — silence is her failure mode).
+    #
+    # CLASS 8 (LIVEFIRE-001) 8a: this used to dispatch unconditionally and
+    # rely on the say-gate to SUPPRESS it as a dup — the anti-double-greeting
+    # correctness was load-bearing on that suppression. It is now an explicit
+    # fallback gated on the registry state, so the two paths never both
+    # dispatch and the gate is a belt, not the whole braces.
     if reconnected:
         # G1: a reconnect resumes a LIVE game — same preemptive-off rule
         # as start_game (which this path bypasses).
@@ -16972,27 +16981,25 @@ async def entrypoint(ctx: JobContext) -> None:
         # Initial glass truth already published above; don't await another
         # attribute RTT before the rejoin line.
         game.publish_attributes_nowait()
-        game.gated_say(
-            "session_rejoin",
-            "rejoin",
-            game.rejoin_instructions(),
-            source="entrypoint",
-        )
+        if game.say_registry.state("session_rejoin") is None:
+            game.gated_say(
+                "session_rejoin",
+                "rejoin",
+                game.rejoin_instructions(),
+                source="entrypoint",
+            )
     else:
-        # Fresh room: Lily speaks FIRST (M1 gate — silence is her failure
-        # mode). Short lobby landing, then conversational name-fishing.
-        # Memory at the door (F): same budgeted wait as on_enter, but only
-        # when this path is actually going to win the dispatch race —
-        # on_enter normally claimed session_greet already (this dispatch
-        # then logs LILY_SAY_SUPPRESSED | reason=dup with zero extra wait).
+        # Fresh room: Lily speaks FIRST. on_enter normally claimed
+        # session_greet already; only when it did NOT do we open here, and
+        # only then do we spend the memory-at-the-door budget.
         if game.say_registry.state("session_greet") is None:
             await game.await_greeting_memory()
-        game.gated_say(
-            "session_greet",
-            "greet",
-            game.greeting_instructions(),
-            source="entrypoint",
-        )
+            game.gated_say(
+                "session_greet",
+                "greet",
+                game.greeting_instructions(),
+                source="entrypoint",
+            )
 
 
 if __name__ == "__main__":

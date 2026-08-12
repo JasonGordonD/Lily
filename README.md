@@ -198,6 +198,30 @@ session, so there is no live verification surface. Shipping fragile
 prompt-note layering into a heavily-tested intake was judged the wrong trade;
 these three are called out for a follow-up WO with the operator.
 
+### CLASS 8 — hygiene sweep
+
+- **8a (shipped)**: `on_enter` is the single PRIMARY greet source; the
+  entrypoint opener is now an explicit fallback gated on
+  `say_registry.state("session_greet"/"session_rejoin") is None` — it fires
+  only if on_enter did not claim the opener, instead of dispatching
+  unconditionally and relying on the say-gate to SUPPRESS it as a dup. The
+  anti-double-greeting correctness is no longer load-bearing on suppression.
+- **8b (shipped)**: the `YIELD_AFTER_QUESTION` clip in `tts_node` now gates on
+  `n_questions >= 2` (stacked questions) — a single question with a plain
+  declarative tail ("Got it, Rami? Let's set you up.") is a natural turn and
+  is preserved, closing the live 82-char non-question cut after name-bind. The
+  `lily_yield_after_first_question` function is unchanged; the caller decides
+  when to apply it.
+- **8c (flagged)**: lobby-vamp stacking ("say start or name a category" +
+  "I'm here when you are" on one wait) is LLM-generated from the single lobby
+  state directive plus the greeting options — no spine double-emitter. Like
+  7b/7c/7d it needs persona-prompt review + a live intake run; flagged for the
+  same follow-up rather than shipping fragile say-gate pattern collapsing.
+- **8d (report)**: the 6a finding stands — the prefetch timeouts (question-
+  driven generation latency) and the memory-pressure warnings (a fixed 120s
+  monitor over a static RSS baseline) are TWO INDEPENDENT problems. Memory
+  pressure is not tuned under this WO; see the Class 6 diagnosis.
+
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
 Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)

@@ -5,6 +5,25 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 8: hygiene sweep
+
+Fixture `lily-639007-f80aa6bf`.
+
+- **8a**: `entrypoint` opener is now an explicit fallback gated on
+  `say_registry.state(...) is None` (greet + rejoin) — on_enter is the single
+  primary source; the anti-double-greeting is no longer load-bearing on
+  say-gate dup suppression.
+- **8b**: `tts_node` gates the `YIELD_AFTER_QUESTION` clip on `n_questions >=
+  2` — a single question with a declarative tail is preserved (the live
+  82-char cut after name-bind); the yield function itself is unchanged.
+- **8c (flagged)**: lobby-vamp stacking is LLM-generated from the lobby
+  directive + greeting options, no spine double-emitter — flagged with
+  7b/7c/7d for persona-prompt review + live verification.
+- **8d (report)**: 6a stands — prefetch timeouts (generation latency) vs
+  memory warnings (fixed 120s monitor, static RSS baseline) are two
+  independent problems; memory not tuned under this WO.
+- Tests: `tests/test_livefire_class8_hygiene.py` (5). Suite green (2453).
+
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 7: recognition latch (7a; 7b/7c/7d flagged)
 
 Fixture `lily-639007-f80aa6bf`.
