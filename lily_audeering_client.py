@@ -838,9 +838,30 @@ async def lily_start_audeering_pipeline(
     when it fails to start — lily_child_gate_ready() reads the live breaker
     state, and the adult deck fails CLOSED with the sensor down."""
     global _ACTIVE_PIPELINE
+    # WO-LILY-HOSTLOOP-001 C11: the 6-module pipeline (aed + audioQuality +
+    # expression + prosody + scene + speakerAttributes) uploaded a
+    # continuous 5s window every 5s — quota burn with no consumer on a
+    # trivia host, and `scene` is meaningless for VoIP audio. Gated behind
+    # LILY_AUDEERING_ENABLED, DEFAULT FALSE; code untouched otherwise.
+    # Coupling note: with the pipeline off, the child-signal sensor is off
+    # too — the adult deck stays governed by adult_deck_gate_mode(), whose
+    # default is "open" per the 2026-08-06 owner directive ("sensor" mode
+    # with the pipeline disabled fails CLOSED, deck down, as ever).
     try:
         pipeline = LilyAudeeringPipeline(state)
+        # Registration happens even for a pipeline that will never start
+        # (same contract as the breaker-open path): lily_child_gate_ready
+        # requires started AND breaker-closed, so a registered-but-disabled
+        # pipeline reads NOT READY and adult mode fails CLOSED in "sensor"
+        # gate mode — the sensor and the deck stay one deployable unit.
         _ACTIVE_PIPELINE = pipeline
+        if not lily_config.audeering_enabled():
+            logger.info(
+                "LILY_AUDEERING | DISABLED | LILY_AUDEERING_ENABLED is not "
+                "set — pipeline registered but not started (C11); "
+                "child-signal sensor inactive, child gate reads not-ready"
+            )
+            return None
         if pipeline.breaker_open:
             return None
         await pipeline.start()

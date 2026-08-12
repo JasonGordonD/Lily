@@ -1111,6 +1111,14 @@ def job_memory_limit_mb() -> float:
 # Billing is audio-seconds, not per-module (JRVS Probe-C Q1 finding): the full
 # module set costs 1× quota. All tunables are STARTING POINTS.
 
+def audeering_enabled() -> bool:
+    """Master switch for the acoustic pipeline (HOSTLOOP-001 C11).
+    DEFAULT FALSE: the 6-module 5s-cadence upload burned quota with no
+    consumer on a trivia host. Flipping it true restores the pipeline
+    (and the child-signal sensor) with zero code changes."""
+    return _get_bool("LILY_AUDEERING_ENABLED", False)
+
+
 def audeering_api_key() -> Optional[str]:
     """Missing key opens the circuit breaker (best-effort pipeline; the
     session runs unaffected). Never required at boot."""
