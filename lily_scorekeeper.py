@@ -1408,6 +1408,122 @@ def lily_verdict_narration(
 
 
 # ---------------------------------------------------------------------------
+# WO-LILY-LIVEFIRE-001 CLASS 1 — SPOKEN SCORE = LEDGER ONLY.
+#
+# Live lily-639007 17:58:45: "Rami, you're at three, streak of three." aired
+# while the committed ledger read score=2 streak=2 (the model read one answer
+# AHEAD of the spine). The X1 detector logged the divergence but the sentence
+# had already gone to TTS — a post-hoc ERROR is not a gate.
+#
+# Class 1 makes it a gate: the spine prints every number. The organic lane is
+# COLOR ONLY — any sentence that narrates a total, a streak value, or a count
+# is suppressed at the say-gate choke point and replaced by ONE template line
+# printed from the ledger authority (ledger_scores / ledger_streaks). This is
+# suppress-and-reemit, never an in-place rewrite of generated text.
+# ---------------------------------------------------------------------------
+
+_NUM_TO_WORD = {
+    0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven",
+    12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
+    16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen",
+    20: "twenty",
+}
+
+
+def _score_word(n: int) -> str:
+    """Spell a small non-negative total; fall back to digits past twenty."""
+    return _NUM_TO_WORD.get(int(n), str(int(n)))
+
+
+# A sentence NARRATES game state when it carries a total/streak/count idiom
+# with a concrete value. Runs on _normalize_command_text output (lowercased,
+# punctuation-stripped, apostrophes gone: "that's" -> "that s"). Covers her
+# actual score grammar (WO 1c): "that's N for you", "on the board at N",
+# "N straight", "still at zero", "sitting on N", plus the you're-at / streak-
+# of / puts-you-at / score-is family. Idiom-anchored so a bare number in a
+# question stem or a year in an answer never matches.
+_N = _SCORE_NUMBER_PATTERN
+_SPOKEN_STATE_SENTENCE_RE = _re.compile(
+    r"\b(?:"
+    + r"that\s+s\s+" + _N + r"\s+(?:for\s+you|straight)"
+    + r"|on\s+the\s+board\s+(?:at|on|with)\s+" + _N
+    + r"|streak\s+of\s+" + _N
+    + r"|" + _N + r"\s+(?:straight|in\s+a\s+row)"
+    + r"|(?:sitting|standing|now|still|stuck|up)\s+(?:at|on|to)\s+" + _N
+    + r"|you\s+(?:re|are|ve|have|had)\s+"
+      r"(?:got\s+|now\s+|up\s+to\s+|at\s+|on\s+)" + _N
+    + r"|puts?\s+you\s+(?:at|on|up\s+to)\s+" + _N
+    + r"|score\s+(?:is|of)\s+(?:now\s+)?" + _N
+    + r")\b"
+)
+
+
+def _sentence_narrates_state(sentence: str) -> bool:
+    """True when one sentence narrates a committed total/streak/count."""
+    normalized = _normalize_command_text(sentence)
+    if not normalized:
+        return False
+    return bool(_SPOKEN_STATE_SENTENCE_RE.search(normalized))
+
+
+# Sentence split that keeps ElevenLabs [audio tags] and mid-sentence dashes
+# intact — we split only on true sentence-terminal punctuation.
+_SENTENCE_SPLIT_RE = _re.compile(r"(?<=[.!?])\s+")
+
+
+def lily_ledger_score_line(
+    ledger_scores: dict, ledger_streaks: Optional[dict] = None
+) -> str:
+    """The ONE template line that speaks committed standings from the ledger
+    authority. Deterministic, model-free — the spine's own words. A player on
+    a live streak (>=2) gets the streak read too. Empty ledger -> ""."""
+    if not ledger_scores:
+        return ""
+    streaks = ledger_streaks or {}
+    parts: list[str] = []
+    for name, score in ledger_scores.items():
+        seg = f"{name} at {_score_word(score)}"
+        streak = int(streaks.get(name, 0) or 0)
+        if streak >= 2:
+            seg += f", streak of {_score_word(streak)}"
+        parts.append(seg)
+    body = "; ".join(parts)
+    return f"On the board: {body}."
+
+
+def lily_score_line_gate(
+    text: str,
+    ledger_scores: dict,
+    ledger_streaks: Optional[dict] = None,
+) -> tuple[str, list[str], str]:
+    """CLASS 1 gate. Split ``text`` into sentences; suppress every sentence
+    that narrates a total/streak/count (the organic lane is color only) and
+    return (kept_text, suppressed_sentences, ledger_line).
+
+    ledger_line is the template-printed authority (lily_ledger_score_line),
+    non-empty only when at least one sentence was suppressed — the caller
+    re-emits it in place of the model's numbers. Pure; suppress-and-reemit,
+    never an in-place rewrite. No ledger / no text -> pass-through."""
+    if not text or not ledger_scores:
+        return text or "", [], ""
+    sentences = _SENTENCE_SPLIT_RE.split(text.strip())
+    kept: list[str] = []
+    suppressed: list[str] = []
+    for sentence in sentences:
+        if sentence.strip() and _sentence_narrates_state(sentence):
+            suppressed.append(sentence.strip())
+        else:
+            kept.append(sentence)
+    if not suppressed:
+        return text, [], ""
+    kept_text = " ".join(k.strip() for k in kept if k.strip()).strip()
+    return kept_text, suppressed, lily_ledger_score_line(
+        ledger_scores, ledger_streaks
+    )
+
+
+# ---------------------------------------------------------------------------
 # HOTFIX-006 N13 — the spoken ROSTER COUNT is read, never computed.
 #
 # Live: "Whenever you four..." spoken to a table of THREE, in the same
@@ -3126,6 +3242,10 @@ class LilyScorekeeper:
             "utterance_id": utterance_id,
             "eval_tier": eval_tier,
             "score_after": state["score"],
+            # CLASS 1 (LIVEFIRE-001): the committed streak rides the row so
+            # ledger_streaks() has a read-only authority the same shape as
+            # score_after — the spine's streak, never the model's count.
+            "streak_after": state["streak"],
             "ts": _now_iso(),
         }
         # W1 correction provenance: which verdict this row amends, on what
@@ -3436,6 +3556,19 @@ class LilyScorekeeper:
             if name in sums:
                 sums[name] += int(entry.get("points") or 0)
         return sums
+
+    def ledger_streaks(self) -> dict[str, int]:
+        """Per-player CURRENT streak — the read-only authority for CLASS 1's
+        streak gate (parallel to ledger_scores()). Reads the streak_after of
+        each player's most recent committed answer/correction row; a player
+        with no committed row is 0. This is the spine's streak; the model may
+        never narrate a different one."""
+        streaks: dict[str, int] = {name: 0 for name in self.players}
+        for entry in self.score_ledger:
+            name = entry.get("player")
+            if name in streaks and "streak_after" in entry:
+                streaks[name] = int(entry.get("streak_after") or 0)
+        return streaks
 
     def reconcile_scores(self) -> list[dict]:
         """Wrap-up reconciliation (WS-7): compare the per-player counters
