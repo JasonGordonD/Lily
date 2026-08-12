@@ -46,7 +46,12 @@ from test_hotfix009_w4_relaxed_pacing import (
 
 
 def _steal_beats(game) -> list:
-    return [i for i in game.session.instructions if "steal" in i.lower()]
+    # REFACTOR W2a: the steal opener is now a deterministic direct_say sheet;
+    # scan both lanes so the count is mechanism-agnostic.
+    return [
+        x for x in (game.session.instructions + game.session.said)
+        if "steal" in x.lower()
+    ]
 
 
 # ===========================================================================

@@ -267,7 +267,12 @@ def _run(step, game: LilyGame | None = None):
 
 
 def _dispatched(game: LilyGame, needle: str) -> list[str]:
-    return [i for i in game.session.instructions if needle in i]
+    # REFACTOR W2a: deterministic beats (verdict, steal opener) air on the
+    # direct_say lane; scan both so needle matches are mechanism-agnostic.
+    return [
+        x for x in (game.session.instructions + game.session.said)
+        if needle in x
+    ]
 
 
 # ===========================================================================

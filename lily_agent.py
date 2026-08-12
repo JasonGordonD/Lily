@@ -9373,6 +9373,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 self.open_window(
                     duration=lily_config.steal_window_seconds(), steal=True
                 )
+                # REFACTOR W2a: the steal opener is a DETERMINISTIC sheet
+                # (direct_say), not an LLM composite — a fixed announcement so
+                # adjudicate never ends in instructed_reply.
                 self.gated_say(
                     None,
                     "steal_window",
@@ -9380,6 +9383,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     "window — quick and hot — anyone who hasn't "
                     "answered can grab it.",
                     source="adjudicate",
+                    text="Nobody landed it — five-second steal window! "
+                    "Anyone who hasn't answered, grab it now.",
                 )
                 return
 

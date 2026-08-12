@@ -264,8 +264,11 @@ def test_relaxed_missed_question_never_arms_steal_clock():
     _run(lambda: game.adjudicate(steal_allowed=True))
 
     assert game._steal_window is False
+    # W2a: the steal opener is a deterministic say sheet — scan both lanes so
+    # the "no steal beat" assertion stays honest.
     steal_beats = [
-        i for i in game.session.instructions if "steal" in i.lower()
+        x for x in (game.session.instructions + game.session.said)
+        if "steal" in x.lower()
     ]
     assert steal_beats == []  # 05:32:11's "Steal window — five seconds"
     # The beat fell through to the ordinary reveal instead of parking on
@@ -490,4 +493,7 @@ def test_timed_missed_question_still_opens_the_steal_window():
 
     assert game._steal_window is True
     assert game.sk.answer_window_open
-    assert any("steal" in i.lower() for i in game.session.instructions)
+    assert any(
+        "steal" in x.lower()
+        for x in (game.session.instructions + game.session.said)
+    )
