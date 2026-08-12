@@ -1970,6 +1970,26 @@ class LilyScorekeeper:
 
     # -- answer window -----------------------------------------------------
 
+    def note_question_time(self, field: str, now: Optional[float] = None) -> None:
+        """C14b (HOSTLOOP-001): per-question delivery timestamps, persisted.
+        These moments existed only as transient log lines; the C3/C4 gates
+        need them queryable. Pure dict on the scorekeeper — folded into the
+        session-end metadata (lily_sessions.metadata.question_timeline), no
+        DDL (C14a's join migration is report-only). Fields:
+        core_sentence_spoken_at, delivery_confirmed_at, window_opened_at,
+        window_closed_at. First stamp per (question, field) wins — a
+        window that reopens (steal) does not overwrite the original edge;
+        steal windows land as window_reopened_at instead."""
+        timeline = getattr(self, "question_timeline", None)
+        if timeline is None:
+            timeline = self.question_timeline = {}
+        q = timeline.setdefault(int(self.question_number), {})
+        t = now if now is not None else time.time()
+        if field == "window_opened_at" and "window_opened_at" in q:
+            field = "window_reopened_at"
+        if field not in q:
+            q[field] = round(t, 3)
+
     def open_answer_window(
         self,
         duration: Optional[float] = None,
@@ -2005,6 +2025,7 @@ class LilyScorekeeper:
         t = now if now is not None else time.time()
         self.answer_window_open = True
         self.answer_window_opened_at = t
+        self.note_question_time("window_opened_at", now=t)
         self.answer_window_deadline = None if untimed else t + (
             duration if duration is not None else self.answer_window_seconds
         )
@@ -2064,6 +2085,8 @@ class LilyScorekeeper:
         # deadline made lateness unmeasurable the moment it mattered.
         if self.answer_window_deadline is not None:
             self._last_window_deadline = self.answer_window_deadline
+        if self.answer_window_open:
+            self.note_question_time("window_closed_at")
         self.answer_window_open = False
         self.answer_window_opened_at = None
         self.answer_window_deadline = None

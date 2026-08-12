@@ -6495,6 +6495,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             retry_counts = getattr(self, "_stale_retry_counts", {})
             for k in confirmed:
                 retry_counts.pop(k, None)
+            # C14b: the delivery turn's playout completed — the second
+            # persisted timestamp (window edges stamp in the scorekeeper).
+            if any(str(k).endswith("_delivery") for k in confirmed):
+                self.sk.note_question_time("delivery_confirmed_at")
         # Task 0 (RECOGNITION-VARIETY): BOTH sides of the call persist.
         # Recording at playout completion means the record holds what the
         # room actually heard — never a dispatched-but-swallowed turn.
@@ -16128,6 +16132,10 @@ async def entrypoint(ctx: JobContext) -> None:
                     # tokens (incl. cached), TTS characters, STT audio
                     # duration, and the whole latency/turn-taking family.
                     "session_metrics": session_metrics.summary(),
+                    # C14b: per-question delivery timestamps
+                    "question_timeline": getattr(
+                        scorekeeper, "question_timeline", {}
+                    ),
                 }
                 await lily_persistence.lily_session_end(
                     supabase, scorekeeper,
@@ -16502,6 +16510,10 @@ async def entrypoint(ctx: JobContext) -> None:
             # Full 1.6.8 metrics ride the heartbeat too, so "is she lagging /
             # burning tokens" is a live SQL query mid-game, not a post-mortem.
             "session_metrics": session_metrics.summary(),
+            # C14b: per-question delivery timestamps
+            "question_timeline": getattr(
+                scorekeeper, "question_timeline", {}
+            ),
         }
 
     # Heartbeat checkpoint loop (60s) — carries rolling latency averages so

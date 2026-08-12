@@ -1290,6 +1290,9 @@ class LilySpeechDeliveryMixin:
                 "(C3a)",
                 self.sk.session_id, qnum,
             )
+            # C14b: the core sentence has (estimatedly) finished airing —
+            # the first of the four persisted delivery timestamps.
+            self.sk.note_question_time("core_sentence_spoken_at")
             self.open_window_after_discharge(core_completion=True)
 
         asyncio.ensure_future(_arm())
