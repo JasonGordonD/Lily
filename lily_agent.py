@@ -917,6 +917,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._active_delivery_qnum: int | None = None
         self._active_delivery_started_at: float | None = None
         self._active_delivery_ended_at: float | None = None
+        # HOSTLOOP-001 C3c: the question whose read a deliberate barge-in
+        # killed, and which therefore owes the table either a bound answer or
+        # a resume of the remaining choices (Session B, lily-05BB92, is what
+        # owing neither looks like). Cleared the moment either is satisfied.
+        self._delivery_barge_cut_qnum: int | None = None
+        # The exact text a resumed read must speak, staged for tts_node.
+        self._pending_delivery_resume: str | None = None
         # Exact user turns whose response is already owned by deterministic
         # game speech. on_user_turn_completed consumes these and raises
         # StopResponse so LiveKit does not also generate a conversational
@@ -5325,6 +5332,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._active_delivery_ended_at = None
         self._mc_delivery_qnum = None
         self._mc_delivery_started_at = None
+        # C3c: a resume can never outlive the question that owed it.
+        self._delivery_barge_cut_qnum = None
+        self._pending_delivery_resume = None
         self._delivery_speech_acts = {}
         self._pre_window_segments = []
         self._recent_finals = []
@@ -6372,6 +6382,28 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # guards that would otherwise catch the copy: GUARD_MAP §7).
             if (interrupted or released) and not barge_in:
                 self.arm_reair_gate()
+            # HOSTLOOP-001 C3c: THE CARVE-OUT, and its whole scope.
+            #
+            # Y7's policy above is unchanged and stays correct for every
+            # non-question phase: a line the room talked over is cancelled,
+            # not recovered. But a question read is an obligation, not a
+            # line — and Session B (lily-05BB92) is what cancelling one
+            # costs: barge lands mid-choices, floor yielded, no resume, the
+            # armed choices never air, the utterance never binds, and the
+            # question sits half-delivered forever. So a barge that kills a
+            # question delivery whose window never opened is MARKED here
+            # (reading Y7's own `barge_in` decision, not a second one), and
+            # the question is owed either a binding or a resume.
+            # The window may already be open here (C3a arms it at core
+            # completion), which is exactly why "window open" is not a guard:
+            # what is owed is the REST OF THE CHOICES, not a window.
+            if (
+                barge_in
+                and interrupted
+                and getattr(self, "_mc_delivery_qnum", None)
+                == self.sk.question_number
+            ):
+                self.note_question_barge_cut(self.sk.question_number)
             # Cut-recovery contract (WS-3, STREAM-INTEGRITY-002): a cut or
             # mid-stream-FAILED organic turn (no keyed claim to drive a
             # game-loop re-dispatch) arms the auto-resume watchdog. It fires
@@ -6643,7 +6675,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         return base
 
     def open_window_after_discharge(
-        self, duration: float | None = None
+        self,
+        duration: float | None = None,
+        core_completion: bool = False,
     ) -> None:
         """Room-discharge pacing (WS-14, AMENDMENT-002): a structural gap
         of lily_config.room_discharge_seconds() between question-delivery
@@ -6660,10 +6694,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         -> discharge gap governs adjudication sensitivity), call THIS at
         the arming point instead of open_window(); the gap and its config
         knob do not move. Steal windows never discharge — they open off a
-        ruling, not a delivery playout."""
+        ruling, not a delivery playout.
+
+        HOSTLOOP-001 C3a takes that interface up: `core_completion=True` is
+        the arming call made when the core question sentence finishes, while
+        the options read continues."""
+        # core_completion is passed ONLY when set, so the ordinary discharge
+        # call stays byte-identical for every existing caller and stub.
+        extra = {"core_completion": True} if core_completion else {}
         gap = lily_config.room_discharge_seconds()
         if gap <= 0:
-            self.open_window(duration=duration)
+            self.open_window(duration=duration, **extra)
             return
         logger.info(
             "LILY_WINDOW | DISCHARGE | session=%s q=%d gap=%.2fs",
@@ -6675,13 +6716,22 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # A racing open (ARMED_LIMBO reopen, adjudication start) wins.
             if self.sk.answer_window_open or self._adjudicating:
                 return
-            self.open_window(duration=duration)
+            self.open_window(duration=duration, **extra)
 
         asyncio.ensure_future(_discharge())
 
     def open_window(
-        self, duration: float | None = None, steal: bool = False
+        self,
+        duration: float | None = None,
+        steal: bool = False,
+        core_completion: bool = False,
     ) -> None:
+        """`core_completion` (HOSTLOOP-001 C3a): this window is opening at
+        the CORE QUESTION's completion, with the option read still airing.
+        Everything about the window itself is identical — the only difference
+        is that the in-flight MC read markers are NOT cleared, because the
+        read really is still in flight and C3b/C3c still need to be able to
+        truncate or resume it."""
         if getattr(self, "_delivery_stop_sticky", False):
             logger.info(
                 "LILY_WINDOW | OPEN_BLOCKED | session=%s q=%d "
@@ -6781,10 +6831,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self._undelivered_refires = 0
         # WS-5: the window is open — no MC options read is still in flight
         # to truncate (whether it played out fully or was answer-aborted).
-        self._mc_delivery_qnum = None
-        self._active_delivery_qnum = None
-        self._active_delivery_started_at = None
-        self._active_delivery_ended_at = None
+        # C3a: unless the window opened AT CORE COMPLETION, in which case the
+        # options are still airing and those markers are live state.
+        if not core_completion:
+            self._mc_delivery_qnum = None
+            self._active_delivery_qnum = None
+            self._active_delivery_started_at = None
+            self._active_delivery_ended_at = None
         self._set_ui_phase("answering")
         self.publish_attributes_nowait()
         # Screen sync: idempotent backstop. The publish normally already
@@ -14524,6 +14577,20 @@ class LilyAgent(Agent):
         # registered speaks normally. Decision + claim + screen publish
         # live in LilyGame.register_delivery_claim (offline-tested).
         speech_id = _current_speech_id()
+        # HOSTLOOP-001 C3c: a staged mid-read RESUME speaks verbatim. The
+        # remaining choices are already rendered deterministically
+        # (rendered_armed_choices_from) and must air exactly as armed, so the
+        # resume replaces the model's prose here — BEFORE the delivery-claim
+        # decision, which would otherwise see an open window (C3a) and hand
+        # the unchecked prose straight to TTS.
+        _resume = self._game.take_pending_delivery_resume()
+        if _resume:
+            logger.info(
+                "LILY_DELIVERY | RESUME_VERBATIM | session=%s q=%d — reading "
+                "the remaining options as armed",
+                self._game.sk.session_id, self._game.sk.question_number,
+            )
+            full = _resume
         delivery = self._game.register_delivery_claim(
             full, speech_id=speech_id
         )
