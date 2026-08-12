@@ -22,7 +22,9 @@ import os
 import re
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Awaitable, Callable, Optional
 
 from dotenv import load_dotenv
 
@@ -616,6 +618,87 @@ _ROSTER_COUNT_WORDS = {
     1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
     6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
 }
+
+
+@dataclass
+class StateView:
+    """Typed schema for the STABLE half of the state block — the honesty
+    surface and the prompt-cache prefix. Every field the prefix may carry is
+    a named slot here (rendered line, or None/empty when absent); the block
+    is built by populating slots, not by hand-appending to a list. `render()`
+    walks the slots in a FIXED order so the same game state produces the same
+    bytes every render — no accidental extra line, no reordered field can
+    silently bust the cache. Slots are grouped by concern (phase / delivery /
+    identity / score / picture / next-question / notes …), matching W3's
+    intended owner split. A slot never holds answer material: the armed
+    NEXT-QUESTION slot carries prompt/category/choices/image status only, so
+    canonical_answer can never reach the stable block."""
+
+    # Emission order below IS the render order — do not reorder without
+    # updating the byte-identity fixture.
+    answered_closed: Optional[str] = None
+    delivery_or_hold: Optional[str] = None
+    identity_intake: Optional[str] = None
+    score: Optional[str] = None
+    roster: Optional[str] = None
+    picture_lane: Optional[str] = None
+    camera_lane: Optional[str] = None
+    glass_image: Optional[str] = None
+    custom_round: Optional[str] = None
+    delivery_pace: Optional[str] = None
+    responsiveness: Optional[str] = None
+    acoustic: list = field(default_factory=list)
+    floor_read: Optional[str] = None
+    architect: Optional[str] = None
+    availability: Optional[str] = None
+    said_already: Optional[str] = None
+    device_candidate: Optional[str] = None
+    next_question: Optional[str] = None
+    unbound_award: Optional[str] = None
+    state_note: Optional[str] = None
+    returner_note: Optional[str] = None
+    why_note: Optional[str] = None
+    identity_probe: Optional[str] = None
+    returner_claim: Optional[str] = None
+    late_recognition: Optional[str] = None
+    recognition_dispute: Optional[str] = None
+    ambiguous_yes: Optional[str] = None
+    setup_pending: Optional[str] = None
+    adult_consent: Optional[str] = None
+    floor_speaking: Optional[str] = None
+    explain_note: Optional[str] = None
+    contest_note: Optional[str] = None
+    late_answer_note: Optional[str] = None
+    lobby: list = field(default_factory=list)
+
+    # The ONE authority for stable-block field order.
+    _ORDER = (
+        "answered_closed", "delivery_or_hold", "identity_intake", "score",
+        "roster", "picture_lane", "camera_lane", "glass_image", "custom_round",
+        "delivery_pace", "responsiveness", "acoustic", "floor_read",
+        "architect", "availability", "said_already", "device_candidate",
+        "next_question", "unbound_award", "state_note", "returner_note",
+        "why_note", "identity_probe", "returner_claim", "late_recognition",
+        "recognition_dispute", "ambiguous_yes", "setup_pending",
+        "adult_consent", "floor_speaking", "explain_note", "contest_note",
+        "late_answer_note", "lobby",
+    )
+
+    def render(self) -> list:
+        """The stable extra-lines list, in fixed order. List-valued slots
+        (acoustic, lobby) splice their items in place; empty slots are
+        skipped. Deterministic over the populated view — the byte-stability
+        contract lives here."""
+        out: list = []
+        for name in self._ORDER:
+            value = getattr(self, name)
+            if not value:
+                continue
+            if isinstance(value, list):
+                out.extend(value)
+            else:
+                out.append(value)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -12247,12 +12330,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         return stable, volatile
 
     def _state_extra_lines(self, *, now: float | None = None) -> list:
-        extra = []
+        """The stable extra lines, rendered from the typed StateView schema
+        (W2b — schema, then render; no hand concatenation)."""
+        return self._build_state_view(now=now).render()
+
+    def _build_state_view(self, *, now: float | None = None) -> "StateView":
+        view = StateView()
         answered_line = self.answered_closed_state_line()
         if answered_line:
-            extra.append(answered_line)
+            view.answered_closed = answered_line
         if getattr(self, "_delivery_stop_sticky", False):
-            extra.append(
+            view.delivery_or_hold = (
                 "game_delivery: STOPPED — conversation may continue, but "
                 "do not ask, arm, reveal, score, nudge, or promise another "
                 "question. Only an explicit resume/continue command clears "
@@ -12269,7 +12357,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # explicit so the model does not produce any game payload while
             # held; the mechanical gate stays the backstop for the armed
             # question. Same context-only, leak-filtered contract.
-            extra.append(
+            view.delivery_or_hold = (
                 "held: you have PAUSED at the player's stop and are waiting "
                 "for their go. Do not ask, arm, reveal, score, nudge, open a "
                 "steal window, or promise another question — in prose or as "
@@ -12278,17 +12366,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             )
         intake_line = self.identity_intake_line()
         if intake_line:
-            extra.append(intake_line)
+            view.identity_intake = intake_line
         score_line = self._score_authority_line()
         if score_line:
-            extra.append(score_line)
+            view.score = score_line
         # HOTFIX-006 N13: the roster count rides the same lane as the score
         # — injected truth, never a computed number. Same never-break,
         # context-only, leak-filtered contract as every field below.
         try:
             roster_line = self._roster_authority_line()
             if roster_line:
-                extra.append(roster_line)
+                view.roster = roster_line
         except Exception:
             pass
         # PATCH-003 P4: field-granular picture-lane truth — claims and
@@ -12299,7 +12387,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         try:
             lane_line = self.picture_lane_state_line()
             if lane_line:
-                extra.append(lane_line)
+                view.picture_lane = lane_line
         except Exception:
             pass  # grounding is enrichment; never breaks the state block
         # VIDEOIN-001 V2/V3: the grounded camera read + the hardcoded describe
@@ -12308,7 +12396,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         try:
             cam_line = self.camera_lane_state_line()
             if cam_line:
-                extra.append(cam_line)
+                view.camera_lane = cam_line
         except Exception:
             pass
         # HOTFIX-005 X4: grounded glass-render readout — a picture claim is
@@ -12317,7 +12405,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         try:
             glass_line = self._glass_image_state_line()
             if glass_line:
-                extra.append(glass_line)
+                view.glass_image = glass_line
         except Exception:
             pass
         # HOTFIX-006 N2: the custom-round registration ledger. The tool
@@ -12327,13 +12415,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         try:
             custom_line = self.custom_round_state_line()
             if custom_line:
-                extra.append(custom_line)
+                view.custom_round = custom_line
         except Exception:
             pass
         # PATCH-003 P7: a slow delivery pace shapes the TEXT on both voices
         # (the voice speed change is best-effort; this always applies).
         if getattr(self.sk, "delivery_pace", "normal") == "slow":
-            extra.append(
+            view.delivery_pace = (
                 "delivery pace: SLOW (the table asked) — keep sentences "
                 "short and add a beat more pause between them; unhurried, "
                 "never clipped"
@@ -12342,7 +12430,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # air a GROUNDED holding beat inside the budget — name the actual
         # thing being checked, never a vamp.
         if getattr(self, "_awaiting_address_since", 0.0):
-            extra.append(
+            view.responsiveness = (
                 "responsiveness: someone addressed you directly — answer "
                 "promptly. If the true answer needs a moment (a real check "
                 "is running), say one grounded holding line naming exactly "
@@ -12354,7 +12442,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # line appears at most once per refresh. Synchronous read — never
         # blocks the turn.
         try:
-            extra.extend(self.acoustic.state_block_lines())
+            view.acoustic = list(self.acoustic.state_block_lines())
         except Exception:
             pass  # acoustic read is enrichment; never breaks the state block
         # FL-1 floor read (WO-LILY-FLOOR-001): the latest addressee
@@ -12368,7 +12456,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             if judgment.classification == (
                 lily_addressee_classifier.CLASS_SIDE_CLUSTER
             ):
-                extra.append(
+                view.floor_read = (
                     "floor read: the players are in a conversation with "
                     "each other right now — the floor is theirs. Stay "
                     "warm and quiet; rejoin the moment someone addresses "
@@ -12377,13 +12465,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             elif judgment.classification == (
                 lily_addressee_classifier.CLASS_SIDE_CHATTER
             ):
-                extra.append(
+                view.floor_read = (
                     "floor read: that last line was table talk between "
                     "players — let it breathe; respond only to what is "
                     "asked of the host"
                 )
         if lily_config.architect_mode():
-            extra.append(
+            view.architect = (
                 "architect mode: server-authenticated override ACTIVE — "
                 "operator testing may bypass adult age/signal vetoes"
             )
@@ -12398,7 +12486,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 self.availability_flags
             )
             if gated_off:
-                extra.append(
+                view.availability = (
                     "tonight's availability (capability vs switched-on — "
                     "name the difference honestly if asked): "
                     + "; ".join(gated_off)
@@ -12409,12 +12497,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # ("I know", the mock-echoed "Fantastic.").
         said = self.sk.said_already_lines()
         if said:
-            extra.append(
+            view.said_already = (
                 "SAID-ALREADY (re-deliver NOTHING on this ledger unless a "
                 "player asks; mint fresh words instead): " + " || ".join(said)
             )
         if getattr(self, "device_candidate_group_id", None):
-            extra.append(
+            view.device_candidate = (
                 "device memory candidate: UNVERIFIED — the device looks "
                 "familiar, but disclose no returning-table details until "
                 "a current voiceprint verifies"
@@ -12453,19 +12541,19 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                         "picture question — image published but NOT yet "
                         "confirmed on glass; do not claim it is up"
                     )
-            extra.append(
+            view.next_question = (
                 "NEXT QUESTION (perform it when the table is ready, "
                 "faithfully): " + json.dumps(need_to_know, ensure_ascii=False)
             )
         elif self.next_question is not None:
-            extra.append("next question: prefetched and ready")
+            view.next_question = "next question: prefetched and ready"
         elif self.game_started and not self.game_over:
-            extra.append(
+            view.next_question = (
                 "next question: NOT ready yet — do not claim it is; "
                 "banter until it lands"
             )
         if self._pending_unbound_award is not None:
-            extra.append(
+            view.unbound_award = (
                 "an unbound voice "
                 f"({self._pending_unbound_award['speaker_label']}) has a "
                 "point waiting — get their name and bind them"
@@ -12476,19 +12564,19 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # harnesses build LilyGame via __new__.
         state_note = getattr(self, "_state_note", None)
         if state_note:
-            extra.append(state_note)
+            view.state_note = state_note
         # RECOGNITION-HONESTY: returner-claim conditioning — context only,
         # never spoken (leak-filtered like every state note); keeps a blank
         # table card from becoming a denial of the player's own memory.
         returner_note = getattr(self, "_returner_honesty_note", None)
         if returner_note:
-            extra.append(returner_note)
+            view.returner_note = returner_note
         why_note = getattr(self, "_recognition_why_note", None)
         if why_note:
-            extra.append(why_note)
+            view.why_note = why_note
         # P0-A: while the probe is outstanding, identity absence is UNKNOWN.
         if self.identity_probe_outstanding():
-            extra.append(
+            view.identity_probe = (
                 "identity: STILL CHECKING — do not claim empty memory or "
                 "clean slate, and do not say your card/ledger doesn't have "
                 "anyone (absence is UNKNOWN, not established — not even to "
@@ -12496,13 +12584,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "checking / the card is not connected yet if asked"
             )
         if getattr(self, "_returner_claim_seen", False):
-            extra.append(
+            view.returner_claim = (
                 "identity: RETURNER CLAIMED — the player explicitly says "
                 "you have met before. A blank lookup never proves otherwise; "
                 "do not say clean slate / no saved voices / no past games."
             )
         if getattr(self, "_late_recognition_pending", False):
-            extra.append(
+            view.late_recognition = (
                 "late_recognition: DEFERRED — a live question owns the floor. "
                 "Do not mention recognition/refresher/usual until the engine "
                 "releases it at the between-question seam."
@@ -12510,19 +12598,19 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if getattr(self, "_recognition_dispute", False) and not getattr(
             self, "_recognition_dispute_why_answered", False
         ):
-            extra.append(
+            view.recognition_dispute = (
                 "recognition_dispute: ACTIVE — lily_begin_round / kickoff / "
                 "category announce blocked until the why-beat lands"
             )
         if getattr(self, "_ambiguous_yes_blocks_start", False):
-            extra.append(
+            view.ambiguous_yes = (
                 "ambiguous_yes: ACTIVE — their last yes answered an A-or-B "
                 "choice, NOT a start. Do NOT call lily_begin_round. Ask one "
                 "clear confirm or wait for 'let's start' / 'let's play'."
             )
         pending_setup = self.pending_setup_jobs()
         if pending_setup:
-            extra.append(
+            view.setup_pending = (
                 "setup_pending: ACTIVE — finish these requested jobs BEFORE "
                 "Round One: "
                 + ", ".join(sorted(pending_setup))
@@ -12530,12 +12618,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 "Use the matching setup tools; then confirm ready."
             )
         if getattr(self, "_age_consent_confirmed", False):
-            extra.append(
+            view.adult_consent = (
                 "adult_consent: CONFIRMED this session — do NOT ask for "
                 "18+ confirmation again."
             )
         if getattr(self, "_user_speaking", False):
-            extra.append(
+            view.floor_speaking = (
                 "floor: USER SPEAKING — do not call lily_begin_round or "
                 "start; listen for the rest of the turn."
             )
@@ -12543,31 +12631,32 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # — context only, leak-filtered like every note above.
         explain_note = getattr(self, "_explain_request_note", None)
         if explain_note:
-            extra.append(explain_note)
+            view.explain_note = explain_note
         contest_note = getattr(self, "_contest_note", None)
         if contest_note:
-            extra.append(contest_note)
+            view.contest_note = contest_note
         # HOTFIX-006 N9: a correct answer that landed past the window. It
         # rides here so the miss is ANNOUNCED with its reason — the live
         # alternative was Rami's "Okay. It's Jupiter." vanishing while
         # "Go." took the blame on his q_1052 row.
         late_note = getattr(self, "_late_answer_note", None)
         if late_note:
-            extra.append(late_note)
+            view.late_answer_note = late_note
         if not self.game_started:
-            extra.append(
+            lobby = [
                 "game not started: you are in the lobby — bind names, fish "
                 "for lobby facts, and wait for clear start language"
-            )
+            ]
             if self.promoted_categories:
                 # Gated category proposals (F): PROMOTED extras only —
                 # unpromoted candidates are never announced.
-                extra.append(
+                lobby.append(
                     "extra categories in tonight's rotation (promoted by "
                     "player demand — you may mention these): "
                     + ", ".join(self.promoted_categories)
                 )
-        return extra
+            view.lobby = lobby
+        return view
 
     # -- burn protocol (say-gate WO §1) ------------------------------------------
 
