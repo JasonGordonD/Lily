@@ -10172,6 +10172,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     "session=%s", embed_ms, resolve_ms, self.sk.session_id,
                 )
             self._voice_identity_resolved = True
+            # Recognition-latency closure (lily-639007: 2.5 min to know a
+            # player whose centroid was 2.5h fresh — and nothing persisted
+            # said whether the match MISSED or never RAN). The outcome now
+            # rides the session report; no log export needed to tell.
+            self._voice_id_outcome = (
+                "no_match" if match is None
+                else f"match:{str(match['group_id'])[:16]}:{match['score']:.3f}"
+            )
             if match is None or match["group_id"] == self.group_id:
                 if match is None:
                     # Z3: no-match is not resolution while the name door
@@ -10225,6 +10233,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return True
         except Exception as e:
             self._voice_identity_resolved = True
+            self._voice_id_outcome = f"failed:{type(e).__name__}"
             # Z3: a failed probe gave no answer either — same hold shape.
             self._voice_identity_no_match_at = time.time()
             logger.warning("LILY_VOICE_ID | MATCH_AT_START_FAILED | %s", e)
@@ -16351,6 +16360,18 @@ async def entrypoint(ctx: JobContext) -> None:
                     "question_timeline": getattr(
                         scorekeeper, "question_timeline", {}
                     ),
+                    # Voice-ID closure: outcome + timing persist so a slow
+                    # or missed recognition explains itself from the DB row.
+                    "voice_identity": {
+                        "outcome": getattr(game, "_voice_id_outcome", None)
+                        or ("never_ran" if not getattr(
+                            game, "_voice_identity_attempted", False
+                        ) else "attempted_no_outcome"),
+                        "embed_ms": getattr(game, "_voice_id_embed_ms", None),
+                        "resolve_ms": getattr(
+                            game, "_voice_id_resolve_ms", None
+                        ),
+                    },
                 }
                 await lily_persistence.lily_session_end(
                     supabase, scorekeeper,
@@ -16729,6 +16750,14 @@ async def entrypoint(ctx: JobContext) -> None:
             "question_timeline": getattr(
                 scorekeeper, "question_timeline", {}
             ),
+            "voice_identity": {
+                "outcome": getattr(game, "_voice_id_outcome", None)
+                or ("never_ran" if not getattr(
+                    game, "_voice_identity_attempted", False
+                ) else "attempted_no_outcome"),
+                "embed_ms": getattr(game, "_voice_id_embed_ms", None),
+                "resolve_ms": getattr(game, "_voice_id_resolve_ms", None),
+            },
         }
 
     # Heartbeat checkpoint loop (60s) — carries rolling latency averages so

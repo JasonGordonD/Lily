@@ -784,6 +784,20 @@ class LilySpeechDeliveryMixin:
         if started is None:
             started = self._playout_started_ids = set()
         started.add(speech_id)
+        # DISPATCH_TO_AIR (lily-639007: a verdict composite took ~17s from
+        # answer to air and nothing said where the time went —
+        # COMMIT_TO_DISPATCH_MS read 0, so the whole 17s hid between
+        # dispatch and first audio frame: LLM generation + TTS + queue).
+        # The flight record already carries the dispatch stamp; one line
+        # here decomposes every composite's latency at zero new state.
+        flight = getattr(self, "_composite_flight_state", None)
+        if flight is not None and flight.get("owner") == speech_id:
+            logger.info(
+                "LILY_LATENCY | DISPATCH_TO_AIR_MS | session=%s act=%s "
+                "ms=%.0f",
+                self.sk.session_id, flight.get("act"),
+                (time.monotonic() - float(flight.get("at") or 0.0)) * 1000,
+            )
         # Transcript sync (2026-08-09 live report): the glass used to see
         # Lily's line only at playout COMPLETION — a long read trailed the
         # voice by the whole turn. The exact aired text is already bound to
