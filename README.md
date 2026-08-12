@@ -783,6 +783,57 @@ state block read aloud, and an answer leak (the Bosporus answer spoken
 BEFORE its question) — is closed by one gateway: `lily_say_gate.py`
 (pure stdlib, offline-tested) plus its wiring in `lily_agent.py`.
 
+### The tts_node speech pipeline (REFACTOR W1b)
+
+That wiring — the sequence of gates `tts_node` applies to every outbound
+turn before synthesis — was ~600 inline lines. It is now a named,
+composable pipeline: 17 `SpeechTransform` stages (defined just above
+`LilyAgent`) run in order by `run_say_pipeline()`. `tts_node` is a thin
+driver: accumulate the streamed chunks, run the pipeline over a
+`SpeechTurn`, then either speak `turn.text` or (on a `Silence`) schedule
+any regen/retry and yield the silence frame. **No behavior change** — each
+stage calls the same pure helper / `LilyGame` method with identical
+arguments, branch logic, and ORDER as the inline block it replaced.
+
+The stages, in running order (the operator's naming plus five real blocks
+it did not name — order in the code wins):
+
+| # | stage `name` | what it does |
+|---|---|---|
+| 1 | `leak_filter` | strip injected state-block context; burn a live question on an answer-bearing leak (the `c6d7dac` tool-call-JSON backstop lives here) |
+| 2 | `hygiene_clean`\* | strip markdown/emoji, keep `[audio tags]` |
+| 3 | `reveal_delivery_fusion_clip`\* | CLASS 2 — clip a next-question fused onto an open reveal |
+| 4 | `score_line_gate` | CLASS 1 — spoken score = ledger only |
+| 5 | `false_empty_rewrite` | never claim "clean slate" while identity is unsettled |
+| 6 | `on_screen_claim_rewrite` | "look at the screen" only after image confirmed |
+| 7 | `dispute_sycophancy_rewrite` | ban "you're right" openers mid-dispute |
+| 8 | `yield_after_first_question` | end conversational turns at the first question (MC deliveries exempt) |
+| 9 | `repeat_lints`\* | log-only mirror/stacked/repeat/paraphrase lints; sets `repeat_kind` |
+| 10 | `regen_gate` | suppress + regenerate a verbatim re-air once; silence a stubborn third copy |
+| 11 | `empty_candidate_retry`\* | retry an empty candidate; force the armed sheet on a second empty delivery |
+| 12 | `back_hold_narration`\* | back a spoken "stopped" claim with real hold state |
+| 13 | `delivery_claim` | structural `q_{N}_delivery` claim; resume-verbatim; suppress duplicate/held |
+| 14 | `unowned_kickoff_suppress` | only the delivery owner may carry kickoff language |
+| 15 | `transition_narration` | N12 — one narration per transition |
+| 16 | `air_dup_guard` | suppress a verbatim repeat of a recently-played turn |
+| 17 | `punctuation_flush` | append a terminal period so the tokenizer flushes |
+
+Two invariants the shape now enforces structurally:
+
+- **Suppression funnel (GUARD_MAP chain F):** marking
+  `_suppressed_speech_ids` and releasing the say-registry owner go through
+  `SpeechTurn.mark_suppressed()` / `release_owner_or_pending()` — a newly
+  added guard cannot silently skip the funnel and journal a never-aired
+  turn as said.
+- **Observability:** every mutating/suppressing stage emits one uniform
+  line, `LILY_SAY | TRANSFORM | name=<stage> action=replace|suppress`,
+  alongside its original bespoke log.
+
+Tests: `tests/test_say_pipeline.py` — each stage in isolation via light
+fakes (no `LilyAgent` instance needed, which is the composability win),
+the stage-order pin, the `mark_suppressed` funnel, and golden turns driven
+end-to-end through `run_say_pipeline`.
+
 ### Idempotent speech acts
 
 Game-critical speech acts carry state keys — `session_greet`,

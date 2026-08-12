@@ -68,6 +68,41 @@ Fixture `lily-639007-f80aa6bf`.
   memory warnings (fixed 120s monitor, static RSS baseline) are two
   independent problems; memory not tuned under this WO.
 - Tests: `tests/test_livefire_class8_hygiene.py` (5). Suite green (2453).
+## 2026-08-12 — REFACTOR W1b: tts_node named SpeechTransform pipeline
+
+`tts_node` was ~600 lines of sequential surgery — each block a live fix. They
+are now 17 named, independently-testable `SpeechTransform` stages run in order
+by `run_say_pipeline()` (defined in `lily_agent.py` just above `LilyAgent`).
+**No behavior change** — every stage calls the same `lily_say_gate` /
+`lily_scorekeeper` / `LilyGame` helpers with identical arguments, branch logic,
+and ORDER; the full suite is byte-identical green (2448 → 2489 with the new
+stage tests).
+
+- **Stages (real code order — the operator's 12-name list plus 5 real blocks it
+  omitted, noted below):** `leak_filter`, `hygiene_clean`*,
+  `reveal_delivery_fusion_clip`* (CLASS 2), `score_line_gate` (CLASS 1),
+  `false_empty_rewrite`, `on_screen_claim_rewrite`, `dispute_sycophancy_rewrite`,
+  `yield_after_first_question`, `repeat_lints`*, `regen_gate`,
+  `empty_candidate_retry`*, `back_hold_narration`*, `delivery_claim`,
+  `unowned_kickoff_suppress`, `transition_narration` (N12), `air_dup_guard`,
+  `punctuation_flush`. (`*` = real block not in the operator's naming list;
+  order in the running code wins, as instructed.)
+- **Suppression funnel (GUARD_MAP chain F):** the mark-`_suppressed_speech_ids`
+  dance and owner release are funnelled through `SpeechTurn.mark_suppressed()` /
+  `release_owner_or_pending()` — a new guard cannot silently skip the funnel.
+- **Observability:** each mutating/suppressing stage emits one uniform line,
+  `LILY_SAY | TRANSFORM | name=<stage> action=replace|suppress`, in addition to
+  its original bespoke log — completing the existing `LILY_SAY | …` dialect.
+- **`Silence`** sentinel carries an optional `schedule` (regen / empty-retry) the
+  orchestrator `ensure_future`s before yielding the silence frame; `tts_node`
+  is now a thin driver (accumulate chunks → `run_say_pipeline` → speak or
+  silence). The tool-call-JSON say-gate backstop (`c6d7dac`) survives verbatim
+  as the `LeakFilter` stage.
+- **Tests:** `tests/test_say_pipeline.py` (41) — every stage in isolation via
+  light fakes (no `LilyAgent`), stage-order pin, `mark_suppressed` funnel, and
+  golden end-to-end turns. Two source-order pins re-scoped to the new structure
+  (invariant preserved): `test_transcript_truth` trim-before-synthesis,
+  `test_hostloop` resume-before-claim.
 
 ## 2026-08-12 — WO-LILY-LIVEFIRE-001 CLASS 7: recognition latch (7a; 7b/7c/7d flagged)
 
