@@ -21,6 +21,10 @@ import uuid
 import lily_config
 import lily_evaluation
 import lily_say_gate
+# C4: control-command detection lives in lily_scorekeeper (which imports
+# lily_evaluation, never this module — no cycle). The pre-window buffer needs
+# the same command exclusion the in-window candidate recorder already applies.
+import lily_scorekeeper
 
 logger = logging.getLogger("lily.agent")
 
@@ -375,6 +379,14 @@ class LilySpeechDeliveryMixin:
             self._active_delivery_ended_at = None
             if getattr(self, "_mc_delivery_qnum", None) == self.sk.question_number:
                 self._mc_delivery_started_at = now
+                # HOSTLOOP-001 C3a: the answer window arms at the CORE
+                # QUESTION's completion, not at full-choices playout. The
+                # stem's spoken length is already modelled (WS-5's
+                # stem-protection estimator, the same knob), and the core
+                # sentence completing is exactly the boundary that estimator
+                # names — so the arm rides it rather than adding a second
+                # notion of "the question has been asked".
+                self._schedule_core_completion_window(self.sk.question_number)
             self.mark_stem_aired(self.sk.question_number)
             # THE QUESTION IS NOW AUDIBLE — so it belongs on the glass and
             # in the group's burn ledger. Both used to wait for the delivery
@@ -1086,7 +1098,20 @@ class LilySpeechDeliveryMixin:
         it never became a candidate. Finals arriving between the delivery
         CLAIM and window open now buffer (last 6) and replay at open.
         No-op unless a question is armed and its delivery is claimed —
-        lobby chatter and post-window banter never buffer."""
+        lobby chatter and post-window banter never buffer.
+
+        HOSTLOOP-001 C4: and never unless the final is ANSWER-SHAPED. This
+        buffer is the one lane that can put speech in front of adjudication
+        without the speech ever having been inside an open window: the
+        replay calls on_transcript_segment(assume_in_window=True), which by
+        design bypasses BOTH the WS-10 sanity gate and window membership, so
+        whatever lands here is a candidate by construction. It used to take
+        every final that overlapped delivery playout, which is how the
+        Session A (2026-08-12 04:50 UTC) complaint fragment "Like speaking
+        at the." became the q6 answer and was scored incorrect. Speech that
+        is not an answer attempt still reaches Lily conversationally — the
+        caller records it into `transcripts` and runs on_transcript_event
+        either way — it simply never becomes scoreable."""
         if (
             getattr(self, "_delivery_stop_sticky", False)
             or self.sk.answer_window_open
@@ -1096,6 +1121,15 @@ class LilySpeechDeliveryMixin:
             return
         key = f"q_{self.sk.question_number}_delivery"
         if self.say_registry.state(key) is None:
+            return
+        if not self._seg_answer_shaped(seg):
+            logger.info(
+                "LILY_ANSWER | PRE_WINDOW_NOT_ANSWER_SHAPED | session=%s "
+                "q=%d speaker=%s text=%r — kept as conversation, never a "
+                "candidate (C4)",
+                self.sk.session_id, self.sk.question_number,
+                seg.get("speaker_label"), (seg.get("text") or "")[:80],
+            )
             return
         buf = self._pre_window_segments
         if buf is None:
@@ -1192,6 +1226,308 @@ class LilySpeechDeliveryMixin:
         """Retired: pre-claim speech can never answer a queued question."""
         self._recent_finals = []
 
+    # -- HOSTLOOP-001 C3/C4: answer-shape + mid-read resume ----------------
+
+    def core_completion_delay(self, now: float) -> float | None:
+        """Seconds from `now` until the CORE question sentence is estimated
+        to finish airing, or None when that is not knowable/applicable.
+
+        Reuses WS-5's stem model exactly: stem word count / configured
+        words-per-second, measured from actual playout start. Already
+        elapsed = 0.0 (arm immediately)."""
+        started = getattr(self, "_mc_delivery_started_at", None)
+        if started is None:
+            return None
+        wps = lily_config.mc_stem_protect_words_per_second()
+        if wps <= 0:
+            return None
+        stem_words = getattr(self, "_mc_delivery_stem_words", 0)
+        return max(0.0, (started + (stem_words / wps)) - now)
+
+    def _core_completion_window_should_arm(self, qnum: int) -> bool:
+        """Guards for the C3a arm, read at FIRE time (not schedule time)."""
+        if qnum != self.sk.question_number:
+            return False
+        if self.armed_question is None:
+            return False
+        if self.sk.answer_window_open or getattr(self, "_adjudicating", False):
+            return False
+        if getattr(self, "_delivery_stop_sticky", False):
+            return False
+        if getattr(self, "game_over", False):
+            return False
+        if not getattr(self, "game_started", False):
+            return False
+        # The read must still be the live one; a delivery that already ended
+        # goes through the normal playout-completion open.
+        return getattr(self, "_mc_delivery_qnum", None) == qnum
+
+    def _schedule_core_completion_window(self, qnum: int) -> None:
+        """C3a: arm the answer window when the core question sentence
+        completes, leaving the options to keep airing into an OPEN window.
+
+        Session B (lily-05BB92) is the cost of waiting for CONFIRMED: the
+        window was still closed through the whole options read, so a barge
+        during the choices could not bind an answer even in principle. The
+        existing pre-window buffer covered the fast buzzer for a read that
+        RAN TO COMPLETION; it could do nothing for a read that never
+        completed, because the replay only ever happens at window open."""
+        delay = self.core_completion_delay(time.time())
+        if delay is None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # offline/fixture: fixtures call open_window directly
+
+        async def _arm() -> None:
+            await asyncio.sleep(delay)
+            if not self._core_completion_window_should_arm(qnum):
+                return
+            logger.info(
+                "LILY_WINDOW | CORE_COMPLETION_ARM | session=%s q=%d — core "
+                "question aired; window opens with options still reading "
+                "(C3a)",
+                self.sk.session_id, qnum,
+            )
+            self.open_window_after_discharge(core_completion=True)
+
+        asyncio.ensure_future(_arm())
+
+    def _seg_answer_shaped(self, seg: dict) -> bool:
+        """Is this captured final an answer ATTEMPT at the live question?
+
+        Thin adapter over lily_evaluation.lily_answer_shaped: it supplies the
+        armed question and the control-command flag (a "skip"/"back to
+        normal" during a read is a command, never an answer — the same
+        exclusion the in-window candidate recorder already applies in
+        lily_scorekeeper.on_transcript_segment)."""
+        armed = self.armed_question
+        if armed is None:
+            return False
+        text = seg.get("text") or ""
+        try:
+            is_command = (
+                lily_scorekeeper.lily_detect_control_command(text) is not None
+            )
+            return lily_evaluation.lily_answer_shaped(
+                text, armed, is_command=is_command
+            )
+        except Exception as e:
+            # Never let a shape check take down capture. Failing OPEN here
+            # would re-open the Session A hole, so it fails CLOSED: the
+            # utterance stays conversational.
+            logger.warning("LILY_ANSWER | answer-shape check failed: %s", e)
+            return False
+
+    def _mc_choice_airing_index(self, now: float) -> int | None:
+        """Which choice index (0-3) was on the air at `now`, or None if the
+        read is not estimably inside the options yet.
+
+        There is no per-sentence playout signal at livekit-agents 1.6.x —
+        the whole stem+options delivery is ONE SpeechHandle (documented at
+        lily_config.mc_stem_protect_words_per_second). WS-5 already had to
+        model the stem/options boundary from a words-per-second estimate to
+        keep the stem protected; resuming from the interrupted choice needs
+        the same estimate carried one step further, per choice, so this
+        reuses that knob rather than adding a second timing model or new
+        playout instrumentation.
+
+        Returns the index whose read had STARTED but (by estimate) not
+        finished. A cut past the last choice returns 3 — nothing is owed."""
+        started = getattr(self, "_mc_delivery_started_at", None)
+        if started is None:
+            return None
+        wps = lily_config.mc_stem_protect_words_per_second()
+        if wps <= 0:
+            return None
+        armed = self.armed_question or {}
+        choices = armed.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return None
+        words_aired = max(0.0, (now - started)) * wps
+        # The stem is spoken first and is protected; anything inside it means
+        # no choice has begun.
+        cursor = float(getattr(self, "_mc_delivery_stem_words", 0))
+        if words_aired < cursor:
+            return None
+        for index, choice in enumerate(choices):
+            # +1 for the spoken letter label ("B)") that rendered_armed_
+            # question puts in front of every option.
+            cursor += 1.0 + len(str(choice).split())
+            if words_aired < cursor:
+                return index
+        return len(choices) - 1
+
+    def rendered_armed_choices_from(self, index: int) -> str:
+        """The armed question's choices from `index` onward, in the SAME
+        deterministic spoken form rendered_armed_question uses (shared
+        MC_CHOICE_LETTERS labels) — the resume sheet for a read that was cut
+        part-way through the options."""
+        armed = self.armed_question or {}
+        choices = armed.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        labels = lily_evaluation.MC_CHOICE_LETTERS
+        start = max(0, min(int(index), len(labels) - 1))
+        return "\n".join(
+            f"{labels[i]}) {choice}"
+            for i, choice in enumerate(choices[: len(labels)])
+            if i >= start
+        )
+
+    def arm_delivery_resume(self, text: str) -> None:
+        """Stage the EXACT text the resumed read must speak. Consumed once,
+        in tts_node, before the delivery-claim decision — so the resume is
+        verbatim by construction and does not depend on the model choosing
+        to honour a 'pick up where you left off' directive (the existing
+        _REGEN_DELIVERY_DIRECTIVE is model-mediated, and Y7 disarms the gate
+        that would carry it on a barge-in anyway)."""
+        self._pending_delivery_resume = (text or "").strip() or None
+
+    def take_pending_delivery_resume(self) -> str | None:
+        """One-shot consume of the staged resume text (tts_node)."""
+        text = getattr(self, "_pending_delivery_resume", None)
+        self._pending_delivery_resume = None
+        return text
+
+    def mcq_barge_resume(self, now: float) -> bool:
+        """HOSTLOOP-001 C3c — a NON-answer-shaped barge during a question
+        read: cancel the TTS and RESUME from the interrupted choice.
+
+        This is the deliberate carve-out from Y7 (HOTFIX-007), and it is
+        scoped exactly to phase=question / delivery=active. Y7's finding
+        stands everywhere else: a barge-in is a CANCEL, she yields the floor,
+        nothing brings the killed line back. But a question read is not a
+        conversational line — it is an OBLIGATION. Session B (lily-05BB92)
+        is what Y7's policy does to it: the barge cancelled the read, no
+        resume was armed, the choices never aired, and the question sat
+        half-delivered with nothing pending. Y7 stays as written; questions
+        get their floor back.
+
+        Returns True if a resume was armed and dispatched."""
+        index = self._mc_choice_airing_index(now)
+        if index is None:
+            return False
+        remaining = self.rendered_armed_choices_from(index)
+        if not remaining:
+            return False
+        qnum = self.sk.question_number
+        logger.info(
+            "LILY_BARGE | QUESTION_RESUME | session=%s q=%d from_choice=%s — "
+            "non-answer barge during the read; cancelling TTS and resuming "
+            "the options from here (C3c carve-out from Y7 BARGE_IN_CANCEL)",
+            self.sk.session_id, qnum,
+            lily_evaluation.MC_CHOICE_LETTERS[index:index + 1] or index,
+        )
+        self._interrupt_current_speech()
+        self.arm_delivery_resume(remaining)
+        self.gated_say(
+            None,
+            "question_nudge",
+            (
+                "You were talked over part-way through reading the options. "
+                "Do not start the question again — the table already has the "
+                "stem and the options before this one. Read exactly the "
+                "remaining options, nothing else, then stop and let them "
+                "answer:\n" + remaining
+            ),
+            source="mcq_barge_resume",
+        )
+        self._delivery_barge_cut_qnum = None
+        return True
+
+    def note_question_barge_cut(self, qnum: int) -> None:
+        """A question delivery was cut by a DELIBERATE barge-in and its
+        window never opened. Called from on_agent_speech_finished, at the
+        exact point where Y7 decides the cut cause — so the carve-out reads
+        Y7's own decision instead of re-deriving it.
+
+        Marks the question as owing either a binding or a resume, and arms
+        the fallback. The fallback matters because the utterance that caused
+        the barge may never reach us: the framework drops a transcript that
+        falls inside `ignore_user_transcript_until` (Y7's own docstring
+        records this), so "wait for the final and then decide" cannot by
+        itself satisfy the C3d invariant."""
+        self._delivery_barge_cut_qnum = qnum
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # Offline/fixture context: the marker is set and the fixtures
+            # drive the decision paths directly.
+            return
+        asyncio.ensure_future(self._question_barge_resume_watch(qnum))
+
+    def _question_barge_resume_still_owed(self, qnum: int) -> bool:
+        """True when question `qnum` is still half-aired with nothing
+        pending: barge-cut, no answer bound, no resume already dispatched.
+        This IS the C3d invariant, expressed once, in one place.
+
+        Note what is NOT a guard here: an OPEN answer window. Under C3a the
+        window opens at core completion, so a barge during the options read
+        lands with the window already open — and an open window does not
+        discharge the obligation to finish reading the choices the table was
+        promised. Only a bound answer, or a resume already out, does."""
+        if getattr(self, "_delivery_barge_cut_qnum", None) != qnum:
+            return False
+        if qnum != self.sk.question_number:
+            return False
+        if getattr(self, "_adjudicating", False):
+            return False
+        if getattr(self, "_delivery_stop_sticky", False):
+            return False
+        if getattr(self, "game_over", False):
+            return False
+        if self.armed_question is None:
+            return False
+        # An answer that already bound sits either in the pre-window buffer
+        # (window not yet open) or in the window's candidates (C3a span).
+        if self._pre_window_segments or []:
+            return False
+        try:
+            if self.sk.ordered_candidates():
+                return False
+        except Exception:
+            pass
+        return True
+
+    async def _question_barge_resume_watch(self, qnum: int) -> None:
+        """Fallback arm of the C3d invariant: if the barge's own utterance
+        never arrives to be judged, resume the read anyway. Grace matches the
+        cut-recovery watchdog's (existing knob), so a real answer landing
+        just after the barge still wins the race and binds."""
+        await asyncio.sleep(lily_config.cut_recovery_grace())
+        if not self._question_barge_resume_still_owed(qnum):
+            return
+        logger.warning(
+            "LILY_BARGE | QUESTION_RESUME_FALLBACK | session=%s q=%d — barge "
+            "utterance never reached adjudication; resuming the read so the "
+            "question cannot end half-aired (C3d)",
+            self.sk.session_id, qnum,
+        )
+        self.mcq_barge_resume(time.time())
+
+    def _maybe_resume_mcq_read(
+        self, seg: dict, *, now: float | None = None
+    ) -> bool:
+        """C3c decision for one captured final during an MC question read.
+
+        Only a NON-answer-shaped utterance gets here (the answer-shaped case
+        bound in mc_early_answer_check). Resumes only when the read is
+        genuinely dead — `note_question_barge_cut` marked it — so a read that
+        is still airing, or that completed and is merely waiting out the
+        room-discharge gap, is never re-read."""
+        ref = now if now is not None else time.time()
+        qnum = self.sk.question_number
+        if not self._question_barge_resume_still_owed(qnum):
+            return False
+        if self._seg_answer_shaped(seg):
+            # Answer-shaped but unbindable here (stem still protected, or
+            # aborts-read disabled). Leave the marker: the fallback resolves
+            # it, and the pre-window buffer still carries the answer.
+            return False
+        return self.mcq_barge_resume(ref)
+
     def _note_mc_delivery_start(self, qnum: int) -> None:
         """WS-5: mark a multiple-choice delivery (stem+options, one turn)
         in flight so a correct answer during the options read can truncate
@@ -1273,7 +1609,17 @@ class LilySpeechDeliveryMixin:
         qnum = getattr(self, "_mc_delivery_qnum", None)
         if qnum is None:
             return False
-        if self.armed_question is None or self.sk.answer_window_open:
+        if self.armed_question is None:
+            return False
+        # C3a: the window may legitimately be OPEN while the options are
+        # still reading. That used to be impossible, so an open window meant
+        # "the read is over, nothing to truncate" and this returned. Now the
+        # open window is the normal state for the second half of an MC read:
+        # the answer is already recorded as an in-window candidate by the
+        # scorekeeper (it runs ahead of this fork), so all that is owed here
+        # is TRUNCATION — recorded in `already_open` and honoured below.
+        already_open = bool(self.sk.answer_window_open)
+        if already_open and getattr(self, "_mc_delivery_qnum", None) != qnum:
             return False
         if getattr(self, "_adjudicating", False):
             return False
@@ -1297,13 +1643,27 @@ class LilySpeechDeliveryMixin:
         except Exception as e:
             logger.warning("LILY_MC | early-answer eval failed: %s", e)
             return False
-        if verdict != "correct":
+        # HOSTLOOP-001 C3b: an ANSWER-SHAPED barge binds, right or wrong.
+        #
+        # WS-5 required verdict == "correct" here, which was sound for its
+        # own goal (only a provably right answer may cut options short) but
+        # left the wrong-but-committed pick with nowhere to go: "B" or
+        # "Sydney" mid-read returned False, so the utterance never bound, and
+        # the barge that produced it was handed to Y7 as an ordinary cancel.
+        # Session B (lily-05BB92) is that gap — answer window closed, floor
+        # yielded, choices dead, nothing re-aired.
+        #
+        # MC Tier-1 resolves a SELECTION independently of correctness, so
+        # "answer-shaped" is a strictly wider set than "correct" and the
+        # verdict is still what adjudication uses. A resolved wrong pick is
+        # a committed answer; it ends the read and goes to verdict.
+        if verdict != "correct" and not self._seg_answer_shaped(seg):
             return False
         logger.info(
-            "LILY_MC | ANSWER_ABORTS_READ | session=%s q=%d speaker=%s — "
-            "correct answer during options read; truncating options and "
-            "adjudicating",
-            self.sk.session_id, qnum, seg.get("speaker_label"),
+            "LILY_MC | ANSWER_ABORTS_READ | session=%s q=%d speaker=%s "
+            "verdict=%s — answer-shaped utterance during options read; "
+            "binding it, truncating remaining options, adjudicating (C3b)",
+            self.sk.session_id, qnum, seg.get("speaker_label"), verdict,
         )
         # Clear the flag first so a second final in the same turn cannot
         # re-enter, then halt the read and open the window early. Seeding
@@ -1319,7 +1679,20 @@ class LilySpeechDeliveryMixin:
         # this final arrived, the buffer's claim-present guard would drop a
         # confirmed-correct answer. We have already validated it here.
         self._mc_delivery_qnum = None
+        # C3b/C3d: this question is answered — it can no longer be owed a
+        # resume, whichever way the barge is reported.
+        self._delivery_barge_cut_qnum = None
         self._interrupt_current_speech()
+        if already_open:
+            # C3a span: the window is live and the scorekeeper already
+            # recorded this utterance as a candidate. Truncate the read and
+            # go to verdict — re-seeding + re-opening would double-count it.
+            self._active_delivery_qnum = None
+            self._active_delivery_started_at = None
+            self._active_delivery_ended_at = None
+            if not getattr(self, "_adjudicating", False):
+                asyncio.ensure_future(self.adjudicate(steal_allowed=False))
+            return True
         buf = self._pre_window_segments
         if buf is None:
             buf = []
@@ -1327,6 +1700,16 @@ class LilySpeechDeliveryMixin:
         buf.append(dict(seg))
         del buf[:-6]
         self.open_window()
+        # C3b: "bind it, skip the remaining choices, PROCEED TO VERDICT".
+        # open_window's replay runs the instant Tier-1 fast path only for a
+        # CORRECT answer — right for the ordinary early-buzz case it was built
+        # for, but a committed WRONG pick would then sit out the whole window
+        # clock after the read had already been cut short: dead air on a
+        # question that is, as far as the table is concerned, over. The
+        # correct case is left exactly as WS-5 had it (the replay adjudicates
+        # it) so this never double-fires.
+        if verdict != "correct" and not getattr(self, "_adjudicating", False):
+            asyncio.ensure_future(self.adjudicate(steal_allowed=False))
         return True
 
     def early_answer_check(
@@ -1336,12 +1719,24 @@ class LilySpeechDeliveryMixin:
         now: float | None = None,
         nbest: dict | None = None,
     ) -> bool:
-        """Let a shouted correct answer end any in-flight question read.
+        """Let a shouted answer end any in-flight question read.
 
         Multiple choice keeps its existing stem-protection rule. Freeform
         questions intentionally allow experts to jump on an early clue; only
         a deterministic Tier-1 correct match truncates the read, so table
         chatter and wrong guesses do not prematurely end the question.
+
+        HOSTLOOP-001 C3: this is the barge fork for phase=question /
+        delivery=active, and it now has BOTH arms the clause requires. An
+        answer-shaped utterance binds (C3b, below / mc_early_answer_check).
+        An MC barge that is NOT answer-shaped no longer just falls through to
+        Y7's cancel — it resumes the read from the interrupted choice (C3c,
+        mcq_barge_resume), which is what keeps the C3d invariant true: a
+        question can never end half-aired with neither an answer bound nor a
+        resume pending. Returns True when the read was ended by a binding
+        answer (the caller then skips pre-window buffering); a RESUME returns
+        False, because nothing was bound and the utterance stays ordinary
+        conversation.
         """
         armed = self.armed_question or {}
         choices = armed.get("choices")
@@ -1349,7 +1744,9 @@ class LilySpeechDeliveryMixin:
             aborted = self.mc_early_answer_check(seg, now=now, nbest=nbest)
             if aborted:
                 self.mark_deterministic_reply(seg.get("text") or "")
-            return aborted
+                return True
+            self._maybe_resume_mcq_read(seg, now=now)
+            return False
         qnum = getattr(self, "_active_delivery_qnum", None)
         if qnum is None or qnum != self.sk.question_number:
             return False

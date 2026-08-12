@@ -381,8 +381,28 @@ def lily_tier1_band(
 
 MC_CHOICE_LETTERS = "ABCD"
 
-_LETTER_INDEX = {"a": 0, "b": 1, "c": 2, "d": 3}
-_LETTER_RE = re.compile(r"^(?:letter |option |choice )?([abcd])$")
+# HOSTLOOP-001 C3b: NATO letter spellings resolve to their letter. A table
+# that has been read "A) ... B) ..." answers "bravo" as often as "B" — and
+# every such pick used to land as "uncertain" (no selection resolved), which
+# on the barge path meant NOT answer-shaped: the utterance never bound, the
+# choices died, nothing re-aired (Session B, lily-05BB92). The spelling
+# alphabet already exists in lily_binding._NATO_CANONICAL, but that copy is
+# name-binding vocabulary (HOTFIX-009 W7) and is cue-gated on a NAME
+# introducer, so it can never resolve a CHOICE; only the four letters an MC
+# question actually offers belong here.
+#
+# Anchored, whole-utterance only (as with the bare letters): a resolved pick
+# is the entire utterance after fillers strip. Per-choice TEXT matching still
+# runs FIRST in lily_tier1_evaluate_mc, so a question whose option really is
+# "Delta" resolves by choice_text, not by this spelling.
+_LETTER_INDEX = {
+    "a": 0, "b": 1, "c": 2, "d": 3,
+    "alpha": 0, "alfa": 0, "bravo": 1, "charlie": 2, "delta": 3,
+}
+_LETTER_RE = re.compile(
+    r"^(?:letter |option |choice )?"
+    r"(alpha|alfa|bravo|charlie|delta|[abcd])$"
+)
 _ORDINAL_INDEX = {"first": 0, "second": 1, "third": 2, "fourth": 3, "last": 3}
 _POSITIONAL_RE = re.compile(
     r"^(?:the )?(first|second|third|fourth|last)"
@@ -540,6 +560,78 @@ def lily_tier1_evaluate_question(
     return lily_tier1_evaluate(
         transcript_text, q.get("acceptable_answers") or [], threshold=threshold
     )
+
+
+# HOSTLOOP-001 C3b/C4 — "is this utterance an ANSWER ATTEMPT?", which is a
+# different question from "is it RIGHT?".
+#
+# Both live failures came from conflating the two:
+#
+#   Session B (lily-05BB92): the only barge path that could bind an answer
+#   mid-read required verdict == "correct" (WS-5 mc_early_answer_check). A
+#   player who barged with a WRONG-but-committed pick ("B", "Sydney") was
+#   therefore not "an answer" to that gate, fell through to Y7's
+#   BARGE_IN_CANCEL, and the question died half-aired: choices killed, no
+#   binding, no re-air.
+#
+#   Session A (04:50 UTC): the reverse error. The pre-window buffer took ANY
+#   final that overlapped delivery playout, so the complaint fragment "Like
+#   speaking at the." was replayed at window open with assume_in_window=True
+#   and scored as the q6 answer (verdict=incorrect).
+#
+# One predicate answers both, and it deliberately owns NO matching logic of
+# its own — it reads the verdict/selection the existing Tier-1 matchers
+# already produce.
+_ANSWER_SHAPE_MIN_CHARS = 2
+
+
+def lily_answer_shaped(
+    text: str,
+    question: dict,
+    *,
+    is_command: bool = False,
+) -> bool:
+    """True when `text` is an ANSWER ATTEMPT at `question` — right or wrong.
+
+    Multiple choice: the utterance RESOLVES one of the armed choices, by
+    letter ("B", "letter b"), NATO spelling ("bravo"), position ("the second
+    one") or (fuzzy) choice text. That is exactly
+    `lily_tier1_evaluate_mc`'s `selected_index is not None`, so this reads
+    that field rather than re-deriving it — MC Tier-1 returns "incorrect"
+    for a clean pick of a wrong option and "uncertain" ONLY when nothing
+    resolved, which is precisely the answer-shaped / not-answer-shaped line.
+
+    Open (freeform) questions have no closed option set to resolve against,
+    so "answer-shaped" is the weaker content test the clause names: any
+    content utterance that is not itself a question and not a control
+    command. A correct freeform match short-circuits regardless.
+
+    `is_command` is passed in by the caller (lily_scorekeeper owns command
+    detection and imports this module — the flag keeps that direction of
+    dependency intact and this function pure).
+    """
+    raw = (text or "").strip()
+    if not raw or is_command:
+        return False
+    q = question or {}
+    choices = q.get("choices")
+    if isinstance(choices, list) and len(choices) == 4:
+        return (
+            lily_tier1_evaluate_question(raw, q).get("selected_index")
+            is not None
+        )
+    # Freeform. A deterministic Tier-1 hit is answer-shaped by construction.
+    if lily_tier1_evaluate_question(raw, q).get("verdict") == "correct":
+        return True
+    # Asking is not answering — "wait, what was C again?" is conversation,
+    # and the re-offer path (not adjudication) owes it a reply.
+    if "?" in raw:
+        return False
+    stripped = _strip_fillers(raw)
+    if not stripped or len(stripped) < _ANSWER_SHAPE_MIN_CHARS:
+        # Pure filler ("I think...", "um") carries no content to score.
+        return False
+    return True
 
 
 def lily_tier1_evaluate_nbest(

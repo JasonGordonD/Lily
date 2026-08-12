@@ -289,14 +289,63 @@ def test_stem_is_protected_early_answer_does_not_truncate():
     assert game._mc_delivery_qnum == qnum
 
 
-# -- Layer 2: a wrong pick during the options read never truncates ------------
+# -- SUPERSEDED by HOSTLOOP-001 C3b ------------------------------------------
+#
+# This slot used to hold `test_wrong_pick_during_options_does_not_truncate`,
+# pinning "a wrong pick during the options read never truncates". WS-5 wanted
+# that: truncating a read is a costly act and only a provably CORRECT answer
+# earned it.
+#
+# Session B (lily-05BB92, 2026-08-12) is the bill for it. A resolved but WRONG
+# pick was not "an answer" to any gate on the barge path, so it fell through
+# to Y7's BARGE_IN_CANCEL: floor yielded, remaining choices killed, utterance
+# never bound, nothing re-aired. The question ended half-delivered.
+#
+# C3b redraws the line at ANSWER-SHAPED rather than CORRECT: a resolved pick
+# is a committed answer whether or not it is right, so it binds, ends the
+# read, and goes to verdict. Correctness is adjudication's job, not the barge
+# gate's. The stem protection, the feature toggle and the freeform rules that
+# WS-5 also pinned are unchanged and still tested above/below.
 
-def test_wrong_pick_during_options_does_not_truncate():
+def test_wrong_but_committed_pick_during_options_binds_and_truncates():
+    """C3b: an answer-shaped WRONG pick ends the read and adjudicates."""
     game = _make_game()
     game.sk.bind_speaker("S1", "Rami")
     _arm_and_claim(game, MC_QUESTION)
     game._mc_delivery_started_at = 200.0
-    aborted = game.mc_early_answer_check(_seg("Sydney", 205.0), now=205.0)
+
+    async def scenario():
+        aborted = game.mc_early_answer_check(_seg("Sydney", 205.0), now=205.0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return aborted
+
+    aborted = _run(scenario(), game)
+    assert aborted is True
+    assert game.session.interrupts == 1
+    assert game.sk.answer_window_open is True
+    cands = game.sk.ordered_candidates()
+    assert cands and cands[0]["text"] == "Sydney"
+    assert game.adjudications == [False]
+    # The verdict itself stays adjudication's call — the pick is simply bound.
+    assert (
+        lily_evaluation.lily_tier1_evaluate_question("Sydney", MC_QUESTION)[
+            "verdict"
+        ]
+        == "incorrect"
+    )
+
+
+def test_non_answer_speech_during_options_never_truncates():
+    """C3b's other side: non-answer speech is not an answer, so it must not
+    bind or truncate. (Its resume is C3c's job — pinned in the C3/C4 suite.)"""
+    game = _make_game()
+    game.sk.bind_speaker("S1", "Rami")
+    _arm_and_claim(game, MC_QUESTION)
+    game._mc_delivery_started_at = 200.0
+    aborted = game.mc_early_answer_check(
+        _seg("Like speaking at the.", 205.0), now=205.0
+    )
     assert aborted is False
     assert game.session.interrupts == 0
     assert game.sk.answer_window_open is False
