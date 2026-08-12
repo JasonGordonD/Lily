@@ -205,8 +205,23 @@ def _run(step):
             out = out()
         if asyncio.iscoroutine(out):
             out = await out
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        # Drain by SETTLING, not by counting ticks. The original two
+        # sleep(0) ticks encoded a Python-scheduler implementation detail:
+        # adjudicate's reveal-publish `await asyncio.gather(...)` resolves
+        # within two ticks on 3.11 and needs a third on 3.13 — which made
+        # this harness cancel adjudication mid-reveal ON CI ONLY and
+        # blocked every deploy from 2026-08-10 09:14 to 08-12 (the W4
+        # landing run itself was the first red). sleep(0) is a scheduler
+        # yield, never a timer, so W4's no-clock invariant is untouched;
+        # the bound exists only so a genuinely stuck task cannot hang the
+        # suite (it is cancelled below exactly as before).
+        for _ in range(25):
+            if not [
+                t for t in asyncio.all_tasks()
+                if t is not asyncio.current_task()
+            ]:
+                break
+            await asyncio.sleep(0)
         pending = [
             t for t in asyncio.all_tasks() if t is not asyncio.current_task()
         ]
