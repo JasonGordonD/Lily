@@ -18,6 +18,7 @@ import asyncio
 import inspect
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -154,15 +155,59 @@ def test_empty_or_none_turn_is_low():
     assert _lily_thinking_level_for_text(None) == "low"
 
 
-def test_llm_node_escalation_is_guarded_and_restores():
-    # The per-turn override must snapshot + restore so LOW is the default
-    # the plugin always returns to (source-level contract check).
+def test_llm_node_depth_is_per_call_not_mutated_on_shared_opts():
+    # W2b: vocal reasoning depth is chosen PER CALL and never mutated onto the
+    # shared llm._opts. The old mutate-to-medium/restore-in-finally dance let
+    # two overlapping generations leak one turn's depth onto the other (a
+    # greeting rendered at "medium"). The default is lifted off the shared
+    # opts ONCE; each turn's depth then rides extra_kwargs on its own chat().
     from lily_agent import LilyAgent
-    src = inspect.getsource(LilyAgent.llm_node)
-    assert "_thinking_level_for_turn" in src
-    assert "finally" in src
-    assert "reasoning_effort" in src
-    assert '"medium"' in src
+    from livekit.agents.types import NOT_GIVEN
+
+    agent = LilyAgent.__new__(LilyAgent)
+    opts = SimpleNamespace(reasoning_effort="low")
+    object.__setattr__(agent, "_llm", SimpleNamespace(_opts=opts))
+
+    # One-time normalization lifts the configured default OFF the shared opts.
+    agent._ensure_vocal_depth_unshared()
+    assert opts.reasoning_effort is NOT_GIVEN
+    assert agent._vocal_effort_default == "low"
+
+    # High turn -> medium (per call); every other turn -> the snapshotted
+    # default. Both are returned as kwargs, never written back to _opts.
+    agent._thinking_level_for_turn = lambda ctx: "high"
+    assert agent._vocal_depth_for_turn(None) == {"reasoning_effort": "medium"}
+    agent._thinking_level_for_turn = lambda ctx: "low"
+    assert agent._vocal_depth_for_turn(None) == {"reasoning_effort": "low"}
+
+    # The shared opts is NEVER re-mutated by depth selection — there is no
+    # window in which an overlapping generation could read a leaked value.
+    assert opts.reasoning_effort is NOT_GIVEN
+
+
+def test_llm_node_depth_thinking_config_transport():
+    # The Google transport carries depth as thinking_config, not
+    # reasoning_effort; the per-call selector picks the right field and never
+    # emits one the plugin does not accept.
+    from lily_agent import LilyAgent
+    from livekit.agents.types import NOT_GIVEN
+
+    agent = LilyAgent.__new__(LilyAgent)
+    opts = SimpleNamespace(thinking_config={"thinking_level": "low"})
+    object.__setattr__(agent, "_llm", SimpleNamespace(_opts=opts))
+
+    agent._ensure_vocal_depth_unshared()
+    assert opts.thinking_config is NOT_GIVEN
+    assert agent._vocal_thinking_default == {"thinking_level": "low"}
+
+    agent._thinking_level_for_turn = lambda ctx: "high"
+    assert agent._vocal_depth_for_turn(None) == {
+        "thinking_config": {"thinking_level": "high"}
+    }
+    agent._thinking_level_for_turn = lambda ctx: "low"
+    assert agent._vocal_depth_for_turn(None) == {
+        "thinking_config": {"thinking_level": "low"}
+    }
 
 
 # -- image provider routing ----------------------------------------------------

@@ -46,6 +46,8 @@ from livekit.agents import (
     function_tool,
 )
 from livekit.agents.llm import ChatMessage
+from livekit.agents.types import NOT_GIVEN
+from livekit.agents.utils import is_given
 from livekit.agents.voice import Agent, AgentSession
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions
@@ -15184,57 +15186,113 @@ class LilyAgent(Agent):
         self._apply_context_blocks(chat_ctx, include_volatile=True)
         self._game.publish_attributes_nowait()
 
-        # Adaptive vocal depth: Grok stays LOW for routine host reflexes and
-        # moves to MEDIUM for disputes, ambiguity and multi-intent. The
-        # contained per-turn override restores the configured default.
-        _sentinel = object()
-        _restore = _sentinel
-        _restore_effort = _sentinel
-        _opts = getattr(getattr(self, "llm", None), "_opts", None)
-        if _opts is not None and self._thinking_level_for_turn(chat_ctx) == "high":
-            if hasattr(_opts, "reasoning_effort"):
-                _restore_effort = getattr(_opts, "reasoning_effort", None)
-                try:
-                    # Front-facing high historically cost ~5s TTFT. Medium
-                    # adds depth for disputes/multi-intent without putting
-                    # every complex turn on the slowest tier.
-                    _opts.reasoning_effort = "medium"
-                except Exception:
-                    _restore_effort = _sentinel
-            elif hasattr(_opts, "thinking_config"):
-                _restore = getattr(_opts, "thinking_config", None)
-                try:
-                    _opts.thinking_config = {"thinking_level": "high"}
-                except Exception:
-                    _restore = _sentinel
-        try:
-            async for chunk in self._llm_node_with_empty_stop_guard(
-                chat_ctx, tools, model_settings
-            ):
+        # Adaptive vocal depth: the vocal model stays LOW for routine host
+        # reflexes and moves up for disputes, ambiguity and multi-intent.
+        # W2b: this depth is now chosen PER CALL, not by mutating the shared
+        # llm._opts in place. Two generations overlap on one _opts (a
+        # preemptive speculative reply and the live user turn); the old
+        # mutate-to-medium/restore-in-finally dance let one turn's depth leak
+        # onto the other — a routine greeting rendered at "medium". The
+        # per-turn override travels in extra_kwargs on THIS chat() alone; the
+        # shared default is lifted off _opts once (below) so the plugin honors
+        # the per-call value.
+        self._ensure_vocal_depth_unshared()
+        depth = self._vocal_depth_for_turn(chat_ctx)
+        async for chunk in self._llm_node_with_empty_stop_guard(
+            chat_ctx, tools, model_settings, vocal_depth=depth
+        ):
+            yield chunk
+
+    def _ensure_vocal_depth_unshared(self) -> None:
+        """Once per agent: lift the vocal reasoning-depth default OFF the
+        shared llm._opts so every generation selects its own depth per call
+        instead of racing on one mutable field. Snapshots the configured
+        default (reasoning_effort for the OpenAI/Grok transport,
+        thinking_config for the Google transport) and clears it to NOT_GIVEN;
+        `_vocal_depth_for_turn` reapplies the right value per call. Idempotent
+        and mutation-free after the first call — it never runs mid-generation
+        against a live turn."""
+        if getattr(self, "_vocal_depth_unshared", False):
+            return
+        self._vocal_depth_unshared = True
+        self._vocal_effort_default = NOT_GIVEN
+        self._vocal_thinking_default = NOT_GIVEN
+        opts = getattr(getattr(self, "llm", None), "_opts", None)
+        if opts is None:
+            return
+        if hasattr(opts, "reasoning_effort") and is_given(
+            getattr(opts, "reasoning_effort", NOT_GIVEN)
+        ):
+            self._vocal_effort_default = opts.reasoning_effort
+            opts.reasoning_effort = NOT_GIVEN
+        if hasattr(opts, "thinking_config") and is_given(
+            getattr(opts, "thinking_config", NOT_GIVEN)
+        ):
+            self._vocal_thinking_default = opts.thinking_config
+            opts.thinking_config = NOT_GIVEN
+
+    def _vocal_depth_for_turn(self, chat_ctx) -> dict:
+        """The per-call depth kwargs for THIS generation. High turns move to
+        the elevated tier (medium reasoning_effort / high thinking_level);
+        every other turn reasserts the configured default snapshotted by
+        `_ensure_vocal_depth_unshared`. Mirrors the original transport split
+        (reasoning_effort for OpenAI/Grok, else thinking_config for Google),
+        so a plugin never sees a field it does not accept. Empty dict when the
+        transport carries no depth control."""
+        opts = getattr(getattr(self, "llm", None), "_opts", None)
+        if opts is None:
+            return {}
+        elevated = self._thinking_level_for_turn(chat_ctx) == "high"
+        if hasattr(opts, "reasoning_effort"):
+            # Front-facing high historically cost ~5s TTFT. Medium adds depth
+            # for disputes/multi-intent without the slowest tier every turn.
+            effort = "medium" if elevated else self._vocal_effort_default
+            return {"reasoning_effort": effort} if is_given(effort) else {}
+        if hasattr(opts, "thinking_config"):
+            thinking = (
+                {"thinking_level": "high"}
+                if elevated
+                else self._vocal_thinking_default
+            )
+            return {"thinking_config": thinking} if is_given(thinking) else {}
+        return {}
+
+    async def _vocal_llm_stream(
+        self, chat_ctx, tools, model_settings, extra_kwargs: dict
+    ):
+        """Agent.default.llm_node, reimplemented only so the per-call vocal
+        depth (W2b) rides in chat()'s extra_kwargs instead of a mutated
+        shared _opts. Behaviour-identical to the default node otherwise: same
+        activity llm, tool_choice, and conn_options; chunks streamed through
+        untouched. Empty depth ⇒ NOT_GIVEN, i.e. exactly the default call."""
+        activity = self._get_activity_or_raise()
+        activity_llm = activity.llm
+        tool_choice = model_settings.tool_choice if model_settings else NOT_GIVEN
+        conn_options = activity.session.conn_options.llm_conn_options
+        async with activity_llm.chat(
+            chat_ctx=chat_ctx,
+            tools=tools,
+            tool_choice=tool_choice,
+            conn_options=conn_options,
+            extra_kwargs=extra_kwargs or NOT_GIVEN,
+        ) as stream:
+            async for chunk in stream:
                 yield chunk
-        finally:
-            if _restore is not _sentinel and _opts is not None:
-                try:
-                    _opts.thinking_config = _restore
-                except Exception:
-                    pass
-            if _restore_effort is not _sentinel and _opts is not None:
-                try:
-                    _opts.reasoning_effort = _restore_effort
-                except Exception:
-                    pass
 
     async def _llm_node_with_empty_stop_guard(
-        self, chat_ctx, tools, model_settings
+        self, chat_ctx, tools, model_settings, *, vocal_depth: dict | None = None
     ):
-        """Stream the default llm_node; on empty STOP (no text, no tools)
-        retry once, then sheet-or-raise. Contentful streams pass through
-        without buffering — TTFT is unchanged on the healthy path."""
+        """Stream the vocal llm; on empty STOP (no text, no tools) retry once,
+        then sheet-or-raise. Contentful streams pass through without buffering
+        — TTFT is unchanged on the healthy path. `vocal_depth` carries the
+        per-call reasoning-depth kwargs (W2b) so both the first attempt and
+        the retry run at the same depth this turn selected."""
+        vocal_depth = vocal_depth or {}
         text_chars = 0
         tool_calls = 0
         try:
-            async for chunk in Agent.default.llm_node(
-                self, chat_ctx, tools, model_settings
+            async for chunk in self._vocal_llm_stream(
+                chat_ctx, tools, model_settings, vocal_depth
             ):
                 t_n, tc_n = lily_llm_chunk_signal(chunk)
                 text_chars += t_n
@@ -15273,8 +15331,8 @@ class LilyAgent(Agent):
         text_chars = 0
         tool_calls = 0
         try:
-            async for chunk in Agent.default.llm_node(
-                self, chat_ctx, tools, model_settings
+            async for chunk in self._vocal_llm_stream(
+                chat_ctx, tools, model_settings, vocal_depth
             ):
                 t_n, tc_n = lily_llm_chunk_signal(chunk)
                 text_chars += t_n

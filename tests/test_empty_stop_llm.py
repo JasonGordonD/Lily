@@ -2,7 +2,7 @@
 
 LLM FinishReason.STOP with no text and no tools must not reach TTS as
 silence on lobby/banter turns. Pure helpers are covered here; the
-llm_node guard is exercised with a stubbed Agent.default.llm_node.
+llm_node guard is exercised with a stubbed _vocal_llm_stream seam.
 """
 
 from __future__ import annotations
@@ -74,12 +74,12 @@ def test_llm_empty_stop_retries_then_raises(monkeypatch):
     closed; no silent TTS turn)."""
     calls = {"n": 0}
 
-    async def _empty_default(agent, chat_ctx, tools, model_settings):
+    async def _empty_default(agent, chat_ctx, tools, model_settings, extra_kwargs=None):
         calls["n"] += 1
         if False:  # pragma: no cover — keep async generator shape
             yield "x"
 
-    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+    monkeypatch.setattr(LilyAgent, "_vocal_llm_stream", _empty_default)
 
     agent = LilyAgent.__new__(LilyAgent)
     game = SimpleNamespace(
@@ -112,12 +112,12 @@ def test_llm_empty_stop_retries_then_raises(monkeypatch):
 def test_prohibited_keyed_delivery_bypasses_model_with_sheet(monkeypatch, caplog):
     calls = {"n": 0}
 
-    async def _blocked(agent, chat_ctx, tools, model_settings):
+    async def _blocked(agent, chat_ctx, tools, model_settings, extra_kwargs=None):
         calls["n"] += 1
         raise _prohibited_error()
         yield  # pragma: no cover
 
-    monkeypatch.setattr(LilyAgent.default, "llm_node", _blocked)
+    monkeypatch.setattr(LilyAgent, "_vocal_llm_stream", _blocked)
     agent = LilyAgent.__new__(LilyAgent)
     expect = {"called": False}
     game = SimpleNamespace(
@@ -159,12 +159,12 @@ def test_prohibited_keyed_delivery_bypasses_model_with_sheet(monkeypatch, caplog
 def test_prohibited_conversation_fails_closed_without_retry(monkeypatch):
     calls = {"n": 0}
 
-    async def _blocked(agent, chat_ctx, tools, model_settings):
+    async def _blocked(agent, chat_ctx, tools, model_settings, extra_kwargs=None):
         calls["n"] += 1
         raise _prohibited_error()
         yield  # pragma: no cover
 
-    monkeypatch.setattr(LilyAgent.default, "llm_node", _blocked)
+    monkeypatch.setattr(LilyAgent, "_vocal_llm_stream", _blocked)
     agent = LilyAgent.__new__(LilyAgent)
     game = SimpleNamespace(
         sk=SimpleNamespace(
@@ -196,11 +196,11 @@ def test_lobby_empty_stop_schedules_one_greet_recover(monkeypatch):
     """F1: cold open empty STOP fail-closed re-dispatches session_greet once."""
     import lily_say_gate
 
-    async def _empty_default(agent, chat_ctx, tools, model_settings):
+    async def _empty_default(agent, chat_ctx, tools, model_settings, extra_kwargs=None):
         if False:  # pragma: no cover
             yield "x"
 
-    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+    monkeypatch.setattr(LilyAgent, "_vocal_llm_stream", _empty_default)
 
     agent = LilyAgent.__new__(LilyAgent)
     said = []
@@ -254,11 +254,11 @@ def test_lobby_empty_stop_recover_capped(monkeypatch):
     """Second empty STOP in the same lobby does not greet again."""
     import lily_say_gate
 
-    async def _empty_default(agent, chat_ctx, tools, model_settings):
+    async def _empty_default(agent, chat_ctx, tools, model_settings, extra_kwargs=None):
         if False:  # pragma: no cover
             yield "x"
 
-    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+    monkeypatch.setattr(LilyAgent, "_vocal_llm_stream", _empty_default)
 
     agent = LilyAgent.__new__(LilyAgent)
     said = []
@@ -295,11 +295,11 @@ def test_lobby_empty_stop_skips_recover_after_confirmed_greet(monkeypatch):
     """Once she opened the night, later lobby empties must not re-greet."""
     import lily_say_gate
 
-    async def _empty_default(agent, chat_ctx, tools, model_settings):
+    async def _empty_default(agent, chat_ctx, tools, model_settings, extra_kwargs=None):
         if False:  # pragma: no cover
             yield "x"
 
-    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+    monkeypatch.setattr(LilyAgent, "_vocal_llm_stream", _empty_default)
 
     agent = LilyAgent.__new__(LilyAgent)
     said = []
@@ -340,12 +340,12 @@ def test_llm_empty_stop_forces_armed_sheet(monkeypatch):
     """Game delivery path: after two empties, yield the deterministic sheet."""
     calls = {"n": 0}
 
-    async def _empty_default(agent, chat_ctx, tools, model_settings):
+    async def _empty_default(agent, chat_ctx, tools, model_settings, extra_kwargs=None):
         calls["n"] += 1
         if False:  # pragma: no cover
             yield "x"
 
-    monkeypatch.setattr(LilyAgent.default, "llm_node", _empty_default)
+    monkeypatch.setattr(LilyAgent, "_vocal_llm_stream", _empty_default)
 
     agent = LilyAgent.__new__(LilyAgent)
     expect = {"called": False}
@@ -376,14 +376,14 @@ def test_llm_empty_stop_forces_armed_sheet(monkeypatch):
 def test_llm_empty_stop_recovers_on_retry(monkeypatch):
     calls = {"n": 0}
 
-    async def _flaky_default(agent, chat_ctx, tools, model_settings):
+    async def _flaky_default(agent, chat_ctx, tools, model_settings, extra_kwargs=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return
             yield  # pragma: no cover
         yield "Hey table — who's ready?"
 
-    monkeypatch.setattr(LilyAgent.default, "llm_node", _flaky_default)
+    monkeypatch.setattr(LilyAgent, "_vocal_llm_stream", _flaky_default)
 
     agent = LilyAgent.__new__(LilyAgent)
     game = SimpleNamespace(
