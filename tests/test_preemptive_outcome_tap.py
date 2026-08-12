@@ -78,3 +78,40 @@ def test_tap_matches_the_framework_message_verbatim():
     assert "preemptive generation invalidated" in src
     assert "using preemptive generation" in src
     assert agent_activity.logger.name == "livekit.agents"
+
+
+def test_used_capture_counts_at_info_deploy_without_flooding():
+    """HOSTLOOP-001 C12: at a production INFO deploy the used-record was
+    never created (counter read 0 by construction). enable_... creates the
+    debug records for the tap while a shield on every root handler keeps
+    them out of the output."""
+    name = "lily_test_used_capture"
+    c = LilyMetricsCollector()
+    tap = c.attach_preemptive_tap(logger_name=name)
+
+    class _Spy(logging.Handler):
+        def __init__(self):
+            super().__init__(level=logging.DEBUG)
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    spy = _Spy()
+    root = logging.getLogger()
+    root.addHandler(spy)
+    lg = logging.getLogger(name)
+    try:
+        shield = c.enable_preemptive_used_capture(logger_name=name)
+        lg.debug("using preemptive generation")
+        lg.warning("some unrelated warning")
+        assert c.summary()["preemptive"]["used"] == 1  # counted...
+        seen = [r.getMessage() for r in spy.records]
+        assert "using preemptive generation" not in seen  # ...not printed
+        assert "some unrelated warning" in seen  # non-debug passes
+    finally:
+        root.removeHandler(spy)
+        lg.removeFilter(tap)
+        lg.setLevel(logging.NOTSET)
+        for h in root.handlers:
+            h.removeFilter(shield)

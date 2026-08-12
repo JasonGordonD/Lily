@@ -5,6 +5,44 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — WO-LILY-HOSTLOOP-001 C12: preemptive waste diagnosed and fixed (settle-on-event)
+
+Evidence (Session B lily-05BB92, first instrumented session): preemptive
+invalidated=10, used=0 — 100% discard, full LLM+TTS latency (~2.4s) paid
+on every turn. **Diagnosis against the WO's two hypotheses:** the
+equality check is NOT too strict (word-level, punctuation/case-blind —
+verified in installed agent_activity), and the trigger is NOT premature
+(STT final p50 1.57s beats the 1.82s turn commit, so the last
+speculation sees final words). The cause is a third thing: ASYNC game
+events mutate the STABLE state block between speculation and commit —
+a prefetch landing flips "next question: ready", adjudication commits
+scores — so the framework's ChatContext.is_equivalent correctly fails.
+The volatile-tail split cannot see these: they are stable-block changes
+by design; the game just moves asynchronously.
+
+**Fix (the cheap one):** settle_context_nowait() refreshes the agent's
+persistent ctx the moment stable inputs change — the same idempotent
+_apply_context_blocks the turn hook uses — wired through the existing
+publish_attributes_nowait chokepoint (27 state-change sites) plus the
+two async supply-landing sites that bypass it. Speculation then
+snapshots current state; commit finds nothing new. Reproduced offline
+with the framework's real is_equivalent: invalidates without settle,
+survives with it (tests/test_context_settle.py, 5 tests). Events landing
+after speculation still invalidate — correctly — and the counter
+measures the residue.
+
+**Survival made measurable (C12's success bar):** the framework
+announces a USED speculation only at DEBUG — at a production INFO
+deploy the record never existed, so `used` read 0 by construction.
+enable_preemptive_used_capture() creates those records for the tap to
+count while shielding every root handler from the debug flood (output
+unchanged; only counting changes). Success reads from the next
+session's `preemptive` block: used > 0.
+
+Deletions: none — the volatile split handles per-turn churn, settle
+handles event-driven stable churn; the Y2 counter arbitrates if either
+becomes redundant. Suite 2299 → 2305 green.
+
 ## 2026-08-09 — Transcript sync: the glass shows the line when she STARTS saying it
 
 Live report: "the sync between what is being said and what is being

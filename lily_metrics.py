@@ -229,6 +229,38 @@ class LilyMetricsCollector:
         logging.getLogger(logger_name).addFilter(f)
         return f
 
+    def enable_preemptive_used_capture(
+        self, logger_name: str = "livekit.agents"
+    ):
+        """Make preemptive SURVIVAL measurable at a production INFO deploy
+        (WO-LILY-HOSTLOOP-001 C12: "measured preemptive survival >0"). The
+        framework announces a USED speculation only at DEBUG — at INFO the
+        record is never created, so the tap's `used` counter read 0 by
+        construction, not by measurement. This sets the framework logger to
+        DEBUG so the records EXIST for the tap to count, and shields every
+        root handler from the resulting debug flood (a filter dropping
+        livekit.* records below INFO — output is unchanged; only counting
+        changes). Returns the shield filter for detach/testing. Call AFTER
+        attach_preemptive_tap; handlers attached later are not shielded
+        (documented limit)."""
+        lk = logging.getLogger(logger_name)
+        if lk.level == logging.NOTSET or lk.level > logging.DEBUG:
+            lk.setLevel(logging.DEBUG)
+
+        prefix = logger_name.split(".")[0]
+
+        class _ShieldFrameworkDebug(logging.Filter):
+            def filter(self, record):
+                return not (
+                    record.name.startswith(prefix)
+                    and record.levelno < logging.INFO
+                )
+
+        shield = _ShieldFrameworkDebug()
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(shield)
+        return shield
+
     def collect_session_usage(self, usage) -> None:
         """Store the latest `session_usage_updated` rollup. `usage` is an
         AgentSessionUsage with `.model_usage: list[ModelUsage]`, each keyed

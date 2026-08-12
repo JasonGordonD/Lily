@@ -1245,7 +1245,48 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         except Exception as e:
             logger.warning("LILY_STATE | attribute publish failed: %s", e)
 
+    def settle_context_nowait(self) -> None:
+        """Y2 (HOTFIX-007) — SETTLE-ON-EVENT, the fix the first instrumented
+        session demanded. Live lily-05BB92: preemptive invalidated=10,
+        used=0 — every speculative reply was discarded at turn commit, so
+        the table paid full LLM+TTS latency (~2.4s) on every turn. Cause
+        (measured, not guessed): the framework compares the speculation's
+        context snapshot against the committed context, transcript
+        equivalence is word-level (the STT final at p50 1.57s beats the
+        1.82s turn commit, so transcript drift is NOT the driver) — what
+        differs is the STABLE state block, mutated by ASYNC game events
+        between speculation and commit: a prefetch landing flips "next
+        question: ready", adjudication commits scores, arming moves the
+        counters. The volatile-tail split (P2) handles per-turn churn
+        (clock/candidates); it cannot see event-driven stable changes.
+
+        The settle: whenever stable inputs change, refresh the agent's
+        PERSISTENT chat ctx immediately — the same _apply_context_blocks
+        the turn hook uses, same idempotent replace-only-when-changed
+        semantics — so the next speculation snapshots CURRENT state and
+        the commit-time comparison finds nothing new. Events that land in
+        the narrow window after speculation triggered still invalidate
+        (correctly — the reply should see them); the Y2 counter measures
+        the residue. No new mechanism: one extra caller of the existing
+        injection, wired through the existing state-change chokepoint."""
+        agent = getattr(self, "agent", None)
+        ctx = getattr(agent, "_chat_ctx", None)
+        apply_blocks = getattr(agent, "_apply_context_blocks", None)
+        if apply_blocks is None or ctx is None:
+            return  # bare fixtures / pre-session: the turn hook still applies
+        try:
+            apply_blocks(ctx, now=time.time())
+        except Exception:
+            logger.exception(
+                "LILY_CTX | SETTLE_FAILED — the turn hook still applies blocks"
+            )
+
     def publish_attributes_nowait(self) -> None:
+        # Y2: every state change that is worth showing the glass is a state
+        # change the next speculation must see — settle rides the same
+        # chokepoint (synchronous + idempotent, so fixtures and the llm_node
+        # heartbeat are no-ops when nothing changed).
+        self.settle_context_nowait()
         # Build the coroutine only when a loop exists. Several pure unit
         # fixtures exercise state transitions synchronously; constructing it
         # first and then failing in ensure_future leaked an unawaited coroutine.
@@ -4217,6 +4258,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 self.next_question = question
                 # Z2: supply landed — the incident (if any) is over.
                 self._note_supply_landed()
+                # Y2: an ASYNC landing flips the stable block's "next
+                # question: ready" line — settle now or the next preemptive
+                # speculation snapshots stale state and dies at commit.
+                self.settle_context_nowait()
                 # HOTFIX-006 N2 — THE registration point. This is the moment
                 # a named topic stops being a promise: a real, verified,
                 # category-matched question is committed to the supply line
@@ -5876,6 +5921,8 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 question["image_source"] = "none"
         self.next_question = question
         self._note_supply_landed()
+        # Y2: same async-landing settle as the prefetch path.
+        self.settle_context_nowait()
         # The stall is over: clear the honest-vamp status note the watchdog
         # or prefetch-crash path may have set.
         self.sk.clear_status_notes()
@@ -15469,6 +15516,10 @@ async def entrypoint(ctx: JobContext) -> None:
     # warnings (and, when debug is on, the used-lines) off its own logger.
     # The settle-vs-volatile-split decision closes on this number.
     session_metrics.attach_preemptive_tap()
+    # HOSTLOOP-001 C12: survival must be MEASURED — create the framework's
+    # debug used-records for the tap to count, with root handlers shielded
+    # from the debug flood (log output unchanged).
+    session_metrics.enable_preemptive_used_capture()
 
     @session.on("session_usage_updated")
     def _on_session_usage(ev) -> None:
