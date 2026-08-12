@@ -371,8 +371,40 @@ _START_GAME_RE = _re.compile(
     r"|ready to (?:start|begin|play)"
     r"|dive in"
     r"|begin (?:the )?(?:game|round|quiz)"
+    r"|kick (?:it )?off"
     r")\b"
 )
+
+# HOSTLOOP-001 C7 — the BARE start intent. Session A (2026-08-12 04:51):
+# the player said "Starts." — an STT rendering of "start" — which matched
+# none of the phrase patterns above; 13 seconds of dead air followed, then
+# a false "welcome back" re-greet. A bare "start"/"starts"/"begin"/
+# "kick off" IS the start intent when it is essentially the whole
+# utterance — matched as an INTENT (utterance-shaped, ≤4 tokens with only
+# filler around it), never as a substring, so "before we start, one
+# question" and "she starts crying every time" can never launch a game.
+_BARE_START_TOKEN_RE = _re.compile(
+    r"^(?:start|starts|begin|begins|kick ?off)$"
+)
+_START_FILLER_TOKENS = frozenset({
+    "ok", "okay", "yeah", "yes", "yep", "so", "alright", "right", "now",
+    "lily", "please", "then", "well", "go", "and", "us", "it", "off",
+})
+
+
+def lily_is_bare_start_intent(text: str) -> bool:
+    """True when the utterance IS the start intent (C7), not merely
+    contains a start-ish word."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    tokens = normalized.split()
+    if not tokens or len(tokens) > 4:
+        return False
+    core = [t for t in tokens if t not in _START_FILLER_TOKENS]
+    if not core:
+        return False
+    return bool(_BARE_START_TOKEN_RE.fullmatch(" ".join(core)))
 
 # P0-2 multi-intent setup parser. Unlike on_transcript_segment's
 # command-or-media dispatch result, this deliberately returns ALL setup
@@ -894,6 +926,8 @@ def lily_detect_control_command(text: str) -> Optional[str]:
         return "skip"
     if _START_GAME_RE.search(normalized):
         return "start_game"
+    if lily_is_bare_start_intent(normalized):
+        return "start_game"  # C7: "Starts." is a start, deterministically
     return None
 
 

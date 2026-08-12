@@ -73,7 +73,11 @@ def test_start_game_not_in_ordinary_speech():
     assert lily_detect_control_command("the game was great") is None
     assert lily_detect_control_command("we started late") is None
     assert lily_detect_control_command("I play tennis") is None
-    assert lily_detect_control_command("start") is None
+    # HOSTLOOP-001 C7 revoked the old "bare start is ignored" pin: Session
+    # A's "Starts." produced 13s of dead air because the lone token didn't
+    # fire. A bare start AS THE WHOLE UTTERANCE is now the intent; start
+    # buried in a sentence still never fires (test_start_intent.py).
+    assert lily_detect_control_command("start") == "start_game"
 
 
 def test_skip_wins_over_start():

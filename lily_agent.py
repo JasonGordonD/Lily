@@ -729,6 +729,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # Set by the entrypoint BEFORE session.start so on_enter knows
         # whether to greet (session_greet) or rejoin (session_rejoin).
         self.reconnected = False
+        # C7 (HOSTLOOP-001): a heard/engaged start intent owns the lobby —
+        # the empty-STOP lobby recovery never re-greets past it. Set
+        # synchronously at spoken-start detection and again in start_game
+        # (all sources), so no recovery can interleave a "welcome back".
+        self._start_intent_heard = False
         # F1: empty-STOP fail-closed in lobby schedules at most one keyed
         # opener re-dispatch (session_greet / session_rejoin). Cap prevents
         # a mute death spiral of greets×N.
@@ -7950,6 +7955,12 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             # Spoken start path — the deterministic pipeline must engage
             # even if Lily never calls the lily_begin_round tool.
             if not self.game_started:
+                # C7: a heard start intent OWNS the lobby from here on. The
+                # empty-STOP lobby recovery must never answer the dead air
+                # that follows a start with a rejoin/"welcome back" script
+                # (Session A: "Starts." -> 13s dead -> false re-greet off a
+                # stale same-room checkpoint).
+                self._start_intent_heard = True
                 asyncio.ensure_future(self.start_game(source="voice"))
             return
 
@@ -10636,6 +10647,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         self.game_started = True
         # Explicit start won — drop any leftover yes-block / or-offer.
         self.clear_ambiguous_yes_block(reason=f"start_{source}")
+        # C7: the start owns the lobby regardless of source (voice, tool,
+        # RPC, auto) — no recovery may re-greet past this point.
+        self._start_intent_heard = True
         logger.info("LILY_STATE | GAME_START | session=%s source=%s",
                     self.sk.session_id, source)
         # G1: speculative user-turn runs are dead weight during rounds
@@ -14058,6 +14072,20 @@ class LilyAgent(Agent):
         if getattr(game, "game_started", False):
             return False
         if int(getattr(game, "_empty_stop_lobby_recover_count", 0) or 0) >= 1:
+            return False
+        # HOSTLOOP-001 C7: once a start intent has been heard, the start
+        # pipeline owns the lobby — a recovery here must not speak AT ALL
+        # (the false "welcome back" of Session A was this path answering
+        # the dead air after "Starts." with the rejoin script, because a
+        # stale same-room checkpoint had set `reconnected`). The rejoin
+        # script is reserved for the GENUINE reconnect re-entry at
+        # on_enter; an in-session start never runs it.
+        if getattr(game, "_start_intent_heard", False):
+            logger.info(
+                "LILY_LOBBY | RECOVER_SKIPPED | session=%s reason="
+                "start_intent_heard — kickoff owns the floor, no re-greet",
+                game.sk.session_id,
+            )
             return False
 
         if getattr(game, "reconnected", False):
