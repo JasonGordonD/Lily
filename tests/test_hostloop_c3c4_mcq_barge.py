@@ -849,10 +849,11 @@ def test_c4_gate_precedes_the_buffer_append():
 
 
 def test_resume_is_consumed_before_the_delivery_claim_decision():
-    """Source-order pin in tts_node: the staged verbatim resume replaces the
-    model's prose BEFORE register_delivery_claim, which under C3a would see
-    an open window and pass the prose straight through."""
-    src = inspect.getsource(sys.modules["lily_agent"])
+    """Source-order pin in the DeliveryClaim pipeline stage (REFACTOR W1b):
+    the staged verbatim resume replaces the model's prose BEFORE
+    register_delivery_claim, which under C3a would see an open window and pass
+    the prose straight through. The invariant now lives inside the transform."""
+    src = inspect.getsource(sys.modules["lily_agent"].DeliveryClaim.apply)
     take = src.index("take_pending_delivery_resume()")
-    claim = src.index("delivery = self._game.register_delivery_claim(")
+    claim = src.index("register_delivery_claim(")
     assert take < claim

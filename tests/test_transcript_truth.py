@@ -43,14 +43,22 @@ def _game() -> LilyGame:
 
 
 def test_trim_precedes_synthesis_in_source():
-    """The WO's binding rule as a source-order pin: the yield clip and the
-    TTS-input binding both happen before the synthesis replay inside
-    tts_node (same idiom as the watchdog source-order pin)."""
+    """The WO's binding rule as a source-order pin (REFACTOR W1b): the yield
+    clip runs inside the say pipeline, which tts_node invokes BEFORE it binds
+    the TTS input (note_post_tts_text) and replays for synthesis. The clip is
+    now the YieldAfterFirstQuestion stage; tts_node preserves the ordering by
+    running the whole pipeline ahead of the bind/replay."""
     src = inspect.getsource(lily_agent.LilyAgent.tts_node)
-    clip = src.index("lily_yield_after_first_question")
+    run = src.index("run_say_pipeline")
     bind = src.index("note_post_tts_text")
     replay = src.index("async def _replay")
-    assert clip < bind < replay
+    assert run < bind < replay
+    # The clip itself lives in the pipeline stage, ahead of the synthesis
+    # handoff by construction (SAY_PIPELINE order).
+    stage_src = inspect.getsource(lily_agent.YieldAfterFirstQuestion.apply)
+    assert "lily_yield_after_first_question" in stage_src
+    names = [t.name for t in lily_agent.SAY_PIPELINE]
+    assert "yield_after_first_question" in names
 
 
 def test_recorded_text_is_the_tts_input_for_a_clipped_turn():

@@ -13037,6 +13037,651 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
 
 
 # ---------------------------------------------------------------------------
+# tts_node speech pipeline (REFACTOR W1b)
+#
+# tts_node was ~600 lines of sequential surgery — each block a live fix. They
+# are extracted here as named, independently-testable SpeechTransform objects
+# run in order by run_say_pipeline(). Behavior is byte-preserved: every gate
+# calls the same lily_say_gate / lily_scorekeeper / LilyGame helpers with the
+# same arguments and the same branch logic, in the same ORDER as the original
+# method. Suppression bookkeeping (mark _suppressed_speech_ids, release the
+# say_registry owner) is funnelled through SpeechTurn so a new guard cannot
+# silently skip it (GUARD_MAP chain F). Each mutating/suppressing stage emits
+# one uniform line: LILY_SAY | TRANSFORM | name=<stage> action=replace|suppress
+# in addition to its original bespoke log.
+# ---------------------------------------------------------------------------
+
+
+def _lily_silence_frame() -> "rtc.AudioFrame":
+    """The 2400-sample silence frame every suppressed turn yields (byte-for-byte
+    the frame the inline method used before this refactor)."""
+    return rtc.AudioFrame(
+        data=b"\x00\x00" * 2400,
+        sample_rate=24000,
+        num_channels=1,
+        samples_per_channel=2400,
+    )
+
+
+class Silence:
+    """A pipeline stage returns this to end the turn with silence. `schedule`,
+    if set, is a zero-arg callable returning the coroutine the orchestrator
+    ensure_futures BEFORE yielding the silence frame (regen / empty retry)."""
+
+    __slots__ = ("reason", "schedule")
+
+    def __init__(self, reason, schedule=None):
+        self.reason = reason
+        self.schedule = schedule
+
+
+class SpeechTurn:
+    """Mutable per-turn context threaded through the pipeline. `text` is the
+    candidate speech (rewritten in place by stages); `raw` is the original
+    accumulated text (immutable — the hygiene stage diffs against it).
+    `game`/`agent` are the LilyGame and LilyAgent; `speech_id` is pinned once
+    (the SpeechHandle ContextVar is stable for the task). `delivery`,
+    `n_questions`, `repeat_kind` carry values computed by one stage and read by
+    a later one."""
+
+    def __init__(self, text, raw, game, agent, speech_id):
+        self.text = text
+        self.raw = raw
+        self.game = game
+        self.agent = agent
+        self.speech_id = speech_id
+        self.delivery = None
+        self.n_questions = 0
+        self.repeat_kind = None
+
+    def mark_suppressed(self):
+        """Record this speech_id as suppressed so a never-aired turn is not
+        journaled as said (guard-map chain D)."""
+        if self.speech_id:
+            suppressed_ids = getattr(self.game, "_suppressed_speech_ids", None)
+            if suppressed_ids is None:
+                self.game._suppressed_speech_ids = set()
+                suppressed_ids = self.game._suppressed_speech_ids
+            suppressed_ids.add(self.speech_id)
+
+    def release_owner_or_pending(self):
+        return (
+            self.game.say_registry.release_owner(self.speech_id)
+            if self.speech_id
+            else self.game.say_registry.release_pending()
+        )
+
+
+class SpeechTransform:
+    name = "transform"
+
+    def apply(self, turn: "SpeechTurn"):
+        raise NotImplementedError
+
+
+class LeakFilter(SpeechTransform):
+    """Say-gate leak filter (BEFORE hygiene): injected state-block context
+    echoed into the outbound turn — the sentinel envelope, envelope fragments,
+    or bracketed metadata lines — is deterministically stripped and triggers
+    the burn protocol for any armed/prefetched question (its answer may have
+    gone out on air). A leaked state note (holds scores, never answers) and a
+    leaked tool-call JSON carry no answer, so stripping them must not burn."""
+
+    name = "leak_filter"
+
+    def apply(self, turn):
+        filtered, leak_reasons = lily_say_gate.lily_filter_leaks(turn.text)
+        if leak_reasons:
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=leak | markers=%s",
+                ",".join(sorted(set(leak_reasons))),
+            )
+            _non_answer_reasons = {"metadata:[state note:", "tool_call"}
+            if any(r not in _non_answer_reasons for r in leak_reasons):
+                turn.game.on_answer_leak()
+        turn.text = filtered
+        return turn
+
+
+class HygieneClean(SpeechTransform):
+    """P4 spoken-markdown strip via the say gate (THE choke point for outbound
+    speech hygiene). Markdown emphasis, headers, bullets and emoji are removed;
+    [bracket] audio tags are load-bearing ElevenLabs v3 controls, preserved
+    verbatim. Emoji-only turns strip to "" and fall to the empty-candidate
+    retry below. (Not in the operator's stage list — a real block preserved.)"""
+
+    name = "hygiene_clean"
+
+    def apply(self, turn):
+        full = lily_say_gate.lily_clean_for_speech(turn.text)
+        if full != turn.raw:
+            logger.info(
+                "LILY_SAY_GATE | stripped %d chars of markdown/emoji/leaks",
+                len(turn.raw) - len(full),
+            )
+        turn.text = full
+        return turn
+
+
+class RevealDeliveryFusionClip(SpeechTransform):
+    """CLASS 2 (LIVEFIRE-001) — NO REVEAL/DELIVERY FUSION. While an open
+    transition has aired its reveal but not delivered the next question, the
+    floor belongs to the reveal; a fused next question in this turn is clipped.
+    The real delivery fires on its own after the reveal confirms. (Real block,
+    not named in the operator's list.)"""
+
+    name = "reveal_delivery_fusion_clip"
+
+    def apply(self, turn):
+        if turn.game.transition_awaiting_delivery():
+            _reveal_kept, _delivery_tail = (
+                lily_say_gate.lily_clip_delivery_from_reveal(turn.text)
+            )
+            if _delivery_tail:
+                logger.warning(
+                    "LILY_SAY_SUPPRESSED | reason=reveal_delivery_fusion | "
+                    "session=%s q=%d dropped=%r — reveal turn may not deliver "
+                    "the next question; it fires after the reveal confirms",
+                    turn.game.sk.session_id,
+                    turn.game.sk.question_number, _delivery_tail[:120],
+                )
+                turn.text = _reveal_kept
+        return turn
+
+
+class ScoreLineGate(SpeechTransform):
+    """CLASS 1 (LIVEFIRE-001) — SPOKEN SCORE = LEDGER ONLY. Any sentence
+    narrating a total/streak/count is suppressed and the ONE authoritative line
+    is re-emitted from the ledger. Suppress-and-reemit, never in-place rewrite.
+    Only fires with a live ledger — pre-game greet/intake is untouched."""
+
+    name = "score_line_gate"
+
+    def apply(self, turn):
+        try:
+            _lscores = turn.game.sk.ledger_scores()
+        except Exception:
+            _lscores = {}
+        if _lscores and any(v for v in _lscores.values()):
+            kept_text, _suppressed, _ledger_line = (
+                lily_scorekeeper.lily_score_line_gate(
+                    turn.text, _lscores, turn.game.sk.ledger_streaks()
+                )
+            )
+            if _suppressed:
+                logger.warning(
+                    "LILY_SAY_SUPPRESSED | reason=score_divergence | "
+                    "session=%s suppressed=%r ledger_line=%r",
+                    turn.game.sk.session_id,
+                    [s[:80] for s in _suppressed], _ledger_line,
+                )
+                turn.text = (kept_text + " " + _ledger_line).strip() if kept_text \
+                    else _ledger_line
+        return turn
+
+
+class FalseEmptyRewrite(SpeechTransform):
+    """A claimed returner / unsettled identity must never be told no recorded
+    game / clean slate exists. Rewrite whenever absence is not a settled fact —
+    greet/intake included, not only when a returner note is armed."""
+
+    name = "false_empty_rewrite"
+
+    def apply(self, turn):
+        if turn.game.must_rewrite_false_empty_claim(turn.text):
+            logger.warning(
+                "LILY_SAY_GATE | FALSE_CLEAN_SLATE_REWRITTEN | session=%s "
+                "probe_out=%s dispute=%s returner_seen=%s",
+                turn.game.sk.session_id,
+                turn.game.identity_probe_outstanding(),
+                bool(getattr(turn.game, "_recognition_dispute", False)),
+                bool(getattr(turn.game, "_returner_claim_seen", False)),
+            )
+            turn.text = lily_say_gate.lily_still_checking_rewrite()
+        return turn
+
+
+class OnScreenClaimRewrite(SpeechTransform):
+    """B4: "look at the screen" / "picture is up" only after image_shown
+    confirmed the armed URL — not drawn is not on screen."""
+
+    name = "on_screen_claim_rewrite"
+
+    def apply(self, turn):
+        if lily_say_gate.lily_false_on_screen_claim(turn.text) and not (
+            turn.game.picture_on_glass_confirmed()
+        ):
+            if turn.game.picture_on_glass_failed():
+                logger.warning(
+                    "LILY_SAY_GATE | FALSE_ON_SCREEN_REWRITTEN | session=%s "
+                    "reason=didnt_land",
+                    turn.game.sk.session_id,
+                )
+                turn.text = lily_say_gate.lily_picture_didnt_land_rewrite()
+            else:
+                logger.warning(
+                    "LILY_SAY_GATE | FALSE_ON_SCREEN_REWRITTEN | session=%s "
+                    "reason=pending_confirm",
+                    turn.game.sk.session_id,
+                )
+                turn.text = lily_say_gate.lily_picture_pending_rewrite()
+        return turn
+
+
+class DisputeSycophancyRewrite(SpeechTransform):
+    """P0-C: while a recognition dispute needs its why-beat, ban sycophantic
+    "you're right" openers — answer the why, don't agree."""
+
+    name = "dispute_sycophancy_rewrite"
+
+    def apply(self, turn):
+        if (
+            getattr(turn.game, "_recognition_dispute", False)
+            and not getattr(turn.game, "_recognition_dispute_why_answered", False)
+            and lily_say_gate.lily_mirror_flag(turn.text)
+        ):
+            logger.warning(
+                "LILY_SAY_GATE | DISPUTE_SYCOPHANCY_REWRITTEN | session=%s",
+                turn.game.sk.session_id,
+            )
+            turn.text = (
+                "Because my first check looked empty and I treated that as "
+                "final instead of still loading — that was wrong on my "
+                "protocol. What do you want next — a refresher, or shall "
+                "we wait?"
+            )
+        return turn
+
+
+class YieldAfterFirstQuestion(SpeechTransform):
+    """Asking obligates listening. Physically end conversational turns at the
+    first completed question. Authoritative MC deliveries are exempt (options
+    legitimately follow their stem); freeform deliveries and verdict-plus-next
+    stacks are NOT exempt. Stashes n_questions for the repeat lints."""
+
+    name = "yield_after_first_question"
+
+    def apply(self, turn):
+        n_questions = lily_say_gate.lily_stacked_question_flag(turn.text)
+        turn.n_questions = n_questions
+        armed = getattr(turn.game, "armed_question", None) or {}
+        mc_delivery = (
+            isinstance(armed.get("choices"), list)
+            and bool(armed.get("choices"))
+            and turn.game.is_question_delivery_turn(turn.text)
+        )
+        # CLASS 8 (LIVEFIRE-001) 8b: the yield clips STACKED questions only.
+        # A single question with a plain declarative tail ("Got it, Rami?
+        # Let's set you up.") is a natural turn, not two competing questions —
+        # clipping it cut an 82-char non-question tail after name-bind. Only a
+        # SECOND question in the turn (n_questions >= 2) creates the
+        # unanswered-obligation the gate exists to end.
+        if not mc_delivery and n_questions >= 2:
+            clipped, yielded = lily_say_gate.lily_yield_after_first_question(turn.text)
+            if yielded:
+                logger.warning(
+                    "LILY_SAY_GATE | YIELD_AFTER_QUESTION | session=%s "
+                    "questions=%d removed_chars=%d",
+                    turn.game.sk.session_id, n_questions,
+                    len(turn.text) - len(clipped),
+                )
+                turn.text = clipped
+        return turn
+
+
+class RepeatLints(SpeechTransform):
+    """LOG-ONLY telemetry lints (mirror / stacked-question / verbatim-repeat /
+    semantic-paraphrase) over turns that actually PLAYED. Never mutates text —
+    it computes repeat_kind, which the regen gate below promotes to a
+    suppression on a genuine consecutive restatement. (Real block; folds the
+    inline lints the operator's list omitted between yield and regen.)"""
+
+    name = "repeat_lints"
+
+    def apply(self, turn):
+        mirror_pattern = lily_say_gate.lily_mirror_flag(turn.text)
+        if mirror_pattern:
+            logger.info(
+                "LILY_SAY | MIRROR_FLAG | session=%s pattern=%r",
+                turn.game.sk.session_id, mirror_pattern,
+            )
+        if turn.n_questions > 1:
+            logger.info(
+                "LILY_SAY | STACKED_QUESTION_FLAG | session=%s count=%d",
+                turn.game.sk.session_id, turn.n_questions,
+            )
+        repeat_kind = lily_say_gate.lily_repeat_flag(
+            turn.text, turn.game.sk.agent_turns
+        )
+        if repeat_kind:
+            logger.info(
+                "LILY_SAY | REPEAT_FLAG | session=%s kind=%s",
+                turn.game.sk.session_id, repeat_kind,
+            )
+        paraphrase_kind = lily_say_gate.lily_paraphrase_repeat_flag(
+            turn.text, turn.game.sk.agent_turns[-3:],
+            threshold=lily_config.paraphrase_repeat_threshold(),
+        )
+        if paraphrase_kind and not repeat_kind:
+            logger.info(
+                "LILY_SAY | PARAPHRASE_FLAG | session=%s kind=%s",
+                turn.game.sk.session_id, paraphrase_kind,
+            )
+            repeat_kind = repeat_kind or paraphrase_kind
+        turn.repeat_kind = repeat_kind
+        return turn
+
+
+class RegenGate(SpeechTransform):
+    """Regeneration GATE (WS-3): on a RE-AIR, a verbatim replay of an
+    already-aired turn is SUPPRESSED and regenerated once with the fresh-words
+    directive. Question deliveries exempt. Bounded to one retry; a stubborn
+    repeat that comes back verbatim a second time yields the floor with silence
+    rather than airing the third copy (the storm)."""
+
+    name = "regen_gate"
+
+    def apply(self, turn):
+        if (
+            not getattr(turn.agent, "_reair_regen_pending", False)
+            and turn.game.reair_verbatim_should_regenerate(turn.text, turn.repeat_kind)
+        ):
+            turn.agent._reair_regen_pending = True
+            # Guard-map chain D fix (HOTFIX-007): this suppressed turn never
+            # airs, so the handle MUST be marked suppressed and its owner
+            # released — otherwise it records its never-aired text as said.
+            turn.mark_suppressed()
+            released = turn.release_owner_or_pending()
+            for k in released:
+                logger.warning(
+                    "LILY_SAY | RELEASED | key=%s | reason=regen_gate", k,
+                )
+            logger.warning(
+                "LILY_REGEN_GATE | verbatim re-air suppressed | session=%s "
+                "kind=%s — regenerating fresh",
+                turn.game.sk.session_id, turn.repeat_kind,
+            )
+            return Silence(
+                "regen_reair",
+                schedule=lambda: turn.agent.session.generate_reply(
+                    instructions=_REGEN_REAIR_DIRECTIVE.strip()
+                ),
+            )
+        if (
+            getattr(turn.agent, "_reair_regen_pending", False)
+            and turn.repeat_kind
+            and not turn.game.is_question_delivery_turn(turn.text)
+        ):
+            # WS-3 tightening: the one regen retry ALSO came back verbatim. The
+            # room has already heard this twice — the third copy is the storm.
+            # Yield the floor with silence. Question deliveries stay exempt.
+            turn.agent._reair_regen_pending = False
+            turn.mark_suppressed()
+            released = turn.release_owner_or_pending()
+            for k in released:
+                logger.warning(
+                    "LILY_SAY | RELEASED | key=%s | reason=stubborn_repeat", k,
+                )
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=stubborn_repeat | session=%s "
+                "kind=%s — regen retry repeated verbatim again; suppressing "
+                "the third copy instead of airing the storm",
+                turn.game.sk.session_id, turn.repeat_kind,
+            )
+            return Silence("stubborn_repeat")
+        turn.agent._reair_regen_pending = False
+        return turn
+
+
+class EmptyCandidateRetry(SpeechTransform):
+    """§11.1: an empty candidate (safety-filter mute, truncation) is a loggable
+    event with a retry — never silence. First empty: release any pending
+    speech-act claim (so the retry can redeliver), re-arm delivery, retry once.
+    Second empty on a delivery: speak the deterministic armed sheet so the
+    table still hears the question; otherwise give the turn back to the room.
+    (Real block — distinct from FalseEmptyRewrite's clean-slate case.)"""
+
+    name = "empty_candidate_retry"
+
+    def apply(self, turn):
+        if len(turn.text) >= 3:
+            turn.agent._empty_retry_pending = False
+            return turn
+        # Say gate: this speech was dispatched but will never play — release
+        # the pending claims so the retry can legitimately redeliver the act.
+        released = turn.release_owner_or_pending()
+        for k in released:
+            logger.warning(
+                "LILY_SAY | RELEASED | key=%s | reason=empty_candidate "
+                "— retry may redeliver", k,
+            )
+        # Structural delivery retry: a released q_{N}_delivery claim re-arms the
+        # one-shot delivery flag so the retry turn re-registers at its dispatch.
+        if f"q_{turn.game.sk.question_number}_delivery" in released:
+            turn.game.expect_delivery()
+        if not turn.agent._empty_retry_pending:
+            turn.agent._empty_retry_pending = True
+            logger.warning(
+                "LILY_EMPTY_CANDIDATE | empty/junk response (%r) — retrying",
+                turn.text,
+            )
+            return Silence(
+                "empty_candidate_retry",
+                schedule=lambda: turn.agent.session.generate_reply(),
+            )
+        turn.agent._empty_retry_pending = False
+        # Second empty on a question delivery: do not leave dead air. Speak the
+        # deterministic armed sheet so the table still hears the question.
+        sheet = ""
+        try:
+            if (
+                getattr(turn.game, "game_started", False)
+                and getattr(turn.game, "armed_question", None) is not None
+                and not turn.game.sk.answer_window_open
+            ):
+                sheet = (turn.game.rendered_armed_question() or "").strip()
+        except Exception:
+            sheet = ""
+        if sheet:
+            logger.error(
+                "LILY_EMPTY_CANDIDATE | second empty on delivery — "
+                "forcing armed question sheet (%d chars)",
+                len(sheet),
+            )
+            turn.game.expect_delivery()
+            turn.text = sheet
+            return turn
+        logger.error(
+            "LILY_EMPTY_CANDIDATE | second consecutive empty response — "
+            "giving the turn back to the room"
+        )
+        return Silence("empty_candidate_giveup")
+
+
+class BackHoldNarration(SpeechTransform):
+    """W8 honest-narration integrity: if this turn narrates a stopped/hold state
+    and no hold is active, enter the hold now so the spoken claim is backed by
+    state — BEFORE the delivery claim, so the freshly-entered hold binds the
+    same-turn / next delivery. State-only; text unchanged. (Real block.)"""
+
+    name = "back_hold_narration"
+
+    def apply(self, turn):
+        turn.game.back_hold_narration(turn.text)
+        return turn
+
+
+class DeliveryClaim(SpeechTransform):
+    """STRUCTURAL delivery registration: the q_{N}_delivery CLAIM is the
+    delivery event; window-open and "delivered" key off it, never off text
+    similarity. A staged mid-read RESUME speaks the remaining armed options
+    verbatim (before the claim decision). rewrite_strict substitutes the
+    deterministic sheet. A duplicate/held turn is made physically silent
+    (suppressed at dispatch, no release). Stashes `delivery` for later gates."""
+
+    name = "delivery_claim"
+
+    def apply(self, turn):
+        # HOSTLOOP-001 C3c: a staged mid-read RESUME speaks verbatim — the
+        # remaining choices are already rendered deterministically and must air
+        # exactly as armed, BEFORE the delivery-claim decision.
+        _resume = turn.game.take_pending_delivery_resume()
+        if _resume:
+            logger.info(
+                "LILY_DELIVERY | RESUME_VERBATIM | session=%s q=%d — reading "
+                "the remaining options as armed",
+                turn.game.sk.session_id, turn.game.sk.question_number,
+            )
+            turn.text = _resume
+        delivery = turn.game.register_delivery_claim(
+            turn.text, speech_id=turn.speech_id
+        )
+        if delivery == "rewrite_strict":
+            turn.text = turn.game.rendered_armed_question()
+            turn.game.expect_delivery()
+            delivery = turn.game.register_delivery_claim(
+                turn.text, speech_id=turn.speech_id
+            )
+            if delivery not in ("claimed_structural", "claimed_core_sentence"):
+                logger.error(
+                    "LILY_DELIVERY | STRICT_REWRITE_FAILED | session=%s q=%d",
+                    turn.game.sk.session_id,
+                    turn.game.sk.question_number,
+                )
+        turn.delivery = delivery
+        if delivery in ("duplicate", "held"):
+            # "held" (W2): a hold is active and this turn would air the armed
+            # question. Suppressed at dispatch exactly like a duplicate.
+            turn.mark_suppressed()
+            return Silence("delivery_%s" % delivery)
+        return turn
+
+
+class UnownedKickoffSuppress(SpeechTransform):
+    """P0-5: "Round" / "Let's do it!" / category teaser may not create a second
+    start owner. Only the turn that structurally owns q_N_delivery may carry
+    kickoff language. Suppress directly (no retry, no re-air) so setup/user
+    holds cannot regenerate the same debris."""
+
+    name = "unowned_kickoff_suppress"
+
+    def apply(self, turn):
+        if turn.game.unowned_kickoff_must_suppress(turn.text, turn.delivery):
+            blocked = turn.game.start_blocked_reason() or "no_delivery_owner"
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=unowned_kickoff | session=%s "
+                "q=%d blocked=%s text=%r",
+                turn.game.sk.session_id,
+                turn.game.sk.question_number,
+                blocked,
+                turn.text[:160],
+            )
+            turn.mark_suppressed()
+            if turn.speech_id:
+                turn.game.say_registry.release_owner(turn.speech_id)
+            return Silence("unowned_kickoff")
+        return turn
+
+
+class TransitionNarration(SpeechTransform):
+    """HOTFIX-006 N12 — ONE NARRATION PER TRANSITION. The transition of a
+    question is claimed whole at the reveal; the first turn that performs its
+    verdict IS its narration. A second, differently-worded narration of the
+    same beat is made physically silent — suppressed, not swallowed."""
+
+    name = "transition_narration"
+
+    def apply(self, turn):
+        transition = turn.game.register_transition_narration(
+            turn.text, speech_id=turn.speech_id
+        )
+        if transition == "duplicate":
+            turn.mark_suppressed()
+            if turn.speech_id:
+                turn.game.say_registry.release_owner(turn.speech_id)
+            return Silence("transition_duplicate")
+        return turn
+
+
+class AirDupGuard(SpeechTransform):
+    """T3 (PATCH-001) — AIR-path dup guard: a verbatim repeat of a recently
+    PLAYED turn (interleaving ignored; delivery turns exempt — their re-reads
+    are deliberate) never airs again."""
+
+    name = "air_dup_guard"
+
+    def apply(self, turn):
+        if turn.game.air_dup_guard(turn.text, turn.delivery):
+            logger.warning(
+                "LILY_TURNS | DUP_TURN_SKIPPED | path=air | session=%s — "
+                "verbatim repeat of a recently played turn suppressed",
+                turn.game.sk.session_id,
+            )
+            turn.mark_suppressed()
+            if turn.speech_id:
+                turn.game.say_registry.release_owner(turn.speech_id)
+            return Silence("air_dup")
+        return turn
+
+
+class PunctuationFlush(SpeechTransform):
+    """MANDATORY punctuation-flush guard (Lovebirds fix): LilyTTS is
+    streaming=False, wrapped in StreamAdapter gated by blingfire sentence
+    tokenization. Suspense holds produce short unpunctuated fragments that
+    deadlock the SegmentSynchronizer; append a terminal period so the tokenizer
+    always flushes."""
+
+    name = "punctuation_flush"
+
+    def apply(self, turn):
+        if turn.text[-1] not in ".!?":
+            turn.text += "."
+        return turn
+
+
+SAY_PIPELINE = [
+    LeakFilter(),
+    HygieneClean(),
+    RevealDeliveryFusionClip(),
+    ScoreLineGate(),
+    FalseEmptyRewrite(),
+    OnScreenClaimRewrite(),
+    DisputeSycophancyRewrite(),
+    YieldAfterFirstQuestion(),
+    RepeatLints(),
+    RegenGate(),
+    EmptyCandidateRetry(),
+    BackHoldNarration(),
+    DeliveryClaim(),
+    UnownedKickoffSuppress(),
+    TransitionNarration(),
+    AirDupGuard(),
+    PunctuationFlush(),
+]
+
+
+def run_say_pipeline(turn: "SpeechTurn"):
+    """Run every stage in order over `turn`. Returns a Silence (turn ends with
+    silence, possibly scheduling a regen/retry) or None (speak turn.text). Any
+    stage that rewrites the text or suppresses the turn emits one uniform
+    LILY_SAY | TRANSFORM line so the whole pipeline is observable and a new
+    guard cannot silently skip the funnel (GUARD_MAP chain F)."""
+    for transform in SAY_PIPELINE:
+        before = turn.text
+        result = transform.apply(turn)
+        if isinstance(result, Silence):
+            logger.info(
+                "LILY_SAY | TRANSFORM | name=%s action=suppress",
+                transform.name,
+            )
+            return result
+        if turn.text != before:
+            logger.info(
+                "LILY_SAY | TRANSFORM | name=%s action=replace",
+                transform.name,
+            )
+    return None
+# ---------------------------------------------------------------------------
 # The agent
 # ---------------------------------------------------------------------------
 
@@ -14826,593 +15471,30 @@ class LilyAgent(Agent):
             chunks.append(chunk)
         raw = "".join(chunks).strip()
 
-        # Say-gate leak filter (BEFORE hygiene): injected state-block
-        # context echoed into the outbound turn — the sentinel envelope,
-        # envelope fragments, or bracketed metadata lines ([GAME STATE],
-        # [room read:, [env:, [RETURNING TABLE]) — is deterministically
-        # stripped and triggers the burn protocol for any armed/prefetched
-        # question (its answer may have gone out on air).
-        filtered, leak_reasons = lily_say_gate.lily_filter_leaks(raw)
-        if leak_reasons:
-            logger.warning(
-                "LILY_SAY_SUPPRESSED | reason=leak | markers=%s",
-                ",".join(sorted(set(leak_reasons))),
-            )
-            # Burn protocol: only for leaks that could carry answer
-            # material. The honesty state note (desync WO Sub-agent C)
-            # holds committed scores, never answers — it is stripped
-            # above, and burning a live question over it would punish the
-            # table for calling out the board. A leaked tool-call JSON
-            # (Grok emitted a function call as content) carries no answer
-            # either — stripping it must not burn a live question.
-            _non_answer_reasons = {"metadata:[state note:", "tool_call"}
-            if any(
-                r not in _non_answer_reasons for r in leak_reasons
-            ):
-                self._game.on_answer_leak()
-
-        # P4 spoken-markdown strip: deterministic hygiene via the say gate
-        # (lily_say_gate — THE choke point for outbound speech hygiene)
-        # BEFORE the punctuation-flush guard. Markdown emphasis, headers,
-        # bullets and emoji are removed; [bracket] audio tags ([excited],
-        # [whispering], [pause], ...) are load-bearing ElevenLabs v3
-        # controls and are preserved verbatim. Emoji-only turns strip to
-        # "" and fall into the empty-candidate retry below.
-        full = lily_say_gate.lily_clean_for_speech(filtered)
-        if full != raw:
-            logger.info(
-                "LILY_SAY_GATE | stripped %d chars of markdown/emoji/leaks",
-                len(raw) - len(full),
-            )
-
-        # CLASS 2 (LIVEFIRE-001) — NO REVEAL/DELIVERY FUSION. While an open
-        # transition has aired its reveal but not yet delivered the next
-        # question, the floor belongs to the reveal. A fused next question in
-        # this turn (the live "Crete… Next up. What… agoge?") is clipped; the
-        # real delivery fires on its own after the reveal confirms
-        # (post_reveal seam). The separate delivery turn journals
-        # next_delivery before its tts_node, so it reads False here.
-        if self._game.transition_awaiting_delivery():
-            _reveal_kept, _delivery_tail = (
-                lily_say_gate.lily_clip_delivery_from_reveal(full)
-            )
-            if _delivery_tail:
-                logger.warning(
-                    "LILY_SAY_SUPPRESSED | reason=reveal_delivery_fusion | "
-                    "session=%s q=%d dropped=%r — reveal turn may not deliver "
-                    "the next question; it fires after the reveal confirms",
-                    self._game.sk.session_id,
-                    self._game.sk.question_number, _delivery_tail[:120],
-                )
-                full = _reveal_kept
-
-        # CLASS 1 (LIVEFIRE-001) — SPOKEN SCORE = LEDGER ONLY. The spine
-        # prints every number: any sentence narrating a total/streak/count is
-        # suppressed here and the ONE authoritative line is re-emitted from
-        # the ledger (ledger_scores / ledger_streaks). Suppress-and-reemit,
-        # never an in-place rewrite. The live 3-vs-2 Athens line ("you're at
-        # three, streak of three" over a committed 2/2) can no longer air.
-        # Only fires with a live ledger — pre-game greet/intake is untouched.
-        try:
-            _lscores = self._game.sk.ledger_scores()
-        except Exception:
-            _lscores = {}
-        if _lscores and any(v for v in _lscores.values()):
-            kept_text, _suppressed, _ledger_line = (
-                lily_scorekeeper.lily_score_line_gate(
-                    full, _lscores, self._game.sk.ledger_streaks()
-                )
-            )
-            if _suppressed:
-                logger.warning(
-                    "LILY_SAY_SUPPRESSED | reason=score_divergence | "
-                    "session=%s suppressed=%r ledger_line=%r",
-                    self._game.sk.session_id,
-                    [s[:80] for s in _suppressed], _ledger_line,
-                )
-                full = (kept_text + " " + _ledger_line).strip() if kept_text \
-                    else _ledger_line
-
-        # A claimed returner / unsettled identity must never be told no
-        # recorded game / clean slate exists. Live 2026-08-09: organic
-        # intake asserted "no saved stats… clean slate" while the probe
-        # was still outstanding, then the late match proved it wrong.
-        # Rewrite whenever absence is not a settled fact — greet/intake
-        # included, not only when a returner note is armed.
-        if self._game.must_rewrite_false_empty_claim(full):
-            logger.warning(
-                "LILY_SAY_GATE | FALSE_CLEAN_SLATE_REWRITTEN | session=%s "
-                "probe_out=%s dispute=%s returner_seen=%s",
-                self._game.sk.session_id,
-                self._game.identity_probe_outstanding(),
-                bool(getattr(self._game, "_recognition_dispute", False)),
-                bool(getattr(self._game, "_returner_claim_seen", False)),
-            )
-            full = lily_say_gate.lily_still_checking_rewrite()
-
-        # B4: "look at the screen" / "picture is up" only after image_shown
-        # confirmed the armed URL — not drawn ≠ on screen.
-        if lily_say_gate.lily_false_on_screen_claim(full) and not (
-            self._game.picture_on_glass_confirmed()
-        ):
-            if self._game.picture_on_glass_failed():
-                logger.warning(
-                    "LILY_SAY_GATE | FALSE_ON_SCREEN_REWRITTEN | session=%s "
-                    "reason=didnt_land",
-                    self._game.sk.session_id,
-                )
-                full = lily_say_gate.lily_picture_didnt_land_rewrite()
-            else:
-                logger.warning(
-                    "LILY_SAY_GATE | FALSE_ON_SCREEN_REWRITTEN | session=%s "
-                    "reason=pending_confirm",
-                    self._game.sk.session_id,
-                )
-                full = lily_say_gate.lily_picture_pending_rewrite()
-
-        # P0-C: while a recognition dispute needs its why-beat, ban
-        # sycophantic "you're right" openers — answer the why, don't agree.
-        if (
-            getattr(self._game, "_recognition_dispute", False)
-            and not getattr(self._game, "_recognition_dispute_why_answered", False)
-            and lily_say_gate.lily_mirror_flag(full)
-        ):
-            logger.warning(
-                "LILY_SAY_GATE | DISPUTE_SYCOPHANCY_REWRITTEN | session=%s",
-                self._game.sk.session_id,
-            )
-            full = (
-                "Because my first check looked empty and I treated that as "
-                "final instead of still loading — that was wrong on my "
-                "protocol. What do you want next — a refresher, or shall "
-                "we wait?"
-            )
-
-        # Asking obligates listening. This used to be telemetry-only, so the
-        # model could ask two questions or ask one and keep explaining over
-        # the players. Physically end conversational turns at the first
-        # completed question. Authoritative MC deliveries are exempt:
-        # multiple-choice options legitimately follow their stem. Freeform
-        # deliveries AND verdict-plus-next-question stacks are NOT exempt —
-        # the live cartography→mitochondria leap was a stacked turn that
-        # slipped through because any delivery matched the exempt path.
-        n_questions = lily_say_gate.lily_stacked_question_flag(full)
-        armed = getattr(self._game, "armed_question", None) or {}
-        mc_delivery = (
-            isinstance(armed.get("choices"), list)
-            and bool(armed.get("choices"))
-            and self._game.is_question_delivery_turn(full)
+        # REFACTOR W1b: the ~600-line sequential surgery is now a named,
+        # independently-testable pipeline (see SpeechTransform / SAY_PIPELINE
+        # above). Behavior is byte-preserved; the speech_id is pinned once (the
+        # SpeechHandle ContextVar is stable for this task).
+        turn = SpeechTurn(
+            text=raw,
+            raw=raw,
+            game=self._game,
+            agent=self,
+            speech_id=_current_speech_id(),
         )
-        # CLASS 8 (LIVEFIRE-001) 8b: the yield clips STACKED questions only.
-        # A single question with a plain declarative tail ("Got it, Rami?
-        # Let's set you up.") is a natural turn, not two competing questions —
-        # clipping it cut an 82-char non-question tail after name-bind. Only a
-        # SECOND question in the turn (n_questions >= 2) creates the
-        # unanswered-obligation the gate exists to end.
-        if not mc_delivery and n_questions >= 2:
-            clipped, yielded = lily_say_gate.lily_yield_after_first_question(full)
-            if yielded:
-                logger.warning(
-                    "LILY_SAY_GATE | YIELD_AFTER_QUESTION | session=%s "
-                    "questions=%d removed_chars=%d",
-                    self._game.sk.session_id, n_questions,
-                    len(full) - len(clipped),
-                )
-                full = clipped
-
-        # Mirror lint (self-knowledge WO Task 2a) — LOG-ONLY: the ban is
-        # prompt-enforced; this makes drift measurable in telemetry.
-        # Never mutates or suppresses the turn.
-        mirror_pattern = lily_say_gate.lily_mirror_flag(full)
-        if mirror_pattern:
-            logger.info(
-                "LILY_SAY | MIRROR_FLAG | session=%s pattern=%r",
-                self._game.sk.session_id, mirror_pattern,
-            )
-        # PATCH-003 P10 lint: the enforcement above clips conversational
-        # turns; this remains telemetry for exempt game deliveries.
-        if n_questions > 1:
-            logger.info(
-                "LILY_SAY | STACKED_QUESTION_FLAG | session=%s count=%d",
-                self._game.sk.session_id, n_questions,
-            )
-        # Repetition lint (RECOGNITION-VARIETY Task 3b) — LOG-ONLY, against
-        # turns that actually PLAYED (sk.agent_turns records at playout, so
-        # a dispatched-then-swallowed turn never counts as said).
-        repeat_kind = lily_say_gate.lily_repeat_flag(
-            full, self._game.sk.agent_turns
-        )
-        if repeat_kind:
-            logger.info(
-                "LILY_SAY | REPEAT_FLAG | session=%s kind=%s",
-                self._game.sk.session_id, repeat_kind,
-            )
-        # PATCH-002 A4a — SEMANTIC repeat lint over the last few PLAYED
-        # turns (the reassurance-storm class: three ways of saying the same
-        # thing in 30s). Log-only here; the regen gate below promotes it to
-        # a suppression on a genuine consecutive restatement, so she doesn't
-        # loop synonyms. Delivery acts are exempt (the regen gate handles
-        # that), and short turns rarely trip the token-overlap threshold.
-        paraphrase_kind = lily_say_gate.lily_paraphrase_repeat_flag(
-            full, self._game.sk.agent_turns[-3:],
-            threshold=lily_config.paraphrase_repeat_threshold(),
-        )
-        if paraphrase_kind and not repeat_kind:
-            logger.info(
-                "LILY_SAY | PARAPHRASE_FLAG | session=%s kind=%s",
-                self._game.sk.session_id, paraphrase_kind,
-            )
-            repeat_kind = repeat_kind or paraphrase_kind
-
-        # Regeneration GATE (WS-3): on a RE-AIR (this turn was re-dispatched
-        # after its prior airing was cut/suppressed), the repeat lint is no
-        # longer telemetry — a verbatim replay of an already-aired turn is
-        # SUPPRESSED and regenerated once with the fresh-words directive.
-        # Question deliveries are exempt (a barged question is re-read
-        # verbatim on purpose). Bounded to one retry (via _reair_regen_pending)
-        # so a stubborn repeat still yields the floor rather than looping.
-        if (
-            not getattr(self, "_reair_regen_pending", False)
-            and self._game.reair_verbatim_should_regenerate(full, repeat_kind)
-        ):
-            self._reair_regen_pending = True
-            speech_id = _current_speech_id()
-            # Guard-map chain D fix (HOTFIX-007): this early return never
-            # airs, so the handle MUST be marked suppressed — otherwise it
-            # finishes "clean" and records its never-aired text into
-            # agent_turns/transcripts as said, polluting her context and
-            # the dedupe lint window (the falsified-record path that made
-            # zero of 34 live duplicates reachable by either guard).
-            if speech_id:
-                suppressed_ids = getattr(
-                    self._game, "_suppressed_speech_ids", None
-                )
-                if suppressed_ids is None:
-                    self._game._suppressed_speech_ids = set()
-                    suppressed_ids = self._game._suppressed_speech_ids
-                suppressed_ids.add(speech_id)
-            released = (
-                self._game.say_registry.release_owner(speech_id)
-                if speech_id
-                else self._game.say_registry.release_pending()
-            )
-            for k in released:
-                logger.warning(
-                    "LILY_SAY | RELEASED | key=%s | reason=regen_gate", k,
-                )
-            logger.warning(
-                "LILY_REGEN_GATE | verbatim re-air suppressed | session=%s "
-                "kind=%s — regenerating fresh",
-                self._game.sk.session_id, repeat_kind,
-            )
-            asyncio.ensure_future(
-                self.session.generate_reply(
-                    instructions=_REGEN_REAIR_DIRECTIVE.strip()
-                )
-            )
-            yield rtc.AudioFrame(
-                data=b"\x00\x00" * 2400,
-                sample_rate=24000,
-                num_channels=1,
-                samples_per_channel=2400,
-            )
-            return
-        if (
-            getattr(self, "_reair_regen_pending", False)
-            and repeat_kind
-            and not self._game.is_question_delivery_turn(full)
-        ):
-            # WS-3 tightening (live 2026-08-09 lily-A070E8: the same cut
-            # greeting aired up to FOUR times): the one regen retry ALSO
-            # came back verbatim, and the old contract aired it anyway
-            # ("a stubborn repeat still yields the floor"). The room has
-            # already heard this content twice — the third copy is the
-            # storm, not the recovery. Yield the floor with silence;
-            # the next user turn drives on. Question deliveries stay
-            # exempt (a barged question is re-read verbatim on purpose).
-            self._reair_regen_pending = False
-            speech_id = _current_speech_id()
-            # Guard-map chain D fix: mark suppressed so the silent turn is
-            # never recorded as said (see the regen-gate note above).
-            if speech_id:
-                suppressed_ids = getattr(
-                    self._game, "_suppressed_speech_ids", None
-                )
-                if suppressed_ids is None:
-                    self._game._suppressed_speech_ids = set()
-                    suppressed_ids = self._game._suppressed_speech_ids
-                suppressed_ids.add(speech_id)
-            released = (
-                self._game.say_registry.release_owner(speech_id)
-                if speech_id
-                else self._game.say_registry.release_pending()
-            )
-            for k in released:
-                logger.warning(
-                    "LILY_SAY | RELEASED | key=%s | reason=stubborn_repeat",
-                    k,
-                )
-            logger.warning(
-                "LILY_SAY_SUPPRESSED | reason=stubborn_repeat | session=%s "
-                "kind=%s — regen retry repeated verbatim again; suppressing "
-                "the third copy instead of airing the storm",
-                self._game.sk.session_id, repeat_kind,
-            )
-            yield rtc.AudioFrame(
-                data=b"\x00\x00" * 2400,
-                sample_rate=24000,
-                num_channels=1,
-                samples_per_channel=2400,
-            )
-            return
-        self._reair_regen_pending = False
-
-        if len(full) < 3:
-            # §11.1: an empty candidate (safety-filter mute, truncation) is a
-            # loggable event with a retry — never silence.
-            #
-            # Say gate (19:27:52 swallowed-delivery fix): this speech was
-            # dispatched but will never play — any speech-act claims made
-            # for it must NOT stay claimed, or the retry below regenerates
-            # into a gate that suppresses the redelivery as a "duplicate".
-            # Claims are claim-at-dispatch / confirm-at-playout /
-            # release-on-failure: release the pending ones here and relog,
-            # so the retry can legitimately redeliver the act.
-            speech_id = _current_speech_id()
-            released = (
-                self._game.say_registry.release_owner(speech_id)
-                if speech_id
-                else self._game.say_registry.release_pending()
-            )
-            for k in released:
-                logger.warning(
-                    "LILY_SAY | RELEASED | key=%s | reason=empty_candidate "
-                    "— retry may redeliver", k,
-                )
-            # Structural delivery retry (desync WO Sub-agent B): a released
-            # q_{N}_delivery claim re-arms the one-shot delivery flag so
-            # the retry turn re-registers the delivery at its dispatch.
-            if (
-                f"q_{self._game.sk.question_number}_delivery" in released
-            ):
-                self._game.expect_delivery()
-            if not self._empty_retry_pending:
-                self._empty_retry_pending = True
-                logger.warning(
-                    "LILY_EMPTY_CANDIDATE | empty/junk response (%r) — retrying",
-                    full,
-                )
-                asyncio.ensure_future(self.session.generate_reply())
-            else:
-                self._empty_retry_pending = False
-                # Second empty on a question delivery: do not leave dead
-                # air. Speak the deterministic armed sheet so the table
-                # still hears the question (Gemini FinishReason.STOP /
-                # empty-completion class from RM_qs6YeUdkV7or).
-                sheet = ""
-                try:
-                    if (
-                        getattr(self._game, "game_started", False)
-                        and getattr(self._game, "armed_question", None)
-                        is not None
-                        and not self._game.sk.answer_window_open
-                    ):
-                        sheet = (
-                            self._game.rendered_armed_question() or ""
-                        ).strip()
-                except Exception:
-                    sheet = ""
-                if sheet:
-                    logger.error(
-                        "LILY_EMPTY_CANDIDATE | second empty on delivery — "
-                        "forcing armed question sheet (%d chars)",
-                        len(sheet),
-                    )
-                    self._game.expect_delivery()
-                    full = sheet
-                else:
-                    logger.error(
-                        "LILY_EMPTY_CANDIDATE | second consecutive empty "
-                        "response — giving the turn back to the room"
-                    )
-                    yield rtc.AudioFrame(
-                        data=b"\x00\x00" * 2400,
-                        sample_rate=24000,
-                        num_channels=1,
-                        samples_per_channel=2400,
-                    )
-                    return
-            if self._empty_retry_pending or not full:
-                yield rtc.AudioFrame(
-                    data=b"\x00\x00" * 2400,
-                    sample_rate=24000,
-                    num_channels=1,
-                    samples_per_channel=2400,
-                )
-                return
-            # Fall through with the forced sheet.
-
-        self._empty_retry_pending = False
-
-        # W8 honest-narration integrity: if this turn narrates a stopped/
-        # hold state and no hold is actually active, enter the hold now so
-        # the spoken claim is backed by state. Placed BEFORE the delivery
-        # claim so the freshly-entered hold binds the same-turn / next
-        # delivery lane through W2's gate — the live lily-5E3036 leak aired
-        # "Stopped until you say go" (05:40:00) and then the q_6 Freudian
-        # delivery (05:40:11) with no hold to block it.
-        self._game.back_hold_narration(full)
-
-        # STRUCTURAL delivery registration (desync WO Sub-agent B) — the
-        # q_{N}_delivery CLAIM is the delivery event; window-open and
-        # "delivered" marking key off it, never off text similarity. This
-        # turn claims when (a) code dispatched it to deliver the armed
-        # question (the one-shot pending-delivery flag: begin_round
-        # post-tool turn, question nudges, skip/game-start follow-ups) —
-        # and it carries the question text, else it is rewritten to the
-        # deterministic sheet first (WS-1); or (b) it organically performs the
-        # question's core answer-bearing sentence as written
-        # (lily_turn_presents_question). BUG-2 duplicate suppression
-        # stands: a turn that textually re-performs an already-claimed
-        # question is made physically silent (no retry: suppressed, not
-        # swallowed) — but a turn that merely banters after the delivery
-        # registered speaks normally. Decision + claim + screen publish
-        # live in LilyGame.register_delivery_claim (offline-tested).
-        speech_id = _current_speech_id()
-        # HOSTLOOP-001 C3c: a staged mid-read RESUME speaks verbatim. The
-        # remaining choices are already rendered deterministically
-        # (rendered_armed_choices_from) and must air exactly as armed, so the
-        # resume replaces the model's prose here — BEFORE the delivery-claim
-        # decision, which would otherwise see an open window (C3a) and hand
-        # the unchecked prose straight to TTS.
-        _resume = self._game.take_pending_delivery_resume()
-        if _resume:
-            logger.info(
-                "LILY_DELIVERY | RESUME_VERBATIM | session=%s q=%d — reading "
-                "the remaining options as armed",
-                self._game.sk.session_id, self._game.sk.question_number,
-            )
-            full = _resume
-        delivery = self._game.register_delivery_claim(
-            full, speech_id=speech_id
-        )
-        if delivery == "rewrite_strict":
-            full = self._game.rendered_armed_question()
-            self._game.expect_delivery()
-            delivery = self._game.register_delivery_claim(
-                full, speech_id=speech_id
-            )
-            if delivery not in (
-                "claimed_structural",
-                "claimed_core_sentence",
-            ):
-                logger.error(
-                    "LILY_DELIVERY | STRICT_REWRITE_FAILED | session=%s q=%d",
-                    self._game.sk.session_id,
-                    self._game.sk.question_number,
-                )
-        if delivery in ("duplicate", "held"):
-            # "held" (W2): a hold is active and this turn would air the armed
-            # question. Suppressed at dispatch exactly like a duplicate — the
-            # turn is made physically silent, not deferred and fired later.
-            if speech_id:
-                suppressed_ids = getattr(
-                    self._game, "_suppressed_speech_ids", None
-                )
-                if suppressed_ids is None:
-                    self._game._suppressed_speech_ids = set()
-                    suppressed_ids = self._game._suppressed_speech_ids
-                suppressed_ids.add(speech_id)
-            yield rtc.AudioFrame(
-                data=b"\x00\x00" * 2400,
-                sample_rate=24000,
-                num_channels=1,
-                samples_per_channel=2400,
-            )
+        outcome = run_say_pipeline(turn)
+        if isinstance(outcome, Silence):
+            if outcome.schedule is not None:
+                asyncio.ensure_future(outcome.schedule())
+            yield _lily_silence_frame()
             return
 
-        # P0-5 BE8D8B: "Round" / "Let's do it!" / category teaser may not
-        # create a second start owner. Only the turn that structurally owns
-        # q_N_delivery may carry kickoff language. Suppress directly (no
-        # empty-candidate retry, no re-air) so setup/user-speech holds cannot
-        # regenerate the same debris.
-        if self._game.unowned_kickoff_must_suppress(full, delivery):
-            blocked = self._game.start_blocked_reason() or "no_delivery_owner"
-            logger.warning(
-                "LILY_SAY_SUPPRESSED | reason=unowned_kickoff | session=%s "
-                "q=%d blocked=%s text=%r",
-                self._game.sk.session_id,
-                self._game.sk.question_number,
-                blocked,
-                full[:160],
-            )
-            if speech_id:
-                suppressed_ids = getattr(
-                    self._game, "_suppressed_speech_ids", None
-                )
-                if suppressed_ids is None:
-                    self._game._suppressed_speech_ids = set()
-                    suppressed_ids = self._game._suppressed_speech_ids
-                suppressed_ids.add(speech_id)
-                self._game.say_registry.release_owner(speech_id)
-            yield rtc.AudioFrame(
-                data=b"\x00\x00" * 2400,
-                sample_rate=24000,
-                num_channels=1,
-                samples_per_channel=2400,
-            )
-            return
+        full = turn.text
 
-        # HOTFIX-006 N12 — ONE NARRATION PER TRANSITION. The transition of
-        # a question is claimed whole at the reveal; the first turn through
-        # this gate that performs its verdict IS its narration. A second,
-        # differently-worded narration of the same beat is the live
-        # contradiction ("That's a point for Chris." / "No points on that
-        # one — the answer was Russia!") and is made physically silent —
-        # suppressed, not swallowed, so nothing retries it.
-        transition = self._game.register_transition_narration(
-            full, speech_id=speech_id
-        )
-        if transition == "duplicate":
-            if speech_id:
-                suppressed_ids = getattr(
-                    self._game, "_suppressed_speech_ids", None
-                )
-                if suppressed_ids is None:
-                    self._game._suppressed_speech_ids = set()
-                    suppressed_ids = self._game._suppressed_speech_ids
-                suppressed_ids.add(speech_id)
-                self._game.say_registry.release_owner(speech_id)
-            yield rtc.AudioFrame(
-                data=b"\x00\x00" * 2400,
-                sample_rate=24000,
-                num_channels=1,
-                samples_per_channel=2400,
-            )
-            return
-
-        # T3 (PATCH-001, RETIRE_WITH_WS6) — AIR-path dup guard: a verbatim
-        # repeat of a recently-PLAYED turn (interleaving ignored; delivery
-        # turns exempt — their re-reads are deliberate) never airs again.
-        # The live class: greet ×2, "my bad" ×2, the Miranda greeting.
-        if self._game.air_dup_guard(full, delivery):
-            logger.warning(
-                "LILY_TURNS | DUP_TURN_SKIPPED | path=air | session=%s — "
-                "verbatim repeat of a recently played turn suppressed",
-                self._game.sk.session_id,
-            )
-            if speech_id:
-                suppressed_ids = getattr(
-                    self._game, "_suppressed_speech_ids", None
-                )
-                if suppressed_ids is None:
-                    self._game._suppressed_speech_ids = set()
-                    suppressed_ids = self._game._suppressed_speech_ids
-                suppressed_ids.add(speech_id)
-                self._game.say_registry.release_owner(speech_id)
-            yield rtc.AudioFrame(
-                data=b"\x00\x00" * 2400,
-                sample_rate=24000,
-                num_channels=1,
-                samples_per_channel=2400,
-            )
-            return
-
-        # MANDATORY punctuation-flush guard (Lovebirds fix): LilyTTS is
-        # streaming=False, so the framework wraps it in StreamAdapter gated
-        # by blingfire sentence tokenization. Lily's suspense holds produce
-        # exactly the short unpunctuated fragments that deadlock the
-        # SegmentSynchronizer (text_done=false / audio_done=true). Append a
-        # terminal period so the tokenizer always flushes. (The node
-        # accumulated every chunk above, so replaying the cleaned text as
-        # one chunk is equivalent — the sentence tokenizer re-splits it.)
-        if full[-1] not in ".!?":
-            full += "."
-
-        # P0-C: this is the exact text handed to TTS after every rewrite,
-        # clip and strict delivery substitution. Playout completion consumes
-        # it for both RTC and durable transcripts.
-        self._game.note_post_tts_text(speech_id, full)
+        # P0-C: this is the exact text handed to TTS after every rewrite, clip
+        # and strict delivery substitution. Playout completion consumes it for
+        # both RTC and durable transcripts.
+        self._game.note_post_tts_text(turn.speech_id, full)
 
         async def _replay():
             yield full
