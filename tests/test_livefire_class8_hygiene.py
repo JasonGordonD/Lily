@@ -38,10 +38,14 @@ def test_stacked_questions_count_two():
 
 
 def test_tts_node_gates_yield_on_stacked_only():
-    # The tts_node call site only clips when there are >= 2 questions.
-    src = inspect.getsource(lily_agent.LilyAgent.tts_node)
+    # REFACTOR W1b: the yield gate now lives in the YieldAfterFirstQuestion
+    # pipeline stage. The 8b invariant holds there — it only clips when there
+    # are >= 2 questions, using the (unchanged) yield function.
+    src = inspect.getsource(lily_agent.YieldAfterFirstQuestion.apply)
     assert "n_questions >= 2" in src
     assert "lily_yield_after_first_question" in src
+    # and the stage is wired into the pipeline that tts_node runs.
+    assert "yield_after_first_question" in [t.name for t in lily_agent.SAY_PIPELINE]
 
 
 def test_yield_function_still_clips_at_first_question():
