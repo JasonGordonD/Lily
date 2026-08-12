@@ -1970,6 +1970,42 @@ class LilyScorekeeper:
 
     # -- answer window -----------------------------------------------------
 
+    def note_recent_answer_text(self, text: str, now: Optional[float] = None) -> None:
+        """Ledger of texts recently CONSUMED as answer candidates (live
+        2026-08-12 lily-639007, the double-verdict session): ownership of a
+        user turn must follow the DATA — a turn whose text the game scored
+        belongs to adjudication's composite, whatever the event ordering.
+        The old suppressor was flow-dependent (an exact mark set on one code
+        path, a window-liveness prehook) and the W4 relaxed beat-close
+        broke both: the seam adjudicated and CLOSED the window ~2s before
+        the framework committed the turn, so the organic reply ran free and
+        narrated a second verdict with a fabricated score."""
+        import lily_evaluation as _ev
+        normalized = _ev.lily_normalize_answer(text or "")
+        if not normalized:
+            return
+        ledger = getattr(self, "_recent_answer_texts", None)
+        if ledger is None:
+            ledger = self._recent_answer_texts = []
+        t = now if now is not None else time.time()
+        ledger.append((normalized, t))
+        del ledger[:-8]
+
+    def recent_answer_text_matches(
+        self, text: str, now: Optional[float] = None, window: float = 30.0
+    ) -> bool:
+        """Was this text consumed as an answer candidate in the last
+        `window` seconds? (The organic-reply suppressor's data-side check.)"""
+        import lily_evaluation as _ev
+        normalized = _ev.lily_normalize_answer(text or "")
+        if not normalized:
+            return False
+        t = now if now is not None else time.time()
+        return any(
+            n == normalized and (t - ts) <= window
+            for n, ts in getattr(self, "_recent_answer_texts", []) or []
+        )
+
     def note_question_time(self, field: str, now: Optional[float] = None) -> None:
         """C14b (HOSTLOOP-001): per-question delivery timestamps, persisted.
         These moments existed only as transient log lines; the C3/C4 gates
@@ -2925,6 +2961,7 @@ class LilyScorekeeper:
                     "LILY_STATE | ANSWER_CANDIDATE | session=%s q=%d key=%s t=%.3f text=%r",
                     self.session_id, self.question_number, key, seg_start, clean[:80],
                 )
+                self.note_recent_answer_text(clean)
             else:
                 # Self-correction (live 2026-07-15 fix): a later final from
                 # the SAME player is a revision, not noise. It joins their

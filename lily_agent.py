@@ -14044,12 +14044,32 @@ class LilyAgent(Agent):
             and callable(prehook_check)
             and prehook_check(message_text)
         )
-        if event_owned or prehook_owned:
+        # Data-side ownership (live 2026-08-12 lily-639007, the
+        # double-verdict session): the two checks above are FLOW-dependent
+        # — the exact-text mark rides one code path, and the prehook needs
+        # the window still open at commit. W4's relaxed beat-close
+        # adjudicates at the transcript seam and closes the window ~2s
+        # BEFORE this hook runs, so on that build every answer aired TWO
+        # verdicts: the organic reply (which fabricated "you're at three")
+        # and adjudicate's ledger-true composite. If the scorekeeper
+        # consumed this turn's text as an answer CANDIDATE, the game owns
+        # the reply — whatever the ordering was.
+        candidate_check = getattr(
+            self._game.sk, "recent_answer_text_matches", None
+        )  # getattr: fixture fakes predate the ledger
+        candidate_owned = bool(
+            not event_owned
+            and not prehook_owned
+            and callable(candidate_check)
+            and candidate_check(message_text)
+        )
+        if event_owned or prehook_owned or candidate_owned:
             logger.info(
                 "LILY_REPLY | ORGANIC_SUPPRESSED | session=%s "
                 "reason=deterministic_game_reply event_owned=%s "
-                "prehook_owned=%s",
+                "prehook_owned=%s candidate_owned=%s",
                 self._game.sk.session_id, event_owned, prehook_owned,
+                candidate_owned,
             )
             raise StopResponse()
         # VIDEOIN-001: if the camera lane is open and a frame is buffered,
