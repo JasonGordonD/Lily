@@ -385,8 +385,16 @@ def test_only_segments_overlapping_the_playout_interval_buffer():
     assert [s["segment_start_time"] for s in game._pre_window_segments] == [
         101.5
     ]
-    # A text-only prehook may suppress only while delivery is actively
-    # playing; after playout it cannot turn discharge-gap speech into answer.
+    # ORGANIC-OWNERSHIP-001 (live lily-A9B757 2026-08-13): the current
+    # question's delivery has aired and adjudication has not claimed it, so an
+    # answer-shaped turn in the discharge / window-open microgap IS
+    # adjudication's — the prehook owns it so the organic reply cannot narrate
+    # a second verdict over it. (The buffer above is what replays the speech
+    # into the window; ownership and buffering are complementary here.)
+    assert game.correct_answer_owns_user_turn("The Nile") is True
+    # Bounded by the terminal boundary: once adjudication has run, the beat is
+    # over and the prehook no longer owns speech about it.
+    game.note_answer_heard(game.sk.question_number)
     assert game.correct_answer_owns_user_turn("The Nile") is False
 
 

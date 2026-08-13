@@ -1748,24 +1748,44 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         delivery_started = getattr(
             self, "_active_delivery_started_at", None
         )
-        delivery_ended = self._active_delivery_ended_at
+        # The question is in its ANSWER phase — its delivery has aired and
+        # adjudication has not yet claimed it — whether or not the window
+        # boolean happens to be open at THIS instant. The live escape
+        # (lily-A9B757 2026-08-13, q6 Pluto / q7 Janet: organic verdict aired
+        # beside the deterministic sheet) rode exactly the gaps the raw
+        # boolean leaves: the discharge -> window-open microgap and W4's
+        # relaxed beat-close (~2s before the framework commits the turn).
+        # Riding the current delivery, bounded by question_is_terminal,
+        # closes both without a timer and without depending on event order.
         answer_live = (
             self.sk.answer_window_open
             or (
                 self._active_delivery_qnum == qnum
                 and delivery_started is not None
-                and delivery_ended is None
+                and not self.question_is_terminal(qnum)
             )
         )
         if not answer_live:
             return False
+        # Ownership follows answer SHAPE at the armed question, not only a
+        # CORRECT verdict: a wrong / uncertain in-window answer is still
+        # adjudication's beat ("no point this time" fires deterministically),
+        # so the organic reply must not narrate a second verdict over it. It
+        # is evaluated INLINE here, from the armed question, so ownership
+        # never depends on the transcript callback's answer-candidate record
+        # having landed first — that ordering is exactly the race this hook
+        # exists to defeat. Non-answers (a clarify question, banter, a
+        # control command) fall through to the conversational lane.
         try:
-            verdict = lily_evaluation.lily_tier1_evaluate_question(
-                text or "", question
-            )["verdict"]
+            is_command = (
+                lily_scorekeeper.lily_detect_control_command(text or "")
+                is not None
+            )
+            if not lily_evaluation.lily_answer_shaped(
+                text or "", question, is_command=is_command
+            ):
+                return False
         except Exception:
-            return False
-        if verdict != "correct":
             return False
         normalized = lily_evaluation.lily_normalize_answer(text or "")
         if normalized:
