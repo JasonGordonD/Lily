@@ -613,6 +613,11 @@ def lily_answer_shaped(
     raw = (text or "").strip()
     if not raw or is_command:
         return False
+    # A pure format directive ("I don't want multiple choice") is never an
+    # answer attempt (ROOT 2). The detector is pure-only — a fused
+    # complaint+answer keeps a residual answer token and stays answer-shaped.
+    if lily_detect_format_directive(raw):
+        return False
     q = question or {}
     choices = q.get("choices")
     if isinstance(choices, list) and len(choices) == 4:
@@ -1043,6 +1048,53 @@ def lily_meta_speech_utterance(text: str) -> Optional[str]:
     return None
 
 
+_FORMAT_MARKER_RE = re.compile(r"\bmulti(?:ple)?\s*choices?\b|\bmcqs?\b")
+_FORMAT_REFUSAL_RE = re.compile(
+    r"\b(?:no|not|dont|don|stop|quit|hate|without|instead|rather|skip|"
+    r"never|enough|sick|tired)\b"
+)
+# Scaffolding a pure format directive is built from — refusal words, format
+# vocabulary and connective fillers. Anything NOT in this set is answer
+# content: its presence makes the utterance fused, never pure.
+_FORMAT_SCAFFOLD = frozenset({
+    "i", "im", "said", "say", "saying", "want", "wanted", "wanna", "these",
+    "those", "them", "this", "that", "with", "any", "some", "more", "please",
+    "just", "we", "you", "to", "do", "did", "dont", "don", "t", "no", "not",
+    "stop", "quit", "hate", "without", "instead", "rather", "of", "give",
+    "gimme", "me", "us", "again", "and", "but", "let", "lets", "s", "really",
+    "actually", "keep", "keeps", "keeping", "stick", "sticking", "go", "going",
+    "doing", "its", "it", "is", "multiple", "choice", "choices", "mcq", "mcqs",
+    "option", "options", "format", "kind", "type", "questions", "question",
+    "way", "freeform", "free", "form", "open", "ended", "regular", "normal",
+    "never", "enough", "sick", "tired", "thanks", "thank", "anymore",
+    "the", "a", "an",
+})
+
+
+def lily_detect_format_directive(text: str) -> bool:
+    """True when `text` is a PURE format directive — a request/complaint about
+    question FORMAT ("I don't want multiple choice", "no more mcqs") that
+    carries no answer of its own.
+
+    Format is set by lily_set_round_format, not here; this exists only to keep
+    a pure directive OFF the scoring path (WO-LILY-CANARY-DEFECTS-001 ROOT 2,
+    live lily-A9B757: "I said I don't want mcqs" was scored a wrong Madonna
+    answer and closed the window before the real answer landed).
+
+    Bias to admit: it requires a format marker AND a refusal, and it fires
+    ONLY when every token is directive scaffolding. Any residual token — a
+    right OR wrong answer clause — makes it not-pure and the utterance stays
+    adjudicable, so a fused complaint+answer never loses its answer."""
+    norm = re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+    if not norm:
+        return False
+    if not _FORMAT_MARKER_RE.search(norm):
+        return False
+    if not _FORMAT_REFUSAL_RE.search(norm):
+        return False
+    return not [tok for tok in norm.split() if tok not in _FORMAT_SCAFFOLD]
+
+
 def lily_non_answer_utterance(
     text: str, question: Optional[dict], roster_names: Optional[list] = None
 ) -> Optional[str]:
@@ -1079,6 +1131,11 @@ def lily_non_answer_utterance(
     for name in roster_names or []:
         if norm == lily_normalize_answer(str(name)):
             return "bare_name"
+    # A PURE format directive is a complaint about the run of play, never an
+    # attempt (ROOT 2). It sits after the answer-surface override above, so a
+    # fused complaint carrying the answer has already been admitted.
+    if lily_detect_format_directive(text):
+        return "format_directive"
     # N4: meta-speech LAST, so every answer-surface and roster escape has
     # already had its say. The seven live rows land here.
     return lily_meta_speech_utterance(text)
