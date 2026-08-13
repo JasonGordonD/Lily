@@ -120,3 +120,68 @@ def test_adult_objection_burns_the_reserve():
     assert ("q9", "age_unconfirmed") in burned
     assert g._next_question_reserve is None
     assert g._next_question_reserve_mode is None
+
+
+# -- the four invariants, made explicit (team-lead 3a ruling) --------------
+
+
+def test_reserve_fill_never_registers_only_promotion_does():
+    # INVARIANT 1 (EXACTLY-ONCE): a question registers exactly once, at
+    # PROMOTION — never at reserve-fill. Populate the reserve the way the
+    # prefetch commit lands it (inert: slot + drawn mode, NO register), then
+    # promote and confirm registration fired exactly once.
+    g = _reserve_game()
+    registered = []
+    g._register_custom_question = lambda category, question: registered.append(
+        question.get("id")
+    )
+    # Reserve-fill, exactly as the commit does it — inert, no registration.
+    g._next_question_reserve = {"id": "q9", "category": "space"}
+    g._next_question_reserve_mode = "general"
+    assert registered == []                    # fill left NO registration
+    g._promote_reserve()
+    assert registered == ["q9"]                # registered once, at promotion
+
+
+def test_burned_reserve_leaves_zero_registration_or_arm_trace():
+    # INVARIANT 2 (LIVEFIRE Class 3b, extended to the reserve): a reserve
+    # burned/cleared before promotion leaves ZERO trace — it never registers
+    # and never becomes the head, so it can never reach asked_history or any
+    # player-facing count (asked_history is written at ARM; a discarded
+    # reserve is never armed).
+    g = _reserve_game()
+    g._is_burned = lambda q: True
+    registered = []
+    g._register_custom_question = lambda category, question: registered.append(
+        question.get("id")
+    )
+    g._next_question_reserve = {"id": "q9", "category": "space"}
+    g._next_question_reserve_mode = "general"
+    g._promote_reserve()
+    assert registered == []                    # never registered
+    assert g.next_question is None             # never became the head → never armable
+    assert g._next_question_reserve is None
+
+
+def test_empty_reserve_promotion_is_zero_side_effect_single_slot_parity():
+    # INVARIANT 4 (HARDENED-PATH PARITY): with an EMPTY reserve the depth-2
+    # code is the old single-slot behaviour, bit-for-bit — promotion touches
+    # nothing. The 583a0f16/2260354c stall-recovery and the auto-advance
+    # arm+nudge all call _promote_reserve on the way through arm; with no
+    # reserve that call must be a strict no-op (no register, no settle, no
+    # head change). The whole 2566-test suite runs in this empty-reserve
+    # state; this pins the seam directly.
+    g = _reserve_game()
+    registered, settled = [], []
+    g._register_custom_question = lambda category, question: registered.append(1)
+    g.settle_context_nowait = lambda: settled.append(1)
+    g.next_question = None
+    g._promote_reserve()
+    assert g.next_question is None             # nothing pulled forward
+    assert registered == []                   # no registration
+    assert settled == []                      # no settle
+    # And with a head already in hand, an empty reserve leaves it untouched.
+    g.next_question = {"id": "head"}
+    g._promote_reserve()
+    assert g.next_question == {"id": "head"}
+    assert registered == [] and settled == []
