@@ -701,6 +701,40 @@ class StateView:
         return out
 
 
+# Watchdog policy sentinel: a policy's run() returns this to end the tick,
+# exactly reproducing a `continue` in the old nested _idle_watchdog. Any
+# other return value (a label, or "") means "did my work, fall through to the
+# next policy" — reproducing a branch that did NOT continue.
+_WATCH_HALT = "__watch_halt__"
+
+
+@dataclass
+class WatchPolicy:
+    """One row of the idle-watchdog policy table (W2b). The watchdog used to
+    be one nested method where recovery for a dead supply line hid three
+    `if` levels down behind a question-armed guard (session 2260354c). Each
+    branch is now a row with an explicit `when` predicate, so what a policy
+    fires on — and where it sits in the priority order — is data, not control
+    flow buried in a story.
+
+    when       — fires this tick iff when(game) is truthy.
+    every_ticks— cadence (1 = every tick; all current rows are 1).
+    run        — does the work; returns `_WATCH_HALT` to end the tick
+                 (an old `continue`) or any other string to fall through.
+    skip_if    — other policy names that, if they ran this tick, skip this
+                 one. Unused under strict ordered halt (the halt-break
+                 subsumes it); reserved for order-independent exclusions.
+
+    `when` predicates are written so they could later delegate to W1a's
+    GameControl.may(act), but do NOT depend on it (W1a is not a hard dep)."""
+
+    name: str
+    when: Callable[["LilyGame"], bool]
+    every_ticks: int
+    run: Callable[["LilyGame"], Awaitable[str]]
+    skip_if: tuple[str, ...] = ()
+
+
 # ---------------------------------------------------------------------------
 # Game director — the non-LLM surface: window timer, adjudication commit,
 # SFX dispatch, state publication, checkpointing triggers.
@@ -4702,260 +4736,330 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     # Conversation may continue, but every game-plane owner
                     # stays frozen until explicit resume.
                     continue
-                # PATCH-002 A4: the hold binds every lane. While held, the
-                # watchdog itself must not refire/nudge/vamp — that would be
-                # the runaway it exists to prevent. It only lifts the hold
-                # on its generous timeout (user speech lifts it sooner).
-                if getattr(self, "_hold_active", False):
-                    if self.hold_timed_out():
-                        self.release_hold(reason="timeout")
-                    else:
-                        continue
-                # PATCH-003 P9: a direct address unanswered past the budget
-                # trips the ADDRESS_UNANSWERED warn once (the '34s silence'
-                # fixture is now a log query on live sessions).
-                if self.address_unanswered() and not getattr(
-                    self, "_address_unanswered_warned", False
-                ):
-                    self._address_unanswered_warned = True
-                    logger.warning(
-                        "LILY_RESPONSIVENESS | ADDRESS_UNANSWERED | "
-                        "session=%s — a direct address went unanswered past "
-                        "the %.1fs budget",
-                        self.sk.session_id,
-                        lily_config.responsiveness_budget_seconds(),
-                    )
-                elif not getattr(self, "_awaiting_address_since", 0.0):
-                    self._address_unanswered_warned = False
-                # PATCH-003 P10: a pending conversational question that goes
-                # unanswered past the timeout gets ONE gentle re-offer, then
-                # holds. The re-offer is exempt from the pending block.
-                if getattr(self, "_question_pending", False):
-                    if self._question_pending_timed_out():
-                        if not getattr(self, "_question_pending_reoffered", False):
-                            self._question_pending_reoffered = True
-                            self.gated_say(
-                                None, "question_reoffer",
-                                "The table hasn't answered the question you "
-                                "asked. REGISTER GUIDANCE (vary freely within "
-                                "this length and temperature, never longer): "
-                                "gently re-ask the SAME question once, no new "
-                                "content stacked on it, then wait.",
-                                source="question_reoffer",
-                            )
-                        else:
-                            # Re-offer already spent — convert to a hold.
-                            self.release_question_pending(reason="reoffer_timeout")
-                            self.enter_hold(reason="question_unanswered")
-                    continue
-                # Z2 (HOTFIX-008): supply health on its OWN tick, independent
-                # of delivery state. Every recovery rung below this point
-                # lives behind the idle guards — session 2260354c proved a
-                # dead supply line is invisible while a question is armed or
-                # a window is open (q1 cycled all session; q2's failed
-                # prefetch was never retried; zero WATCHDOG lines). This
-                # check extends recovery's REACH into the non-idle phases;
-                # it only ever lands SUPPLY (next_question) — delivery stays
-                # owned by the arm/nudge machinery of whatever phase the
-                # game is in, and the idle branch keeps its own ladder.
-                if self._supply_silent_window():
-                    self._supply_silent_ticks = (
-                        getattr(self, "_supply_silent_ticks", 0) + 1
-                    )
-                    idle_phase = (
-                        self.armed_question is None
-                        and not self.sk.answer_window_open
-                        and not self._adjudicating
-                        and not getattr(self, "_question_transitioning", False)
-                    )
-                    if not idle_phase:
-                        if (
-                            self._supply_silent_ticks
-                            == self.SUPPLY_SILENT_WARN_TICKS
-                        ):
-                            logger.warning(
-                                "LILY_SUPPLY | SUPPLY_SILENT_WINDOW | "
-                                "session=%s q=%d ticks=%d (~%ds) armed=%s "
-                                "window=%s — no prefetched question and no "
-                                "prefetch in flight while delivery is busy; "
-                                "starting supply recovery",
-                                self.sk.session_id, self.sk.question_number,
-                                self._supply_silent_ticks,
-                                int(
-                                    self._supply_silent_ticks
-                                    * self.WATCHDOG_INTERVAL_SECONDS
-                                ),
-                                self.armed_question is not None,
-                                self.sk.answer_window_open,
-                            )
-                        if (
-                            self._supply_silent_ticks
-                            >= self.SUPPLY_SILENT_WARN_TICKS
-                        ):
-                            self.ensure_supply_recovery(
-                                trigger="watchdog_silent_window"
-                            )
-                else:
-                    self._supply_silent_ticks = 0
-                paused = self.progression_paused_reason()
-                if paused:
-                    logger.info(
-                        "LILY_PROGRESSION | WATCHDOG_PAUSED | session=%s "
-                        "q=%d reason=%s",
-                        self.sk.session_id, self.sk.question_number, paused,
-                    )
-                    continue
-                if (
-                    self.sk.answer_window_open
-                    or self._adjudicating
-                    or getattr(self, "_question_transitioning", False)
-                ):
-                    self._prefetch_stall_ticks = 0
-                    self._armed_limbo_ticks = 0
-                    self._supply_stall_ticks = 0
-                    continue
-                if self.armed_question is not None:
-                    # Armed with a CLOSED window and no ruling in flight.
-                    # Pre-delivery that's normal (the delivery-nudge
-                    # machinery owns it) — but if the delivery claim is
-                    # already CONFIRMED, this question was asked, played
-                    # out, and then the post-delivery chain died (live
-                    # 2026-07-15 04:05: adjudication crashed between the
-                    # answer commit and the reveal publish; the game
-                    # parked on Q3 forever while the watchdog trusted
-                    # "armed = in progress"). Recover deterministically.
-                    self._prefetch_stall_ticks = 0
-                    self._supply_stall_ticks = 0
-                    claim = self.say_registry.state(
-                        f"q_{self.sk.question_number}_delivery"
-                    )
-                    if claim == lily_say_gate.CLAIM_CONFIRMED:
-                        self._armed_limbo_ticks += 1
-                        if self._armed_limbo_ticks >= 2:
-                            self._armed_limbo_ticks = 0
-                            if self.sk.answer_candidates:
-                                logger.error(
-                                    "LILY_WATCHDOG | ARMED_LIMBO | session=%s "
-                                    "q=%d — delivery confirmed, window closed, "
-                                    "candidates waiting: forcing adjudication",
-                                    self.sk.session_id, self.sk.question_number,
-                                )
-                                asyncio.ensure_future(
-                                    # Recovery may reclaim a journaled
-                                    # transition whose speech never aired —
-                                    # without this the SECOND_LANE_REFUSED
-                                    # guard and this watchdog ping-pong
-                                    # forever over dead air (lily-1C53C6).
-                                    self.adjudicate(
-                                        steal_allowed=False,
-                                        reclaim_transition=True,
-                                    )
-                                )
-                            else:
-                                logger.error(
-                                    "LILY_WATCHDOG | ARMED_LIMBO | session=%s "
-                                    "q=%d — delivery confirmed, window closed, "
-                                    "no candidates: reopening the window",
-                                    self.sk.session_id, self.sk.question_number,
-                                )
-                                self.open_window()
-                        self._undelivered_ticks = 0
-                        self._undelivered_refires = 0
-                    else:
-                        # WS-2: armed with a CLOSED window and the delivery
-                        # claim NOT confirmed — either never registered, or
-                        # registered and stuck (dispatched, playing, but
-                        # playout silently never completed and no exception
-                        # fired, so WS-0's suppressed-path release never
-                        # ran). The old contract trusted the delivery-nudge
-                        # machinery here, but that machinery only advances
-                        # on a FINISHED agent turn; a fully-silent stall
-                        # never trips it. Reconcile explicitly.
-                        self._armed_limbo_ticks = 0
-                        self.reconcile_undelivered_claim()
-                    continue
-                self._armed_limbo_ticks = 0
-                # Game live but idle: nothing armed, no window, no ruling
-                # in flight. Someone must move the game — that someone is
-                # now guaranteed to exist.
-                if self.next_question is not None:
-                    self._supply_stall_ticks = 0
-                    if self.arm_next_question() and self.session is not None:
-                        logger.warning(
-                            "LILY_WATCHDOG | IDLE_REARM | session=%s q=%d",
-                            self.sk.session_id, self.sk.question_number,
-                        )
-                        # Structural delivery claim (desync WO Sub-agent
-                        # B): the nudged turn registers the delivery.
-                        self.expect_delivery()
-                        self.gated_say(
-                            None,
-                            "question_nudge",
-                            (
-                                "The next question just landed in the state "
-                                "block. Bridge in one short beat and ask it "
-                                "now — its question sentence exactly as "
-                                "written, whole, in one breath."
-                            ),
-                            source="idle_watchdog",
-                        )
-                    continue
-                # WS-6 supply-stall fallback. Nothing armed, nothing
-                # prefetched: count the stall independently of
-                # _prefetch_stall_ticks. A starved generator that returns
-                # nothing every tick keeps re-prefetching below (task.done()
-                # each tick), so the hard timeout never climbs — the
-                # 583a0f16 five-minute stall lived exactly there. Past the
-                # fallback window, arm straight from the curated bank — but
-                # only once reconciliation reports no stuck claim (WS-2), so
-                # a fallback never queues behind a ghost.
-                self._supply_stall_ticks = (
-                    getattr(self, "_supply_stall_ticks", 0) + 1
-                )
-                logger.warning(
-                    "LILY_WATCHDOG | SUPPLY_STALL | session=%s q=%d "
-                    "ticks=%d (~%ds) — no question in hand",
-                    self.sk.session_id, self.sk.question_number,
-                    self._supply_stall_ticks,
-                    int(self._supply_stall_ticks * self.WATCHDOG_INTERVAL_SECONDS),
-                )
-                if (
-                    self._supply_stall_ticks >= self._supply_fallback_ticks()
-                    and self.no_stuck_claims()
-                ):
-                    if await self.arm_supply_fallback() == "armed":
-                        self._supply_stall_ticks = 0
-                        continue
-                    # empty / blocked / error: fall through so the normal
-                    # re-prefetch keeps trying and the honest vamp holds.
-                task = self._prefetch_task
-                if task is None or task.done():
-                    self._prefetch_stall_ticks = 0
-                    logger.warning(
-                        "LILY_WATCHDOG | IDLE_REPREFETCH | session=%s q=%d",
-                        self.sk.session_id, self.sk.question_number,
-                    )
-                    self.start_prefetch()
-                    continue
-                # A prefetch task is alive but the game has been idle for
-                # this long — it outlived every internal timeout, so treat
-                # it as hung: cancel and let the next tick relaunch.
-                self._prefetch_stall_ticks += 1
-                if self._prefetch_stall_ticks >= self.PREFETCH_HARD_TIMEOUT_TICKS:
-                    self._prefetch_stall_ticks = 0
-                    logger.error(
-                        "LILY_WATCHDOG | PREFETCH_HARD_TIMEOUT | session=%s "
-                        "q=%d — cancelling the stuck supply task",
-                        self.sk.session_id, self.sk.question_number,
-                    )
-                    task.cancel()
-                    self.sk.set_status_note(
-                        "the question machine stalled and was restarted — "
-                        "vamp honestly for a beat; the next question is on "
-                        "its way"
-                    )
+                # W2b item 1: the tick is an ORDERED walk of the policy table.
+                await self._run_watch_policies()
             except Exception:
                 logger.exception("LILY_WATCHDOG | TICK_FAILED")
+
+    # -- watchdog policy table (W2b item 1) -----------------------------------
+    #
+    # The tick, past the pre-gates above, walks _WATCH_POLICIES in order. Each
+    # row fires when its `when` holds; a row that returns _WATCH_HALT ends the
+    # tick — the exact semantics of a `continue` in the pre-refactor nested
+    # watchdog. ORDER IS PRIORITY: an earlier row that halts hides the ones
+    # below it this tick. That priority is the whole point of the refactor —
+    # session 2260354c stalled because supply recovery sat BELOW the armed /
+    # question halts and never ran while a question was in hand.
+
+    async def _run_watch_policies(self) -> None:
+        table = getattr(self, "_watch_policy_table", None)
+        if table is None:
+            table = self._make_watch_policies()
+            self._watch_policy_table = table
+        self._watchdog_tick = getattr(self, "_watchdog_tick", 0) + 1
+        ran: set = set()
+        for policy in table:
+            if self._watchdog_tick % policy.every_ticks:
+                continue
+            if ran.intersection(policy.skip_if):
+                continue
+            if not policy.when(self):
+                continue
+            action = await policy.run(self)
+            ran.add(policy.name)
+            if action == _WATCH_HALT:
+                break
+
+    def _make_watch_policies(self) -> tuple:
+        """Ordered policy table. THIS order is the CURRENT execution order of
+        the pre-refactor _idle_watchdog — the reviewable parity baseline
+        (W2b item 1, commit A). Commit B reorders to the operator's list."""
+        return (
+            WatchPolicy("hold_timeout", LilyGame._when_hold, 1,
+                        LilyGame._wp_hold),
+            WatchPolicy("address_unanswered", LilyGame._when_always, 1,
+                        LilyGame._wp_address_unanswered),
+            WatchPolicy("question_reoffer", LilyGame._when_question_pending, 1,
+                        LilyGame._wp_question_reoffer),
+            WatchPolicy("supply_silent", LilyGame._when_always, 1,
+                        LilyGame._wp_supply_silent),
+            WatchPolicy("progression_paused", LilyGame._when_progression_paused,
+                        1, LilyGame._wp_progression_paused),
+            WatchPolicy("busy_reset", LilyGame._when_busy, 1,
+                        LilyGame._wp_busy_reset),
+            WatchPolicy("armed", LilyGame._when_armed, 1, LilyGame._wp_armed),
+            WatchPolicy("idle_rearm", LilyGame._when_idle, 1,
+                        LilyGame._wp_idle_rearm),
+            WatchPolicy("supply_stall", LilyGame._when_idle, 1,
+                        LilyGame._wp_supply_stall),
+        )
+
+    # -- policy predicates ----------------------------------------------------
+
+    def _when_always(self) -> bool:
+        return True
+
+    def _when_hold(self) -> bool:
+        return getattr(self, "_hold_active", False)
+
+    def _when_question_pending(self) -> bool:
+        return getattr(self, "_question_pending", False)
+
+    def _when_progression_paused(self) -> bool:
+        return bool(self.progression_paused_reason())
+
+    def _when_busy(self) -> bool:
+        return (
+            self.sk.answer_window_open
+            or self._adjudicating
+            or getattr(self, "_question_transitioning", False)
+        )
+
+    def _when_armed(self) -> bool:
+        return self.armed_question is not None
+
+    def _when_idle(self) -> bool:
+        return self.armed_question is None
+
+    # -- policy actions (one per pre-refactor branch) -------------------------
+
+    async def _wp_hold(self) -> str:
+        # PATCH-002 A4: the hold binds every lane. While held, the watchdog
+        # itself must not refire/nudge/vamp. It lifts only on the generous
+        # timeout (user speech lifts it sooner) — then the tick continues.
+        if self.hold_timed_out():
+            self.release_hold(reason="timeout")
+            return "hold_released"
+        return _WATCH_HALT
+
+    async def _wp_address_unanswered(self) -> str:
+        # PATCH-003 P9: a direct address unanswered past the budget trips the
+        # ADDRESS_UNANSWERED warn once.
+        if self.address_unanswered() and not getattr(
+            self, "_address_unanswered_warned", False
+        ):
+            self._address_unanswered_warned = True
+            logger.warning(
+                "LILY_RESPONSIVENESS | ADDRESS_UNANSWERED | "
+                "session=%s — a direct address went unanswered past "
+                "the %.1fs budget",
+                self.sk.session_id,
+                lily_config.responsiveness_budget_seconds(),
+            )
+        elif not getattr(self, "_awaiting_address_since", 0.0):
+            self._address_unanswered_warned = False
+        return "address_checked"
+
+    async def _wp_question_reoffer(self) -> str:
+        # PATCH-003 P10: a pending conversational question unanswered past the
+        # timeout gets ONE gentle re-offer, then holds. Always halts the tick.
+        if self._question_pending_timed_out():
+            if not getattr(self, "_question_pending_reoffered", False):
+                self._question_pending_reoffered = True
+                self.gated_say(
+                    None, "question_reoffer",
+                    "The table hasn't answered the question you "
+                    "asked. REGISTER GUIDANCE (vary freely within "
+                    "this length and temperature, never longer): "
+                    "gently re-ask the SAME question once, no new "
+                    "content stacked on it, then wait.",
+                    source="question_reoffer",
+                )
+            else:
+                # Re-offer already spent — convert to a hold.
+                self.release_question_pending(reason="reoffer_timeout")
+                self.enter_hold(reason="question_unanswered")
+        return _WATCH_HALT
+
+    async def _wp_supply_silent(self) -> str:
+        # Z2 (HOTFIX-008): supply health on its OWN tick, independent of
+        # delivery state — session 2260354c proved a dead supply line is
+        # invisible while a question is armed or a window is open. This check
+        # extends recovery's REACH into the non-idle phases; it only ever
+        # lands SUPPLY (next_question). Falls through (never halts).
+        if self._supply_silent_window():
+            self._supply_silent_ticks = (
+                getattr(self, "_supply_silent_ticks", 0) + 1
+            )
+            idle_phase = (
+                self.armed_question is None
+                and not self.sk.answer_window_open
+                and not self._adjudicating
+                and not getattr(self, "_question_transitioning", False)
+            )
+            if not idle_phase:
+                if (
+                    self._supply_silent_ticks
+                    == self.SUPPLY_SILENT_WARN_TICKS
+                ):
+                    logger.warning(
+                        "LILY_SUPPLY | SUPPLY_SILENT_WINDOW | "
+                        "session=%s q=%d ticks=%d (~%ds) armed=%s "
+                        "window=%s — no prefetched question and no "
+                        "prefetch in flight while delivery is busy; "
+                        "starting supply recovery",
+                        self.sk.session_id, self.sk.question_number,
+                        self._supply_silent_ticks,
+                        int(
+                            self._supply_silent_ticks
+                            * self.WATCHDOG_INTERVAL_SECONDS
+                        ),
+                        self.armed_question is not None,
+                        self.sk.answer_window_open,
+                    )
+                if (
+                    self._supply_silent_ticks
+                    >= self.SUPPLY_SILENT_WARN_TICKS
+                ):
+                    self.ensure_supply_recovery(
+                        trigger="watchdog_silent_window"
+                    )
+        else:
+            self._supply_silent_ticks = 0
+        return "supply_silent_checked"
+
+    async def _wp_progression_paused(self) -> str:
+        paused = self.progression_paused_reason()
+        logger.info(
+            "LILY_PROGRESSION | WATCHDOG_PAUSED | session=%s "
+            "q=%d reason=%s",
+            self.sk.session_id, self.sk.question_number, paused,
+        )
+        return _WATCH_HALT
+
+    async def _wp_busy_reset(self) -> str:
+        self._prefetch_stall_ticks = 0
+        self._armed_limbo_ticks = 0
+        self._supply_stall_ticks = 0
+        return _WATCH_HALT
+
+    async def _wp_armed(self) -> str:
+        # Armed with a CLOSED window and no ruling in flight. If the delivery
+        # claim is already CONFIRMED, the post-delivery chain died (2026-07-15
+        # 04:05) — recover deterministically. Always halts.
+        self._prefetch_stall_ticks = 0
+        self._supply_stall_ticks = 0
+        claim = self.say_registry.state(
+            f"q_{self.sk.question_number}_delivery"
+        )
+        if claim == lily_say_gate.CLAIM_CONFIRMED:
+            self._armed_limbo_ticks += 1
+            if self._armed_limbo_ticks >= 2:
+                self._armed_limbo_ticks = 0
+                if self.sk.answer_candidates:
+                    logger.error(
+                        "LILY_WATCHDOG | ARMED_LIMBO | session=%s "
+                        "q=%d — delivery confirmed, window closed, "
+                        "candidates waiting: forcing adjudication",
+                        self.sk.session_id, self.sk.question_number,
+                    )
+                    asyncio.ensure_future(
+                        # Recovery may reclaim a journaled transition whose
+                        # speech never aired — without this the
+                        # SECOND_LANE_REFUSED guard and this watchdog
+                        # ping-pong forever over dead air (lily-1C53C6).
+                        self.adjudicate(
+                            steal_allowed=False,
+                            reclaim_transition=True,
+                        )
+                    )
+                else:
+                    logger.error(
+                        "LILY_WATCHDOG | ARMED_LIMBO | session=%s "
+                        "q=%d — delivery confirmed, window closed, "
+                        "no candidates: reopening the window",
+                        self.sk.session_id, self.sk.question_number,
+                    )
+                    self.open_window()
+            self._undelivered_ticks = 0
+            self._undelivered_refires = 0
+        else:
+            # WS-2: armed, CLOSED window, delivery claim NOT confirmed —
+            # never registered, or registered and stuck. Reconcile explicitly.
+            self._armed_limbo_ticks = 0
+            self.reconcile_undelivered_claim()
+        return _WATCH_HALT
+
+    async def _wp_idle_rearm(self) -> str:
+        # Game live but idle: nothing armed, no window, no ruling. Reset the
+        # limbo counter, then arm the prefetched question if one is in hand
+        # (halt); otherwise fall through to the supply-stall ladder.
+        self._armed_limbo_ticks = 0
+        if self.next_question is not None:
+            self._supply_stall_ticks = 0
+            if self.arm_next_question() and self.session is not None:
+                logger.warning(
+                    "LILY_WATCHDOG | IDLE_REARM | session=%s q=%d",
+                    self.sk.session_id, self.sk.question_number,
+                )
+                # Structural delivery claim (desync WO Sub-agent B): the
+                # nudged turn registers the delivery.
+                self.expect_delivery()
+                self.gated_say(
+                    None,
+                    "question_nudge",
+                    (
+                        "The next question just landed in the state "
+                        "block. Bridge in one short beat and ask it "
+                        "now — its question sentence exactly as "
+                        "written, whole, in one breath."
+                    ),
+                    source="idle_watchdog",
+                )
+            return _WATCH_HALT
+        return "idle_no_supply"
+
+    async def _wp_supply_stall(self) -> str:
+        # WS-6 supply-stall fallback. Nothing armed, nothing prefetched: count
+        # the stall independently of _prefetch_stall_ticks. Past the fallback
+        # window, arm straight from the curated bank — but only once
+        # reconciliation reports no stuck claim (WS-2).
+        self._supply_stall_ticks = (
+            getattr(self, "_supply_stall_ticks", 0) + 1
+        )
+        logger.warning(
+            "LILY_WATCHDOG | SUPPLY_STALL | session=%s q=%d "
+            "ticks=%d (~%ds) — no question in hand",
+            self.sk.session_id, self.sk.question_number,
+            self._supply_stall_ticks,
+            int(self._supply_stall_ticks * self.WATCHDOG_INTERVAL_SECONDS),
+        )
+        if (
+            self._supply_stall_ticks >= self._supply_fallback_ticks()
+            and self.no_stuck_claims()
+        ):
+            if await self.arm_supply_fallback() == "armed":
+                self._supply_stall_ticks = 0
+                return _WATCH_HALT
+            # empty / blocked / error: fall through so the normal
+            # re-prefetch keeps trying and the honest vamp holds.
+        task = self._prefetch_task
+        if task is None or task.done():
+            self._prefetch_stall_ticks = 0
+            logger.warning(
+                "LILY_WATCHDOG | IDLE_REPREFETCH | session=%s q=%d",
+                self.sk.session_id, self.sk.question_number,
+            )
+            self.start_prefetch()
+            return _WATCH_HALT
+        # A prefetch task is alive but the game has been idle for this long —
+        # it outlived every internal timeout, so treat it as hung.
+        self._prefetch_stall_ticks += 1
+        if self._prefetch_stall_ticks >= self.PREFETCH_HARD_TIMEOUT_TICKS:
+            self._prefetch_stall_ticks = 0
+            logger.error(
+                "LILY_WATCHDOG | PREFETCH_HARD_TIMEOUT | session=%s "
+                "q=%d — cancelling the stuck supply task",
+                self.sk.session_id, self.sk.question_number,
+            )
+            task.cancel()
+            self.sk.set_status_note(
+                "the question machine stalled and was restarted — "
+                "vamp honestly for a beat; the next question is on "
+                "its way"
+            )
+        return "supply_stall_checked"
+
 
     # -- registered-undelivered reconciliation (WS-2, WO-LILY-OMNIBUS-003) -----
     #

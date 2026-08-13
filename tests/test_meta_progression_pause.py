@@ -76,9 +76,10 @@ def test_question_nudge_is_suppressed_at_dispatch_choke_point():
 
 
 def test_watchdog_checks_pause_before_delivery_recovery():
-    body = inspect.getsource(LilyGame._idle_watchdog)
-    pause = body.index("paused = self.progression_paused_reason()")
-    reconcile = body.index("self.reconcile_undelivered_claim()")
-    rearm = body.index("LILY_WATCHDOG | IDLE_REARM")
-    assert pause < reconcile
-    assert pause < rearm
+    # The pause gate must sit ahead of the delivery/idle recovery rows so a
+    # paused game is never reconciled or re-armed. In the W2b policy table
+    # that priority IS the row order.
+    game = LilyGame.__new__(LilyGame)
+    names = [p.name for p in game._make_watch_policies()]
+    assert names.index("progression_paused") < names.index("armed")
+    assert names.index("progression_paused") < names.index("idle_rearm")
