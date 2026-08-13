@@ -1544,6 +1544,28 @@ def lily_ledger_score_line(
     return f"On the board: {body}."
 
 
+def lily_scores_sheet(
+    *,
+    ledger_scores: dict,
+    ledger_streaks: Optional[dict] = None,
+    final: bool = False,
+    winner: Optional[str] = None,
+) -> str:
+    """REFACTOR W2a. The deterministic round-standings / finale flourish —
+    composed from the ledger, model-free — that replaces adjudicate's last
+    LLM `instructed_reply`. The verdict beat already announced the answer and
+    the point; this beat is standings only, so a deterministic composite
+    cannot restate the verdict (the "do NOT restate" directive becomes true by
+    construction — which is what deletes the second half of the N12 double-
+    narration class). Empty ledger degrades to the bare boundary line."""
+    standings = lily_ledger_score_line(ledger_scores, ledger_streaks)
+    if final:
+        head = f"That's the game — {winner} takes it!" if winner else "That's the game!"
+    else:
+        head = "That closes the round."
+    return f"{head} {standings}".strip() if standings else head
+
+
 def lily_verdict_sheet(
     *,
     answer: str,

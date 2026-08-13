@@ -810,22 +810,26 @@ def test_round_transition_reveal_and_question_use_separate_strict_turns():
     # verdict word, then the standings flourish that never restates it.
     # The strict q7 delivery dispatches only at reveal playout completion
     # (delivery_scenario below).
-    # REFACTOR W2a: still TWO beats, now split across lanes — the DETERMINISTIC
-    # verdict sheet on direct_say, then the standings flourish (LLM) that never
-    # restates it.
-    assert len(game.session.said) == 1
-    assert len(game.session.instructions) == 1
-    verdict = game.session.said[0]
-    reveal = game.session.instructions[0]
+    # REFACTOR W2a: still TWO beats, now BOTH deterministic on the direct_say
+    # lane — the verdict sheet, then the standings flourish that never restates
+    # it (standings-only by construction, so adjudicate ends in a template and
+    # NEVER instructed_reply). No LLM instruction is emitted by adjudicate at
+    # all; the q7 delivery is the only later instruction, at scores playout.
+    assert len(game.session.said) == 2
+    assert len(game.session.instructions) == 0
+    verdict, standings = game.session.said
     assert "femur" in verdict.lower()
-    assert "separate authoritative delivery turn follows" in reveal
-    assert "do NOT restate" in reveal
+    # The standings never re-rules or re-awards — the "do NOT restate" directive
+    # is now true by construction.
+    assert "correct" not in standings.lower()
+    assert "point" not in standings.lower()
+    assert "on the board" in standings.lower()
     verdict_owner = game.say_registry.owner_of("q_6_verdict")
     scores_owner = game.say_registry.owner_of("round_1_scores")
     assert verdict_owner is not None
     assert scores_owner is not None
     assert ROUND_TWO_MC["prompt"] not in verdict
-    assert ROUND_TWO_MC["prompt"] not in reveal
+    assert ROUND_TWO_MC["prompt"] not in standings
     assert game._pending_delivery_qnum is None
 
     async def delivery_scenario():
@@ -835,17 +839,19 @@ def test_round_transition_reveal_and_question_use_separate_strict_turns():
         game.on_agent_speech_finished(
             "Correct — femur.", speech_id=verdict_owner
         )
-        # W2a: the verdict was a say; completing it adds no instruction — the
-        # lone standings flourish still stands, q7 not yet dispatched.
-        assert len(game.session.instructions) == 1
+        # W2a: verdict and standings were both says; completing the verdict
+        # adds no instruction — q7 not yet dispatched (it waits on the scores
+        # flourish's playout completion).
+        assert len(game.session.instructions) == 0
         assert game._pending_delivery_qnum is None
 
-        # The round-scores flourish owns the transition to q7.
+        # The round-scores flourish owns the transition to q7 — the delivery is
+        # the only LLM instruction adjudicate's transition produces.
         game.on_agent_speech_finished(
             "Round one standings.", speech_id=scores_owner
         )
-        assert len(game.session.instructions) == 2
-        delivery = game.session.instructions[1]
+        assert len(game.session.instructions) == 1
+        delivery = game.session.instructions[0]
         assert ROUND_TWO_MC["prompt"] in delivery
         for choice in ROUND_TWO_MC["choices"]:
             assert choice in delivery

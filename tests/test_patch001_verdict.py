@@ -113,8 +113,11 @@ def test_failed_commit_holds_in_character_and_never_celebrates(caplog):
     game.sk.record_result = _boom
     with caplog.at_level(logging.ERROR):
         _run(_adjudicate_and_drain(game), game)
-    joined = " ".join(game.session.instructions)
-    assert "VERDICT BEAT" not in joined  # no verdict narration
+    # REFACTOR W2a: the commit-failure hold is a deterministic direct_say
+    # sheet — no verdict narration, just the in-character hold.
+    joined = " ".join(game.session.said)
+    assert "Correct" not in joined       # no verdict narration
+    assert "point" not in joined.lower()
     assert "double-check" in joined      # the in-character hold aired
     assert any("COMMIT_FAILED" in r.message for r in caplog.records)
     # No score moved.

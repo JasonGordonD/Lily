@@ -9212,6 +9212,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                             self.sk.session_id, self.sk.question_number,
                             winner,
                         )
+                        # REFACTOR W2a: the commit-failure hold is a
+                        # DETERMINISTIC sheet — adjudicate never ends in
+                        # instructed_reply, even on the error path. No verdict,
+                        # points, or answer (the commit failed).
                         self.gated_say(
                             None,
                             "verdict_hold",
@@ -9220,6 +9224,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                             "double-check that one—' — and do NOT announce "
                             "any verdict, points, or the answer.",
                             source="adjudicate_commit_failed",
+                            text="Ooh — let me double-check that one.",
                         )
                         return
                 else:
@@ -9800,6 +9805,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             elif verdict_spoken_organically:
                 act = None
             if act is not None:
+                # REFACTOR W2a: the flourish is a DETERMINISTIC standings /
+                # finale composite from the ledger (direct_say) — adjudicate
+                # ends in a template, never instructed_reply. Standings-only by
+                # construction, so it cannot restate the verdict beat (that is
+                # what deletes the N12 double-narration class). reveal_instr is
+                # retained only as the empty-sheet fallback.
+                _scores = self.sk.ledger_scores()
+                _leaders = (
+                    [n for n, s in _scores.items() if s == max(_scores.values())]
+                    if _scores else []
+                )
+                scores_sheet = lily_scorekeeper.lily_scores_sheet(
+                    ledger_scores=_scores,
+                    ledger_streaks=self.sk.ledger_streaks(),
+                    final=was_final,
+                    winner=_leaders[0] if len(_leaders) == 1 else None,
+                )
                 self.gated_say(
                     flourish_key,
                     act,
@@ -9809,6 +9831,7 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                     "do NOT re-award the point; go straight to the color "
                     "and onward.",
                     source="adjudicate",
+                    text=scores_sheet or None,
                 )
         except Exception:
             # Adjudication runs inside fire-and-forget timer tasks — an
