@@ -5,6 +5,70 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — REFACTOR W2b: watchdog policy table + StateView schema + per-call vocal depth
+
+Four items, all landed: (1) watchdog policy table, (2) StateView schema, (3a)
+depth-2 prefetch, (3b) per-call vocal depth.
+
+**Item 1 — idle watchdog as a policy table (commits A + B).** `_idle_watchdog`
+was one nested method where recovery for a dead supply line hid three `if`
+levels down behind a question-armed guard (session 2260354c). It is now an
+ordered table `_WATCH_POLICIES`, walked by `_run_watch_policies`; each branch
+is a `WatchPolicy(name, when, every_ticks, run, skip_if)`. A `run` returns
+`_WATCH_HALT` to end the tick (the old `continue`) or falls through. Order IS
+priority.
+
+- **Commit A** encodes the table in the CURRENT execution order — the
+  behaviour-preserving parity baseline (full suite green; the pause-before-
+  recovery source-pin test now asserts row order). Row → old branch:
+  `hold_timeout`, `address_unanswered`, `question_reoffer`, `supply_silent`,
+  `progression_paused`, `busy_reset`, `armed` (the confirmed→armed-limbo and
+  not-confirmed→undelivered-reconcile branches), `idle_rearm`, `supply_stall`.
+- **Commit B** reorders to the operator's stated priority: `hold_timeout` →
+  `supply_silent` → (`progression_paused`, `busy_reset` gates, slotted ahead
+  of the armed/idle recovery they gate) → `armed` → `address_unanswered` →
+  `question_reoffer` → `idle_rearm` → `supply_stall`. Deliberate change:
+  `supply_silent` now precedes every HALT that could hide it. Acceptance:
+  supply_silent fires while a question is armed AND while a conversational
+  question is pending (`test_watchdog_policies.py`).
+- **A→B tick-outcome diffs** (enumerated; none break existing contracts):
+  (1) when `_question_pending`, supply_silent now runs — commit A halted at
+  `question_reoffer` first (the intended fix); (2) `address_unanswered` and
+  `question_reoffer`, now lowest priority, are suppressed on a tick where
+  `progression_paused`/`busy_reset`/`armed` halts first (they ran before those
+  in A); (3) when both `_question_pending` and `armed_question` hold, B fires
+  the armed recovery where A fired the conversational re-offer.
+
+**Item 2 — StateView schema.** `_state_extra_lines` populates a typed
+`StateView` (one named slot per honesty field) and renders it in a fixed order
+via `StateView.render()`; `_build_state_view` holds the conditionals. The
+stable prefix is now a pure function of the view — byte-identical across
+renders (the prompt-cache boundary) and provably answer-safe (the armed
+NEXT-QUESTION slot carries prompt/category/choices/image only, never
+canonical_answer). Behaviour-preserving; acceptance in `test_stateview.py`.
+
+**Item 3a — depth-2 prefetch (reserve slot).** `next_question` (the head) now
+keeps a reserve `_next_question_reserve` (the N+2), so consuming the head never
+leaves an empty hand — the supply-stall and the custom-round "putting it
+together" vamp both came from an empty hand. INVARIANT: the reserve is non-None
+only while the head is non-None. `start_prefetch` draws while EITHER slot is
+open; the commit lands the N+2 in the reserve WITHOUT the head-only
+register/settle/auto-advance; `arm_next_question` promotes reserve→head via
+`_promote_reserve`. That promotion is the centralised Class-6 guard: a reserve
+drawn under a deck that has since flipped (mode mismatch) or one already burned
+is DISCARDED there, never served cross-deck, and register/settle run once, at
+promotion, as the head. Both burn paths (adult objection, answer leak) and the
+picture-lane refresh retire the reserve with the head. Cross-deck discard is
+tested explicitly (`test_prefetch_reserve.py`).
+
+**Item 3b — per-call vocal depth.** Vocal reasoning depth is chosen per call
+via `chat()` extra_kwargs instead of mutating the shared `llm._opts` in place
+(the default is lifted off `_opts` once by `_ensure_vocal_depth_unshared`;
+`_vocal_depth_for_turn` supplies each turn's depth; `_vocal_llm_stream`
+replaces the default node). Closes the race where two overlapping generations
+leaked one turn's depth (a greeting rendered at "medium"). Both transports
+(OpenAI reasoning_effort, Google thinking_config). Empty-STOP guard unchanged.
+
 ## 2026-08-12 — REFACTOR W2a: verdict/score/command beats are deterministic direct_say sheets
 
 Step 2 + the latency item. The discrete adjudicate/command beats that composed

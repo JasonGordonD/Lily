@@ -288,6 +288,67 @@ and only TTS first-frame latency is left.
   meta-conversation, not verdict/score speech, and already deterministically
   grounded; a fixed spoken sheet would need a conversational trigger. The `skip`
   beat delivers the next question (delivery-sheet territory).
+## Idle watchdog — a policy table, not a novel (REFACTOR WAVE 2b)
+
+`_idle_watchdog` used to be one nested method; recovery for a dead supply
+line sat three `if` levels down, behind a question-armed guard, and stayed
+invisible while a question was in hand (session 2260354c: q1 window-cycled
+all session while q2's failed prefetch was never retried). The tick is now an
+ordered walk of `_WATCH_POLICIES` (`_run_watch_policies`), one
+`WatchPolicy(name, when, every_ticks, run, skip_if)` per branch:
+
+- **`when`** decides if the row fires this tick — written so it could later
+  delegate to `GameControl.may(act)` but does NOT depend on W1a.
+- **`run`** does the work and returns `_WATCH_HALT` to end the tick (exactly a
+  `continue` in the old method) or any other string to fall through.
+- **Order IS priority.** An earlier row that halts hides the rows below it
+  this tick — so where a row sits is the whole design surface.
+
+Row order (operator priority): `hold_timeout` → `supply_silent` →
+`progression_paused` → `busy_reset` → `armed` → `address_unanswered` →
+`question_reoffer` → `idle_rearm` → `supply_stall`. `supply_silent` sits ahead
+of every HALT that could hide it (the 2260354c fix): supply recovery runs even
+while a question is armed or a conversational question is pending. The
+progression-paused and busy gates sit ahead of the armed/idle recovery they
+gate, so a paused or busy game is never re-armed. Consequence: the lowest rows
+(`address_unanswered`, `question_reoffer`) are skipped on a tick an earlier
+halt claims — see the CHANGELOG A→B enumeration. Per-policy tests live in
+`tests/test_watchdog_policies.py`; the full watchdog behavioural suite
+(stall/supply/undelivered/wedge/transition) is the parity net.
+
+## State block — schema, then render (REFACTOR WAVE 2b)
+
+The stable half of the state block (the honesty surface AND the prompt-cache
+prefix) is built by populating a typed `StateView` — one named slot per field
+— and rendering it in a fixed order via `StateView.render()`, not by
+hand-appending to a list. `_build_state_view` holds the conditionals;
+`_state_extra_lines` is now `_build_state_view(...).render()`. The stable
+prefix is a pure function of the view: byte-identical across renders (an
+accidental extra line or a reordered field would bust the cache) and provably
+answer-safe — the armed NEXT-QUESTION slot carries prompt/category/choices/
+image status only, so `canonical_answer` can never reach the stable block.
+Acceptance in `tests/test_stateview.py`.
+
+## Depth-2 supply — a reserve behind the head (REFACTOR WAVE 2b)
+
+The prefetch keeps a queue of **two**: the head (`next_question`) plus a
+reserve (`_next_question_reserve`, the N+2). Consuming the head promotes the
+reserve forward immediately, so the hand is only empty when BOTH slots are
+spent — the supply-stall and the custom-round "putting it together" vamp both
+came from an empty hand. **Invariant:** the reserve is non-None only while the
+head is non-None, so every existing `next_question is None` guard stays
+correct. `start_prefetch` draws while either slot is open; the commit lands the
+N+2 in the reserve WITHOUT the head-only machinery (settle, the registration
+point, auto-advance), which runs at PROMOTION.
+
+`_promote_reserve` is the **centralised Class-6 guard**: a reserve drawn under
+a deck that has since flipped (mode mismatch) or one already burned is
+DISCARDED at promotion — never served cross-deck — and registration runs there,
+once, as the head. Every site that empties the head keeps the invariant: arm
+promotes, the picture-lane refresh clears the reserve (a pictureless reserve is
+invalid for pictures), and both burn paths (adult objection, answer leak) retire
+the reserve with everything else in flight. `tests/test_prefetch_reserve.py`
+pins the cross-deck discard explicitly.
 
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
