@@ -5,6 +5,28 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-13 — REFACTOR W3b: LilyGame.bare() + getattr-fog deletion
+
+The follow-up to the W3 split: production code can now trust its own fields. The
+`getattr(self, "_hold_active", False)` fog existed because ~50 game-state fields
+were lazily initialized and read before they were written; incomplete
+`LilyGame.__new__(LilyGame)` test fixtures made this permanent. Four bisectable
+commits, suite + parity green each:
+
+1. **`_init_all_game_state` + `LilyGame.bare()`** — every mutable game-state
+   field set to its default in ONE place, called first by `__init__` (byte-
+   identical: those are the values the fog supplied lazily) and by `bare()`, a
+   fully-initialized test instance without `__init__`'s heavy deps.
+2. **Fixture migration + a complete 135-field default map** — all 114
+   `LilyGame.__new__(LilyGame)` sites (98 files) → `bare()`. The default per
+   field is resolved across ALL seven modules (the first pass missed 17 fogged
+   in `lily_speech_delivery.py`) and from source empty-container assignments, so
+   e.g. `_last_user_turn_at = 0.0` and `_suppressed_speech_ids = set()`.
+3. **Fog deletion** — `getattr(self, "_x", default)` → `self._x` for the 135
+   fields (~210 sites), scoped to the LilyGame class body + its mixins. The
+   LilyAgent class region is deliberately untouched (it has its own lazily-set
+   fields); the one `_last_assistant_text` @property fallback is preserved.
+
 ## 2026-08-13 — REFACTOR W3: split LilyGame by owner (five invariant mixins)
 
 Step 4, the last of the ordered refactor: the 12,261-line LilyGame god class is
