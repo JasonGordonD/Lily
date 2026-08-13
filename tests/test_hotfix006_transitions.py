@@ -61,6 +61,7 @@ import lily_audeering_consumers
 import lily_persistence
 import lily_say_gate
 import lily_scorekeeper
+import lily_transition
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
 
@@ -423,7 +424,7 @@ def test_a_stale_transition_stops_owning_her_words():
     assert game.register_transition_narration(N12_LANE_A_VERDICT) == "narration"
     # Age the verdict stage past the narration window.
     entry = game._transition_entry(3, "verdict")
-    entry["at"] -= lily_agent._TRANSITION_NARRATION_WINDOW_SECONDS + 1.0
+    entry["at"] -= lily_transition._TRANSITION_NARRATION_WINDOW_SECONDS + 1.0
 
     assert game.register_transition_narration(N12_LANE_B_VERDICT) is None
 
