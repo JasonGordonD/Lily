@@ -78,7 +78,7 @@ def test_a_landing_candidate_changes_only_the_volatile_tail():
 
 
 def _game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = _sk()
     game.session_started_at = 0.0
     game.availability_flags = None

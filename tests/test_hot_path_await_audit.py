@@ -54,7 +54,7 @@ def test_adjudicate_still_awaits_glass_before_verdict():
 
 def test_skip_question_speaks_without_waiting_on_slow_publish():
     """Behavioral: a hung publish must not delay gated_say dispatch."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = SimpleNamespace(
         session_id="hot-path",
         answer_window_open=True,

@@ -347,7 +347,7 @@ def test_agent_draw_repartitions_on_heat_flip(monkeypatch):
     from lily_agent import LilyGame
     from lily_scorekeeper import LilyScorekeeper
 
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("arsw")
     game.sk.mode = "adult"
     game.sk.adult_image_intensity = "suggestive"
@@ -382,7 +382,7 @@ def test_agent_draw_none_without_group_or_pipeline(monkeypatch):
     from lily_scorekeeper import LilyScorekeeper
 
     def _game():
-        g = LilyGame.__new__(LilyGame)
+        g = LilyGame.bare()
         g.sk = LilyScorekeeper("arsw2")
         g.sk.mode = "general"
         g.asked_history = []
@@ -408,7 +408,7 @@ def test_agent_arsenal_rung_serves_with_no_generator_present(monkeypatch):
 
     sb = _FakeSupabase()
     sb.seed_ready("general", 3)
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("arsw3")
     game.sk.mode = "general"
     game.supabase = sb

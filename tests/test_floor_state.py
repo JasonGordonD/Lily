@@ -54,7 +54,7 @@ class _FakeAgentHandle:
 
 
 def _game(session_id: str = "y10-floor") -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False
@@ -198,7 +198,7 @@ def test_her_live_audio_outranks_a_stale_room_read():
 def test_floor_state_survives_a_bare_new_harness():
     # No addressee classifier, no hold attributes: the read must degrade to
     # OPEN rather than raising inside a speech path.
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("y10-bare")
     assert game.floor_state() == LilyGame.FLOOR_OPEN
 

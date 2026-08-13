@@ -72,7 +72,7 @@ def _make_game() -> LilyGame:
     """Minimal LilyGame via __new__ — the attributes the delivery-claim /
     window-open / state-block paths touch (test_say_gate_dispatch pattern,
     extended for on_agent_speech_finished + open_window)."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False

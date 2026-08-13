@@ -24,7 +24,7 @@ BE8D8B_SETUP = (
 
 
 def _game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("p0-multi-intent")
     game.game_started = False
     game.game_over = False

@@ -80,7 +80,7 @@ class _FakeSession:
 
 
 def _make_game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("mc-abort-fixture")
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.group_id = "grp_mc"

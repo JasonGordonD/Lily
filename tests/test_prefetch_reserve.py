@@ -22,7 +22,7 @@ from lily_agent import LilyGame
 
 
 def _reserve_game() -> LilyGame:
-    g = LilyGame.__new__(LilyGame)
+    g = LilyGame.bare()
     g.sk = SimpleNamespace(
         mode="general", media_mode="voice_only", session_id="reserve"
     )

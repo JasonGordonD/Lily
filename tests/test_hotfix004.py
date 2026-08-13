@@ -91,7 +91,7 @@ def test_minor_or_ambiguous_boundary_birth_year_never_consents():
 
 
 def _game(mode="general"):
-    g = LilyGame.__new__(LilyGame)
+    g = LilyGame.bare()
     g.sk = LilyScorekeeper("h4")
     g.sk.mode = mode
     g._age_consent_confirmed = False
@@ -117,7 +117,7 @@ def test_consent_latches_on_a_real_yes_not_a_question():
 
 
 def _adult_game_with_queue():
-    g = LilyGame.__new__(LilyGame)
+    g = LilyGame.bare()
     g.sk = LilyScorekeeper("h4b")
     g.sk.mode = "adult"
     g.armed_question = {"id": "adult_1", "prompt": "spicy one"}

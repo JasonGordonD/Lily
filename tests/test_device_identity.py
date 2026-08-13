@@ -21,7 +21,7 @@ class _STT:
 
 
 def _game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = type("Scorekeeper", (), {"roster_size": lambda self: 1})()
     game.group_id = "room-new"
     game.group_id_source = "room_name"

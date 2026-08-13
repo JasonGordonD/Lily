@@ -70,7 +70,7 @@ def _enable(monkeypatch, *, embedding=None):
 
 def _game(session_id):
     """A game booted onto the room-name throwaway (group_id == session_id)."""
-    g = LilyGame.__new__(LilyGame)
+    g = LilyGame.bare()
     g.sk = LilyScorekeeper(session_id)
     g.supabase = object()  # truthy; no path in these tests hits the wire
     g.group_id = session_id

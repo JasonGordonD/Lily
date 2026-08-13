@@ -104,7 +104,7 @@ def test_pre_claim_finals_never_enter_the_buffer():
     import lily_say_gate
     from lily_agent import LilyGame
 
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = _sk_with_open_window()
     game.sk.close_answer_window()
     game.say_registry = lily_say_gate.SpeechActRegistry()

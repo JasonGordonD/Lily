@@ -15,7 +15,7 @@ QUESTION = {
 
 
 def _game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("meta-pause")
     game.sk.bind_speaker("S1", "Rami")
     game.sk.start_question(dict(QUESTION))
@@ -79,7 +79,7 @@ def test_watchdog_checks_pause_before_delivery_recovery():
     # The pause gate must sit ahead of the delivery/idle recovery rows so a
     # paused game is never reconciled or re-armed. In the W2b policy table
     # that priority IS the row order.
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     names = [p.name for p in game._make_watch_policies()]
     assert names.index("progression_paused") < names.index("armed")
     assert names.index("progression_paused") < names.index("idle_rearm")

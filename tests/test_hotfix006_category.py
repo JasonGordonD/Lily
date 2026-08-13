@@ -275,7 +275,7 @@ class _Ctx:
 def _make_game(reasoning=None, supabase=None, question_number=0):
     """Real LilyGame via __new__ (the harness test_adult_identity uses), wired
     with everything _prefetch_inner + arm_next_question actually touch."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.ctx = _Ctx()
     game.session = _Session()
     game.agent = type("A", (), {

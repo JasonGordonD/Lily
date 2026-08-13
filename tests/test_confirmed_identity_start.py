@@ -14,7 +14,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("identity-before-q1")
     game.fragments = LilyFragmentAccumulator()
     game._confirmed_name_evidence = {}

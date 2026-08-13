@@ -86,7 +86,7 @@ def test_empty_and_garbage():
 
 
 def _make_game(*, memory_block="", verified=False):
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("rh")
     game.sk.players = {}
     game.memory_block = memory_block

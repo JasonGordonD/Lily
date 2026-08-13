@@ -124,7 +124,7 @@ Q_DIAMOND = {
 
 
 def _make_game(session_id: str = "lily-5E3036-b56b5eb4") -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False

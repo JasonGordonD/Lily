@@ -18,7 +18,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _make_game(started: bool, over: bool = False) -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("p8-fixture")
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.game_started = started

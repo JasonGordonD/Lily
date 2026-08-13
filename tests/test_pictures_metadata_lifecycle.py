@@ -41,7 +41,7 @@ class _FakeCtx:
 
 
 def _game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("b3-meta")
     game.sk.question_number = 2
     game.ctx = _FakeCtx()

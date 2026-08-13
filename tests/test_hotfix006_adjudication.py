@@ -170,7 +170,7 @@ Q_4821 = {
 
 
 def _make_game(session_id: str = "lily-fixture") -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.ctx = _FakeCtx()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()

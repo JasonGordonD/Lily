@@ -188,7 +188,7 @@ def test_duplicate_award_logs_at_info(caplog):
 def _make_game() -> LilyGame:
     """Minimal LilyGame via __new__ — only the attributes the burn / arm
     paths touch (per-file fake, mirroring the desync fixture pattern)."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("ws4-burn")
     game.game_started = True
     game.game_over = False

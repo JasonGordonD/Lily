@@ -46,7 +46,7 @@ def test_empty_ledger_never_flags():
 # -- state block carries the authoritative ledger score -----------------------
 
 def test_state_block_injects_authoritative_score():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("x1")
     game.sk.players = {"Rami": {"score": 0, "streak": 0}}
     game.sk.score_ledger = [{"player": "Rami", "points": 5},

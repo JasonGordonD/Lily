@@ -44,7 +44,7 @@ class _Handle:
 
 
 def _make_game(session_id="wedge-fixture") -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper(session_id)
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game._playout_started_ids = set()

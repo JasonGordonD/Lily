@@ -117,7 +117,7 @@ def _make_game(mode: str = "general") -> LilyGame:
     """test_supply_fallback._make_game, extended with the REAL
     start_prefetch and a scriptable reasoning fake — the Z2 contract is
     about the real supply task's failure path."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper(SESSION_ID)

@@ -18,7 +18,7 @@ from lily_memory import lily_build_session_summary, lily_session_winner
 
 
 def _game_with_asked(n: int) -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.asked_history = [
         {"question_id": f"q_{i}", "category": "Greece"} for i in range(n)
     ]
@@ -41,7 +41,7 @@ def test_burned_card_not_counted():
 
 
 def test_empty_history_is_zero():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.asked_history = []
     assert game.questions_asked_count() == 0
 

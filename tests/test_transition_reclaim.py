@@ -43,7 +43,7 @@ from lily_scorekeeper import LilyScorekeeper
 def _make_game(session_id: str = "lily-1C53C6") -> LilyGame:
     """Minimal LilyGame via __new__ — only what the transition-journal
     surface touches (test_hotfix006_transitions pattern, narrowed)."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper(session_id)
     return game

@@ -322,7 +322,7 @@ def _transition_armed_game() -> LilyGame:
     test_hotfix006_transitions.py) with a question transition OPEN and its
     verdict journaled — the exact state in which the N12 gate hunts for
     second narrations. Character lines must still air here."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper("lily-golden-suite")
     assert game.open_question_transition(
@@ -391,7 +391,7 @@ class _FakeAgentHandle:
 
 
 def _make_game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False

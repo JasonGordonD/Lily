@@ -50,7 +50,7 @@ class _RecordingAgentHandle:
 
 
 def _make_game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _RecordingAgentHandle()
     game._preemptive_paused = False
@@ -208,7 +208,7 @@ def test_register_draw_claims_once_per_question():
 
 
 def test_register_draw_lazy_inits_for_harness_built_games():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     assert game._register_draw(dict(BANK_Q)) is True
     assert game._register_draw(dict(BANK_Q)) is False
 

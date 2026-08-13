@@ -149,7 +149,7 @@ N8_REVEAL = "No worries! The correct answer is Frankenstein"
 
 
 def _make_game(session_id: str = "lily-D99BE7") -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False
@@ -670,7 +670,7 @@ NON_ROSTER_NUMBERS = (
 
 
 def _roster_game(names=LIVE_ROSTER) -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("lily-D99BE7")
     for i, name in enumerate(names, start=1):
         game.sk.bind_speaker(f"S{i}", name)

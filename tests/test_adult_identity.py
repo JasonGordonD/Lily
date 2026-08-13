@@ -145,7 +145,7 @@ class _DeckReasoning:
 
 
 def _make_game(reasoning=None) -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.ctx = _FakeCtx()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()

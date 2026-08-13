@@ -24,7 +24,7 @@ _SECRET = "Jupiter-is-the-canonical-answer-do-not-leak"
 
 
 def _game_with_armed_question() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("stateview")
     game.sk.bind_speaker("S1", "Rami")
     game.game_started = True

@@ -50,7 +50,7 @@ def test_set_delivery_pace_lowers_tts_speed():
 
 
 def _make_game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("p7")
 
     class _FakeTTS:

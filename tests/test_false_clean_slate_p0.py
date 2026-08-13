@@ -26,7 +26,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _game(*, resolved=False, memory_block="", supabase=object()):
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("rami-false-slate")
     game.memory_block = memory_block
     game.memory_total_games = 0

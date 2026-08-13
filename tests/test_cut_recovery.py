@@ -46,7 +46,7 @@ class _FakeAgentHandle:
 
 
 def _make_game(session_id: str = "ws3-cut") -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False

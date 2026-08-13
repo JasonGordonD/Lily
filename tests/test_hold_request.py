@@ -49,7 +49,7 @@ def test_answers_and_content_never_fire():
 
 
 def _game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("c13-hold")
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.session = None

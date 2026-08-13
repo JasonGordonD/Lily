@@ -23,7 +23,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("latency-obs")
     game.say_registry = lily_say_gate.SpeechActRegistry()
     return game

@@ -32,7 +32,7 @@ class _Participant:
 
 
 def _game() -> tuple[LilyGame, _Participant]:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("post-tts")
     game._post_tts_text_by_speech_id = {}
     participant = _Participant()

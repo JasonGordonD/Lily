@@ -196,7 +196,7 @@ def test_relaxed_window_multiplier_config(monkeypatch):
 
 
 def _minimal_game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("test-room")
     return game
 
@@ -506,7 +506,7 @@ class _FakeCtx:
 
 
 def _make_game(supabase=None) -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.ctx = _FakeCtx()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()

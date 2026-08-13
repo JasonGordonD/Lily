@@ -20,7 +20,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _make_game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("p6p10")
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.game_started = True

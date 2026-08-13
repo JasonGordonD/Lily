@@ -46,7 +46,7 @@ def _run(coro):
 
 
 def _make_game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("x3-reveal-fixture")
     game.armed_question = {
         "id": "q_0001",
@@ -79,7 +79,7 @@ def test_adjudicate_refuses_reveal_without_delivery(caplog):
 def test_open_window_records_delivery_to_playout():
     """open_window IS the delivery-reached-playout event: it records the
     question number durably (append-only), unlike _aired_stems."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("x3-openwindow")
     game.game_started = True
     game.armed_question = {"prompt": "Test?", "canonical_answer": "x"}

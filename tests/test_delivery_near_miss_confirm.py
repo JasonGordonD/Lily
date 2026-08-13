@@ -28,7 +28,7 @@ class _FakeSession:
 
 
 def _game(prompt: str) -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = None
     game._preemptive_paused = False

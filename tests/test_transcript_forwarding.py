@@ -81,7 +81,7 @@ class _FakeCtx:
 
 
 def _make_game() -> tuple[LilyGame, _FakeLocalParticipant]:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper("transcript-fwd")
     local = _FakeLocalParticipant()

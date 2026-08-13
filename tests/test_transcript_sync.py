@@ -33,7 +33,7 @@ class _PublishSpy:
 
 
 def _game_with_spy():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("sync-test")
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game._post_tts_text_by_speech_id = {}

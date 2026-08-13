@@ -561,7 +561,7 @@ class _FakeTranscripts:
 def _make_game() -> LilyGame:
     """Minimal LilyGame via __new__ (test_desync_fixture pattern) with the
     transcript-event + addressee-log surfaces live."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False

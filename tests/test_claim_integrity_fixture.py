@@ -105,7 +105,7 @@ class _FakeAgentHandle:
 def _make_game(game_started: bool) -> LilyGame:
     """Minimal LilyGame via __new__ (test_desync_fixture pattern) — the
     attributes the claim / window / start_game paths touch."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False

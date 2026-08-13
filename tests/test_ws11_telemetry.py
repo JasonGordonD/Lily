@@ -309,7 +309,7 @@ class _FakeAgentHandle:
 
 
 def _make_game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False

@@ -26,7 +26,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("y3-window")
     game.session_started_at = 0.0
     game.availability_flags = None

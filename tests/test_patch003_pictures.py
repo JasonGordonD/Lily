@@ -20,7 +20,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _make_game(mode="general", supabase=object()):
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("p1p2")
     game.sk.mode = mode
     game.sk.media_mode = "voice_only"

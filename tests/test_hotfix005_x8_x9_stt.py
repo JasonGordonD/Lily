@@ -48,7 +48,7 @@ class _FakeAgent:
 
 
 def _retune_game(roster_size, applied=7):
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("x8")
     # roster_size() reads from bound players
     game.sk.players = {f"P{i}": {"score": 0} for i in range(roster_size)}

@@ -45,7 +45,7 @@ def test_session_image_memo_is_bounded():
 # -- render confirmation + grounded readout -----------------------------------
 
 def _game_with_armed(image_url=None):
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("x4")
     game.armed_question = {"prompt": "?", "image_url": image_url} if image_url else {}
     return game

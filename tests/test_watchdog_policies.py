@@ -23,7 +23,7 @@ def _run(coro):
 
 
 def _bare_game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = SimpleNamespace(
         answer_window_open=False, question_number=1, session_id="wp"
     )
@@ -37,7 +37,7 @@ def _bare_game() -> LilyGame:
 
 
 def test_policy_table_is_ordered_and_typed():
-    table = LilyGame.__new__(LilyGame)._make_watch_policies()
+    table = LilyGame.bare()._make_watch_policies()
     assert all(isinstance(p, WatchPolicy) for p in table)
     names = [p.name for p in table]
     # Commit B: the OPERATOR'S stated priority — supply_silent ahead of the

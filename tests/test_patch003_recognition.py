@@ -23,7 +23,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _make_game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("p5-fixture")
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.memory_block = "[RETURNING TABLE] Rami — 4 wins"

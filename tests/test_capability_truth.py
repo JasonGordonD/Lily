@@ -263,7 +263,7 @@ def test_custom_category_capability_invocation_routes_the_topic():
     proving she builds the round instead of denying it."""
     import asyncio
 
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = __import__("lily_scorekeeper").LilyScorekeeper("truth-fixture")
     game.sk.mode = "general"
     game.sk.question_number = 0

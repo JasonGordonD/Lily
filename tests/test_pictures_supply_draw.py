@@ -23,7 +23,7 @@ def _run(coro):
 
 
 def _game(*, mode="general", media="voice_only"):
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("b2-supply")
     game.sk.mode = mode
     game.sk.media_mode = media

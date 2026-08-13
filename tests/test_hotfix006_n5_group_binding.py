@@ -48,7 +48,7 @@ def _run(coro):
 
 
 def _game(*, group_id, source):
-    g = LilyGame.__new__(LilyGame)
+    g = LilyGame.bare()
     g.sk = LilyScorekeeper("hotfix006-n5")
     g.sk.players = {"Rami": None, "Miranda": None, "Chris": None}
     g.group_id = group_id

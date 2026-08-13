@@ -50,7 +50,7 @@ class _FakeAgentHandle:
 def _make_game() -> LilyGame:
     """Minimal LilyGame via __new__ — the attributes the greeting path
     touches (same pattern as test_say_gate_dispatch)."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()
     game._preemptive_paused = False
@@ -185,7 +185,7 @@ def test_rejoin_path_never_waits_on_memory():
 def test_game_via_new_without_event_attribute_skips_wait():
     # Defensive path: harness-built games without the __init__ attribute
     # set must not crash or wait.
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     _run(LilyGame.await_greeting_memory(game))
 
 

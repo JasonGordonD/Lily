@@ -175,7 +175,7 @@ def test_second_voice_on_reused_label_never_takes_score_history():
 # ---------------------------------------------------------------------------
 
 def _make_game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper("test-room")
     game.fragments = LilyFragmentAccumulator()

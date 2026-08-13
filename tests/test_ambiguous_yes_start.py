@@ -20,7 +20,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("wo2-ambiguous-yes")
     game.game_started = False
     game.game_over = False

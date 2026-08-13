@@ -21,7 +21,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _make_game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("m4-fixture")
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game._aired_stems = set()

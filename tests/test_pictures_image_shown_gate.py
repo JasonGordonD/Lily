@@ -18,7 +18,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _game(image_url="https://x/pic.png"):
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("b4-gate")
     game.armed_question = {
         "prompt": "What is this?",

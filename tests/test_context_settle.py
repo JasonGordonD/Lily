@@ -34,7 +34,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("y2-settle")
     game.sk.bind_speaker("S1", "Rami")
     game.session_started_at = 0.0

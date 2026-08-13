@@ -79,7 +79,7 @@ TAG = "ecapa-192-v1"
 
 
 def _game(sb):
-    g = LilyGame.__new__(LilyGame)
+    g = LilyGame.bare()
     g.sk = LilyScorekeeper("vi")
     g.supabase = sb
     g.group_id = "voiceA"

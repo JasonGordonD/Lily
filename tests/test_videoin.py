@@ -52,7 +52,7 @@ def test_camera_refused_in_adult_mode():
 # -- V2: grounded lane status + honest lines ----------------------------------
 
 def _game(mode="general", lane="off", frame=None):
-    g = LilyGame.__new__(LilyGame)
+    g = LilyGame.bare()
     g.sk = LilyScorekeeper("v")
     g.sk.mode = mode
     g.sk.camera_lane = lane

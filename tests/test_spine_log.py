@@ -24,7 +24,7 @@ def test_spine_line_format():
 
 
 def test_spine_fields_and_dedupe():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = SimpleNamespace(
         question_number=1,
         answer_window_open=False,

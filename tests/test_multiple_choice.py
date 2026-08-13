@@ -438,7 +438,7 @@ class _FakeCtx:
 
 
 def _make_game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.ctx = _FakeCtx()
     game.session = _FakeSession()
     game.agent = _FakeAgentHandle()

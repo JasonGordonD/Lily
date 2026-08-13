@@ -238,7 +238,7 @@ class _FakePreemptiveAgent:
 
 
 def _make_game_for_replies() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.agent = _FakePreemptiveAgent()
     game._preemptive_paused = False
@@ -265,7 +265,7 @@ def test_resume_preemptive_on_playout_completion():
 
 
 def test_instructed_reply_without_session_is_noop():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = None
     game.agent = _FakePreemptiveAgent()
     game._preemptive_paused = False

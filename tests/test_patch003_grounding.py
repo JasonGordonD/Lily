@@ -18,7 +18,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _make_game(media_mode="voice_only", mode="general", supabase=object()):
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("p4-fixture")
     game.sk.media_mode = media_mode
     game.sk.mode = mode

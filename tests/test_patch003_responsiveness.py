@@ -20,7 +20,7 @@ from lily_speech_delivery import LilySpeechDeliveryMixin
 
 
 def _make_game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("p9")
     game._awaiting_address_since = 0.0
     game._address_unanswered_warned = False

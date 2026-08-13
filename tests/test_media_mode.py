@@ -145,7 +145,7 @@ def test_control_command_takes_precedence_over_media_choice():
 # ---------------------------------------------------------------------------
 
 def _make_game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = None
     game.agent = None
     game._preemptive_paused = False

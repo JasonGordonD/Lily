@@ -97,7 +97,7 @@ class _FakeAgent:
 
 
 def _make_game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("adult-grok-fixture")
     game.agent = _FakeAgent()
     game._general_llm = object()

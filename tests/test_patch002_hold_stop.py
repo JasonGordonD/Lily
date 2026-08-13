@@ -44,7 +44,7 @@ class _FakeSession:
 
 
 def _make_game():
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("patch002-fixture")
     game.say_registry = __import__("lily_say_gate").SpeechActRegistry()
     game.session = _FakeSession()

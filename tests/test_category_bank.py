@@ -176,7 +176,7 @@ def test_register_operator_category_noops_without_supabase():
 
 
 def _make_game(question_number: int = 0) -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("category-bank-fixture")
     game.sk.mode = "general"
     game.sk.question_number = question_number

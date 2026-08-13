@@ -52,7 +52,7 @@ class _FakeBatcher:
 
 
 def _make_game(fail_batcher=False) -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("hotfix002-fixture")
     game.transcripts = _FakeBatcher(fail=fail_batcher)
     return game
@@ -203,7 +203,7 @@ def test_token_present_still_resolves_dispatch_metadata(monkeypatch):
 def test_unverifiable_candidate_says_so(caplog):
     """An STT surface without get_speaker_ids makes promotion impossible —
     that condition must be a WARN, not an eternal silent None."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("hotfix002-verify")
     game.device_candidate_group_id = "41dfc215-uuid"
     game.stt = object()  # no get_speaker_ids
@@ -230,7 +230,7 @@ def test_unverifiable_candidate_says_so(caplog):
 def test_stop_idle_watchdog_cancels_and_flags():
     """TICK_FAILED class: the watchdog must die WITH the session — after
     stop_idle_watchdog() no tick can ever run against a dead AgentSession."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.game_over = False
     game.game_started = True
 

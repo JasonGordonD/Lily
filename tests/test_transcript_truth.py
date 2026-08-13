@@ -37,7 +37,7 @@ from lily_scorekeeper import LilyScorekeeper
 
 
 def _game() -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("y5-truth")
     return game
 

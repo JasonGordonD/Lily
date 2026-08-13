@@ -67,7 +67,7 @@ class _FakeSession:
 
 
 def _make_game(game_started: bool = True) -> LilyGame:
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.session = _FakeSession()
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper(SESSION_ID)

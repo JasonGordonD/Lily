@@ -43,7 +43,7 @@ def _make_game(question_number: int = 0, mode: str = "general") -> LilyGame:
     """Real LilyGame via __new__ (sidestep the heavy livekit init) with the
     exact surface lily_set_category + _round_for_next_question +
     _category_for_round touch."""
-    game = LilyGame.__new__(LilyGame)
+    game = LilyGame.bare()
     game.sk = LilyScorekeeper("custom-category-fixture")
     game.sk.mode = mode
     game.sk.question_number = question_number
