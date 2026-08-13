@@ -867,7 +867,14 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         # a mute death spiral of greets×N.
         self._empty_stop_lobby_recover_count = 0
 
-        self.next_question: dict | None = None      # prefetched N+1
+        self.next_question: dict | None = None      # prefetched N+1 (the head)
+        # W2b item 3a: depth-2 supply. The reserve holds N+2 so consuming the
+        # head never leaves an empty hand (the supply-stall / "putting it
+        # together" vamp). INVARIANT: the reserve is non-None only while the
+        # head is non-None — it is filled only when the head is full and is
+        # promoted or cleared the instant the head empties, so every existing
+        # `next_question is None` guard stays correct.
+        self._next_question_reserve: dict | None = None
         self.armed_question: dict | None = None     # in state block, awaiting ask
         # Draw idempotency (WO-LILY-DESYNC-HONESTY-001 G2): every question
         # a prefetch DRAWS registers here the moment it lands — not at
@@ -4336,7 +4343,16 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             return
         if self._prefetch_task and not self._prefetch_task.done():
             return
-        if self.next_question is not None or self.game_over:
+        if self.game_over:
+            return
+        # Depth-2 (W2b item 3a): draw while there is room in the hand — the
+        # head OR the reserve is open. Only a full pair (head AND reserve)
+        # short-circuits. Filling the head keeps its full commit machinery;
+        # filling the reserve lands N+2 behind it (see the commit below).
+        if (
+            self.next_question is not None
+            and getattr(self, "_next_question_reserve", None) is not None
+        ):
             return
 
         async def _prefetch() -> None:
@@ -4607,6 +4623,20 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 if question.get("image_source"):
                     question["image_source"] = "none"
             if (
+                question is not None
+                and not getattr(self, "_delivery_stop_sticky", False)
+                and self.next_question is not None
+            ):
+                # Depth-2 (W2b item 3a): the head is already in hand — land
+                # N+2 in the reserve. The head-only machinery (settle, THE
+                # registration point, auto-advance) is deliberately skipped
+                # here; it runs when this question is PROMOTED to the head at
+                # arm. Stamp the draw mode so promotion can reject a deck that
+                # flipped while the reserve sat.
+                self._next_question_reserve = question
+                self._next_question_reserve_mode = self.sk.mode
+                self._note_supply_landed()
+            elif (
                 question is not None
                 and not getattr(self, "_delivery_stop_sticky", False)
             ):
@@ -6638,6 +6668,50 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             ))
         return question
 
+    def _promote_reserve(self) -> None:
+        """Depth-2 supply (W2b item 3a): pull the reserve (N+2) into the head
+        the instant the head empties, so the hand is only empty when BOTH
+        slots are spent. This is the CENTRALISED Class-6 guard: a reserve
+        drawn under a deck that has since flipped, or one already burned, is
+        DISCARDED here — never served — and the head is left empty for the
+        caller to re-prefetch. The register/settle the prefetch commit skips
+        for a reserve run HERE, at promotion, so a promoted question is
+        registered exactly once, as the head. No-op when there is no reserve
+        (the invariant: a reserve exists only while the head was full)."""
+        reserve = getattr(self, "_next_question_reserve", None)
+        if reserve is None:
+            return
+        self._next_question_reserve = None
+        reserve_mode = getattr(self, "_next_question_reserve_mode", None)
+        self._next_question_reserve_mode = None
+        if self._is_burned(reserve) or (
+            reserve_mode is not None and reserve_mode != self.sk.mode
+        ):
+            logger.info(
+                "LILY_SUPPLY | RESERVE_DISCARD | session=%s id=%s "
+                "drawn_mode=%s mode_now=%s — deck flipped or answer aired "
+                "while the reserve sat; discarding (head left empty to "
+                "re-prefetch)",
+                self.sk.session_id, reserve.get("id"), reserve_mode,
+                self.sk.mode,
+            )
+            return
+        if self.sk.media_mode != "pictures":
+            # Mirror the prefetch commit's voice_only picture exclusion.
+            reserve.pop("image_url", None)
+            reserve.pop("image_license_note", None)
+            reserve.pop("image_prompt", None)
+            if reserve.get("image_source"):
+                reserve["image_source"] = "none"
+        self.next_question = reserve
+        self._register_custom_question(reserve.get("category") or "", reserve)
+        self.settle_context_nowait()
+        logger.info(
+            "LILY_SUPPLY | RESERVE_PROMOTED | session=%s id=%s — N+2 is now "
+            "the head",
+            self.sk.session_id, reserve.get("id"),
+        )
+
     def arm_next_question(self) -> bool:
         """Move the prefetched question into the state block for Lily to
         perform. Returns True if a question is armed."""
@@ -6659,10 +6733,17 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 self.sk.session_id, self.next_question.get("id"),
             )
             self.next_question = None
+            # Head burned: pull the reserve forward (or discard it if it is
+            # itself stale) before falling back to a fresh prefetch.
+            self._promote_reserve()
             self.start_prefetch()
             return False
         self.armed_question = self.next_question
         self.next_question = None
+        # Depth-2: refill the head from the reserve immediately, then top the
+        # reserve back up — the hand never goes empty between arms.
+        self._promote_reserve()
+        self.start_prefetch()
         self.sk.start_question(self.armed_question)
         self.sk.round = self._round_for_next_question()
         # Correct for start_question incrementing question_number first:
@@ -12219,6 +12300,11 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self.sk.session_id, source, (nq or {}).get("id"),
         )
         self.next_question = None
+        # Depth-2: the reserve was drawn under the same pictureless deck — it
+        # is invalid for pictures too. Clear it with the head (invariant: head
+        # cleared => reserve cleared).
+        self._next_question_reserve = None
+        self._next_question_reserve_mode = None
         task = getattr(self, "_prefetch_task", None)
         if task is not None and not task.done():
             task.cancel()
@@ -12863,6 +12949,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             self._burn_question(self.next_question, reason=reason)
             self.next_question = None
             burned = True
+        if getattr(self, "_next_question_reserve", None) is not None:
+            # Depth-2: the reserve is another objected-to adult question in
+            # flight — retire it with the rest, never serve it.
+            self._burn_question(self._next_question_reserve, reason=reason)
+            self._next_question_reserve = None
+            self._next_question_reserve_mode = None
+            burned = True
         if burned:
             logger.warning(
                 "LILY_ADULT_GATE | PENDING_BURNED | session=%s reason=%s — "
@@ -12891,6 +12984,13 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
         if self.next_question is not None:
             self._burn_question(self.next_question, reason="answer_leak")
             self.next_question = None
+            burned = True
+        if getattr(self, "_next_question_reserve", None) is not None:
+            # Depth-2: the leak filter cannot attribute the fragment, so the
+            # reserve is in-flight and dead too — burn it with the rest.
+            self._burn_question(self._next_question_reserve, reason="answer_leak")
+            self._next_question_reserve = None
+            self._next_question_reserve_mode = None
             burned = True
         if not burned:
             return
