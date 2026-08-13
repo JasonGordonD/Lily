@@ -60,7 +60,7 @@ def _game() -> LilyGame:
 def test_hold_request_enters_the_hold_and_acks_once():
     game = _game()
     acks = []
-    game.gated_say = lambda key, act, text, source=None, **kw: acks.append(act)
+    game.gated_say = lambda key, act, instructions, source=None, **kw: acks.append(act)
     game.handle_hold_request("hold on")
     assert game._hold_active is True
     assert game._hold_reason == "player_hold_request"

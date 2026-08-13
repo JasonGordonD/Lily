@@ -85,13 +85,20 @@ def _make_game():
     game.publish_attributes_nowait = lambda: None
     game.start_prefetch = lambda: None
     game.instructed_replies = []
+    game.said = []
 
     def _reply(text):
         game.instructed_replies.append(text)
         h = _Handle(f"sp{len(game.instructed_replies)}")
         return h
 
+    def _direct(text):
+        # REFACTOR W2a: the STOP/hold acks are deterministic direct_say sheets.
+        game.said.append(text)
+        return _Handle(f"say{len(game.said)}")
+
     game.instructed_reply = _reply
+    game.direct_say = _direct
     return game
 
 
@@ -128,8 +135,9 @@ def test_stop_primitive_halts_cancels_and_holds():
     assert game._hold_active is True
     assert game.game_delivery_stopped() is True
     # Exactly one short acknowledgment aired (the stop ack is hold-exempt).
-    assert len(game.instructed_replies) == 1
-    assert "stop" in game.instructed_replies[0].lower()
+    # REFACTOR W2a: the STOP ack is a deterministic direct_say sheet.
+    assert len(game.said) == 1
+    assert "stop" in game.said[0].lower()
 
 
 # -- A4: the hold binds every lane ---------------------------------------------
@@ -242,7 +250,8 @@ def test_repeated_stop_does_not_repeat_ack():
     game.handle_stop_primitive("Stop the quiz.")
     game.handle_stop_primitive("I don't want to play anymore.")
 
-    assert len(game.instructed_replies) == 1
+    # REFACTOR W2a: repeated STOP still acks exactly once (deterministic sheet).
+    assert len(game.said) == 1
 
 
 def test_quit_phrases_are_stop_commands():
@@ -478,8 +487,9 @@ def test_real_stop_utterance_routes_to_hold_with_polluted_roster():
     assert handled is True
     assert game._hold_active is True
     assert game.game_delivery_stopped() is True
-    assert len(game.instructed_replies) == 1
-    assert "stop" in game.instructed_replies[0].lower()
+    # REFACTOR W2a: the STOP ack is a deterministic direct_say sheet.
+    assert len(game.said) == 1
+    assert "stop" in game.said[0].lower()
 
 
 def test_solo_and_addressed_stop_routing_unchanged():

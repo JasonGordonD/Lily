@@ -5662,6 +5662,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             "holding. ONE short warm acknowledgment (a few words, e.g. "
             "'Take your time.') and then silence until they come back.",
             source="hold_request",
+            # REFACTOR W2a: the hold ack is a DETERMINISTIC sheet (direct_say)
+            # — one warm line, then silence until they return.
+            text="Take your time.",
         )
 
     def back_hold_narration(self, spoken_text: str) -> bool:
@@ -5764,6 +5767,9 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             "longer): one or two calm words — 'Stopped.' / 'Say the "
             "word.' No question, no recap, no next move — wait for them.",
             source="stop_primitive",
+            # REFACTOR W2a: the STOP ack is a DETERMINISTIC sheet (direct_say),
+            # not the 8-13s composite — one calm line, no question, no recap.
+            text="Stopped. Say the word when you're ready.",
         )
 
     # -- PATCH-002 M4: no orphan stems (RETIRE_WITH_WS6: 004's journal

@@ -93,12 +93,19 @@ def _make_game():
     game.publish_attributes_nowait = lambda: None
     game.start_prefetch = lambda: None
     game.instructed_replies = []
+    game.said = []
 
     def _reply(text):
         game.instructed_replies.append(text)
         return _Handle(f"sp{len(game.instructed_replies)}")
 
+    def _direct(text):
+        # REFACTOR W2a: the STOP ack is a deterministic direct_say sheet.
+        game.said.append(text)
+        return _Handle(f"say{len(game.said)}")
+
     game.instructed_reply = _reply
+    game.direct_say = _direct
     return game
 
 
@@ -127,9 +134,10 @@ def test_stop_mid_greeting_terminates_and_cancels_the_beat():
             )
             is False
         ), source
-    # Nothing but the single stop acknowledgment aired.
-    assert len(game.instructed_replies) == 1
-    assert "stop" in game.instructed_replies[0].lower()
+    # Nothing but the single stop acknowledgment aired (W2a: deterministic
+    # direct_say sheet).
+    assert len(game.said) == 1
+    assert "stop" in game.said[0].lower()
 
 
 # -- item 2: exactly ONE stop acknowledgment airs -----------------------------
@@ -154,11 +162,11 @@ def test_double_ack_narration_lane_first_suppresses_mechanical_ack():
 def test_mechanical_first_then_narration_stays_single_ack():
     game = _make_game()
     game.handle_stop_primitive("stop")
-    assert len(game.instructed_replies) == 1
+    assert len(game.said) == 1
     # The mechanical ack itself narrates a stop; back_hold_narration is a
     # no-op because the hold is already active — no third lane, no re-ack.
     assert game.back_hold_narration("Stopped. Say the word.") is False
-    assert len(game.instructed_replies) == 1
+    assert len(game.said) == 1
 
 
 def test_prior_non_stop_hold_does_not_swallow_the_stop_ack():
@@ -167,15 +175,15 @@ def test_prior_non_stop_hold_does_not_swallow_the_stop_ack():
     # then says stop; the stop still earns its own acknowledgment.
     game.enter_hold(reason="question_unanswered")
     game.handle_stop_primitive("stop")
-    assert len(game.instructed_replies) == 1
-    assert "stop" in game.instructed_replies[0].lower()
+    assert len(game.said) == 1
+    assert "stop" in game.said[0].lower()
 
 
 def test_repeated_stop_never_double_acks():
     game = _make_game()
     game.handle_stop_primitive("stop")
     game.handle_stop_primitive("stop")
-    assert len(game.instructed_replies) == 1
+    assert len(game.said) == 1
 
 
 # -- edge (A): a cut greeting must not double-disclose what's-new -------------
