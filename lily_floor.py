@@ -30,7 +30,7 @@ logger = logging.getLogger("lily_agent")
 class LilyFloorMixin:
     def start_blocked_reason(self) -> str | None:
         """Single choke for kickoff gates. None = start allowed."""
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return "game_stopped"
         if self.recognition_dispute_blocks_start():
             return "recognition_dispute"
@@ -41,7 +41,7 @@ class LilyFloorMixin:
             and not self._identity_gate_satisfied()
         ):
             return "identity_unconfirmed"
-        if getattr(self, "_user_speaking", False):
+        if self._user_speaking:
             return "user_speaking"
         if self.pending_setup_jobs():
             return "setup_pending"
@@ -83,7 +83,7 @@ class LilyFloorMixin:
         gate; a lobby/ended state blocks every game-lane act."""
         if act not in self._GAME_LANE_ACTS:
             return False
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return True
         return not getattr(self, "game_started", False) or getattr(
             self, "game_over", False
@@ -151,7 +151,7 @@ class LilyFloorMixin:
         silence on an auto-resume; clearing the judgment on note_agent_prompt
         would be a second write path into FL-1 state, which is the layer
         Y10 is under mandate not to add."""
-        if getattr(self, "_question_pending", False):
+        if self._question_pending:
             return True
         judgment = getattr(self, "last_addressee_judgment", None)
         if judgment is None:
@@ -179,7 +179,7 @@ class LilyFloorMixin:
         the room's talk outranks the default. FLOOR_OPEN is the residual —
         a genuine lull, which is exactly when the canon says the floor
         comes back to her."""
-        if getattr(self, "_hold_active", False):
+        if self._hold_active:
             return self.FLOOR_HOLD
         if getattr(getattr(self, "sk", None), "host_speaking", False):
             return self.FLOOR_LILY_SPEAKING
@@ -189,13 +189,13 @@ class LilyFloorMixin:
 
     def progression_paused_reason(self) -> str | None:
         """Why a new question delivery must not take the floor right now."""
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return "game_stopped"
-        if getattr(self, "_hold_active", False):
+        if self._hold_active:
             return "hold"
-        if getattr(self, "_question_pending", False):
+        if self._question_pending:
             return "question_pending"
-        if getattr(self, "_awaiting_address_since", 0.0):
+        if self._awaiting_address_since:
             return "address_unanswered"
         if getattr(self.sk, "host_speaking", False):
             return "host_speaking"
@@ -208,7 +208,7 @@ class LilyFloorMixin:
         sources (the STOP ack, hold-release) always pass; everything else
         — conversational turns AND question deliveries — is blocked while
         held."""
-        if not getattr(self, "_hold_active", False):
+        if not self._hold_active:
             return False
         return source not in self._HOLD_EXEMPT_SOURCES
 
@@ -217,7 +217,7 @@ class LilyFloorMixin:
         player's decline/wait, Lily's own 'take your time', and STOP all
         route here. Idempotent — re-entering while held only refreshes the
         clock."""
-        already = getattr(self, "_hold_active", False)
+        already = self._hold_active
         self._hold_active = True
         self._hold_since = time.time()
         self._hold_reason = reason
@@ -231,7 +231,7 @@ class LilyFloorMixin:
     def release_hold(self, reason: str) -> bool:
         """Lift the hold (user spoke, a hard game event fired, or the
         timeout elapsed). Returns True if a hold was actually lifted."""
-        if not getattr(self, "_hold_active", False):
+        if not self._hold_active:
             return False
         self._hold_active = False
         self._hold_reason = None
@@ -242,14 +242,14 @@ class LilyFloorMixin:
         return True
 
     def hold_timed_out(self, now: float | None = None) -> bool:
-        if not getattr(self, "_hold_active", False):
+        if not self._hold_active:
             return False
         ref = now if now is not None else time.time()
-        return (ref - getattr(self, "_hold_since", 0.0)) >= lily_config.hold_timeout_seconds()
+        return (ref - self._hold_since) >= lily_config.hold_timeout_seconds()
 
     def game_delivery_stopped(self) -> bool:
         """Persistent STOP latch; conversation may resume, game delivery may not."""
-        return bool(getattr(self, "_delivery_stop_sticky", False))
+        return bool(self._delivery_stop_sticky)
 
     def resume_game_delivery(self, *, reason: str) -> bool:
         """Clear sticky STOP after an explicit resume command. CLASS 5
@@ -291,7 +291,7 @@ class LilyFloorMixin:
     # with P6 — the user's next turn IS the response, engaged first.
 
     def enter_question_pending(self, question_text: str) -> None:
-        already = getattr(self, "_question_pending", False)
+        already = self._question_pending
         self._question_pending = True
         self._question_pending_since = time.time()
         self._question_pending_reoffered = False
@@ -303,7 +303,7 @@ class LilyFloorMixin:
             )
 
     def release_question_pending(self, reason: str) -> bool:
-        if not getattr(self, "_question_pending", False):
+        if not self._question_pending:
             return False
         self._question_pending = False
         logger.info(
@@ -319,14 +319,14 @@ class LilyFloorMixin:
         beat ('One sec — checking [the real thing]') is a state-block
         template so any beat she takes names the actual check, never a
         vamp."""
-        since = getattr(self, "_awaiting_address_since", 0.0)
+        since = self._awaiting_address_since
         if not since:
             return False
         ref = now if now is not None else time.time()
         return (ref - since) >= lily_config.responsiveness_budget_seconds()
 
     def _question_pending_timed_out(self, now: float | None = None) -> bool:
-        if not getattr(self, "_question_pending", False):
+        if not self._question_pending:
             return False
         ref = now if now is not None else time.time()
         return (
@@ -338,7 +338,7 @@ class LilyFloorMixin:
         hold. Exempt: the same sources the hold exempts (STOP/hold/release
         acks) plus game-lane acts (their own windows govern them) and the
         pending re-offer itself."""
-        if not getattr(self, "_question_pending", False):
+        if not self._question_pending:
             return False
         if source in self._HOLD_EXEMPT_SOURCES or source == "question_reoffer":
             return False
@@ -447,7 +447,7 @@ class LilyFloorMixin:
         sibling of handle_stop_primitive: no sticky latch, no claim
         release, no content retirement — the table asked for a beat, not
         a brake."""
-        already_held = getattr(self, "_hold_active", False)
+        already_held = self._hold_active
         logger.warning(
             "LILY_HOLD | REQUESTED | session=%s text=%r already_held=%s — "
             "player hold-equivalent; yielding within this utterance (C13)",
@@ -492,8 +492,8 @@ class LilyFloorMixin:
         # acking. Read the SHARED hold state (no new flag) so whichever lane
         # reached the stop first owns the single acknowledgment.
         already_acked = already_stopped or (
-            getattr(self, "_hold_active", False)
-            and getattr(self, "_hold_reason", None) == "narrated_stop"
+            self._hold_active
+            and self._hold_reason == "narrated_stop"
         )
         logger.warning(
             "LILY_STOP | PRIMITIVE | session=%s text=%r — halting playout, "
@@ -603,7 +603,7 @@ class LilyFloorMixin:
         window_open = self.sk.is_window_open(now=segment_ts)
         delivery_key = f"q_{self.sk.question_number}_delivery"
         delivery_in_flight = (
-            getattr(self, "_active_delivery_qnum", None)
+            self._active_delivery_qnum
             == self.sk.question_number
             or self.say_registry.state(delivery_key) is not None
         )

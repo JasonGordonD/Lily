@@ -41,7 +41,7 @@ class LilySupplyMixin:
         exists — the starvation the 583a0f16 session sat in with no screen
         cue. Pre-game and post-game report ready (the lobby/final screens
         carry their own state, not a supply cue)."""
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return False
         if not getattr(self, "game_started", False) or getattr(
             self, "game_over", False
@@ -54,8 +54,8 @@ class LilySupplyMixin:
             return True
         if (
             self.sk.answer_window_open
-            or getattr(self, "_adjudicating", False)
-            or getattr(self, "_question_transitioning", False)
+            or self._adjudicating
+            or self._question_transitioning
         ):
             return True
         return False
@@ -243,7 +243,7 @@ class LilySupplyMixin:
         consumed here) to de-escalate authoring effort on the retry draw."""
         effort = getattr(self, "_prefetch_effort_override", None)
         self._prefetch_effort_override = None
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return
         if self._prefetch_task and not self._prefetch_task.done():
             return
@@ -528,7 +528,7 @@ class LilySupplyMixin:
                     question["image_source"] = "none"
             if (
                 question is not None
-                and not getattr(self, "_delivery_stop_sticky", False)
+                and not self._delivery_stop_sticky
                 and self.next_question is not None
             ):
                 # Depth-2 (W2b item 3a): the head is already in hand — land
@@ -542,7 +542,7 @@ class LilySupplyMixin:
                 self._note_supply_landed()
             elif (
                 question is not None
-                and not getattr(self, "_delivery_stop_sticky", False)
+                and not self._delivery_stop_sticky
             ):
                 self.next_question = question
                 # Z2: supply landed — the incident (if any) is over.
@@ -581,7 +581,7 @@ class LilySupplyMixin:
                     and self.armed_question is None
                     and not self.sk.answer_window_open
                     and not self._adjudicating
-                    and not getattr(self, "_question_transitioning", False)
+                    and not self._question_transitioning
                     and paused is None
                 ):
                     if self.arm_next_question() and self.session is not None:
@@ -694,14 +694,14 @@ class LilySupplyMixin:
         # falling through to the armed-guard "idle" below.
         if not self.no_stuck_claims():
             return "blocked"
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return "idle"
         if (
             self.armed_question is not None
             or self.next_question is not None
             or self.sk.answer_window_open
             or self._adjudicating
-            or getattr(self, "_question_transitioning", False)
+            or self._question_transitioning
         ):
             return "idle"
         if self.supabase is None:
@@ -768,7 +768,7 @@ class LilySupplyMixin:
         blindness)."""
         if not getattr(self, "game_started", False) or self.game_over:
             return False
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return False
         if self.next_question is not None or self.sk.question_number < 1:
             return False
@@ -783,7 +783,7 @@ class LilySupplyMixin:
         itself."""
         if not getattr(self, "game_started", False) or self.game_over:
             return
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return
         if self.next_question is not None:
             return
@@ -888,7 +888,7 @@ class LilySupplyMixin:
         window is open. Arming/nudging stays with callers that own a phase
         where delivery is legal. Returns "supplied", "empty", "error", or
         "idle" (nothing to do)."""
-        if getattr(self, "_delivery_stop_sticky", False) or self.game_over:
+        if self._delivery_stop_sticky or self.game_over:
             return "idle"
         if self.next_question is not None:
             return "idle"
@@ -1129,7 +1129,7 @@ class LilySupplyMixin:
     def arm_next_question(self) -> bool:
         """Move the prefetched question into the state block for Lily to
         perform. Returns True if a question is armed."""
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return False
         if self.armed_question is not None:
             return True

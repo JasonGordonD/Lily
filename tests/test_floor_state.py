@@ -483,7 +483,7 @@ def test_floor_is_read_before_the_fire_decision_returns_true():
         lily_speech_delivery.LilySpeechDeliveryMixin._cut_recovery_should_fire
     )
     floor = body.index("self._floor_yields_recovery()")
-    assert floor < body.index("return not getattr(self, \"_adjudicating\"")
+    assert floor < body.index("return not self._adjudicating")
     assert "self.floor_state()" in inspect.getsource(
         lily_speech_delivery.LilySpeechDeliveryMixin._floor_yields_recovery
     )

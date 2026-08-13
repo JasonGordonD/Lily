@@ -212,7 +212,7 @@ class LilySpeechDeliveryMixin:
             elif self.game_payload_blocked(act, source):
                 _legacy_reason = (
                     "game_stopped"
-                    if getattr(self, "_delivery_stop_sticky", False)
+                    if self._delivery_stop_sticky
                     else "no_live_game"
                 )
             else:
@@ -252,7 +252,7 @@ class LilySpeechDeliveryMixin:
             # desync/adult fixtures the original P0-G left red).
             paused = (
                 "address_unanswered"
-                if getattr(self, "_awaiting_address_since", 0.0)
+                if self._awaiting_address_since
                 else "setup_pending" if self.pending_setup_jobs() else None
             )
             if paused:
@@ -271,7 +271,7 @@ class LilySpeechDeliveryMixin:
         if self.game_payload_blocked(act, source):
             reason = (
                 "game_stopped"
-                if getattr(self, "_delivery_stop_sticky", False)
+                if self._delivery_stop_sticky
                 else "no_live_game"
             )
             logger.warning(
@@ -519,7 +519,7 @@ class LilySpeechDeliveryMixin:
         the composite owns the words."""
         if verdict not in ("correct", "incorrect", "uncertain"):
             return False
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return False
         if not getattr(self, "game_started", False):
             return False
@@ -660,7 +660,7 @@ class LilySpeechDeliveryMixin:
         record of what was committed for the question being revealed — and
         requiring it also means a re-air can only ever state a result that
         was actually journaled."""
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return False
         for qnum, key in self._cut_verdict_keys(released):
             try:
@@ -834,7 +834,7 @@ class LilySpeechDeliveryMixin:
                 "LILY_TRANSCRIPT | INTERIM_PUBLISH_FAILED — completion "
                 "publish still covers this turn"
             )
-        if getattr(self, "_awaiting_address_since", 0.0):
+        if self._awaiting_address_since:
             # A dispatch is only an intention. Clear at real playout so a
             # queued, wedged, or suppressed handle cannot hide the
             # ADDRESS_UNANSWERED signal.
@@ -889,7 +889,7 @@ class LilySpeechDeliveryMixin:
         q_{N}_delivery at dispatch. No-op pre-game (WS-1: intake turns can
         never become deliveries), when nothing is armed, the window is
         already open, or the delivery is already claimed."""
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             logger.info(
                 "LILY_DELIVERY | EXPECT_BLOCKED | session=%s q=%d "
                 "reason=game_stopped",
@@ -906,7 +906,7 @@ class LilySpeechDeliveryMixin:
         # regression.
         paused = (
             "address_unanswered"
-            if getattr(self, "_awaiting_address_since", 0.0)
+            if self._awaiting_address_since
             else "setup_pending" if self.pending_setup_jobs() else None
         )
         if paused:
@@ -1034,7 +1034,7 @@ class LilySpeechDeliveryMixin:
         barged re-read of the question is CORRECT verbatim (players need
         the whole question), so it is exempt from the conversational
         regeneration gate (WS-3)."""
-        if getattr(self, "_pending_delivery_qnum", None) is not None:
+        if self._pending_delivery_qnum is not None:
             return True
         armed = getattr(self, "armed_question", None)
         if armed is not None and not self.sk.answer_window_open:
@@ -1067,7 +1067,7 @@ class LilySpeechDeliveryMixin:
         the time a cut reaches `on_agent_speech_finished` the human may
         already be back in `listening` and her transcript may have been
         dropped, so the timestamp is the only surviving evidence."""
-        if not speaking and getattr(self, "_user_speaking", False):
+        if not speaking and self._user_speaking:
             self._user_speech_ended_at = time.monotonic()
         self._user_speaking = bool(speaking)
 
@@ -1093,7 +1093,7 @@ class LilySpeechDeliveryMixin:
         and (2) `_on_end_of_turn` awaits `current_speech.interrupt()`
         BEFORE `on_user_turn_completed`, so even a committed turn can be
         stamped after this decision has already been made."""
-        if getattr(self, "_user_speaking", False):
+        if self._user_speaking:
             return True
         for stamp in (
             getattr(self, "_user_speech_ended_at", None),
@@ -1132,11 +1132,11 @@ class LilySpeechDeliveryMixin:
             return False
         if getattr(self, "game_over", False):
             return False
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return False
         if getattr(self.sk, "answer_window_open", False):
             return False
-        return not getattr(self, "_adjudicating", False)
+        return not self._adjudicating
 
     def arm_cut_recovery(self, tail_text: str) -> None:
         """Schedule the auto-resume watchdog for a cut organic turn. Bumps
@@ -1256,7 +1256,7 @@ class LilySpeechDeliveryMixin:
                 "reason=%s — resume stood down; no live arm may leak to an "
                 "unrelated dispatch", self.sk.session_id, reason,
             )
-        if getattr(self, "_awaiting_address_since", 0.0):
+        if self._awaiting_address_since:
             self._awaiting_address_since = 0.0
             self._address_unanswered_warned = False
             logger.warning(
@@ -1317,7 +1317,7 @@ class LilySpeechDeliveryMixin:
             return False
         if getattr(self.sk, "answer_window_open", False):
             return False
-        return not getattr(self, "_adjudicating", False)
+        return not self._adjudicating
 
     def trigger_cut_recovery(self) -> bool:
         """Dispatch the fresh auto-resume. Arms the re-air gate first so the
@@ -1399,7 +1399,7 @@ class LilySpeechDeliveryMixin:
                                    silent (W2);
           None                   — not a delivery event; speak normally.
         """
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return None
         armed = self.armed_question
         if armed is None or self.sk.answer_window_open:
@@ -1427,7 +1427,7 @@ class LilySpeechDeliveryMixin:
         # "still stopped until you say go") is not a delivery here and
         # speaks. STOP/sticky is stronger and returns above; this changes
         # only the plain-hold case (self-wait-promise / question-unanswered).
-        if getattr(self, "_hold_active", False) and (
+        if self._hold_active and (
             self._delivery_text_matches_armed(spoken_text)
         ):
             logger.warning(
@@ -1550,7 +1550,7 @@ class LilySpeechDeliveryMixin:
 
     def _segment_overlaps_active_delivery(self, seg: dict) -> bool:
         """True only when captured speech overlaps actual delivery playout."""
-        qnum = getattr(self, "_active_delivery_qnum", None)
+        qnum = self._active_delivery_qnum
         if qnum is None or qnum != self.sk.question_number:
             return False
         started = getattr(self, "_active_delivery_started_at", None)
@@ -1590,7 +1590,7 @@ class LilySpeechDeliveryMixin:
         caller records it into `transcripts` and runs on_transcript_event
         either way — it simply never becomes scoreable."""
         if (
-            getattr(self, "_delivery_stop_sticky", False)
+            self._delivery_stop_sticky
             or self.sk.answer_window_open
             or self.armed_question is None
             or not self._segment_overlaps_active_delivery(seg)
@@ -1727,9 +1727,9 @@ class LilySpeechDeliveryMixin:
             return False
         if self.armed_question is None:
             return False
-        if self.sk.answer_window_open or getattr(self, "_adjudicating", False):
+        if self.sk.answer_window_open or self._adjudicating:
             return False
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return False
         if getattr(self, "game_over", False):
             return False
@@ -1970,7 +1970,7 @@ class LilySpeechDeliveryMixin:
         conversational turn that never owed the question arms nothing, and
         the pre-existing window-fallback nudge / idle watchdog still own a
         question that stalls for any other reason."""
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return False
         if not getattr(self, "game_started", False):
             return False
@@ -2026,9 +2026,9 @@ class LilySpeechDeliveryMixin:
             return False
         if qnum != self.sk.question_number:
             return False
-        if getattr(self, "_adjudicating", False):
+        if self._adjudicating:
             return False
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             return False
         if getattr(self, "game_over", False):
             return False
@@ -2175,7 +2175,7 @@ class LilySpeechDeliveryMixin:
         already_open = bool(self.sk.answer_window_open)
         if already_open and getattr(self, "_mc_delivery_qnum", None) != qnum:
             return False
-        if getattr(self, "_adjudicating", False):
+        if self._adjudicating:
             return False
         if not self._segment_overlaps_active_delivery(seg):
             return False
@@ -2256,7 +2256,7 @@ class LilySpeechDeliveryMixin:
             self._active_delivery_qnum = None
             self._active_delivery_started_at = None
             self._active_delivery_ended_at = None
-            if not getattr(self, "_adjudicating", False):
+            if not self._adjudicating:
                 asyncio.ensure_future(self.adjudicate(steal_allowed=False))
             return True
         buf = self._pre_window_segments
@@ -2274,7 +2274,7 @@ class LilySpeechDeliveryMixin:
         # question that is, as far as the table is concerned, over. The
         # correct case is left exactly as WS-5 had it (the replay adjudicates
         # it) so this never double-fires.
-        if verdict != "correct" and not getattr(self, "_adjudicating", False):
+        if verdict != "correct" and not self._adjudicating:
             asyncio.ensure_future(self.adjudicate(steal_allowed=False))
         return True
 
@@ -2313,12 +2313,12 @@ class LilySpeechDeliveryMixin:
                 return True
             self._maybe_resume_mcq_read(seg, now=now)
             return False
-        qnum = getattr(self, "_active_delivery_qnum", None)
+        qnum = self._active_delivery_qnum
         if qnum is None or qnum != self.sk.question_number:
             return False
         if not self._segment_overlaps_active_delivery(seg):
             return False
-        if self.sk.answer_window_open or getattr(self, "_adjudicating", False):
+        if self.sk.answer_window_open or self._adjudicating:
             return False
         try:
             hyps = (nbest or {}).get("hypotheses") or []

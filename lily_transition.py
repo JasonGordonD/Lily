@@ -112,7 +112,7 @@ class LilyTransitionMixin:
                     stale_key = (entry.get("detail") or {}).get("key")
                     if stale_key:
                         self.say_registry.release(stale_key)
-                if getattr(self, "_open_transition_qnum", None) == qnum:
+                if self._open_transition_qnum == qnum:
                     self._open_transition_qnum = None
                 logger.error(
                     "LILY_TRANSITION | RECLAIMED_UNAIRED | session=%s q=%d "
@@ -226,7 +226,7 @@ class LilyTransitionMixin:
         cue (lily_verdict_narration), so banter, encouragement and answers
         to the table are untouched — a false suppression would be a worse
         defect than the one this fixes."""
-        qnum = getattr(self, "_open_transition_qnum", None)
+        qnum = self._open_transition_qnum
         if qnum is None:
             return None
         entry = self._transition_entry(qnum, "verdict")
@@ -304,7 +304,7 @@ class LilyTransitionMixin:
         question" guard, moved off timing and onto the journal: the next
         delivery is the LAST stage of the previous question's transition,
         so no lane can deliver N+1 over a reveal still on the air."""
-        qnum = getattr(self, "_open_transition_qnum", None)
+        qnum = self._open_transition_qnum
         if qnum is None:
             return False  # no transition in flight (skip, game start, nudge)
         stages = self.transition_stages(qnum)
@@ -348,7 +348,7 @@ class LilyTransitionMixin:
         Strict TTS validation rewrites any drift to the deterministic sheet.
         """
         if (
-            getattr(self, "_delivery_stop_sticky", False)
+            self._delivery_stop_sticky
             or self.armed_question is None
             or self.sk.answer_window_open
             or getattr(self, "game_over", False)
@@ -389,7 +389,7 @@ class LilyTransitionMixin:
             # The transition closes on its own last stage. A dispatch that
             # was gated (hold, no live game) journals nothing, so the
             # legitimate retry still owns the beat.
-            qnum = getattr(self, "_open_transition_qnum", None)
+            qnum = self._open_transition_qnum
             if qnum is not None:
                 self.journal_transition(
                     qnum, "next_delivery",
@@ -405,7 +405,7 @@ class LilyTransitionMixin:
         agoge?"). A turn dispatched by dispatch_armed_question journals
         next_delivery BEFORE its tts_node, so the real delivery reads False
         here and is never clipped."""
-        qnum = getattr(self, "_open_transition_qnum", None)
+        qnum = self._open_transition_qnum
         if qnum is None:
             return False
         stages = self.transition_stages(qnum)
@@ -455,7 +455,7 @@ class LilyTransitionMixin:
             detail={"source": reason, "delivered_q": None},
         )
         self.say_registry.release(self.transition_key(qnum))
-        if getattr(self, "_open_transition_qnum", None) == qnum:
+        if self._open_transition_qnum == qnum:
             self._open_transition_qnum = None
         logger.warning(
             "LILY_TRANSITION | RELEASED_COMPLETE | session=%s q=%d "

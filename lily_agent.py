@@ -1409,23 +1409,23 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             return lily_game_control.from_latches(
                 game_started=getattr(self, "game_started", False),
                 game_over=getattr(self, "game_over", False),
-                delivery_stop_sticky=getattr(self, "_delivery_stop_sticky", False),
-                adjudicating=getattr(self, "_adjudicating", False),
+                delivery_stop_sticky=self._delivery_stop_sticky,
+                adjudicating=self._adjudicating,
                 question_transitioning=getattr(
                     self, "_question_transitioning", False
                 ),
-                hold_active=getattr(self, "_hold_active", False),
-                hold_reason=getattr(self, "_hold_reason", None),
+                hold_active=self._hold_active,
+                hold_reason=self._hold_reason,
                 answer_window_open=getattr(sk, "answer_window_open", False),
-                active_delivery_qnum=getattr(self, "_active_delivery_qnum", None),
+                active_delivery_qnum=self._active_delivery_qnum,
                 pending_delivery_qnum=getattr(
                     self, "_pending_delivery_qnum", None
                 ),
-                open_transition_qnum=getattr(self, "_open_transition_qnum", None),
+                open_transition_qnum=self._open_transition_qnum,
                 armed_question=getattr(self, "armed_question", None),
                 question_number=getattr(sk, "question_number", None),
-                recognition_dispute=getattr(self, "_recognition_dispute", False),
-                question_pending=getattr(self, "_question_pending", False),
+                recognition_dispute=self._recognition_dispute,
+                question_pending=self._question_pending,
                 delivery_confirmed=delivery_confirmed,
                 game_start_committed=getattr(
                     self, "_game_start_committed", False
@@ -1752,7 +1752,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         answer_live = (
             self.sk.answer_window_open
             or (
-                getattr(self, "_active_delivery_qnum", None) == qnum
+                self._active_delivery_qnum == qnum
                 and delivery_started is not None
                 and delivery_ended is None
             )
@@ -2208,18 +2208,18 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         return bool(
             getattr(self, "_returner_claim_seen", False)
             or getattr(self, "_returner_honesty_note", None)
-            or getattr(self, "_recognition_dispute", False)
+            or self._recognition_dispute
             or not self.can_claim_empty_memory()
         )
 
 
     def ambiguous_yes_blocks_start(self) -> bool:
         """WO-2: bare yes after an A-or-B offer must not open the round."""
-        return bool(getattr(self, "_ambiguous_yes_blocks_start", False))
+        return bool(self._ambiguous_yes_blocks_start)
 
     def pending_setup_jobs(self) -> set[str]:
         """Requested lobby setup not yet committed in code."""
-        return set(getattr(self, "_setup_pending", set()) or set())
+        return set(self._setup_pending or set())
 
     def note_confirmed_name_evidence(
         self, speaker_label: str, player_name: str
@@ -2287,7 +2287,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
 
     def mark_setup_applied(self, *jobs: str) -> None:
         """Clear setup jobs only after their real state mutation succeeds."""
-        pending = getattr(self, "_setup_pending", None)
+        pending = self._setup_pending
         if pending is None:
             self._setup_pending = set()
             pending = self._setup_pending
@@ -2312,7 +2312,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if getattr(self, "game_started", False):
             return intents
         requested = getattr(self, "_setup_requested", None)
-        pending = getattr(self, "_setup_pending", None)
+        pending = self._setup_pending
         if requested is None:
             self._setup_requested = set()
             requested = self._setup_requested
@@ -2422,7 +2422,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         return self._delivery_text_matches_armed(text or "")
 
     def clear_ambiguous_yes_block(self, *, reason: str) -> None:
-        if getattr(self, "_ambiguous_yes_blocks_start", False) or getattr(
+        if self._ambiguous_yes_blocks_start or getattr(
             self, "_pending_or_choice_offer", False
         ):
             logger.info(
@@ -2797,7 +2797,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     return
                 if not self.game_started or self.game_over:
                     continue
-                if getattr(self, "_delivery_stop_sticky", False):
+                if self._delivery_stop_sticky:
                     # Conversation may continue, but every game-plane owner
                     # stays frozen until explicit resume.
                     continue
@@ -2877,10 +2877,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         return True
 
     def _when_hold(self) -> bool:
-        return getattr(self, "_hold_active", False)
+        return self._hold_active
 
     def _when_question_pending(self) -> bool:
-        return getattr(self, "_question_pending", False)
+        return self._question_pending
 
     def _when_progression_paused(self) -> bool:
         return bool(self.progression_paused_reason())
@@ -2889,7 +2889,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         return (
             self.sk.answer_window_open
             or self._adjudicating
-            or getattr(self, "_question_transitioning", False)
+            or self._question_transitioning
         )
 
     def _when_armed(self) -> bool:
@@ -2923,7 +2923,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 self.sk.session_id,
                 lily_config.responsiveness_budget_seconds(),
             )
-        elif not getattr(self, "_awaiting_address_since", 0.0):
+        elif not self._awaiting_address_since:
             self._address_unanswered_warned = False
         return "address_checked"
 
@@ -2962,7 +2962,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 self.armed_question is None
                 and not self.sk.answer_window_open
                 and not self._adjudicating
-                and not getattr(self, "_question_transitioning", False)
+                and not self._question_transitioning
             )
             if not idle_phase:
                 if (
@@ -3187,7 +3187,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             return False
         if self.armed_question is None or self.sk.answer_window_open:
             return False
-        if self._adjudicating or getattr(self, "_question_transitioning", False):
+        if self._adjudicating or self._question_transitioning:
             return False
         if self._delivery_confirmed():
             return False
@@ -3214,7 +3214,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         """
         if self.armed_question is None or self.sk.answer_window_open:
             return False
-        if self._adjudicating or getattr(self, "_question_transitioning", False):
+        if self._adjudicating or self._question_transitioning:
             return False
         qnum = self.sk.question_number
         if self.question_already_answered(qnum):
@@ -3261,7 +3261,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if self.armed_question is None or self.sk.answer_window_open:
             self._undelivered_ticks = 0
             return "idle"
-        if self._adjudicating or getattr(self, "_question_transitioning", False):
+        if self._adjudicating or self._question_transitioning:
             self._undelivered_ticks = 0
             return "idle"
         if self._delivery_confirmed():
@@ -3527,7 +3527,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         already passed the gated_say gate, so backing the claim never
         suppresses the ack itself — it binds the NEXT dispatch (with W2's
         gate, the leaked delivery)."""
-        if getattr(self, "_hold_active", False):
+        if self._hold_active:
             return False
         if self.game_delivery_stopped():
             return False
@@ -4053,7 +4053,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if (
             not (interrupted or suppressed)
             and getattr(self, "_recognition_why_note", None)
-            and getattr(self, "_recognition_dispute", False)
+            and self._recognition_dispute
         ):
             self._recognition_dispute_why_answered = True
             logger.info(
@@ -4109,7 +4109,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # close the beat with its terminal marker and free the claim,
             # so the idle/supply recovery runs and a fresh transition
             # delivers N+1 when supply returns.
-            open_qnum = getattr(self, "_open_transition_qnum", None)
+            open_qnum = self._open_transition_qnum
             if open_qnum is not None and self.armed_question is None:
                 self.release_completed_transition(
                     open_qnum, reason="supply_empty_post_reveal"
@@ -4293,7 +4293,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         is that the in-flight MC read markers are NOT cleared, because the
         read really is still in flight and C3b/C3c still need to be able to
         truncate or resume it."""
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             logger.info(
                 "LILY_WINDOW | OPEN_BLOCKED | session=%s q=%d "
                 "reason=game_stopped",
@@ -4617,7 +4617,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     async def skip_question(self, source: str) -> None:
         """Skip: identical for spoken 'skip' and the RPC tap — no comment,
         no spotlight on who asked."""
-        if self._adjudicating or getattr(self, "_question_transitioning", False):
+        if self._adjudicating or self._question_transitioning:
             logger.info(
                 "LILY_STATE | SKIP_IGNORED | session=%s source=%s "
                 "reason=question_transition",
@@ -4676,11 +4676,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         it (lily-1C53C6)."""
         # REFACTOR WAVE 1a: shadow the typed GameControl gate. may("adjudicate")
         # is compared against this guard; the latch guard stays authoritative.
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             _legacy_reason = "game_stopped"
         elif self._adjudicating:
             _legacy_reason = "already_adjudicating"
-        elif getattr(self, "_question_transitioning", False):
+        elif self._question_transitioning:
             _legacy_reason = "transitioning"
         elif self.armed_question is None:
             _legacy_reason = "no_armed_question"
@@ -5068,7 +5068,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 5 if self.sk.round > self.rounds_total else max(1, self.sk.round)
             )
 
-            if getattr(self, "_delivery_stop_sticky", False):
+            if self._delivery_stop_sticky:
                 logger.warning(
                     "LILY_STOP | ADJUDICATION_ABORTED | session=%s q=%d — "
                     "STOP landed before score commit",
@@ -5328,7 +5328,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # arm N+1 or release on empty supply.
             resumed_complete = (
                 reclaim_transition
-                and getattr(self, "_open_transition_qnum", None)
+                and self._open_transition_qnum
                 == transition_qnum
                 and self.transition_narration_complete(transition_qnum)
             )
@@ -5346,7 +5346,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             resumed_burned = (
                 not resumed_complete
                 and reclaim_transition
-                and getattr(self, "_open_transition_qnum", None)
+                and self._open_transition_qnum
                 == transition_qnum
                 and self._is_burned(question)
             )
@@ -5953,7 +5953,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # one yet" left the decision to the model, which cannot
             # reliably know. Decide it in code: the fired flag is the
             # authority.
-            if getattr(self, "_late_recognition_fired", False):
+            if self._late_recognition_fired:
                 instructions += (
                     " The welcome-back beat has ALREADY AIRED this session "
                     "— do NOT welcome the table back again, do not repeat "

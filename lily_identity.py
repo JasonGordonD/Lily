@@ -72,21 +72,21 @@ class LilyIdentityMixin:
         # speech is forbidden outright — it belongs to the greeting/intake
         # window, never inside or after game start. The live beat aired as
         # act=game_start and suppressed q_1's kickoff.
-        if getattr(self, "_game_start_committed", False):
+        if self._game_start_committed:
             return "game_start_committed"
         if self.sk.answer_window_open:
             return "answer_window_open"
-        if getattr(self, "_adjudicating", False):
+        if self._adjudicating:
             return "adjudicating"
-        if getattr(self, "_question_transitioning", False):
+        if self._question_transitioning:
             return "question_transitioning"
         if getattr(self, "pending_clarify", None):
             return "pending_clarify"
         if getattr(self.sk, "host_speaking", False):
             return "host_speaking"
-        if getattr(self, "_active_delivery_qnum", None) is not None:
+        if self._active_delivery_qnum is not None:
             return "delivery_active"
-        if getattr(self, "_pending_delivery_qnum", None) is not None:
+        if self._pending_delivery_qnum is not None:
             return "delivery_pending"
         armed = getattr(self, "armed_question", None)
         registry = getattr(self, "say_registry", None)
@@ -228,7 +228,7 @@ class LilyIdentityMixin:
 
     def flush_late_recognition_at_seam(self) -> bool:
         """Emit a deferred recognition beat only when the game is between Qs."""
-        if not getattr(self, "_late_recognition_pending", False):
+        if not self._late_recognition_pending:
             return False
         return self.maybe_fire_late_recognition()
 
@@ -529,7 +529,7 @@ class LilyIdentityMixin:
 
     def recognition_dispute_blocks_start(self) -> bool:
         """P0-B: kickoff locked until the why-beat has landed."""
-        if not getattr(self, "_recognition_dispute", False):
+        if not self._recognition_dispute:
             return False
         return not getattr(self, "_recognition_dispute_why_answered", False)
 
@@ -583,7 +583,7 @@ class LilyIdentityMixin:
     def arm_recognition_dispute(self, *, reason: str) -> None:
         """Open a recognition dispute: inject the why-directive and lock
         start. Idempotent while already open."""
-        already = bool(getattr(self, "_recognition_dispute", False))
+        already = bool(self._recognition_dispute)
         self._recognition_dispute = True
         if not already:
             self._recognition_dispute_why_answered = False

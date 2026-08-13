@@ -240,8 +240,8 @@ class LilyGlassMixin:
         sk = self.sk
         phase = getattr(self, "_phase_hold", None) or getattr(self, "ui_phase", None) or "-"
         q = getattr(sk, "question_number", None)
-        pending = getattr(self, "_pending_delivery_qnum", None)
-        active = getattr(self, "_active_delivery_qnum", None)
+        pending = self._pending_delivery_qnum
+        active = self._active_delivery_qnum
         if pending is not None:
             delivery = f"pending:{pending}"
         elif active is not None:
@@ -251,14 +251,14 @@ class LilyGlassMixin:
         else:
             delivery = "none"
         if getattr(sk, "answer_window_open", False):
-            window = "steal" if getattr(self, "_steal_window", False) else "open"
+            window = "steal" if self._steal_window else "open"
         else:
             window = "closed"
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             hold = "stop_sticky"
-        elif getattr(self, "_hold_active", False):
+        elif self._hold_active:
             hold = "wait"
-        elif getattr(self, "_question_pending", False):
+        elif self._question_pending:
             hold = "q_pending"
         else:
             hold = "clear"
@@ -266,7 +266,7 @@ class LilyGlassMixin:
             supply = "lobby"
         elif getattr(self, "game_over", False):
             supply = "over"
-        elif getattr(self, "_delivery_stop_sticky", False):
+        elif self._delivery_stop_sticky:
             supply = "stopped"
         elif self.next_question_ready():
             supply = "ready"
@@ -616,12 +616,12 @@ class LilyGlassMixin:
         # PATCH-002 A4 — any user final RELEASES the hold (they've spoken;
         # conversation may resume). Sticky STOP remains an independent game
         # delivery freeze unless the explicit resume detector above fired.
-        if getattr(self, "_hold_active", False):
+        if self._hold_active:
             self.release_hold(reason="user_speech")
         # PATCH-003 P6 — the table answered the question she asked: release
         # the pending state so her normal speak-by-default engages this
         # turn as the response (she finishes the conversation she started).
-        if getattr(self, "_question_pending", False):
+        if self._question_pending:
             self.release_question_pending(reason="user_answered")
 
         self.request_device_verification("final_transcript")
@@ -1728,14 +1728,14 @@ class LilyGlassMixin:
         answered_line = self.answered_closed_state_line()
         if answered_line:
             view.answered_closed = answered_line
-        if getattr(self, "_delivery_stop_sticky", False):
+        if self._delivery_stop_sticky:
             view.delivery_or_hold = (
                 "game_delivery: STOPPED — conversation may continue, but "
                 "do not ask, arm, reveal, score, nudge, or promise another "
                 "question. Only an explicit resume/continue command clears "
                 "this state."
             )
-        elif getattr(self, "_hold_active", False):
+        elif self._hold_active:
             # W8: a plain hold (a self-wait-promise, a decline, P10, or a
             # backed stopped-state narration) is not the sticky STOP latch,
             # so the STOPPED directive above does not fire — yet the delivery
@@ -1818,7 +1818,7 @@ class LilyGlassMixin:
         # PATCH-003 P9: if a real state check will make an answer slow,
         # air a GROUNDED holding beat inside the budget — name the actual
         # thing being checked, never a vamp.
-        if getattr(self, "_awaiting_address_since", 0.0):
+        if self._awaiting_address_since:
             view.responsiveness = (
                 "responsiveness: someone addressed you directly — answer "
                 "promptly. If the true answer needs a moment (a real check "
@@ -1978,20 +1978,20 @@ class LilyGlassMixin:
                 "you have met before. A blank lookup never proves otherwise; "
                 "do not say clean slate / no saved voices / no past games."
             )
-        if getattr(self, "_late_recognition_pending", False):
+        if self._late_recognition_pending:
             view.late_recognition = (
                 "late_recognition: DEFERRED — a live question owns the floor. "
                 "Do not mention recognition/refresher/usual until the engine "
                 "releases it at the between-question seam."
             )
-        if getattr(self, "_recognition_dispute", False) and not getattr(
+        if self._recognition_dispute and not getattr(
             self, "_recognition_dispute_why_answered", False
         ):
             view.recognition_dispute = (
                 "recognition_dispute: ACTIVE — lily_begin_round / kickoff / "
                 "category announce blocked until the why-beat lands"
             )
-        if getattr(self, "_ambiguous_yes_blocks_start", False):
+        if self._ambiguous_yes_blocks_start:
             view.ambiguous_yes = (
                 "ambiguous_yes: ACTIVE — their last yes answered an A-or-B "
                 "choice, NOT a start. Do NOT call lily_begin_round. Ask one "
@@ -2011,7 +2011,7 @@ class LilyGlassMixin:
                 "adult_consent: CONFIRMED this session — do NOT ask for "
                 "18+ confirmation again."
             )
-        if getattr(self, "_user_speaking", False):
+        if self._user_speaking:
             view.floor_speaking = (
                 "floor: USER SPEAKING — do not call lily_begin_round or "
                 "start; listen for the rest of the turn."
