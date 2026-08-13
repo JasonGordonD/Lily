@@ -4121,7 +4121,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # beat. Round boundaries advance only after the separately keyed
             # standings flourish; q_N_verdict deliberately does not satisfy
             # this gate, so N+1 cannot queue over the previous round's scores.
-            if self.dispatch_armed_question(source="post_reveal"):
+            # PACING-001: a deliberate silent breath rides in front of the
+            # dispatch (inline when disabled) so the room gets a beat to react.
+            if self._advance_after_breath(source="post_reveal"):
                 return
             # HOTFIX-008 Z2c: the beat finished on the air but there is no
             # armed question to deliver (supply was starved at arm time).
@@ -4254,6 +4256,52 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if self.sk.pacing == "relaxed":
             return base * lily_config.relaxed_window_multiplier()
         return base
+
+    def _advance_after_breath(self, *, source: str) -> bool:
+        """PACING-001 item 2 — put a deliberate silent beat between the
+        verdict/reveal that just aired and the NEXT question. Returns True when
+        this call OWNS the advance (dispatched inline, or scheduled the breathed
+        dispatch); False only on the inline path when dispatch_armed_question
+        itself declined, so the seam's supply-starved fallback still runs.
+
+        The verdict/reveal has already played out; this delays ONLY N+1, so
+        verdict latency is untouched. Mirrors open_window_after_discharge's
+        gap pattern exactly: breath<=0 or no running loop -> inline dispatch
+        (byte-identical to the pre-PACING-001 seam); otherwise ensure_future a
+        sleep-then-dispatch whose guards are re-read at fire time. The
+        user-floor gate (progression_paused_reason -> user_speaking) still
+        holds N+1 longer if a human speaks into the breath."""
+        breath = lily_config.inter_question_breath_seconds()
+        if breath <= 0:
+            return self.dispatch_armed_question(source=source)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return self.dispatch_armed_question(source=source)
+        qnum = self.sk.question_number
+        logger.info(
+            "LILY_PACING | INTER_QUESTION_BREATH | session=%s q=%d breath=%.2fs "
+            "source=%s", self.sk.session_id, qnum, breath, source,
+        )
+
+        async def _breathe() -> None:
+            await asyncio.sleep(breath)
+            if getattr(self, "game_over", False):
+                return
+            if self.sk.question_number != qnum:
+                return  # the beat advanced by another path during the breath
+            if self.dispatch_armed_question(source=source):
+                return
+            # Supply was starved at arm time: close the completed transition so
+            # recovery runs (the inline path's fallback, honored after the breath).
+            open_qnum = self._open_transition_qnum
+            if open_qnum is not None and self.armed_question is None:
+                self.release_completed_transition(
+                    open_qnum, reason=f"{source}_breath_no_supply"
+                )
+
+        asyncio.ensure_future(_breathe())
+        return True
 
     def open_window_after_discharge(
         self,

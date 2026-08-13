@@ -345,6 +345,69 @@ def test_discharge_racing_open_wins(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_inter_question_breath_defers_next_question(monkeypatch):
+    """PACING-001 item 2: with a nonzero breath, N+1 does NOT fire inline at
+    verdict/reveal completion — a silent beat passes, then it dispatches."""
+    monkeypatch.setenv("LILY_INTER_QUESTION_BREATH_SECONDS", "0.05")
+    game = _make_game()
+    _arm(game, PROMPT)
+    dispatched: list = []
+    game.dispatch_armed_question = (
+        lambda *, source: dispatched.append(source) or True
+    )
+
+    async def scenario():
+        assert game._advance_after_breath(source="post_reveal") is True
+        assert dispatched == []  # the breath — the room gets a moment
+        await asyncio.sleep(0.1)
+        assert dispatched == ["post_reveal"]
+
+    asyncio.run(scenario())
+
+
+def test_inter_question_breath_zero_is_synchronous(monkeypatch):
+    """breath=0 (the suite baseline) is exactly the pre-PACING-001 behavior:
+    N+1 dispatches inline at the seam."""
+    monkeypatch.setenv("LILY_INTER_QUESTION_BREATH_SECONDS", "0")
+    game = _make_game()
+    _arm(game, PROMPT)
+    dispatched: list = []
+    game.dispatch_armed_question = (
+        lambda *, source: dispatched.append(source) or True
+    )
+    assert game._advance_after_breath(source="post_reveal") is True
+    assert dispatched == ["post_reveal"]
+
+
+def test_inter_question_breath_zero_passes_dispatch_false_through(monkeypatch):
+    """Inline path returns dispatch's own result, so the seam's supply-starved
+    fallback still runs when there is nothing armed to deliver."""
+    monkeypatch.setenv("LILY_INTER_QUESTION_BREATH_SECONDS", "0")
+    game = _make_game()
+    _arm(game, PROMPT)
+    game.dispatch_armed_question = lambda *, source: False
+    assert game._advance_after_breath(source="post_reveal") is False
+
+
+def test_inter_question_breath_stands_down_if_game_over(monkeypatch):
+    """A game that ended during the breath never fires the deferred question."""
+    monkeypatch.setenv("LILY_INTER_QUESTION_BREATH_SECONDS", "0.05")
+    game = _make_game()
+    _arm(game, PROMPT)
+    dispatched: list = []
+    game.dispatch_armed_question = (
+        lambda *, source: dispatched.append(source) or True
+    )
+
+    async def scenario():
+        game._advance_after_breath(source="post_reveal")
+        game.game_over = True
+        await asyncio.sleep(0.1)
+        assert dispatched == []
+
+    asyncio.run(scenario())
+
+
 def test_answers_during_gap_do_not_become_early_answers():
     """The discharge gap begins after question audio ends. A closed window
     plus a registered claim is not enough to make later speech an answer."""

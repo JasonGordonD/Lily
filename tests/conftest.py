@@ -15,3 +15,9 @@ import os
 
 def pytest_configure(config) -> None:
     os.environ["LILY_ROOM_DISCHARGE_SECONDS"] = "0"
+    # PACING-001 between-beat breath is a live pacing layer on top of the
+    # deterministic next-question dispatch. The suite's post-reveal seam
+    # assertions pin the inline dispatch (breath=0 = pre-PACING-001 behavior);
+    # the breath itself is covered explicitly in test_interruption_layer.py
+    # with a nonzero value — same discipline as the discharge gap above.
+    os.environ["LILY_INTER_QUESTION_BREATH_SECONDS"] = "0"

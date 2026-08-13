@@ -442,6 +442,20 @@ def room_discharge_seconds() -> float:
     return _get_float("LILY_ROOM_DISCHARGE_SECONDS", 0.5)
 
 
+def inter_question_breath_seconds() -> float:
+    """Between-beat breath (PACING-001): a deliberate silent pause between a
+    verdict/reveal finishing and the NEXT question firing, so the room gets a
+    moment to react before Lily moves on (operator 2026-08-13: "give her space
+    ... after each question give the operator a chance to respond instead of
+    just dishing them all out back to back"). Complements the user-floor gate
+    (progression_paused_reason -> user_speaking), which only holds while a human
+    is actually speaking; this adds the pause even in silence. It delays ONLY
+    the next question — never the verdict/reveal itself, which has already
+    aired, so verdict-delivery latency is untouched. 0 disables (fire N+1
+    inline, pre-PACING-001 behavior)."""
+    return _get_float("LILY_INTER_QUESTION_BREATH_SECONDS", 0.8)
+
+
 def mc_answer_aborts_read() -> bool:
     """WS-5 (WO-LILY-OMNIBUS-003): a final landing DURING an in-flight
     multiple-choice options read that Tier-1-matches a read option (or the
