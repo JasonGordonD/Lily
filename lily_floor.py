@@ -37,7 +37,7 @@ class LilyFloorMixin:
         if self.ambiguous_yes_blocks_start():
             return "ambiguous_yes"
         if (
-            getattr(self, "_identity_required_before_start", False)
+            self._identity_required_before_start
             and not self._identity_gate_satisfied()
         ):
             return "identity_unconfirmed"
@@ -330,7 +330,7 @@ class LilyFloorMixin:
             return False
         ref = now if now is not None else time.time()
         return (
-            ref - getattr(self, "_question_pending_since", 0.0)
+            ref - self._question_pending_since
         ) >= lily_config.hold_timeout_seconds()
 
     def question_pending_blocks_dispatch(self, act: str, source: str) -> bool:
@@ -350,7 +350,7 @@ class LilyFloorMixin:
         """Retire every current delivery surface without ending conversation."""
         self._delivery_stop_sticky = True
 
-        timer = getattr(self, "_window_timer", None)
+        timer = self._window_timer
         if timer is not None and not timer.done():
             timer.cancel()
         self._window_timer = None
@@ -361,7 +361,7 @@ class LilyFloorMixin:
         self.clear_pending_clarify_for_question(
             self.sk.question_number, reason="stop_primitive"
         )
-        if getattr(self, "_bed_handle", None) is not None:
+        if self._bed_handle is not None:
             self._stop_bed()
         self._steal_window = False
 
@@ -376,7 +376,7 @@ class LilyFloorMixin:
         # not the general kb_* retirement this clause removes.
         self.sk.current_question = None
 
-        task = getattr(self, "_prefetch_task", None)
+        task = self._prefetch_task
         if task is not None and not task.done():
             task.cancel()
         self._prefetch_task = None
@@ -502,7 +502,7 @@ class LilyFloorMixin:
             already_acked,
         )
         # 1. Halt anything airing + cancel every tracked handle.
-        for speech_id in list(getattr(self, "_speech_handles", {})):
+        for speech_id in list(self._speech_handles):
             self.cancel_speech(speech_id, reason="stop_primitive")
         # 2. Kill the delivery watchdog's ability to resurrect the turn.
         released = self.say_registry.release_pending()

@@ -53,7 +53,7 @@ class LilyTransitionMixin:
         return f"q_{qnum}_transition"
 
     def _transition_journals(self) -> dict:
-        journals = getattr(self, "_transition_journal", None)
+        journals = self._transition_journal
         if journals is None:
             journals = self._transition_journal = {}
         return journals

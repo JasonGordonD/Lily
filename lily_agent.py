@@ -1284,7 +1284,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         readers that genuinely want "her previous turn" with no generation
         of their own (_verdict_already_spoken, _reveal_already_on_air,
         transition journaling)."""
-        return getattr(self, "_last_assistant_turn", ("", ""))[1]
+        return self._last_assistant_turn[1]
 
     @_last_assistant_text.setter
     def _last_assistant_text(self, text: str) -> None:
@@ -1298,7 +1298,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         generation-scoped reader of this buffer MUST come through here;
         reading `_last_assistant_text` from a per-speech callback is the
         phantom-`[cut off]` bug class (GUARD_MAP: HOTFIX-008 Z1)."""
-        item_id, text = getattr(self, "_last_assistant_turn", ("", ""))
+        item_id, text = self._last_assistant_turn
         return text if item_id and item_id in item_ids else ""
 
     # -- state transport (seam contract) ------------------------------------
@@ -1447,7 +1447,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         sets LILY_GAMECONTROL_PARITY) this raises so the mismatch is a hard
         failure; live, it only counts and logs (the latches stay
         authoritative this wave)."""
-        counts = getattr(self, "_gamecontrol_divergences", None)
+        counts = self._gamecontrol_divergences
         if counts is None:
             counts = self._gamecontrol_divergences = {}
         counts[kind] = counts.get(kind, 0) + 1
@@ -1705,14 +1705,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if not normalized:
             return
         token = (self.sk.question_number, normalized)
-        prehook = getattr(self, "_prehook_answer_suppressions", None)
+        prehook = self._prehook_answer_suppressions
         if prehook is not None and token in prehook:
             # on_user_turn_completed won the event-order race and already
             # stopped the organic reply. Consume that reservation instead of
             # leaving a stale marker that could suppress a later repeated word.
             prehook.discard(token)
             return
-        pending = getattr(self, "_deterministic_reply_texts", None)
+        pending = self._deterministic_reply_texts
         if pending is None:
             pending = self._deterministic_reply_texts = []
         pending.append(normalized)
@@ -1721,7 +1721,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     def consume_deterministic_reply(self, text: str) -> bool:
         """Consume an exact handled-turn marker; never suppress a later turn."""
         normalized = lily_evaluation.lily_normalize_answer(text or "")
-        pending = getattr(self, "_deterministic_reply_texts", None) or []
+        pending = self._deterministic_reply_texts or []
         try:
             index = pending.index(normalized)
         except ValueError:
@@ -1748,7 +1748,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         delivery_started = getattr(
             self, "_active_delivery_started_at", None
         )
-        delivery_ended = getattr(self, "_active_delivery_ended_at", None)
+        delivery_ended = self._active_delivery_ended_at
         answer_live = (
             self.sk.answer_window_open
             or (
@@ -1862,7 +1862,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # Edge (A): emit the delta through the FIRST carrier only. Without this
         # latch, a cut greet leaves the stamp lagged and both the
         # late-recognition beat and the game-start ride-along compose it.
-        if getattr(self, "_whats_new_emitted", False):
+        if self._whats_new_emitted:
             return ""
         self._whats_new_emitted = True
         self._whats_new_pending = True
@@ -1893,7 +1893,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         """Bind the exact final TTS input to one speech handle."""
         if not speech_id:
             return
-        mapping = getattr(self, "_post_tts_text_by_speech_id", None)
+        mapping = self._post_tts_text_by_speech_id
         if mapping is None:
             mapping = self._post_tts_text_by_speech_id = {}
         mapping[speech_id] = (text or "").strip()
@@ -1906,7 +1906,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         consume stays with playout completion, Y5 contract untouched)."""
         if not speech_id:
             return None
-        mapping = getattr(self, "_post_tts_text_by_speech_id", None) or {}
+        mapping = self._post_tts_text_by_speech_id or {}
         return mapping.get(speech_id)
 
     def consume_post_tts_text(
@@ -1915,7 +1915,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         """Return and consume the text that actually entered TTS."""
         if not speech_id:
             return (fallback or "").strip()
-        mapping = getattr(self, "_post_tts_text_by_speech_id", None) or {}
+        mapping = self._post_tts_text_by_speech_id or {}
         final = mapping.pop(speech_id, None)
         if final is None:
             return (fallback or "").strip()
@@ -2032,7 +2032,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         (one note per 20s) so a chatty lobby doesn't spam the context;
         the note is consumed by the next turn like every state note.
         """
-        prev = getattr(self, "_intake_last_segment", None)
+        prev = self._intake_last_segment
         self._intake_last_segment = (label, start_ts, end_ts)
         if prev is None or not label:
             return
@@ -2043,7 +2043,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if start_ts >= (prev_end - epsilon):
             return
         now = time.monotonic()
-        last_noted = getattr(self, "_intake_overlap_noted_at", 0.0)
+        last_noted = self._intake_overlap_noted_at
         if now - last_noted < 20.0:
             return
         self._intake_overlap_noted_at = now
@@ -2182,7 +2182,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         prior contact. Deterministic UNKNOWN≠EMPTY; a blank card never
         disproves the player's memory.
         """
-        if getattr(self, "_returner_claim_seen", False):
+        if self._returner_claim_seen:
             return False
         if getattr(self, "memory_block", None):
             return False
@@ -2193,7 +2193,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if lily_config.voice_identity_enabled() and getattr(
             self, "supabase", None
         ) is not None:
-            return bool(getattr(self, "_voice_identity_resolved", False))
+            return bool(self._voice_identity_resolved)
         return True
 
     def must_rewrite_false_empty_claim(self, text: str) -> bool:
@@ -2206,8 +2206,8 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if not lily_say_gate.lily_false_clean_slate_claim(text):
             return False
         return bool(
-            getattr(self, "_returner_claim_seen", False)
-            or getattr(self, "_returner_honesty_note", None)
+            self._returner_claim_seen
+            or self._returner_honesty_note
             or self._recognition_dispute
             or not self.can_claim_empty_memory()
         )
@@ -2228,7 +2228,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         name = (player_name or "").strip()
         if not label or not lily_is_valid_name(name):
             return
-        evidence = getattr(self, "_confirmed_name_evidence", None)
+        evidence = self._confirmed_name_evidence
         if evidence is None:
             evidence = self._confirmed_name_evidence = {}
         evidence[label] = name
@@ -2282,7 +2282,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
 
     def confirmed_name_for_label(self, speaker_label: str) -> str | None:
         label = (speaker_label or "").strip().strip("[]")
-        evidence = getattr(self, "_confirmed_name_evidence", None) or {}
+        evidence = self._confirmed_name_evidence or {}
         return evidence.get(label)
 
     def mark_setup_applied(self, *jobs: str) -> None:
@@ -2311,7 +2311,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         intents = lily_scorekeeper.lily_parse_lobby_setup_intents(text)
         if getattr(self, "game_started", False):
             return intents
-        requested = getattr(self, "_setup_requested", None)
+        requested = self._setup_requested
         pending = self._setup_pending
         if requested is None:
             self._setup_requested = set()
@@ -2333,7 +2333,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 pending.add("adult")
         if intents["age_mentioned"]:
             requested.add("consent")
-            if getattr(self, "_age_consent_confirmed", False):
+            if self._age_consent_confirmed:
                 pending.discard("consent")
             else:
                 pending.add("consent")
@@ -2384,7 +2384,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 getattr(self.sk, "session_id", "?"),
                 intents["start"], intents["voice"], intents["adult"],
                 intents["media"], intents["heat"],
-                getattr(self, "_age_consent_confirmed", False),
+                self._age_consent_confirmed,
                 ",".join(sorted(pending)) or "none",
             )
         return intents
@@ -2452,7 +2452,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if command == "start_game":
             self.clear_ambiguous_yes_block(reason="explicit_start_command")
             return
-        if not getattr(self, "_pending_or_choice_offer", False):
+        if not self._pending_or_choice_offer:
             return
         if lily_scorekeeper.lily_is_bare_affirmative(text):
             self._ambiguous_yes_blocks_start = True
@@ -2532,7 +2532,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # late-recognition / game-start beats once the candidate promotes or
         # clears. Gating here removes the contradictory co-composition rather
         # than layering a reconciler on top.
-        if getattr(self, "_first_human_utterance_seen", False) and not getattr(
+        if self._first_human_utterance_seen and not getattr(
             self, "device_candidate_group_id", None
         ):
             if self.memory_block:
@@ -2659,7 +2659,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             ]
         # Operator-requested topic wins over the family rotation for the
         # round it was set on (getattr: test harnesses build via __new__).
-        override = getattr(self, "_category_override", {}).get(rnd)
+        override = self._category_override.get(rnd)
         if override:
             return override
         return CATEGORY_FAMILIES[(rnd - 1) % len(CATEGORY_FAMILIES)]
@@ -2671,7 +2671,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         topic) before regenerating — the compounding arsenal."""
         if not category:
             return False
-        return category in set(getattr(self, "_category_override", {}).values())
+        return category in set(self._category_override.values())
 
     # -- custom rounds: registration is the only proof (HOTFIX-006 N2) --------
     #
@@ -2701,7 +2701,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         key = lily_bank.lily_normalize_category_name(category)
         if not key:
             return
-        registry = getattr(self, "_custom_round_registered", None)
+        registry = self._custom_round_registered
         if registry is None:
             self._custom_round_registered = registry = {}
         ids = registry.setdefault(key, [])
@@ -2759,7 +2759,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     def start_idle_watchdog(self) -> None:
         # getattr: test harnesses build LilyGame via __new__ without the
         # full __init__ attribute set.
-        task = getattr(self, "_watchdog_task", None)
+        task = self._watchdog_task
         if task and not task.done():
             return
         self._prefetch_stall_ticks = 0
@@ -2779,21 +2779,21 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         `AgentSession isn't running`, once per hangup). Cancel plus the
         _session_closed flag (belt for a tick already past the sleep)."""
         self._session_closed = True
-        task = getattr(self, "_watchdog_task", None)
+        task = self._watchdog_task
         if task is not None and not task.done():
             task.cancel()
         self._watchdog_task = None
         # Z2: a supply-recovery ladder must not outlive the session either.
-        rec = getattr(self, "_supply_recovery_task", None)
+        rec = self._supply_recovery_task
         if rec is not None and not rec.done():
             rec.cancel()
         self._supply_recovery_task = None
 
     async def _idle_watchdog(self) -> None:
-        while not self.game_over and not getattr(self, "_session_closed", False):
+        while not self.game_over and not self._session_closed:
             await asyncio.sleep(self.WATCHDOG_INTERVAL_SECONDS)
             try:
-                if getattr(self, "_session_closed", False):
+                if self._session_closed:
                     return
                 if not self.game_started or self.game_over:
                     continue
@@ -2817,11 +2817,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     # question halts and never ran while a question was in hand.
 
     async def _run_watch_policies(self) -> None:
-        table = getattr(self, "_watch_policy_table", None)
+        table = self._watch_policy_table
         if table is None:
             table = self._make_watch_policies()
             self._watch_policy_table = table
-        self._watchdog_tick = getattr(self, "_watchdog_tick", 0) + 1
+        self._watchdog_tick = self._watchdog_tick + 1
         ran: set = set()
         for policy in table:
             if self._watchdog_tick % policy.every_ticks:
@@ -2931,7 +2931,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # PATCH-003 P10: a pending conversational question unanswered past the
         # timeout gets ONE gentle re-offer, then holds. Always halts the tick.
         if self._question_pending_timed_out():
-            if not getattr(self, "_question_pending_reoffered", False):
+            if not self._question_pending_reoffered:
                 self._question_pending_reoffered = True
                 self.gated_say(
                     None, "question_reoffer",
@@ -2956,7 +2956,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # lands SUPPLY (next_question). Falls through (never halts).
         if self._supply_silent_window():
             self._supply_silent_ticks = (
-                getattr(self, "_supply_silent_ticks", 0) + 1
+                self._supply_silent_ticks + 1
             )
             idle_phase = (
                 self.armed_question is None
@@ -3092,7 +3092,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # window, arm straight from the curated bank — but only once
         # reconciliation reports no stuck claim (WS-2).
         self._supply_stall_ticks = (
-            getattr(self, "_supply_stall_ticks", 0) + 1
+            self._supply_stall_ticks + 1
         )
         logger.warning(
             "LILY_WATCHDOG | SUPPLY_STALL | session=%s q=%d "
@@ -3191,7 +3191,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             return False
         if self._delivery_confirmed():
             return False
-        return getattr(self, "_undelivered_refires", 0) > 0
+        return self._undelivered_refires > 0
 
     def no_stuck_claims(self) -> bool:
         """WS-6 gate: True when reconciliation reports no registered-
@@ -3294,7 +3294,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # stuck — the live "Nobody…"/"Hey…" triples were false refires on
         # turns that actually played.
         owner = self.say_registry.owner_of(key)
-        if owner and owner in getattr(self, "_playout_started_ids", set()):
+        if owner and owner in self._playout_started_ids:
             self._undelivered_ticks = 0
             return "idle"
         if getattr(self.sk, "host_speaking", False):
@@ -3307,20 +3307,20 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # RM_VYp6 undelivered-refire loops). Hold until the room goes
         # quiet; ticks keep accumulating so a truly silent stall still
         # recovers once the quiet window elapses.
-        last_user = getattr(self, "_last_user_turn_at", None)
+        last_user = self._last_user_turn_at
         if last_user is not None:
             quiet_for = time.monotonic() - last_user
             if quiet_for < lily_config.undelivered_refire_quiet_seconds():
                 return "idle"
         # Armed, window closed, delivery unconfirmed (never registered or
         # stuck PENDING): count consecutive stuck ticks.
-        self._undelivered_ticks = getattr(self, "_undelivered_ticks", 0) + 1
+        self._undelivered_ticks = self._undelivered_ticks + 1
         if self._undelivered_ticks < self._undelivered_reconcile_ticks():
             return "idle"
         self._undelivered_ticks = 0
         # Near-miss: table already heard a high-similarity performance —
         # confirm + open, never UNDELIVERED_REFIRE the same Q again.
-        last_ratio = float(getattr(self, "_last_armed_speech_ratio", 0.0) or 0.0)
+        last_ratio = float(self._last_armed_speech_ratio or 0.0)
         if last_ratio >= 0.9:
             logger.warning(
                 "LILY_WATCHDOG | UNDELIVERED_NEAR_MISS | session=%s q=%d "
@@ -3331,7 +3331,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 reason="undelivered_near_miss", ratio=last_ratio,
             )
             return "confirmed"
-        if getattr(self, "_undelivered_refires", 0) < UNDELIVERED_MAX_REFIRES:
+        if self._undelivered_refires < UNDELIVERED_MAX_REFIRES:
             self._undelivered_refires += 1
             # Drop a stale never-played claim so the re-dispatched delivery
             # re-claims cleanly (a confirmed claim can never reach here, so
@@ -3379,7 +3379,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         already ran (the answered-set survives the question transition,
         so a stale refire for N after the game moved to N+1 is caught
         too). An answered question never re-airs."""
-        answered = getattr(self, "_answered_questions", None) or set()
+        answered = self._answered_questions or set()
         if qnum in answered:
             return True
         if qnum == self.sk.question_number and self.sk.answer_candidates:
@@ -3393,7 +3393,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         merely-recorded candidate: clarify is still legal while the window
         is open. note_answer_heard() is the terminal boundary.
         """
-        answered = getattr(self, "_answered_questions", None) or set()
+        answered = self._answered_questions or set()
         return qnum in answered
 
     def answered_closed_state_line(self) -> str | None:
@@ -3412,7 +3412,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         """T2 marking point: adjudication is starting (answer_heard) —
         every outstanding delivery attempt for this question is now
         invalid, in-flight playout included."""
-        answered = getattr(self, "_answered_questions", None)
+        answered = self._answered_questions
         if answered is None:
             answered = self._answered_questions = set()
         answered.add(qnum)
@@ -3444,11 +3444,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         the live handle when we hold one. Safe on unknown ids."""
         if not speech_id:
             return
-        suppressed = getattr(self, "_suppressed_speech_ids", None)
+        suppressed = self._suppressed_speech_ids
         if suppressed is None:
             suppressed = self._suppressed_speech_ids = set()
         suppressed.add(speech_id)
-        handles = getattr(self, "_speech_handles", None) or {}
+        handles = self._speech_handles or {}
         handle = handles.get(speech_id)
         if handle is None:
             return
@@ -3548,7 +3548,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         delivery playout started). Recorded so an abandonment before the
         window opens can be flagged as a cancelled stem rather than a
         silent vanish."""
-        aired = getattr(self, "_aired_stems", None)
+        aired = self._aired_stems
         if aired is None:
             aired = self._aired_stems = set()
         aired.add(qnum)
@@ -3556,14 +3556,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     def mark_stem_completed(self, qnum: int) -> None:
         """The window opened — the stem completed its promise. Terminal;
         clears the aired marker so it can't later read as abandoned."""
-        (getattr(self, "_aired_stems", None) or set()).discard(qnum)
+        (self._aired_stems or set()).discard(qnum)
 
     def _terminate_aired_stem(self, reason: str) -> None:
         """If the CURRENT question's stem aired but never completed
         (window never opened), emit a cancellation event so the dispatch
         record terminates. Idempotent — the marker clears here."""
         qnum = self.sk.question_number
-        aired = getattr(self, "_aired_stems", None) or set()
+        aired = self._aired_stems or set()
         if qnum not in aired:
             return
         if self.sk.answer_window_open:
@@ -3586,7 +3586,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         speech_id = getattr(handle, "id", None)
         if not speech_id:
             return
-        handles = getattr(self, "_speech_handles", None)
+        handles = self._speech_handles
         if handles is None:
             handles = self._speech_handles = {}
         handles[speech_id] = handle
@@ -3821,7 +3821,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if (
             speech_id
             and self.say_registry.owner_of(delivery_key) == speech_id
-            and getattr(self, "_active_delivery_started_at", None) is not None
+            and self._active_delivery_started_at is not None
         ):
             # Close the exact audible interval before any discharge delay.
             # Finals may arrive after this callback, but only a segment whose
@@ -3845,9 +3845,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # Stale-claim recovery bookkeeping: this speech's playout lifecycle
         # is over either way — its airing marker and handle are spent.
         if speech_id:
-            getattr(self, "_playout_started_ids", set()).discard(speech_id)
-            (getattr(self, "_speech_handles", None) or {}).pop(speech_id, None)
-            (getattr(self, "_delivery_speech_acts", None) or {}).pop(
+            self._playout_started_ids.discard(speech_id)
+            (self._speech_handles or {}).pop(speech_id, None)
+            (self._delivery_speech_acts or {}).pop(
                 speech_id, None
             )
         # HOSTLOOP-001 C5: this turn's playout is over however it ended, so
@@ -3993,7 +3993,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             )
             # A confirmed act played — its stale-retry budget is spent
             # state, never carried into a later same-key claim cycle.
-            retry_counts = getattr(self, "_stale_retry_counts", {})
+            retry_counts = self._stale_retry_counts
             for k in confirmed:
                 retry_counts.pop(k, None)
             # C14b: the delivery turn's playout completed — the second
@@ -4052,7 +4052,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # counts as the why-beat landing — unlock kickoff for when he asks.
         if (
             not (interrupted or suppressed)
-            and getattr(self, "_recognition_why_note", None)
+            and self._recognition_why_note
             and self._recognition_dispute
         ):
             self._recognition_dispute_why_answered = True
@@ -4074,7 +4074,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # once the greet has genuinely played out, the stamp moves forward
         # (never before: an interrupted greet keeps the delta for a retry).
         if (
-            getattr(self, "_whats_new_pending", False)
+            self._whats_new_pending
             and self.say_registry.state("session_greet")
             == lily_say_gate.CLAIM_CONFIRMED
         ):
@@ -4382,7 +4382,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # turn's playout completes — so THIS is the durable "delivery
             # reached playout" record the reveal side gates on. A steal
             # window rides an already-delivered question, so it never adds.
-            delivered = getattr(self, "_delivered_to_playout", None)
+            delivered = self._delivered_to_playout
             if delivered is None:
                 delivered = self._delivered_to_playout = set()
             delivered.add(self.sk.question_number)
@@ -4517,7 +4517,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         via __new__)."""
         if not key:
             return None
-        store = getattr(self, "_nbest_by_key", None) or {}
+        store = self._nbest_by_key or {}
         found = store.get(key)
         if found is None and key == "unrostered:None":
             found = store.get("unrostered:UU")
@@ -4718,7 +4718,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             not self.sk.answer_window_open
             and not _delivery_confirmed
             and self.sk.question_number
-            not in getattr(self, "_delivered_to_playout", set())
+            not in self._delivered_to_playout
         ):
             logger.error(
                 "LILY_REVEAL | REFUSED_NO_DELIVERY | session=%s q=%d — "
@@ -6176,7 +6176,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if armed is None or supabase is None:
             return False
         qnum = self.sk.question_number
-        if getattr(self, "_durable_asked_qnum", None) == qnum:
+        if self._durable_asked_qnum == qnum:
             return False
         self._durable_asked_qnum = qnum
         asyncio.ensure_future(lily_bank.lily_record_asked(
@@ -6308,13 +6308,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         revealed/burned question. Returned as (ids, hashes)."""
         ids = (
             lily_bank.lily_history_question_ids(self.asked_history)
-            | getattr(self, "_drawn_ids", set())
-            | getattr(self, "_burned_question_ids", set())
+            | self._drawn_ids
+            | self._burned_question_ids
         )
         hashes = (
             lily_bank.lily_history_hashes(self.asked_history)
-            | getattr(self, "_drawn_hashes", set())
-            | getattr(self, "_burned_question_hashes", set())
+            | self._drawn_hashes
+            | self._burned_question_hashes
         )
         return ids, hashes
 
@@ -6339,7 +6339,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self._burn_question(self.next_question, reason="answer_leak")
             self.next_question = None
             burned = True
-        if getattr(self, "_next_question_reserve", None) is not None:
+        if self._next_question_reserve is not None:
             # Depth-2: the leak filter cannot attribute the fragment, so the
             # reserve is in-flight and dead too — burn it with the rest.
             self._burn_question(self._next_question_reserve, reason="answer_leak")
@@ -6424,7 +6424,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 "no_xai_key" if update is not None else "no_agent_handle",
             )
             return False
-        llm = getattr(self, "_adult_llm", None)
+        llm = self._adult_llm
         if llm is None:
             try:
                 llm = lily_build_grok_vocal_llm(
@@ -6443,7 +6443,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self._adult_llm = llm
             # Y1c: the freshly built adult transport gets the same per-call
             # cache accounting as the general node.
-            wire = getattr(self, "_llm_metrics_wire", None)
+            wire = self._llm_metrics_wire
             if wire is not None:
                 try:
                     wire(llm)
@@ -6469,7 +6469,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         idempotent; a session that never swapped is a no-op."""
         agent = getattr(self, "agent", None)
         update = getattr(agent, "update_options", None)
-        general = getattr(self, "_general_llm", None)
+        general = self._general_llm
         if update is None or general is None:
             return
         try:
@@ -6580,7 +6580,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         logger.info(
             "LILY_STT | roster=%d max_speakers=%d",
             self.sk.roster_size(),
-            getattr(self, "_stt_max_speakers_applied", 7),
+            self._stt_max_speakers_applied,
         )
         # Voiceprint enrollment fires on the first binding and every later
         # bind. The write is idempotent and this closes the late-binder gap:
@@ -6622,11 +6622,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         14:49:49). Fires at most once, only to SHRINK the cap, only when
         explicitly enabled, and only if the rebuild+swap machinery is
         present. Fail-safe: any error leaves the live STT untouched."""
-        if getattr(self, "_stt_roster_retuned", False):
+        if self._stt_roster_retuned:
             return
         if not lily_config.stt_roster_retune_enabled():
             return
-        rebuild = getattr(self, "_stt_rebuild", None)
+        rebuild = self._stt_rebuild
         agent = getattr(self, "agent", None)
         update = getattr(agent, "update_options", None) if agent else None
         if rebuild is None or not callable(update):
@@ -6638,7 +6638,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if roster < 1:
             return
         target = lily_stt_tuning.lily_max_speakers_for(roster)
-        current = int(getattr(self, "_stt_max_speakers_applied", 7))
+        current = int(self._stt_max_speakers_applied)
         if target >= current:
             # The construction fallback already covers this table; a live
             # swap that doesn't shrink the cap buys a reconnect for nothing.
@@ -6671,7 +6671,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         auto-started between Chris's bind and Rhonda's introduction)."""
         if self.game_started or self.game_over:
             return False
-        last = getattr(self, "_last_bind_at", None)
+        last = self._last_bind_at
         if last is None:
             return False
         return time.time() - last < lily_config.intake_settle_seconds()
@@ -6718,7 +6718,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # fall back to "never quiet enough" when no user turn has landed
         # yet (the greeting alone is not a settled table).
         quiet_needed = lily_config.auto_start_quiet_seconds()
-        last_user = getattr(self, "_last_user_turn_at", None)
+        last_user = self._last_user_turn_at
         if last_user is None:
             logger.info(
                 "LILY_STATE | START_DEFERRED | session=%s "

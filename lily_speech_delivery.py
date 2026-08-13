@@ -322,7 +322,7 @@ class LilySpeechDeliveryMixin:
                     instructions = instructions + _REGEN_DELIVERY_DIRECTIVE
                 else:
                     instructions = instructions + _REGEN_REAIR_DIRECTIVE
-        elif getattr(self, "_reair_gate_armed", False):
+        elif self._reair_gate_armed:
             # A DETERMINISTIC line is fresh by construction and must reach
             # the air verbatim, so it neither needs the regeneration
             # directive nor may hand tts_node's regen GATE a turn it would
@@ -348,7 +348,7 @@ class LilySpeechDeliveryMixin:
                 "game_start",
                 "skip",
             ):
-                delivery_acts = getattr(self, "_delivery_speech_acts", None)
+                delivery_acts = self._delivery_speech_acts
                 if delivery_acts is None:
                     delivery_acts = self._delivery_speech_acts = {}
                 delivery_acts[speech_id] = act
@@ -374,7 +374,7 @@ class LilySpeechDeliveryMixin:
         directions the say gate already defines a dead dispatch: a RELEASED
         claim, and a dispatch whose speech never reached playout inside the
         stale-claim deadline. No wedged token can mute the progression loop."""
-        flight = getattr(self, "_composite_flight_state", None)
+        flight = self._composite_flight_state
         if flight is None:
             return None
         owner = flight.get("owner")
@@ -386,7 +386,7 @@ class LilySpeechDeliveryMixin:
             # free and the legitimate redelivery is not refused as a race.
             self._composite_flight_state = None
             return None
-        started = owner in getattr(self, "_playout_started_ids", set())
+        started = owner in self._playout_started_ids
         if not started and (
             time.monotonic() - float(flight.get("at") or 0.0)
         ) >= _STALE_CLAIM_SECONDS:
@@ -455,7 +455,7 @@ class LilySpeechDeliveryMixin:
         """Release the composite lane at PLAYOUT COMPLETION (confirmed,
         interrupted or suppressed — all three end the flight). Wired from
         on_agent_speech_finished, the one place every outbound turn ends."""
-        flight = getattr(self, "_composite_flight_state", None)
+        flight = self._composite_flight_state
         if flight is None:
             return
         if speech_id is not None and flight.get("owner") != speech_id:
@@ -507,7 +507,7 @@ class LilySpeechDeliveryMixin:
         """The receipt text already aired for question `qnum`, or None —
         the input the verdict composite is conditioned on so it does not
         rule twice."""
-        record = getattr(self, "_answer_receipt_aired", None) or {}
+        record = self._answer_receipt_aired or {}
         if record.get("qnum") != qnum:
             return None
         return record.get("text") or None
@@ -536,8 +536,8 @@ class LilySpeechDeliveryMixin:
                 return False
         except Exception:
             pass
-        fired = getattr(self, "_answer_receipts_fired", None)
-        if fired is None or getattr(self, "_answer_receipts_qnum", None) != qnum:
+        fired = self._answer_receipts_fired
+        if fired is None or self._answer_receipts_qnum != qnum:
             fired, self._answer_receipts_qnum = set(), qnum
             self._answer_receipts_fired = fired
         if receipt_id in fired:
@@ -707,7 +707,7 @@ class LilySpeechDeliveryMixin:
         if age is None or age < _STALE_CLAIM_SECONDS:
             return False
         owner = self.say_registry.owner_of(key)
-        started = getattr(self, "_playout_started_ids", set())
+        started = self._playout_started_ids
         if owner is not None and owner in started:
             return False  # airing (long turn mid-playout) — leave it alone
         if getattr(self.sk, "host_speaking", False):
@@ -753,12 +753,12 @@ class LilySpeechDeliveryMixin:
                 return
             if self.say_registry.owner_of(key) != owner:
                 return
-            if owner in getattr(self, "_playout_started_ids", set()):
+            if owner in self._playout_started_ids:
                 return
             if getattr(self.sk, "host_speaking", False):
                 continue
             age = self.say_registry.pending_age(key) or 0.0
-            counts = getattr(self, "_stale_retry_counts", None)
+            counts = self._stale_retry_counts
             if counts is None:
                 counts = self._stale_retry_counts = {}
             attempts = counts.get(key, 0)
@@ -796,7 +796,7 @@ class LilySpeechDeliveryMixin:
         self.cancel_cut_recovery()
         if not speech_id:
             return
-        started = getattr(self, "_playout_started_ids", None)
+        started = self._playout_started_ids
         if started is None:
             started = self._playout_started_ids = set()
         started.add(speech_id)
@@ -806,7 +806,7 @@ class LilySpeechDeliveryMixin:
         # dispatch and first audio frame: LLM generation + TTS + queue).
         # The flight record already carries the dispatch stamp; one line
         # here decomposes every composite's latency at zero new state.
-        flight = getattr(self, "_composite_flight_state", None)
+        flight = self._composite_flight_state
         if flight is not None and flight.get("owner") == speech_id:
             logger.info(
                 "LILY_LATENCY | DISPATCH_TO_AIR_MS | session=%s act=%s "
@@ -854,7 +854,7 @@ class LilySpeechDeliveryMixin:
             self._active_delivery_qnum = self.sk.question_number
             self._active_delivery_started_at = now
             self._active_delivery_ended_at = None
-            if getattr(self, "_mc_delivery_qnum", None) == self.sk.question_number:
+            if self._mc_delivery_qnum == self.sk.question_number:
                 self._mc_delivery_started_at = now
                 # HOSTLOOP-001 C3a: the answer window arms at the CORE
                 # QUESTION's completion, not at full-choices playout. The
@@ -984,8 +984,8 @@ class LilySpeechDeliveryMixin:
                 self.sk.session_id, qnum,
             )
             return self.force_confirm_delivery_heard(reason="cut_after_air")
-        cuts = getattr(self, "_delivery_cuts", None)
-        if cuts is None or getattr(self, "_delivery_cuts_qnum", None) != qnum:
+        cuts = self._delivery_cuts
+        if cuts is None or self._delivery_cuts_qnum != qnum:
             cuts, self._delivery_cuts_qnum = 0, qnum
         cuts += 1
         self._delivery_cuts = cuts
@@ -1009,13 +1009,13 @@ class LilySpeechDeliveryMixin:
 
     def peek_reair_gate(self) -> bool:
         """Read the re-air arm without consuming it."""
-        return getattr(self, "_reair_gate_armed", False)
+        return self._reair_gate_armed
 
     def take_reair_dispatch(self) -> bool:
         """Consume the re-air arm at DISPATCH time and hand the signal on
         to tts_node via _reair_turn_pending. True = this dispatch is a
         re-air and must carry a regeneration directive."""
-        if not getattr(self, "_reair_gate_armed", False):
+        if not self._reair_gate_armed:
             return False
         self._reair_gate_armed = False
         self._reair_turn_pending = True
@@ -1025,7 +1025,7 @@ class LilySpeechDeliveryMixin:
         """Consume the re-air signal at PLAYOUT (tts_node). True = the
         outbound turn is a re-air and its verbatim-replay lint is a GATE,
         not telemetry."""
-        pending = getattr(self, "_reair_turn_pending", False)
+        pending = self._reair_turn_pending
         self._reair_turn_pending = False
         return pending
 
@@ -1096,8 +1096,8 @@ class LilySpeechDeliveryMixin:
         if self._user_speaking:
             return True
         for stamp in (
-            getattr(self, "_user_speech_ended_at", None),
-            getattr(self, "_last_user_turn_at", None),
+            self._user_speech_ended_at,
+            self._last_user_turn_at,
         ):
             if stamp and (
                 time.monotonic() - stamp <= _CUT_RECOVERY_USER_TURN_LOOKBACK
@@ -1144,7 +1144,7 @@ class LilySpeechDeliveryMixin:
         the arm time (the user-turn recency guard keys off it). No-op
         without a running loop — offline tests drive _cut_recovery_should_fire
         / trigger_cut_recovery directly."""
-        self._cut_recovery_token = getattr(self, "_cut_recovery_token", 0) + 1
+        self._cut_recovery_token = self._cut_recovery_token + 1
         self._cut_recovery_tail = tail_text or ""
         self._cut_recovery_armed_at = time.monotonic()
         try:
@@ -1156,7 +1156,7 @@ class LilySpeechDeliveryMixin:
     def cancel_cut_recovery(self) -> None:
         """Supersede any pending auto-resume (new speech started airing —
         one of the one-emission cancel points)."""
-        self._cut_recovery_token = getattr(self, "_cut_recovery_token", 0) + 1
+        self._cut_recovery_token = self._cut_recovery_token + 1
 
     def note_user_turn(self) -> None:
         """Stamp the last user-turn time. A user turn near a cut means the
@@ -1178,9 +1178,9 @@ class LilySpeechDeliveryMixin:
         code dispatches from jumping in front of that answer until its
         playout clears it (the designed path)."""
         self._last_user_turn_at = time.monotonic()
-        armed_at = getattr(self, "_cut_recovery_armed_at", 0.0)
+        armed_at = self._cut_recovery_armed_at
         arm_belongs_to_this_cut = (
-            getattr(self, "_reair_gate_armed", False)
+            self._reair_gate_armed
             and armed_at > 0.0
             and (self._last_user_turn_at - armed_at)
             <= lily_config.cut_recovery_grace()
@@ -1249,7 +1249,7 @@ class LilySpeechDeliveryMixin:
         the recovery that would have paid it. Releasing it here restores
         exactly what the pre-Y10 code got by accident (the bypassing resume
         fired and its playout cleared the latch), without the bypass."""
-        if getattr(self, "_reair_gate_armed", False):
+        if self._reair_gate_armed:
             self._reair_gate_armed = False
             logger.info(
                 "LILY_CUT_RECOVERY | REAIR_ARM_CLEARED | session=%s "
@@ -1271,7 +1271,7 @@ class LilySpeechDeliveryMixin:
         genuine dead air: not superseded, nobody speaking, no user turn in
         the lookback window (a real barge-in carried content the normal path
         answers), game still live and out of a scoring window."""
-        if getattr(self, "_cut_recovery_token", 0) != token:
+        if self._cut_recovery_token != token:
             return False  # superseded by a newer cut or an explicit cancel
         # FLOOR-001 counterweight (HOTFIX-007 Y10) — THE GRADED CHOICE.
         # This watchdog is the purest expression of the code-side push
@@ -1298,8 +1298,8 @@ class LilySpeechDeliveryMixin:
             return False
         if getattr(self.sk, "host_speaking", False):
             return False  # audio already resumed / a new turn is airing
-        armed_at = getattr(self, "_cut_recovery_armed_at", 0.0)
-        last_user = getattr(self, "_last_user_turn_at", 0.0)
+        armed_at = self._cut_recovery_armed_at
+        last_user = self._last_user_turn_at
         if last_user >= armed_at - _CUT_RECOVERY_USER_TURN_LOOKBACK:
             # A user turn landed around/after the cut — a genuine barge with
             # content; the normal reply path (re-air-gated fresh) owns it.
@@ -1435,7 +1435,7 @@ class LilySpeechDeliveryMixin:
                 "act=question_delivery | source=tts_node", key,
             )
             return "held"
-        delivery_acts = getattr(self, "_delivery_speech_acts", None) or {}
+        delivery_acts = self._delivery_speech_acts or {}
         delivery_act = (
             delivery_acts.pop(speech_id, None) if speech_id else None
         )
@@ -1553,7 +1553,7 @@ class LilySpeechDeliveryMixin:
         qnum = self._active_delivery_qnum
         if qnum is None or qnum != self.sk.question_number:
             return False
-        started = getattr(self, "_active_delivery_started_at", None)
+        started = self._active_delivery_started_at
         if started is None:
             return False
         try:
@@ -1561,7 +1561,7 @@ class LilySpeechDeliveryMixin:
             seg_end = float(seg.get("segment_end_time", seg_start))
         except (KeyError, TypeError, ValueError):
             return False
-        ended = getattr(self, "_active_delivery_ended_at", None)
+        ended = self._active_delivery_ended_at
         return seg_end >= started and (ended is None or seg_start <= ended)
 
     def buffer_pre_window_answer(self, seg: dict) -> None:
@@ -1690,7 +1690,7 @@ class LilySpeechDeliveryMixin:
         landed just BEFORE the delivery claim can be back-filled into the
         pre-window buffer at claim time. Trimmed to buzz_prewindow_seconds()
         (and a hard 12-item cap) so it never grows without bound."""
-        buf = getattr(self, "_recent_finals", None)
+        buf = self._recent_finals
         if buf is None:
             buf = []
             self._recent_finals = buf
@@ -1712,13 +1712,13 @@ class LilySpeechDeliveryMixin:
         Reuses WS-5's stem model exactly: stem word count / configured
         words-per-second, measured from actual playout start. Already
         elapsed = 0.0 (arm immediately)."""
-        started = getattr(self, "_mc_delivery_started_at", None)
+        started = self._mc_delivery_started_at
         if started is None:
             return None
         wps = lily_config.mc_stem_protect_words_per_second()
         if wps <= 0:
             return None
-        stem_words = getattr(self, "_mc_delivery_stem_words", 0)
+        stem_words = self._mc_delivery_stem_words
         return max(0.0, (started + (stem_words / wps)) - now)
 
     def _core_completion_window_should_arm(self, qnum: int) -> bool:
@@ -1737,7 +1737,7 @@ class LilySpeechDeliveryMixin:
             return False
         # The read must still be the live one; a delivery that already ended
         # goes through the normal playout-completion open.
-        return getattr(self, "_mc_delivery_qnum", None) == qnum
+        return self._mc_delivery_qnum == qnum
 
     def _schedule_core_completion_window(self, qnum: int) -> None:
         """C3a: arm the answer window when the core question sentence
@@ -1815,7 +1815,7 @@ class LilySpeechDeliveryMixin:
 
         Returns the index whose read had STARTED but (by estimate) not
         finished. A cut past the last choice returns 3 — nothing is owed."""
-        started = getattr(self, "_mc_delivery_started_at", None)
+        started = self._mc_delivery_started_at
         if started is None:
             return None
         wps = lily_config.mc_stem_protect_words_per_second()
@@ -1828,7 +1828,7 @@ class LilySpeechDeliveryMixin:
         words_aired = max(0.0, (now - started)) * wps
         # The stem is spoken first and is protected; anything inside it means
         # no choice has begun.
-        cursor = float(getattr(self, "_mc_delivery_stem_words", 0))
+        cursor = float(self._mc_delivery_stem_words)
         if words_aired < cursor:
             return None
         for index, choice in enumerate(choices):
@@ -1867,7 +1867,7 @@ class LilySpeechDeliveryMixin:
 
     def take_pending_delivery_resume(self) -> str | None:
         """One-shot consume of the staged resume text (tts_node)."""
-        text = getattr(self, "_pending_delivery_resume", None)
+        text = self._pending_delivery_resume
         self._pending_delivery_resume = None
         return text
 
@@ -1987,7 +1987,7 @@ class LilySpeechDeliveryMixin:
             == lily_say_gate.CLAIM_CONFIRMED
         ):
             return False
-        if getattr(self, "_mc_delivery_qnum", None) == qnum:
+        if self._mc_delivery_qnum == qnum:
             return True
         return delivery_key in (released or [])
 
@@ -2022,7 +2022,7 @@ class LilySpeechDeliveryMixin:
         lands with the window already open — and an open window does not
         discharge the obligation to finish reading the choices the table was
         promised. Only a bound answer, or a resume already out, does."""
-        if getattr(self, "_delivery_barge_cut_qnum", None) != qnum:
+        if self._delivery_barge_cut_qnum != qnum:
             return False
         if qnum != self.sk.question_number:
             return False
@@ -2108,13 +2108,13 @@ class LilySpeechDeliveryMixin:
         """WS-5: True while the MC stem is still (estimated to be) reading —
         the protected span. An early answer cannot truncate the question
         until the whole table has heard it."""
-        started = getattr(self, "_mc_delivery_started_at", None)
+        started = self._mc_delivery_started_at
         if started is None:
             return True
         wps = lily_config.mc_stem_protect_words_per_second()
         if wps <= 0:
             return True
-        stem_words = getattr(self, "_mc_delivery_stem_words", 0)
+        stem_words = self._mc_delivery_stem_words
         return now < started + (stem_words / wps)
 
     def _interrupt_current_speech(self) -> None:
@@ -2160,7 +2160,7 @@ class LilySpeechDeliveryMixin:
         adjudicates the answer, so it neither replays nor goes inert."""
         if not lily_config.mc_answer_aborts_read():
             return False
-        qnum = getattr(self, "_mc_delivery_qnum", None)
+        qnum = self._mc_delivery_qnum
         if qnum is None:
             return False
         if self.armed_question is None:
@@ -2173,7 +2173,7 @@ class LilySpeechDeliveryMixin:
         # scorekeeper (it runs ahead of this fork), so all that is owed here
         # is TRUNCATION — recorded in `already_open` and honoured below.
         already_open = bool(self.sk.answer_window_open)
-        if already_open and getattr(self, "_mc_delivery_qnum", None) != qnum:
+        if already_open and self._mc_delivery_qnum != qnum:
             return False
         if self._adjudicating:
             return False

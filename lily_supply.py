@@ -64,7 +64,7 @@ class LilySupplyMixin:
         """Question ids registered for `category` this session (read-only)."""
         key = lily_bank.lily_normalize_category_name(category)
         return list(
-            getattr(self, "_custom_round_registered", {}).get(key, [])
+            self._custom_round_registered.get(key, [])
         )
 
     def custom_round_unbuilt_topics(self) -> list:
@@ -79,12 +79,12 @@ class LilySupplyMixin:
         landed AFTER the round had already failed to materialise, so a check
         that only watched the build window would have missed half the
         defect."""
-        override = getattr(self, "_category_override", {})
+        override = self._category_override
         unbuilt = [
             topic for topic in override.values()
             if not self.custom_round_registrations(topic)
         ]
-        for topic in getattr(self, "_custom_round_refused", []):
+        for topic in self._custom_round_refused:
             if topic not in unbuilt and not self.custom_round_registrations(
                 topic
             ):
@@ -147,9 +147,9 @@ class LilySupplyMixin:
         # game cannot keep serving under a name she is about to disown, then
         # relaunch supply normally — the refusal offers the deck, so the deck
         # has to actually be coming.
-        if getattr(self, "_category_override", {}).get(rnd) == subject:
+        if self._category_override.get(rnd) == subject:
             self._category_override.pop(rnd, None)
-        refused = getattr(self, "_custom_round_refused", None)
+        refused = self._custom_round_refused
         if refused is None:
             self._custom_round_refused = refused = []
         if subject not in refused:
@@ -182,8 +182,8 @@ class LilySupplyMixin:
         The tool is not the only channel — she can also just talk, and in
         lily-16A9AE she did ("I'm putting your round together right now").
         This is the truth sitting in front of that sentence."""
-        override = getattr(self, "_category_override", {})
-        refused = list(getattr(self, "_custom_round_refused", []))
+        override = self._category_override
+        refused = list(self._custom_round_refused)
         if not override and not refused:
             return None
         parts = []
@@ -223,7 +223,7 @@ class LilySupplyMixin:
         the caller discards the duplicate instead of prefetching it twice
         (the live q_0492 class: draw two ran before serving one
         registered). getattr: test harnesses build LilyGame via __new__."""
-        drawn_ids = getattr(self, "_drawn_ids", None)
+        drawn_ids = self._drawn_ids
         if drawn_ids is None:
             self._drawn_ids = drawn_ids = set()
             self._drawn_hashes = set()
@@ -241,7 +241,7 @@ class LilySupplyMixin:
         out. Failure writes an honest status note (§11.2). Z2 (HOTFIX-008):
         a supply-recovery retry sets `_prefetch_effort_override` (one-shot,
         consumed here) to de-escalate authoring effort on the retry draw."""
-        effort = getattr(self, "_prefetch_effort_override", None)
+        effort = self._prefetch_effort_override
         self._prefetch_effort_override = None
         if self._delivery_stop_sticky:
             return
@@ -255,7 +255,7 @@ class LilySupplyMixin:
         # filling the reserve lands N+2 behind it (see the commit below).
         if (
             self.next_question is not None
-            and getattr(self, "_next_question_reserve", None) is not None
+            and self._next_question_reserve is not None
         ):
             return
 
@@ -289,7 +289,7 @@ class LilySupplyMixin:
             # window-cycling all session, so a failed q2 prefetch was never
             # retried and the game starved with the bank full.
             if (
-                getattr(self, "_prefetch_supply_failed", False)
+                self._prefetch_supply_failed
                 and self.next_question is None
                 and self.game_started and not self.game_over
             ):
@@ -316,7 +316,7 @@ class LilySupplyMixin:
             # arm-time registration alone left the window the live q_0492
             # double-draw ran through. WS-4 adds the revealed/burned set so
             # a timed-out-and-revealed question is never re-drawn either.
-            if getattr(self, "_drawn_ids", None) is None:
+            if self._drawn_ids is None:
                 # Test harnesses build LilyGame via __new__ without the
                 # full __init__ attribute set.
                 self._drawn_ids = set()
@@ -787,9 +787,9 @@ class LilySupplyMixin:
             return
         if self.next_question is not None:
             return
-        if getattr(self, "_supply_exhausted_notified", False):
+        if self._supply_exhausted_notified:
             return
-        task = getattr(self, "_supply_recovery_task", None)
+        task = self._supply_recovery_task
         if task is not None and not task.done():
             return
         pf = self._prefetch_task
@@ -809,15 +809,15 @@ class LilySupplyMixin:
             await asyncio.sleep(0)
             retry_budget = lily_config.prefetch_total_budget_seconds() + 25.0
             while (
-                getattr(self, "_supply_retry_attempts", 0)
+                self._supply_retry_attempts
                 < self.SUPPLY_RETRY_MAX
             ):
-                if getattr(self, "_session_closed", False):
+                if self._session_closed:
                     return
                 if self.next_question is not None or self.game_over:
                     return
                 self._supply_retry_attempts = (
-                    getattr(self, "_supply_retry_attempts", 0) + 1
+                    self._supply_retry_attempts + 1
                 )
                 # De-escalate: adult authoring runs high by default, general
                 # runs medium — the retry drops a band so a hard draw does
@@ -846,7 +846,7 @@ class LilySupplyMixin:
             # Ladder exhausted: generation retries and the bank both came
             # back empty. One honest line + an explicit pause offer — the
             # table never waits open-ended on silence.
-            if getattr(self, "_supply_exhausted_notified", False):
+            if self._supply_exhausted_notified:
                 return
             self._supply_exhausted_notified = True
             logger.error(
@@ -898,7 +898,7 @@ class LilySupplyMixin:
         category = self._category_for_round(rnd)
         tier = self._difficulty_for_round(rnd)
         mc = self.sk.format_for_round(rnd) == "multiple_choice"
-        if getattr(self, "_drawn_ids", None) is None:
+        if self._drawn_ids is None:
             self._drawn_ids = set()
             self._drawn_hashes = set()
         history_ids = (
@@ -1092,11 +1092,11 @@ class LilySupplyMixin:
         for a reserve run HERE, at promotion, so a promoted question is
         registered exactly once, as the head. No-op when there is no reserve
         (the invariant: a reserve exists only while the head was full)."""
-        reserve = getattr(self, "_next_question_reserve", None)
+        reserve = self._next_question_reserve
         if reserve is None:
             return
         self._next_question_reserve = None
-        reserve_mode = getattr(self, "_next_question_reserve_mode", None)
+        reserve_mode = self._next_question_reserve_mode
         self._next_question_reserve_mode = None
         if self._is_burned(reserve) or (
             reserve_mode is not None and reserve_mode != self.sk.mode
@@ -1212,7 +1212,7 @@ class LilySupplyMixin:
         self._active_delivery_qnum = None
         self._active_delivery_started_at = None
         self._active_delivery_ended_at = None
-        getattr(self, "_prehook_answer_suppressions", set()).clear()
+        self._prehook_answer_suppressions.clear()
         self._undelivered_ticks = 0  # WS-2: reconcile counters are per-question
         self._undelivered_refires = 0
         self._supply_stall_ticks = 0  # WS-6: a question is in hand now
@@ -1480,11 +1480,11 @@ class LilySupplyMixin:
         # cleared => reserve cleared).
         self._next_question_reserve = None
         self._next_question_reserve_mode = None
-        task = getattr(self, "_prefetch_task", None)
+        task = self._prefetch_task
         if task is not None and not task.done():
             task.cancel()
         self._prefetch_task = None
-        if getattr(self, "_prefetch_stall_ticks", None) is not None:
+        if self._prefetch_stall_ticks is not None:
             self._prefetch_stall_ticks = 0
         if getattr(self, "game_over", False):
             return
@@ -1525,7 +1525,7 @@ class LilySupplyMixin:
         prompt = question.get("prompt", "")
         if prompt and prompt not in self.used_prompts:
             self.used_prompts.append(prompt)
-        burned_ids = getattr(self, "_burned_question_ids", None)
+        burned_ids = self._burned_question_ids
         if burned_ids is None:
             self._burned_question_ids = burned_ids = set()
             self._burned_question_hashes = set()
@@ -1548,8 +1548,8 @@ class LilySupplyMixin:
         qid = str(question.get("id") or "")
         qhash = lily_bank.lily_question_text_hash(question.get("prompt"))
         return (
-            (bool(qid) and qid in getattr(self, "_burned_question_ids", set()))
-            or qhash in getattr(self, "_burned_question_hashes", set())
+            (bool(qid) and qid in self._burned_question_ids)
+            or qhash in self._burned_question_hashes
         )
 
     def _burn_pending_adult_questions(self, reason: str) -> bool:
@@ -1561,7 +1561,7 @@ class LilySupplyMixin:
         burned = False
         if self.armed_question is not None:
             self._burn_question(self.armed_question, reason=reason)
-            timer = getattr(self, "_window_timer", None)
+            timer = self._window_timer
             if timer is not None and not timer.done():
                 timer.cancel()
             self.sk.close_answer_window()
@@ -1572,7 +1572,7 @@ class LilySupplyMixin:
             self._burn_question(self.next_question, reason=reason)
             self.next_question = None
             burned = True
-        if getattr(self, "_next_question_reserve", None) is not None:
+        if self._next_question_reserve is not None:
             # Depth-2: the reserve is another objected-to adult question in
             # flight — retire it with the rest, never serve it.
             self._burn_question(self._next_question_reserve, reason=reason)

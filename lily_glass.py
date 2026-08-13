@@ -238,7 +238,7 @@ class LilyGlassMixin:
     def spine_fields(self) -> dict:
         """Snapshot the operability spine for logs / tests."""
         sk = self.sk
-        phase = getattr(self, "_phase_hold", None) or getattr(self, "ui_phase", None) or "-"
+        phase = self._phase_hold or getattr(self, "ui_phase", None) or "-"
         q = getattr(sk, "question_number", None)
         pending = self._pending_delivery_qnum
         active = self._active_delivery_qnum
@@ -285,7 +285,7 @@ class LilyGlassMixin:
         """Emit ``LILY_SPINE`` once per distinct snapshot (deduped)."""
         fields = self.spine_fields()
         line = lily_spine_line(**fields)
-        if getattr(self, "_last_spine_line", None) == line:
+        if self._last_spine_line == line:
             return line
         self._last_spine_line = line
         logger.info("%s", line)
@@ -852,7 +852,7 @@ class LilyGlassMixin:
         if (
             command is None
             and not result.get("media_choice")
-            and not getattr(self, "_contest_note", None)
+            and not self._contest_note
             and lily_scorekeeper.lily_detect_verdict_contest(text)
         ):
             self._contest_note = (
@@ -885,7 +885,7 @@ class LilyGlassMixin:
         # fresh command. A brand-new pacing command (not yes/no) falls
         # through to dispatch, which clears the pending slot on apply.
         if (
-            getattr(self, "_pending_pacing", None) is not None
+            self._pending_pacing is not None
             and command not in ("pacing_relaxed", "pacing_timed")
         ):
             speaker_key = player or speaker_label
@@ -1007,7 +1007,7 @@ class LilyGlassMixin:
             # apply below and clears the slot).
             stated = (self.prefs or {}).get("pacing")
             if (
-                getattr(self, "_pending_pacing", None) is None
+                self._pending_pacing is None
                 and stated in ("timed", "relaxed")
                 and stated != pacing
             ):
@@ -1017,7 +1017,7 @@ class LilyGlassMixin:
                 # "chose this session" only if a live write set it; a value
                 # merged from cross-session memory is "the usual on file",
                 # never a this-session claim.
-                if getattr(self, "_pacing_stated_this_session", False):
+                if self._pacing_stated_this_session:
                     provenance = (
                         f"already chose {stated} pacing earlier this session"
                     )
@@ -1138,7 +1138,7 @@ class LilyGlassMixin:
                 )
         elif (
             not media_choice
-            and getattr(self, "_pending_picture_on_offer", False)
+            and self._pending_picture_on_offer
         ):
             # She offered "want them on?" — short yes / live flips the flag
             # so the stocked arsenal can serve (E66E1B: bank ready, mode stuck).
@@ -1408,7 +1408,7 @@ class LilyGlassMixin:
             # V3.2: structurally unavailable in the adult deck.
             "available": not adult,
             "open": getattr(self.sk, "camera_lane", "off") == "open",
-            "frame_pending": getattr(self, "_latest_video_frame", None) is not None,
+            "frame_pending": self._latest_video_frame is not None,
             "unavailable_reason": "adult_mode" if adult else None,
         }
 
@@ -1453,7 +1453,7 @@ class LilyGlassMixin:
         """Consume the most-recent camera frame for attachment to ONE turn,
         then clear it — a frame lives in its turn and is gone (no retention,
         never re-attached to a later turn). None when nothing is buffered."""
-        frame = getattr(self, "_latest_video_frame", None)
+        frame = self._latest_video_frame
         self._latest_video_frame = None
         if frame is not None:
             self._camera_frame_shown = True
@@ -1507,7 +1507,7 @@ class LilyGlassMixin:
         if armed is None:
             return False
         qnum = self.sk.question_number
-        if getattr(self, "_glass_published_qnum", None) == qnum:
+        if self._glass_published_qnum == qnum:
             return False
         self._glass_published_qnum = qnum
         image_url = armed.get("image_url")
@@ -1627,7 +1627,7 @@ class LilyGlassMixin:
 
     def note_picture_on_confirm(self, text: str) -> bool:
         """If a picture-on offer is pending and the user confirmed, flip."""
-        if not getattr(self, "_pending_picture_on_offer", False):
+        if not self._pending_picture_on_offer:
             return False
         if getattr(self.sk, "media_mode", "voice_only") == "pictures":
             self._pending_picture_on_offer = False
@@ -1666,7 +1666,7 @@ class LilyGlassMixin:
         intended = None
         if isinstance(armed, dict):
             intended = armed.get("image_url") or None
-        confirmed = getattr(self, "_glass_image_url", None)
+        confirmed = self._glass_image_url
         return bool(intended and confirmed and confirmed == intended)
 
     def picture_on_glass_failed(self, *, timeout_s: float = 8.0) -> bool:
@@ -1680,7 +1680,7 @@ class LilyGlassMixin:
             intended = armed.get("image_url") or None
         if not intended:
             return False
-        pending_at = getattr(self, "_glass_image_pending_at", None)
+        pending_at = self._glass_image_pending_at
         if pending_at is None:
             return False
         return (time.monotonic() - pending_at) >= timeout_s
@@ -1695,7 +1695,7 @@ class LilyGlassMixin:
         armed = getattr(self, "armed_question", None)
         if isinstance(armed, dict):
             intended = armed.get("image_url") or None
-        confirmed = getattr(self, "_glass_image_url", None)
+        confirmed = self._glass_image_url
         if not intended and not confirmed:
             return None
         if intended and confirmed == intended:
@@ -1951,16 +1951,16 @@ class LilyGlassMixin:
         # player's state callout — context only, never speech (the leak
         # filter drops the line if it ever echoes outbound). getattr: test
         # harnesses build LilyGame via __new__.
-        state_note = getattr(self, "_state_note", None)
+        state_note = self._state_note
         if state_note:
             view.state_note = state_note
         # RECOGNITION-HONESTY: returner-claim conditioning — context only,
         # never spoken (leak-filtered like every state note); keeps a blank
         # table card from becoming a denial of the player's own memory.
-        returner_note = getattr(self, "_returner_honesty_note", None)
+        returner_note = self._returner_honesty_note
         if returner_note:
             view.returner_note = returner_note
-        why_note = getattr(self, "_recognition_why_note", None)
+        why_note = self._recognition_why_note
         if why_note:
             view.why_note = why_note
         # P0-A: while the probe is outstanding, identity absence is UNKNOWN.
@@ -1972,7 +1972,7 @@ class LilyGlassMixin:
                 "concede a gap to a claimed returner); say you are still "
                 "checking / the card is not connected yet if asked"
             )
-        if getattr(self, "_returner_claim_seen", False):
+        if self._returner_claim_seen:
             view.returner_claim = (
                 "identity: RETURNER CLAIMED — the player explicitly says "
                 "you have met before. A blank lookup never proves otherwise; "
@@ -2006,7 +2006,7 @@ class LilyGlassMixin:
                 + ". Do NOT call lily_begin_round or announce a category. "
                 "Use the matching setup tools; then confirm ready."
             )
-        if getattr(self, "_age_consent_confirmed", False):
+        if self._age_consent_confirmed:
             view.adult_consent = (
                 "adult_consent: CONFIRMED this session — do NOT ask for "
                 "18+ confirmation again."
@@ -2018,17 +2018,17 @@ class LilyGlassMixin:
             )
         # HOTFIX-005 X12: explain-on-request and verdict-contest conditioning
         # — context only, leak-filtered like every note above.
-        explain_note = getattr(self, "_explain_request_note", None)
+        explain_note = self._explain_request_note
         if explain_note:
             view.explain_note = explain_note
-        contest_note = getattr(self, "_contest_note", None)
+        contest_note = self._contest_note
         if contest_note:
             view.contest_note = contest_note
         # HOTFIX-006 N9: a correct answer that landed past the window. It
         # rides here so the miss is ANNOUNCED with its reason — the live
         # alternative was Rami's "Okay. It's Jupiter." vanishing while
         # "Go." took the blame on his q_1052 row.
-        late_note = getattr(self, "_late_answer_note", None)
+        late_note = self._late_answer_note
         if late_note:
             view.late_answer_note = late_note
         if not self.game_started:

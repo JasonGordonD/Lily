@@ -121,7 +121,7 @@ class LilyIdentityMixin:
             return False
         # P5: recognized AT the greet — the door already caught them; the
         # late beat is a duplicate and is killed for the session.
-        if getattr(self, "_recognized_at_greet", False):
+        if self._recognized_at_greet:
             self._late_recognition_fired = True
             self._late_recognition_pending = False
             return False
@@ -309,7 +309,7 @@ class LilyIdentityMixin:
             or getattr(self, "stt", None) is None
         ):
             return
-        task = getattr(self, "_device_verify_task", None)
+        task = self._device_verify_task
         if task is not None and not task.done():
             return
         self._device_verify_task = asyncio.ensure_future(
@@ -329,7 +329,7 @@ class LilyIdentityMixin:
         # ends still-quarantined can say how hard it tried (the WARN in
         # the close handler) instead of leaving silent amnesia.
         self._device_verify_attempts = (
-            getattr(self, "_device_verify_attempts", 0) + 1
+            self._device_verify_attempts + 1
         )
         get_ids = getattr(self.stt, "get_speaker_ids", None)
         if get_ids is None:
@@ -482,7 +482,7 @@ class LilyIdentityMixin:
         not "clean slate", not "blank card", not "my card doesn't have
         you". Saying nothing about memory is always available and always
         honest."""
-        if getattr(self, "_voice_identity_resolved", False):
+        if self._voice_identity_resolved:
             return self._no_match_awaiting_name_door()
         if not lily_config.voice_identity_enabled():
             return False
@@ -515,12 +515,12 @@ class LilyIdentityMixin:
         anonymous table is never gagged about memory forever — on expiry
         the question resolves empty and Y9's honest gap-naming is
         permitted exactly as before."""
-        stamp = getattr(self, "_voice_identity_no_match_at", None)
+        stamp = self._voice_identity_no_match_at
         if stamp is None:
             return False
         if getattr(self, "memory_block", None):
             return False
-        if getattr(self, "_identity_name_door_checked", False):
+        if self._identity_name_door_checked:
             return False
         hold = lily_config.identity_no_match_hold_seconds()
         if hold <= 0:
@@ -531,7 +531,7 @@ class LilyIdentityMixin:
         """P0-B: kickoff locked until the why-beat has landed."""
         if not self._recognition_dispute:
             return False
-        return not getattr(self, "_recognition_dispute_why_answered", False)
+        return not self._recognition_dispute_why_answered
 
     def _identity_gate_satisfied(self) -> bool:
         """HOTFIX-010 V5: the name gate is a ONE-SHOT, never a standing
@@ -552,7 +552,7 @@ class LilyIdentityMixin:
             return True
         if self.sk.has_active_placeholder():
             return True
-        if getattr(self, "_identity_ask_spent", False):
+        if self._identity_ask_spent:
             return True
         return False
 
@@ -567,7 +567,7 @@ class LilyIdentityMixin:
         clause: hosting never waits on a name."""
         if getattr(self, "game_started", False):
             return None
-        if not getattr(self, "_identity_required_before_start", False):
+        if not self._identity_required_before_start:
             return None
         if self._identity_gate_satisfied():
             return None
@@ -604,7 +604,7 @@ class LilyIdentityMixin:
             "LILY_HONESTY | RECOGNITION_DISPUTE | session=%s reason=%s "
             "why_answered=%s",
             getattr(self.sk, "session_id", "?"), reason,
-            getattr(self, "_recognition_dispute_why_answered", False),
+            self._recognition_dispute_why_answered,
         )
 
     def note_late_answer(
@@ -818,7 +818,7 @@ class LilyIdentityMixin:
     def _warm_voice_embedder(self) -> None:
         """Kick the one-time model load OFF the event loop. Fire-and-forget
         and idempotent; failure just leaves the feature inert."""
-        if getattr(self, "_voice_embedder_warming", False):
+        if self._voice_embedder_warming:
             return
         if not lily_config.voice_identity_enabled() or self.supabase is None:
             return
@@ -862,7 +862,7 @@ class LilyIdentityMixin:
         match reads an in-memory pool and does no DB round-trip. Fire-and-
         forget and idempotent; a slow load just leaves the match's own
         cold-path fetch as the fallback."""
-        if getattr(self, "_voice_identity_pool_loading", False):
+        if self._voice_identity_pool_loading:
             return
         if not lily_config.voice_identity_enabled() or self.supabase is None:
             return
@@ -890,7 +890,7 @@ class LilyIdentityMixin:
         """Captured mono PCM for embedding, or None when unavailable. Reads a
         buffer a track frame sink fills (`_voice_identity_pcm`); None keeps the
         feature inert until that sink lands. Injected directly in tests."""
-        return getattr(self, "_voice_identity_pcm", None)
+        return self._voice_identity_pcm
 
     def maybe_start_voice_identity_match(self) -> bool:
         """Start the one session match only after captured PCM is ready.
@@ -904,7 +904,7 @@ class LilyIdentityMixin:
         # transcript".
         self._warm_voice_embedder()
         if (
-            getattr(self, "_voice_identity_attempted", False)
+            self._voice_identity_attempted
             or not self._voice_identity_ready()
             or self._voice_identity_audio_probe() is None
         ):
@@ -941,8 +941,8 @@ class LilyIdentityMixin:
             # round-trip on the recognition path). Cold-path fallback ONLY
             # when the first utterance beat the preload — fetch inline so the
             # feature is never silently inert.
-            if getattr(self, "_voice_identity_pool_loaded", False):
-                identities = getattr(self, "_voice_identity_pool", None) or []
+            if self._voice_identity_pool_loaded:
+                identities = self._voice_identity_pool or []
             else:
                 tag = lily_config.voice_identity_model_tag()
                 identities = await lily_persistence.lily_load_voice_identities(
@@ -962,7 +962,7 @@ class LilyIdentityMixin:
             # embedding -> match decision; a large resolve_ms is the DB
             # round-trip on the path (exactly what the preload above removes).
             t2 = time.monotonic()
-            t0 = getattr(self, "_voice_identity_match_t0", None)
+            t0 = self._voice_identity_match_t0
             if t0 is not None:
                 embed_ms = round((t1 - t0) * 1000, 1)
                 resolve_ms = round((t2 - t1) * 1000, 1)
@@ -1369,7 +1369,7 @@ class LilyIdentityMixin:
             staged_names = {
                 str(n).strip().casefold()
                 for n in (
-                    getattr(self, "_device_candidate_memory", None) or {}
+                    self._device_candidate_memory or {}
                 ).get("player_names") or []
                 if str(n).strip()
             }
@@ -1486,8 +1486,8 @@ class LilyIdentityMixin:
         if new_id is None:
             if (
                 lily_config.voice_identity_enabled()
-                and getattr(self, "_voice_identity_attempted", False)
-                and not getattr(self, "_voice_identity_resolved", False)
+                and self._voice_identity_attempted
+                and not self._voice_identity_resolved
             ):
                 logger.info(
                     "LILY_MEMORY | GROUP_ID_RESOLVE | trigger=%s deferring "
