@@ -754,9 +754,13 @@ def test_a_late_correct_answer_past_the_margin_is_announced_not_lost(
     assert row["utterance_id"] == "u-jupiter"
     assert row["awarded_points"] == 0
     assert row["question_id"] == "q_1052"
-    # And Lily is told to SAY it, with the reason.
-    assert "Jupiter" in (game._late_answer_note or "")
-    assert "Rami" in game._late_answer_note
+    # REFACTOR W2a: the miss is a DETERMINISTIC direct_say beat (not an
+    # organic-lane note) — it names the player, confirms the answer, and awards
+    # no point.
+    late = " ".join(game.session.said)
+    assert "Jupiter" in late
+    assert "Rami" in late
+    assert "point" in late.lower() and "no point" in late.lower()
 
 
 def test_an_echo_of_the_revealed_answer_is_not_a_late_answer(monkeypatch):

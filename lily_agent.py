@@ -9967,17 +9967,23 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 cause="late_answer",
                 utterance_id=utterance_id,
             ))
-        # And she SAYS it, with the reason. An announced miss is the whole
-        # point: the alternative that shipped was a correct answer vanishing
-        # while a different utterance took the blame.
+        # REFACTOR W2a: an announced miss is verdict/score speech, so it is a
+        # DETERMINISTIC direct_say beat — never an organic-lane note the LLM
+        # weaves (the organic lane is forbidden from verdict/score speech). It
+        # names them, confirms the answer was right, gives the just-past-the-
+        # buzzer reason, and awards NO point (the ledger says zero).
         who = player or "that voice"
-        self._late_answer_note = (
-            f"[late answer — {who} said {text.strip()!r} and it was RIGHT, "
-            f"{seconds_late:.1f}s after the window closed. Say so plainly and "
-            f"warmly in your next beat: name them, confirm the answer was "
-            f"right, and give the reason it didn't score — just past the "
-            f"buzzer. Do NOT award a point (the window was closed and the "
-            f"ledger says zero) and do NOT pretend it scored.]"
+        self.gated_say(
+            f"q_{self.sk.question_number}_late_answer",
+            "late_answer",
+            "A correct answer arrived just after the window closed. Name the "
+            "player, confirm it was right, say it landed just past the buzzer "
+            "so it doesn't score, and do NOT award a point.",
+            source="late_answer",
+            text=(
+                f"Quick one — {who} said {text.strip()}, and that was right, "
+                "just past the buzzer. No point this time, but nice one."
+            ),
         )
         return record
 
