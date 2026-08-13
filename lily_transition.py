@@ -16,7 +16,7 @@ import lily_evaluation
 import lily_say_gate
 import lily_scorekeeper
 
-logger = logging.getLogger("lily.agent")
+logger = logging.getLogger("lily_agent")
 
 
 # HOTFIX-006 N12: how long a question transition owns its narration. The

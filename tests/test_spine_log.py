@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from lily_agent import LilyGame, lily_spine_line
+from lily_agent import LilyGame
+from lily_glass import lily_spine_line
 
 
 def test_spine_line_format():

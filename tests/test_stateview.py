@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_audeering_consumers
-from lily_agent import LilyGame, StateView
+from lily_agent import LilyGame
+from lily_glass import StateView
 from lily_scorekeeper import LilyScorekeeper
 
 _SECRET = "Jupiter-is-the-canonical-answer-do-not-leak"

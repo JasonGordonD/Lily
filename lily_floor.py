@@ -24,7 +24,7 @@ import lily_persistence
 import lily_scorekeeper
 
 import logging
-logger = logging.getLogger("lily.agent")
+logger = logging.getLogger("lily_agent")
 
 
 class LilyFloorMixin:

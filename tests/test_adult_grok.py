@@ -127,10 +127,13 @@ def test_enter_adult_vocal_without_key_degrades_loudly(monkeypatch, caplog):
 def test_adult_entry_and_every_exit_are_hooked():
     """Source-level pin: the enter tool swaps in; all three exit paths
     (back-to-normal, child-signal veto, child-gate lost) swap out."""
-    src = Path(lily_reasoning.__file__).parent.joinpath("lily_agent.py").read_text(
-        encoding="utf-8"
-    )
-    assert src.count('getattr(self, "exit_adult_vocal", lambda: None)()') == 3
+    # REFACTOR W3: one exit path (child-gate-lost, in on_transcript_event) moved
+    # to lily_glass with the transcript surface; scan both owner modules.
+    root = Path(lily_reasoning.__file__).parent
+    src = root.joinpath("lily_agent.py").read_text(encoding="utf-8")
+    glass = root.joinpath("lily_glass.py").read_text(encoding="utf-8")
+    combined = src + glass
+    assert combined.count('getattr(self, "exit_adult_vocal", lambda: None)()') == 3
     assert 'getattr(self._game, "enter_adult_vocal", lambda: None)()' in src
 
 

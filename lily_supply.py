@@ -27,7 +27,7 @@ import lily_say_gate
 import lily_scorekeeper
 
 import logging
-logger = logging.getLogger("lily.agent")
+logger = logging.getLogger("lily_agent")
 
 
 class LilySupplyMixin:

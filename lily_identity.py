@@ -32,7 +32,7 @@ from lily_binding import (
 from lily_voice_switch import lily_list_voices, lily_switch_voice
 
 import logging
-logger = logging.getLogger("lily.agent")
+logger = logging.getLogger("lily_agent")
 
 
 # Sources that identify the live table strongly enough to skip fallback.
