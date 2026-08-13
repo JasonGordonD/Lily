@@ -197,6 +197,15 @@ class LilyFloorMixin:
             return "question_pending"
         if self._awaiting_address_since:
             return "address_unanswered"
+        if getattr(self, "_user_speaking", False):
+            # D-E (live lily-A9B757 2026-08-13, 04:40:17): a new question must
+            # never take the floor while a human is mid-turn — after a timeout
+            # verdict the next delivery fired over the operator's active
+            # complaint. VAD's _user_speaking self-clears on the falling edge,
+            # so the advance resumes the instant they stop (no timer, no dead
+            # game). This gates STARTING a delivery only; the barge-in cancel
+            # path (Y7) is untouched.
+            return "user_speaking"
         if getattr(self.sk, "host_speaking", False):
             return "host_speaking"
         if self.pending_setup_jobs():

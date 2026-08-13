@@ -54,6 +54,25 @@ def test_host_speaking_and_setup_each_pause_progression():
     assert game.progression_paused_reason() == "setup_pending"
 
 
+def test_active_user_turn_pauses_question_dispatch():
+    """D-E (live lily-A9B757 2026-08-13, 04:40:17): after a timeout verdict the
+    next question fired OVER the operator's active complaint ("I didn't even
+    get a chance to speak"). A new delivery must yield while a human holds the
+    floor. VAD's _user_speaking is that signal and it self-clears on the
+    falling edge, so the advance resumes the instant they stop — no timer, no
+    dead game."""
+    game = _game()
+    game._user_speaking = True
+    assert game.progression_paused_reason() == "user_speaking"
+    called = []
+    game.expect_delivery = lambda: called.append("expect")
+    game.gated_say = lambda *a, **k: called.append("say") or True
+    assert game.dispatch_armed_question(source="post_reveal") is False
+    assert called == []
+    game._user_speaking = False  # falling edge — the human stopped
+    assert game.progression_paused_reason() is None
+
+
 def test_expect_delivery_does_not_arm_while_meta_is_unanswered():
     game = _game()
     game._awaiting_address_since = 100.0
