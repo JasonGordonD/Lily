@@ -27,15 +27,30 @@ duplicates" item.
   landed it — five-second steal window! …", "Stopped. Say the word when you're
   ready.", "Take your time." — the "REGISTER GUIDANCE (vary freely)" composites
   are gone.
-- **Already deterministic:** the RESUME beat dispatches the preserved armed
-  card through Class 5's deterministic sheet; the round-standings NUMBERS are
-  already ledger-authoritative (Class 1's score-line gate).
-- **Deliberately left LLM-narrated** (the "spine decides, LLM narrates" line):
-  the round-scores / finale FLOURISH (reveal color, suspense hold, per-player
-  redemption, rematch — its standings numbers are already ledger-deterministic);
-  the `skip` beat (it DELIVERS the next question — delivery-sheet territory, a
-  later item); and the custom-round-refusal / late-answer-miss notes (state-block
-  directives woven into the next organic turn, not discrete beats).
+- **Round-scores / finale FLOURISH → `lily_scorekeeper.lily_scores_sheet`**
+  (new, pure): standings from the ledger + a fixed boundary/finale head.
+  Standings-only by construction, so it cannot restate the verdict beat — the
+  "do NOT restate" directive is now true by construction, which deletes the
+  second half of the N12 double-narration class. This removes the LAST
+  `instructed_reply` from `adjudicate`: every `gated_say` in adjudicate now
+  carries `text=` (verdict, steal, flourish, and the award-commit-failure
+  `verdict_hold`), so **adjudicate ends in `direct_say` and NEVER
+  `instructed_reply`** — the operator mandate.
+- **Late-answer miss → deterministic `direct_say` beat.** The correct-but-late
+  announcement was an organic-lane `_late_answer_note` the LLM wove into its
+  next beat — verdict/score speech in the organic lane, which the spec forbids.
+  It now airs as a fixed beat at detection time (names the player, confirms the
+  answer, "just past the buzzer", awards no point).
+- **Already deterministic:** RESUME dispatches the preserved armed card through
+  Class 5's sheet.
+- **Boundary (flagged to the operator):** the custom-round "nothing was built"
+  refusal is a conversational GROUNDING field (`custom_round_state_line`,
+  injected read-only into the state block), not a discrete dispatch beat, and it
+  is meta-conversation about round construction rather than verdict/score speech
+  — its truth is already deterministically grounded (the LLM cannot fabricate
+  "built"). Making it a fixed spoken sheet needs a conversational-trigger design;
+  left grounded. The `skip` beat DELIVERS the next question (delivery-sheet
+  territory), so its ack stays with the delivery.
 - **Tests:** new `tests/test_verdict_sheet.py` (pure sheet cases). ~22 contract
   assertions across the verdict / steal / stop / hold suites migrated from the
   instructions lane to the deterministic say lane (the fakes gain a `direct_say`

@@ -273,15 +273,21 @@ and only TTS first-frame latency is left.
   different one than the ledger. N12 duplicate suppression is unchanged — the
   say-registry claim and the transition journal own it, independent of the
   speech lane.
-- **Steal opener, STOP ack, hold ack** — fixed lines.
+- **Steal opener, STOP ack, hold ack, commit-failure hold** — fixed lines.
+- **Round-scores / finale flourish** — `lily_scorekeeper.lily_scores_sheet`
+  (standings from the ledger + a fixed boundary/finale head). Standings-only by
+  construction, so it cannot restate the verdict — which is why **adjudicate now
+  ends in `direct_say` and NEVER `instructed_reply`** (every `gated_say` in
+  adjudicate carries `text=`), deleting the double-narration class at the root.
+- **Late-answer miss** — a deterministic `direct_say` beat at detection time,
+  not the old organic-lane `_late_answer_note` the LLM wove into its next turn.
 - **Resume** — already deterministic (Class 5 dispatches the preserved armed
   card through its sheet).
-- **Left LLM-narrated, deliberately** (this is the "spine decides, LLM narrates"
-  boundary): the round-scores / finale flourish (color, suspense, redemption,
-  rematch — its standings numbers are already ledger-authoritative via Class
-  1); the `skip` beat (it delivers the next question); and the
-  custom-round-refusal / late-answer-miss state-block notes (woven into the next
-  organic turn, not discrete beats).
+- **Boundary:** the custom-round "nothing was built" refusal is a conversational
+  grounding field (`custom_round_state_line`), not a discrete dispatch beat —
+  meta-conversation, not verdict/score speech, and already deterministically
+  grounded; a fixed spoken sheet would need a conversational trigger. The `skip`
+  beat delivers the next question (delivery-sheet territory).
 
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
