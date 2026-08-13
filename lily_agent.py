@@ -4771,16 +4771,24 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
                 break
 
     def _make_watch_policies(self) -> tuple:
-        """Ordered policy table. THIS order is the CURRENT execution order of
-        the pre-refactor _idle_watchdog — the reviewable parity baseline
-        (W2b item 1, commit A). Commit B reorders to the operator's list."""
+        """Ordered policy table in the OPERATOR'S stated priority (W2b item 1,
+        commit B): hold-timeout -> supply-silent -> armed recovery
+        (undelivered-refire / armed-limbo, the two branches of `armed`) ->
+        address-unanswered -> question-reoffer. The unnamed rows are slotted
+        by their current semantics: the progression-paused and busy gates sit
+        ahead of the armed/idle recovery they gate (never re-arm a paused or
+        busy game); idle-rearm and supply-stall stay together, after armed, as
+        the idle branch.
+
+        The deliberate change from the pre-refactor order (commit A): supply-
+        silent now runs BEFORE the question-reoffer and armed/paused/busy
+        HALTS, so a dead supply line is never hidden behind them (the
+        2260354c class). Consequence, enumerated in the CHANGELOG: address-
+        unanswered and question-reoffer, being lowest priority, are suppressed
+        on a tick where an earlier halt (paused/busy/armed) claims it."""
         return (
             WatchPolicy("hold_timeout", LilyGame._when_hold, 1,
                         LilyGame._wp_hold),
-            WatchPolicy("address_unanswered", LilyGame._when_always, 1,
-                        LilyGame._wp_address_unanswered),
-            WatchPolicy("question_reoffer", LilyGame._when_question_pending, 1,
-                        LilyGame._wp_question_reoffer),
             WatchPolicy("supply_silent", LilyGame._when_always, 1,
                         LilyGame._wp_supply_silent),
             WatchPolicy("progression_paused", LilyGame._when_progression_paused,
@@ -4788,6 +4796,10 @@ class LilyGame(lily_speech_delivery.LilySpeechDeliveryMixin):
             WatchPolicy("busy_reset", LilyGame._when_busy, 1,
                         LilyGame._wp_busy_reset),
             WatchPolicy("armed", LilyGame._when_armed, 1, LilyGame._wp_armed),
+            WatchPolicy("address_unanswered", LilyGame._when_always, 1,
+                        LilyGame._wp_address_unanswered),
+            WatchPolicy("question_reoffer", LilyGame._when_question_pending, 1,
+                        LilyGame._wp_question_reoffer),
             WatchPolicy("idle_rearm", LilyGame._when_idle, 1,
                         LilyGame._wp_idle_rearm),
             WatchPolicy("supply_stall", LilyGame._when_idle, 1,

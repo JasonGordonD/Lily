@@ -40,13 +40,61 @@ def test_policy_table_is_ordered_and_typed():
     table = LilyGame.__new__(LilyGame)._make_watch_policies()
     assert all(isinstance(p, WatchPolicy) for p in table)
     names = [p.name for p in table]
-    # Commit A: the CURRENT execution order.
+    # Commit B: the OPERATOR'S stated priority — supply_silent ahead of the
+    # question/armed halts; address/question-reoffer lowest.
     assert names == [
-        "hold_timeout", "address_unanswered", "question_reoffer",
-        "supply_silent", "progression_paused", "busy_reset", "armed",
-        "idle_rearm", "supply_stall",
+        "hold_timeout", "supply_silent", "progression_paused", "busy_reset",
+        "armed", "address_unanswered", "question_reoffer", "idle_rearm",
+        "supply_stall",
     ]
     assert all(p.every_ticks == 1 for p in table)
+    # The 2260354c fix, structurally: supply_silent precedes every HALT that
+    # could hide it (question_reoffer, armed, paused, busy).
+    assert names.index("supply_silent") < names.index("question_reoffer")
+    assert names.index("supply_silent") < names.index("armed")
+    assert names.index("supply_silent") < names.index("progression_paused")
+
+
+def _tick_game_supply_silent() -> LilyGame:
+    """A game whose supply line is silent, wired so a full tick can run the
+    early rows without the heavy armed/idle machinery."""
+    g = _bare_game()
+    g._hold_active = False
+    g._supply_silent_window = lambda: True
+    g._supply_silent_ticks = LilyGame.SUPPLY_SILENT_WARN_TICKS
+    g.recovered = []
+    g.ensure_supply_recovery = lambda trigger: g.recovered.append(trigger)
+    g.progression_paused_reason = lambda: ""
+    # armed policy body, stubbed to the not-confirmed (reconcile) branch.
+    g._prefetch_stall_ticks = 0
+    g._supply_stall_ticks = 0
+    g._armed_limbo_ticks = 0
+    g.say_registry = SimpleNamespace(state=lambda key: "pending")
+    g.reconcile_undelivered_claim = lambda: None
+    return g
+
+
+def test_supply_silent_fires_while_a_question_is_armed():
+    # Commit B acceptance (2260354c): supply recovery must run even while a
+    # question is armed — it precedes the armed HALT in the table.
+    g = _tick_game_supply_silent()
+    g.armed_question = {"prompt": "?"}  # armed -> armed row will HALT the tick
+    _run(g._run_watch_policies())
+    assert g.recovered == ["watchdog_silent_window"]
+
+
+def test_supply_silent_fires_while_a_conversational_question_is_pending():
+    # The A->B distinguisher: under the OLD order question_reoffer (which
+    # HALTS whenever _question_pending) sat ahead of supply_silent, so a
+    # pending conversational question hid supply recovery. Under B,
+    # supply_silent runs first. Non-idle here via an open answer window (a
+    # trivia window can be open while a conversational question is pending).
+    g = _tick_game_supply_silent()
+    g.armed_question = None
+    g.sk.answer_window_open = True   # non-idle -> supply_silent recovers
+    g._question_pending = True       # in commit A this would HALT before supply_silent
+    _run(g._run_watch_policies())
+    assert g.recovered == ["watchdog_silent_window"]
 
 
 # -- when predicates ------------------------------------------------------
