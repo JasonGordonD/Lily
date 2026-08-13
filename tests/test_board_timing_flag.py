@@ -30,9 +30,9 @@ def test_playout_start_wiring_is_the_primary_path():
     the arm path posts ONLY under the reverted flag."""
     src = inspect.getsource(lily_speech_delivery)
     assert 'publish_question_to_glass(reason="playout_started")' in src
-    import lily_agent
+    import lily_supply
 
-    agent_src = inspect.getsource(lily_agent)
+    agent_src = inspect.getsource(lily_supply)
     i = agent_src.index('publish_question_to_glass(reason="serve_time_flag")')
     guard = agent_src.rindex("board_on_playout_start", 0, i)
     # The serve-time post sits behind the flag check (within the same block).

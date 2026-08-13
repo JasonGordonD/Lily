@@ -135,7 +135,7 @@ def _arm_next_question_source() -> str:
     write living at the wrong seam, and the only way to pin that is to
     assert on where the call sites are."""
     src = (
-        Path(__file__).resolve().parent.parent / "lily_agent.py"
+        Path(__file__).resolve().parent.parent / "lily_supply.py"
     ).read_text(encoding="utf-8")
     start = src.index("    def arm_next_question(")
     end = src.index("\n    def ", start + 10)

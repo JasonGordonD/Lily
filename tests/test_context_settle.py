@@ -140,8 +140,9 @@ def test_the_chokepoint_and_both_landing_sites_settle():
     import re
 
     import lily_agent as la
+    import lily_supply
 
-    src = inspect.getsource(la)
+    src = inspect.getsource(la) + inspect.getsource(lily_supply)
     # Each landing site sets next_question then settles within a few lines.
     landings = [
         m.start()
