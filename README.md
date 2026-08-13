@@ -495,6 +495,23 @@ and emits the already-vetted `rendered_armed_question()` sheet once; ordinary
 conversation fails closed without retry. The block log carries request/model/
 question IDs and context-component hashes, never raw private prompt contents.
 
+## LilyGame owner split (REFACTOR W3)
+
+LilyGame was a 12k-line god class. It is split by OWNER into five mixins, each
+owning one invariant ("what is true?"), with LilyGame kept as the director:
+
+| Module | Owns | Invariant |
+|---|---|---|
+| `lily_transition.py` | reveal→verdict→next journal | one transition/question, one owner, no stage twice |
+| `lily_supply.py` | prefetch / reserve / bank / arsenal | a truthful "is a deliverable question in hand?"; ids unique, burn-once |
+| `lily_identity.py` | recognition / device / voiceprint / forget | a name → at most one confirmed biometric identity |
+| `lily_floor.py` | hold / stop / pending / addressee | "who may speak now?" → exactly one owner (GameControl's client) |
+| `lily_glass.py` | attributes / metadata / events / state-view | what the room is SHOWN reflects committed state (idempotent I/O) |
+
+The extracts are byte-identical moves (`self.*` unchanged; `class LilyGame(...)`
+inherits the mixins). `game_control()` / `may()` and the GameControl parity
+shadow stay in the director — the authority flip + latch deletion are W4.
+
 ## Architecture invariants
 
 - **No generation gate or trigger loop.** Lily speaks by default — silence is

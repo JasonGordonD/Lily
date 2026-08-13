@@ -5,6 +5,41 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-13 — REFACTOR W3: split LilyGame by owner (five invariant mixins)
+
+Step 4, the last of the ordered refactor: the 12,261-line LilyGame god class is
+split by OWNER into five mixins, in dependency order, one commit per cut, each a
+BYTE-IDENTICAL move (`self.*` bindings unchanged; LilyGame inherits the mixins)
+with the full suite + parity (`LILY_GAMECONTROL_PARITY=1`) green after every cut.
+Extracted INVARIANTS, not helpers — each module answers one "what is true?":
+
+1. **lily_transition.py — LilyTransitionMixin** (17 methods): one transition per
+   question, one owner, a monotonic reveal→verdict→next_delivery journal, no
+   stage narrated twice (the N12 spine). Already a closed algebra.
+2. **lily_supply.py — LilySupplyMixin** (24): a truthful "is a deliverable
+   question in hand?" — armed / prefetched / depth-2 reserve / bank / arsenal,
+   ids unique and burn-once. The WatchPolicy rows stay in the director with the
+   `_WATCH_*` sentinels; only their supply call targets moved.
+3. **lily_identity.py — LilyIdentityMixin** (32): a name maps to at most one
+   CONFIRMED biometric identity; device candidates quarantined; minting
+   biometric-only (W1c). The `_STRONG/_KNOWN_GROUP_SOURCES` provenance constants
+   moved to their true home.
+4. **lily_floor.py — LilyFloorMixin** (29): "who may speak right now?" resolves
+   to exactly one owner. Post-W1a it is GameControl's CLIENT — `game_control()` /
+   `may()` and the `_gamecontrol_*` parity shims STAY in the director (W4's job).
+5. **lily_glass.py — LilyGlassMixin** (29): what the room has been SHOWN reflects
+   committed state — idempotent attribute/metadata/event/image publishes, no
+   state ownership. StateView (the W2b typed schema) moved here: it is the render
+   schema; LilyGlass populates it from game state and publishes.
+
+LilyGame stays the DIRECTOR (start / adjudicate / skip / watchdog ticks /
+on_agent_speech_finished / delivery reconciliation / prompt assembly / `__init__`),
+down from ~12,261 to ~6,022 lines. The latch set and the GameControl parity shadow
+are left UNTOUCHED — the authority flip and latch deletion are W4. `LilyGame.bare()`
++ the `getattr(self, "_hold_active", False)` fog deletion is the one remaining W3
+sub-piece (see report). Unavoidable import/source-location test updates only where
+a constant or method genuinely changed modules; behavior byte-identical.
+
 ## 2026-08-12 — REFACTOR W2b: watchdog policy table + StateView schema + per-call vocal depth
 
 Four items, all landed: (1) watchdog policy table, (2) StateView schema, (3a)
