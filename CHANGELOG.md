@@ -5,6 +5,43 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-12 — REFACTOR W2a: verdict/score/command beats are deterministic direct_say sheets
+
+Step 2 + the latency item. The discrete adjudicate/command beats that composed
+an 8-13s LLM `instructed_reply` (`generate_reply`) are replaced with fixed
+`direct_say` sheets — the spine's own words, dispatched through the existing
+`gated_say(text=)` lane so every gate/claim/journal still runs but only TTS
+first-frame latency remains. This is the "kills 8-13s verdict latency and N12
+duplicates" item.
+
+- **Verdict beat → `lily_scorekeeper.lily_verdict_sheet`.** Pure, model-free,
+  composed from the COMMITTED ruling: RULINGS-001 R1 register (verdict word
+  first, then answer + point), HOSTLOOP-001 C6 anti-double (skips the verdict
+  word when the instant receipt already aired it). `winner_scored` is the
+  ledger truth — nobody-landed-it is a stated outcome, never a silent loss —
+  and the sheet never quotes an utterance, so it cannot describe a different
+  one than the ledger (strictly stronger than the old "do not credit 'Go.'"
+  instruction). N12 duplicate suppression is unchanged (the say-registry claim
+  and the transition journal own it, independent of the speech lane).
+- **Steal opener, STOP ack, hold ack → fixed `direct_say` lines.** "Nobody
+  landed it — five-second steal window! …", "Stopped. Say the word when you're
+  ready.", "Take your time." — the "REGISTER GUIDANCE (vary freely)" composites
+  are gone.
+- **Already deterministic:** the RESUME beat dispatches the preserved armed
+  card through Class 5's deterministic sheet; the round-standings NUMBERS are
+  already ledger-authoritative (Class 1's score-line gate).
+- **Deliberately left LLM-narrated** (the "spine decides, LLM narrates" line):
+  the round-scores / finale FLOURISH (reveal color, suspense hold, per-player
+  redemption, rematch — its standings numbers are already ledger-deterministic);
+  the `skip` beat (it DELIVERS the next question — delivery-sheet territory, a
+  later item); and the custom-round-refusal / late-answer-miss notes (state-block
+  directives woven into the next organic turn, not discrete beats).
+- **Tests:** new `tests/test_verdict_sheet.py` (pure sheet cases). ~22 contract
+  assertions across the verdict / steal / stop / hold suites migrated from the
+  instructions lane to the deterministic say lane (the fakes gain a `direct_say`
+  / `say` capture; one gated_say stub's positional `text` param renamed to
+  `instructions` to clear the new `text=` kwarg). Full suite green.
+
 ## 2026-08-12 — REFACTOR W1c: identity has one authority; tools speak only results
 
 Steps 5–6 of the ordered refactor. Two structural fixes.

@@ -259,6 +259,30 @@ a hold once blocked the question sheet but not a prose reveal.
   same way the legacy gates read them, so the single phase enum loses no
   information during the transition.
 
+## Deterministic speech sheets (REFACTOR WAVE 2a)
+
+The discrete adjudicate/command beats that mattered for latency are FIXED
+words, not LLM composites. Each aired an 8-13s `instructed_reply` composite
+("REGISTER GUIDANCE — vary freely"); each is now a `direct_say` sheet through
+the existing `gated_say(text=)` lane, so every gate/claim/journal still runs
+and only TTS first-frame latency is left.
+
+- **Verdict** — `lily_scorekeeper.lily_verdict_sheet` composes the beat from the
+  COMMITTED ruling (verdict word, then answer + point; nobody-landed-it as a
+  stated outcome). It never quotes an utterance, so it cannot describe a
+  different one than the ledger. N12 duplicate suppression is unchanged — the
+  say-registry claim and the transition journal own it, independent of the
+  speech lane.
+- **Steal opener, STOP ack, hold ack** — fixed lines.
+- **Resume** — already deterministic (Class 5 dispatches the preserved armed
+  card through its sheet).
+- **Left LLM-narrated, deliberately** (this is the "spine decides, LLM narrates"
+  boundary): the round-scores / finale flourish (color, suspense, redemption,
+  rematch — its standings numbers are already ledger-authoritative via Class
+  1); the `skip` beat (it delivers the next question); and the
+  custom-round-refusal / late-answer-miss state-block notes (woven into the next
+  organic turn, not discrete beats).
+
 ## Host-loop overhaul (WO-LILY-HOSTLOOP-001)
 
 Evidence base: Session A (2026-08-12 04:50–04:54 UTC, lily_answers q1–q6)
