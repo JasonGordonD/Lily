@@ -646,6 +646,145 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     addressee_classifier: "lily_addressee_classifier.LilyAddresseeClassifier | None" = None
     last_addressee_judgment: "lily_addressee_classifier.LilyAddresseeJudgment | None" = None
 
+    def _init_all_game_state(self) -> None:
+        """W3b: every mutable game-state field set to its default in ONE
+        place, so no field is read before it is written. This is the values
+        the getattr(...) fog used to supply lazily; setting them here makes
+        the fog unnecessary. Called first by __init__ and by bare(). Fields
+        __init__ then assigns real values to are simply overwritten."""
+        self._active_delivery_ended_at = None
+        self._active_delivery_qnum = None
+        self._active_delivery_started_at = None
+        self._address_unanswered_warned = False
+        self._adjudicating = False
+        self._adult_llm = None
+        self._age_consent_confirmed = False
+        self._aired_stems = None
+        self._ambiguous_yes_blocks_start = False
+        self._answered_questions = None
+        self._awaiting_address_since = 0.0
+        self._bed_handle = None
+        self._burned_question_hashes = set()
+        self._burned_question_ids = set()
+        self._category_override = {}
+        self._confirmed_name_evidence = None
+        self._contest_note = None
+        self._custom_round_refused = []
+        self._custom_round_registered = {}
+        self._delivered_to_playout = set()
+        self._delivery_speech_acts = None
+        self._delivery_stop_sticky = False
+        self._deterministic_reply_texts = None
+        self._device_candidate_memory = None
+        self._device_verify_attempts = 0
+        self._device_verify_task = None
+        self._drawn_hashes = set()
+        self._drawn_ids = set()
+        self._durable_asked_qnum = None
+        self._explain_request_note = None
+        self._first_human_utterance_seen = False
+        self._game_start_committed = False
+        self._gamecontrol_divergences = None
+        self._general_llm = None
+        self._glass_image_pending_at = None
+        self._glass_image_url = None
+        self._glass_published_qnum = None
+        self._hold_active = False
+        self._hold_reason = None
+        self._hold_since = 0.0
+        self._identity_ask_spent = False
+        self._identity_name_door_checked = False
+        self._identity_required_before_start = False
+        self._intake_last_segment = None
+        self._intake_overlap_noted_at = 0.0
+        self._last_armed_speech_ratio = 0.0
+        self._last_assistant_turn = ('', '')
+        self._last_bind_at = None
+        self._last_spine_line = None
+        self._last_user_turn_at = None
+        self._late_answer_note = None
+        self._late_recognition_fired = False
+        self._late_recognition_pending = False
+        self._latest_video_frame = None
+        self._llm_metrics_wire = None
+        self._nbest_by_key = None
+        self._next_question_reserve = None
+        self._next_question_reserve_mode = None
+        self._open_transition_qnum = None
+        self._pacing_stated_this_session = False
+        self._pending_delivery_qnum = None
+        self._pending_or_choice_offer = False
+        self._pending_pacing = None
+        self._pending_picture_on_offer = False
+        self._phase_hold = None
+        self._playout_started_ids = set()
+        self._post_tts_text_by_speech_id = None
+        self._prefetch_effort_override = None
+        self._prefetch_stall_ticks = None
+        self._prefetch_supply_failed = False
+        self._prefetch_task = None
+        self._prehook_answer_suppressions = set()
+        self._question_pending = False
+        self._question_pending_reoffered = False
+        self._question_pending_since = 0.0
+        self._question_transitioning = False
+        self._recognition_dispute = False
+        self._recognition_dispute_why_answered = False
+        self._recognition_why_note = None
+        self._recognized_at_greet = False
+        self._returner_claim_seen = False
+        self._returner_honesty_note = None
+        self._session_closed = False
+        self._setup_pending = set()
+        self._setup_requested = None
+        self._speech_handles = {}
+        self._stale_retry_counts = {}
+        self._state_note = None
+        self._steal_window = False
+        self._stt_max_speakers_applied = 7
+        self._stt_rebuild = None
+        self._stt_roster_retuned = False
+        self._supply_exhausted_notified = False
+        self._supply_recovery_task = None
+        self._supply_retry_attempts = 0
+        self._supply_silent_ticks = 0
+        self._supply_stall_ticks = 0
+        self._suppressed_speech_ids = None
+        self._transition_journal = None
+        self._undelivered_refires = 0
+        self._undelivered_ticks = 0
+        self._user_speaking = False
+        self._vocal_depth_unshared = False
+        self._voice_embedder_warming = False
+        self._voice_identity_attempted = False
+        self._voice_identity_match_t0 = None
+        self._voice_identity_no_match_at = None
+        self._voice_identity_pcm = None
+        self._voice_identity_pool = None
+        self._voice_identity_pool_loaded = False
+        self._voice_identity_pool_loading = False
+        self._voice_identity_resolved = False
+        self._watch_policy_table = None
+        self._watchdog_task = None
+        self._watchdog_tick = 0
+        self._whats_new_emitted = False
+        self._whats_new_pending = False
+        self._window_timer = None
+
+    @classmethod
+    def bare(cls, sk=None, **overrides):
+        """W3b: a fully-initialized LilyGame for tests, WITHOUT __init__'s heavy
+        deps (ctx/reasoning/supabase). Every game-state field carries its
+        default so no read hits an unset attribute; pass sk and any overrides.
+        The drop-in replacement for LilyGame.__new__(LilyGame) in fixtures."""
+        obj = cls.__new__(cls)
+        obj._init_all_game_state()
+        if sk is not None:
+            obj.sk = sk
+        for k, v in overrides.items():
+            setattr(obj, k, v)
+        return obj
+
     def __init__(
         self,
         ctx: JobContext,
@@ -656,6 +795,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         group_id: str,
         group_id_source: str = "room_name",
     ) -> None:
+        self._init_all_game_state()
         self.ctx = ctx
         self.sk = scorekeeper
         self.reasoning = reasoning
