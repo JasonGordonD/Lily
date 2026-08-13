@@ -34,7 +34,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import lily_config
 import lily_memory
 import lily_voice_embedder
-from lily_agent import LilyGame, _STRONG_GROUP_SOURCES
+from lily_agent import LilyGame
+from lily_identity import _STRONG_GROUP_SOURCES
 from lily_scorekeeper import LilyScorekeeper
 
 

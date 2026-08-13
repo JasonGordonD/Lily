@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_agent
 import lily_persistence
-from lily_agent import _STRONG_GROUP_SOURCES
+from lily_identity import _STRONG_GROUP_SOURCES
 from test_recognition_variety import _make_game
 
 REAL_TABLE = "grp_0b07f989673dcf11e62da96343a39fd4006c1405"
