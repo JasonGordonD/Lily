@@ -696,6 +696,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # `_floor_line_nonce` rotates the deterministic line set.
         self._floor_fired_for_ts = 0.0
         self._floor_line_nonce = 0
+        # WO-LILY-QUESTION-FIRING-001: a fused next-question clipped off a
+        # reveal turn owes a standalone delivery; the clip arms an immediate
+        # breathed dispatch (Fix 1) and a delivery watchdog (Fix 2).
+        self._fusion_delivery_deadline = None
+        self._fusion_delivery_watchdog_task = None
+        self._fusion_owed_delivery_qnum = None
         self._game_start_committed = False
         self._gamecontrol_divergences = {}
         self._general_llm = None
@@ -2798,6 +2804,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if task is not None and not task.done():
             task.cancel()
         self._watchdog_task = None
+        # WO-LILY-QUESTION-FIRING-001: the fusion-delivery watchdog is a live
+        # dispatch lane too — it must not outlive the session.
+        fdw = self._fusion_delivery_watchdog_task
+        if fdw is not None and not fdw.done():
+            fdw.cancel()
+        self._fusion_delivery_watchdog_task = None
+        self._clear_owed_fusion_delivery()
         # Z2: a supply-recovery ladder must not outlive the session either.
         rec = self._supply_recovery_task
         if rec is not None and not rec.done():
@@ -4235,6 +4248,164 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
 
         asyncio.ensure_future(_breathe())
         return True
+
+    # -- WO-LILY-QUESTION-FIRING-001: fusion-clipped delivery --------------
+    #
+    # The dead time between a reveal and the next question came from the
+    # DELIVERY_NUDGE's arbitrary 2-agent-turn wait. When RevealDeliveryFusionClip
+    # strips a fused next-question off a reveal turn, the armed question owes a
+    # standalone delivery and the reveal has already aired (the clip's own
+    # precondition). These three methods deliver it promptly (Fix 1) and
+    # guarantee it airs (Fix 2), leaving the nudge as the fallback for every
+    # other case and touching none of the load-bearing gates.
+
+    def note_fusion_clipped_delivery(self) -> None:
+        """A fused next-question was clipped off a reveal turn. Arm the immediate
+        breathed dispatch (Fix 1) and the delivery watchdog (Fix 2). No-op unless
+        a question is armed AND supply is ready — a starved seam is owned by the
+        normal supply-recovery path, not this one."""
+        if self.armed_question is None or not self.next_question_ready():
+            return
+        qnum = self.sk.question_number
+        self._fusion_owed_delivery_qnum = qnum
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (unit context): record the owed marker and fire
+            # once inline so the transform is deterministic under test.
+            self._fire_owed_fusion_delivery(source="fusion_clip_immediate")
+            return
+        self._fusion_delivery_deadline = loop.time() + self.WATCHDOG_INTERVAL_SECONDS
+        # Fix 1 — immediate delivery after the operator-pinned PACING-001 breath
+        # (measured working exactly; value untouched, never bypassed).
+        breath = lily_config.inter_question_breath_seconds()
+
+        async def _immediate() -> None:
+            if breath > 0:
+                await asyncio.sleep(breath)
+            self._fire_owed_fusion_delivery(source="fusion_clip_immediate")
+
+        asyncio.ensure_future(_immediate())
+        # Fix 2 — watchdog backstop; one task per owed delivery.
+        task = self._fusion_delivery_watchdog_task
+        if task is None or task.done():
+            self._fusion_delivery_watchdog_task = asyncio.ensure_future(
+                self._fusion_delivery_watchdog(qnum)
+            )
+
+    def _clear_owed_fusion_delivery(self) -> None:
+        self._fusion_owed_delivery_qnum = None
+        self._fusion_delivery_deadline = None
+
+    def _fire_owed_fusion_delivery(self, *, source: str) -> bool:
+        """Dispatch the standalone delivery a fusion clip owes — shared by the
+        immediate path (Fix 1) and the watchdog (Fix 2).
+
+        Bypasses the N12 verdict-airing wedge ON PURPOSE: the clip only fires
+        once the reveal has aired (transition_awaiting_delivery), so the
+        reveal-claim's post-STOP/resume state must not re-block this delivery —
+        that wedge is exactly what left Q3 to the slow nudge in the audited
+        session. Every OTHER load-bearing gate still holds: supply readiness, an
+        already-answered question, an open window / live ruling, and — via
+        gated_say's question_delivery path — hold, question_pending, and
+        address_unanswered (EXPECT_BLOCKED). Claim discipline stands the owed
+        marker down the instant any lane owns this delivery, so the immediate
+        path and the nudge can never both fire."""
+        qnum = self._fusion_owed_delivery_qnum
+        if qnum is None:
+            return False
+        if getattr(self, "game_over", False) or qnum != self.sk.question_number:
+            self._clear_owed_fusion_delivery()
+            return False
+        key = f"q_{qnum}_delivery"
+        if (
+            self.say_registry.state(key) is not None
+            or self._pending_delivery_qnum == qnum
+            or self._active_delivery_qnum == qnum
+        ):
+            # Another lane already owns this delivery — no double.
+            self._clear_owed_fusion_delivery()
+            return False
+        if self.question_already_answered(qnum):
+            self._clear_owed_fusion_delivery()
+            return False
+        if (
+            self.armed_question is None
+            or not self.next_question_ready()
+            or self.sk.answer_window_open
+            or self._adjudicating
+        ):
+            # Not deliverable yet (supply / open window / live ruling). Leave
+            # the marker so the watchdog retries once the state clears.
+            return False
+        self.expect_delivery()
+        if self._pending_delivery_qnum != qnum:
+            # expect_delivery declined (EXPECT_BLOCKED: address_unanswered /
+            # setup / stop) — the gate is respected; the watchdog retries.
+            return False
+        sheet = self.rendered_armed_question()
+        dispatched = self.gated_say(
+            None,
+            "question_delivery",
+            (
+                "The previous reveal is complete. Deliver ONLY the armed "
+                "question now. Read this sheet exactly, with every option "
+                f"when present, then stop for answers:\n{sheet}"
+            ),
+            source=source,
+        )
+        if dispatched:
+            self._clear_owed_fusion_delivery()
+            # The transition closes on its own last stage; journal it so no
+            # other lane re-narrates and dispatch_armed_question reads DUP.
+            qn = self._open_transition_qnum
+            if qn is not None:
+                self.journal_transition(
+                    qn, "next_delivery",
+                    detail={"source": source, "delivered_q": qnum},
+                )
+        return dispatched
+
+    async def _fusion_delivery_watchdog(self, qnum: int) -> None:
+        """Fix 2 — guarantee the fusion-clipped question airs. If the owed
+        delivery has not fired within N seconds of the clip, re-emit it through
+        the normal delivery path. N = WATCHDOG_INTERVAL_SECONDS (10s): the
+        established watchdog cadence, comfortably past the immediate path
+        (~breath) and the 2-turn nudge, so this fires only in the pathological
+        'shown on screen, never voiced' hole — a true backstop, not a
+        competitor for the fast paths."""
+        try:
+            while True:
+                if (
+                    self._fusion_owed_delivery_qnum != qnum
+                    or getattr(self, "game_over", False)
+                    or getattr(self, "_session_closed", False)
+                ):
+                    return
+                loop = asyncio.get_running_loop()
+                deadline = self._fusion_delivery_deadline
+                if deadline is not None and loop.time() < deadline:
+                    await asyncio.sleep(min(1.0, deadline - loop.time()))
+                    continue
+                if self._fire_owed_fusion_delivery(
+                    source="fusion_delivery_watchdog"
+                ):
+                    return
+                if self._fusion_owed_delivery_qnum != qnum:
+                    return
+                # Still owed but gated (hold / address_unanswered / supply) —
+                # re-arm the deadline and keep watching until it airs.
+                self._fusion_delivery_deadline = (
+                    loop.time() + self.WATCHDOG_INTERVAL_SECONDS
+                )
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "LILY_WATCHDOG | FUSION_DELIVERY_TICK_FAILED | session=%s q=%d",
+                self.sk.session_id, qnum,
+            )
 
     def open_window_after_discharge(
         self,
@@ -6762,6 +6933,11 @@ class RevealDeliveryFusionClip(SpeechTransform):
                     turn.game.sk.question_number, _delivery_tail[:120],
                 )
                 turn.text = _reveal_kept
+                # WO-LILY-QUESTION-FIRING-001 (Fixes 1+2): the clipped question
+                # owes a standalone delivery. Arm the immediate breathed dispatch
+                # and the delivery watchdog instead of waiting out the 2-turn
+                # DELIVERY_NUDGE. No-op unless a question is armed and ready.
+                turn.game.note_fusion_clipped_delivery()
         return turn
 
 
