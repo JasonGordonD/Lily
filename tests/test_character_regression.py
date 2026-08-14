@@ -426,8 +426,15 @@ def _run(coro):
 
 
 def _drive_tts_node(agent: LilyAgent, raw_text: str) -> list[str]:
-    """Run LilyAgent.tts_node end-to-end with the default TTS node swapped
-    for a recorder — captures exactly what reaches synthesis."""
+    """Run LilyAgent.tts_node end-to-end with the TTS node swapped for a
+    recorder — captures exactly what reaches synthesis.
+
+    WO-LILY-UI-SYNC-TYPEWRITER-001: tts_node now has TWO synthesis exits —
+    the legacy `Agent.default.tts_node` and, flag-on, the direct-synthesis
+    `_lily_aligned_tts_frames` that keeps per-word timings alive. The golden
+    line reaching synthesis VERBATIM is the same guarantee on both, so BOTH
+    are recorded and these goldens hold in either flag state.
+    """
     captured: list[str] = []
 
     async def _recording_default(agent_self, text, model_settings):
@@ -436,8 +443,15 @@ def _drive_tts_node(agent: LilyAgent, raw_text: str) -> list[str]:
         if False:  # pragma: no cover — keeps this an async generator
             yield
 
+    async def _recording_aligned(agent_self, full, model_settings):
+        captured.append(full)
+        if False:  # pragma: no cover — keeps this an async generator
+            yield
+
     original = Agent.default.tts_node
+    original_aligned = LilyAgent._lily_aligned_tts_frames
     Agent.default.tts_node = _recording_default
+    LilyAgent._lily_aligned_tts_frames = _recording_aligned
     try:
         async def _speak():
             async def _chunks():
@@ -449,6 +463,7 @@ def _drive_tts_node(agent: LilyAgent, raw_text: str) -> list[str]:
         _run(_speak())
     finally:
         Agent.default.tts_node = original
+        LilyAgent._lily_aligned_tts_frames = original_aligned
     return captured
 
 

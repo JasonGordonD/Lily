@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from livekit.agents import APIStatusError
+from livekit.agents import APIConnectionError, APIStatusError
 
 from lily_tts import (
     ELEVENLABS_REQUEST_CHAR_CAP,
@@ -167,6 +167,9 @@ def _make_stream(text: str, session: _FakeSession) -> LilyChunkedStream:
     stream.chunks_total = 0
     stream.chunks_delivered = 0
     stream.undelivered_remainder = ""
+    # Audio seconds already aired before this request (the per-sentence
+    # direct-synthesis path sets it; a single-request turn leaves it 0.0).
+    stream._time_offset = 0.0
     # These cases script raw-PCM responses (the legacy /stream path); the
     # timed /stream/with-timestamps path has its own cases below.
     stream._timed = False
@@ -395,3 +398,89 @@ def test_word_timing_aggregator_offset_makes_second_chunk_monotonic():
     out2 = agg2.feed(list("bye"), [0.0, 0.05, 0.10], [0.05, 0.10, 0.15], 2.0)
     out2 += agg2.flush()
     assert abs(out2[0].start_time - 2.0) < 1e-9
+
+
+# --------------------------------------------------------------------------
+# Silent-mute guard (WO-LILY-UI-SYNC-TYPEWRITER-001, 1.6.10 merge review)
+#
+# A 200 from /stream/with-timestamps whose body is NOT newline-delimited JSON
+# — a vendor framing change, a plan downgrade serving raw /stream bytes, an
+# error envelope with a 200 — parses to nothing. Before the guard the chunk
+# loop completed normally and chunks_delivered advanced, so a MUTE turn was
+# recorded as a clean delivery and cut-recovery never armed. These cases pin
+# the failure onto the transport path a torn stream already takes.
+# --------------------------------------------------------------------------
+
+
+class _RawBodyTimedResp:
+    """A 200 carrying raw PCM instead of NDJSON (the pre-fix silent mute)."""
+
+    def __init__(self, payload: bytes):
+        self.status = 200
+        self.content = _FakeTimedContent([payload])
+
+    async def text(self):
+        return ""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def test_timed_empty_200_is_a_chunk_failure_not_a_clean_delivery():
+    text = "Which planet is biggest?"
+    # Two responses: the guard reuses the HOTFIX-005 X5 zero-bytes retry, so
+    # the chunk is re-fetched once before it is given up on.
+    session = _RecordingSession([
+        _RawBodyTimedResp(_pcm(24000)),
+        _RawBodyTimedResp(_pcm(24000)),
+    ])
+    stream = _make_timed_stream(text, session)
+    emitter = _TimedEmitter()
+
+    with pytest.raises(APIConnectionError):
+        asyncio.run(stream._run(emitter))
+
+    # No audio ever reached the air...
+    assert emitter.pushed == b""
+    # ...so the chunk is UNDELIVERED and its text is handed to cut-recovery.
+    # Pre-fix this read chunks_delivered == 1/1 with an empty remainder.
+    assert stream.chunks_delivered == 0
+    assert stream.chunks_total == 1
+    assert stream.undelivered_remainder == text
+    # One clean re-fetch was attempted, exactly as for a torn stream.
+    assert session.calls == 2
+
+
+def test_timed_empty_200_second_chunk_leaves_only_the_tail_undelivered():
+    # The guard must not over-claim: a chunk that DID air stays delivered.
+    sent_a = "A" * 2500 + ". "
+    sent_b = "B" * 2500 + "."
+    obj = _align_obj(["A"], [0.0], [0.04], 4)
+    session = _RecordingSession([
+        _FakeTimedResp(200, [obj]),        # chunk 1 airs normally
+        _RawBodyTimedResp(_pcm(24000)),    # chunk 2 returns an empty 200
+        _RawBodyTimedResp(_pcm(24000)),    # ...and again on the retry
+    ])
+    stream = _make_timed_stream(sent_a + sent_b, session)
+    emitter = _TimedEmitter()
+
+    with pytest.raises(APIConnectionError):
+        asyncio.run(stream._run(emitter))
+
+    assert emitter.pushed  # chunk 1's audio did air
+    assert stream.chunks_delivered == 1
+    assert stream.undelivered_remainder == sent_b
+
+
+def test_raw_path_empty_200_is_untouched_by_the_guard():
+    # Flag-off byte-identity: the guard is timed-path only. A raw /stream 200
+    # with no bytes behaves exactly as it did before the WO — no raise.
+    session = _FakeSession([_FakeResp(200, b"")])
+    stream = _make_stream("Hi there.", session)  # _timed is False
+    emitter = _FakeEmitter()
+    asyncio.run(stream._run(emitter))
+    assert stream.chunks_delivered == 1
+    assert stream.undelivered_remainder == ""

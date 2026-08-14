@@ -199,14 +199,55 @@ class LilyTTS(tts.TTS):
         text: str,
         *,
         conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
+        time_offset: float = 0.0,
     ) -> "LilyChunkedStream":
+        """Synthesize one text into a LilyChunkedStream.
+
+        `time_offset` (WO-LILY-UI-SYNC-TYPEWRITER-001, 1.6.10 merge review) is
+        the audio-seconds ALREADY AIRED in this turn before this request. Each
+        /stream/with-timestamps request is independent and its alignment
+        restarts at 0.0, so a turn synthesized as several requests (the
+        per-sentence path in LilyAgent.tts_node) would otherwise emit word
+        onsets that reset to zero at every sentence — the synchronizer reads
+        those as time going backwards. Callers that synthesize a turn in one
+        request leave it at 0.0 and nothing changes; the parameter is inert on
+        the raw /stream path, which carries no timings at all.
+        """
         return LilyChunkedStream(
             tts=self,
             input_text=text,
             conn_options=conn_options,
             opts=replace(self._opts),
             skip_empty=self._is_empty_after_strip(text),
+            time_offset=time_offset,
         )
+
+
+class _EmptyTimedResponse(aiohttp.ClientError):
+    """A 200 from /stream/with-timestamps that yielded NO audio for a chunk.
+
+    WHY THIS IS AN ERROR AND NOT A SHRUG (WO-LILY-UI-SYNC-TYPEWRITER-001,
+    1.6.10 merge review). The timed path parses newline-delimited JSON and
+    pushes only what it can decode. If the endpoint ever answers 200 with a
+    body that is NOT that shape — a vendor framing change, a plan downgrade
+    that silently serves the raw `/stream` bytes, an error envelope with a
+    200 — every line fails `json.loads` and is skipped, the chunk loop
+    completes NORMALLY, and `chunks_delivered` is advanced as if the chunk
+    aired. Measured on the pre-fix code with a raw-PCM 200: 0 bytes pushed,
+    `chunks_delivered == chunks_total`, `undelivered_remainder == ""`. So
+    Lily went MUTE, the claim-vs-delivery ledger recorded a clean delivery,
+    the game believed the question was asked, and cut-recovery never armed —
+    the exact silent mid-turn death WS-2's accounting exists to prevent.
+
+    Raising a ClientError subclass puts an empty 200 on EXACTLY the transport
+    path a torn stream already takes: it is caught by the same handler, so it
+    gets the same single zero-bytes clean re-fetch (HOTFIX-005 X5 — an empty
+    response can be transient, and no audio aired means no duplication risk),
+    and if it recurs it propagates to APIConnectionError with the chunk left
+    UNDELIVERED, so the tail accounting records the remainder and cut-recovery
+    regenerates it. Never raised on the raw `/stream` path — flag-off
+    behaviour is byte-identical to the pre-WO code.
+    """
 
 
 class _WordTimingAggregator:
@@ -299,10 +340,15 @@ class LilyChunkedStream(tts.ChunkedStream):
         conn_options: APIConnectOptions,
         opts: _TTSOpts,
         skip_empty: bool = False,
+        time_offset: float = 0.0,
     ) -> None:
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._opts = opts
         self._skip_empty = skip_empty
+        # Audio seconds already aired in this turn before this request — the
+        # base every word onset in this stream is measured from. See
+        # LilyTTS.synthesize.
+        self._time_offset = float(time_offset or 0.0)
         # Tail-chunk delivery accounting (WO-LILY-STREAM-INTEGRITY-002 WS-2,
         # claim-vs-delivery model): a chunk counts DELIVERED only once its
         # audio actually flushed. If synthesis dies after the first chunk
@@ -461,15 +507,25 @@ class LilyChunkedStream(tts.ChunkedStream):
                                 # chunks (the splitter breaks on whitespace),
                                 # so one aggregator per chunk, flushed at end.
                                 agg = _WordTimingAggregator()
-                                chunk_offset = total_bytes / float(SAMPLE_RATE * 2)
+                                chunk_offset = (
+                                    self._time_offset
+                                    + total_bytes / float(SAMPLE_RATE * 2)
+                                )
+                                # Silent-mute detection counters (see
+                                # _EmptyTimedResponse). Counts only — never the
+                                # body, which is vendor payload.
+                                lines_seen = 0
+                                objects_parsed = 0
                                 async for raw_line in resp.content:
                                     line = raw_line.strip()
                                     if not line:
                                         continue
+                                    lines_seen += 1
                                     try:
                                         obj = json.loads(line)
                                     except (ValueError, UnicodeDecodeError):
                                         continue
+                                    objects_parsed += 1
                                     audio_b64 = obj.get("audio_base64") or obj.get("audio")
                                     if audio_b64:
                                         data = carry + base64.b64decode(audio_b64)
@@ -499,6 +555,35 @@ class LilyChunkedStream(tts.ChunkedStream):
                                 tail_words = agg.flush()
                                 if tail_words:
                                     output_emitter.push_timed_transcript(tail_words)
+                                # SILENT-MUTE GUARD. A 200 that produced no
+                                # audio for this chunk is a FAILED chunk, not a
+                                # delivered one — without this the loop breaks
+                                # normally and chunks_delivered advances, so the
+                                # ledger records a clean delivery for a chunk
+                                # that never made a sound (see
+                                # _EmptyTimedResponse). Raised INSIDE the retry
+                                # try/except so it takes the identical path a
+                                # torn stream takes: one clean re-fetch, then
+                                # cut-recovery. Counts only in the log line —
+                                # no body, no headers, nothing that could carry
+                                # the api key.
+                                if total_bytes == bytes_at_chunk_start:
+                                    logger.error(
+                                        "LILY_TTS | TIMED_EMPTY_RESPONSE | "
+                                        "chunk=%d/%d status=200 lines=%d "
+                                        "objects=%d audio_bytes=0 — "
+                                        "with-timestamps returned no decodable "
+                                        "audio; treating as a chunk failure so "
+                                        "cut-recovery arms instead of going "
+                                        "silently mute",
+                                        chunk_index + 1, self.chunks_total,
+                                        lines_seen, objects_parsed,
+                                    )
+                                    raise _EmptyTimedResponse(
+                                        "with-timestamps 200 produced no audio "
+                                        f"(lines={lines_seen} "
+                                        f"objects={objects_parsed})"
+                                    )
                         break  # chunk fully streamed
                     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                         pushed_this_chunk = total_bytes - bytes_at_chunk_start

@@ -150,11 +150,38 @@ def _run_agent_final(game) -> None:
 
 
 def test_agent_final_default_legacy_only_framework_owns_the_stream():
-    # WO-LILY-UI-SYNC-TYPEWRITER-001 (default ON): the framework's
+    # WO-LILY-UI-SYNC-TYPEWRITER-001, flag ON: the framework's
     # sync_transcription owns the lk.transcription text stream, so the manual
     # stream mirror is suppressed to avoid a duplicate, differently-segmented
     # line. The legacy rtc.Transcription completion publish stays as the
-    # durable/older-client record.
+    # durable/older-client record. Explicitly SET (not popped) since the
+    # 1.6.10 merge review flipped the default to OFF — the feature lands dark
+    # and is enabled by env var after the vendor gate.
+    game, local = _make_game()
+
+    class _AudioPub:
+        kind = rtc.TrackKind.KIND_AUDIO
+        sid = "TR_audio1"
+
+    local.track_publications = {"TR_audio1": _AudioPub()}
+    prev = os.environ.get("LILY_VOICE_SYNCED_TRANSCRIPT")
+    os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = "true"
+    try:
+        _run_agent_final(game)
+    finally:
+        if prev is None:
+            os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+        else:
+            os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
+
+    assert len(local.legacy) == 1          # durable legacy publish still out
+    assert len(local.streams) == 0         # framework owns lk.transcription
+
+
+def test_agent_final_off_mirrors_onto_the_stream_wire():
+    # The DEFAULT (flag off): the manual stream mirror is the single source
+    # and rides the wire the glass reads, same segment id, final=true.
+    # Popped rather than set, so this also pins the shipped default.
     game, local = _make_game()
 
     class _AudioPub:
@@ -167,30 +194,6 @@ def test_agent_final_default_legacy_only_framework_owns_the_stream():
         _run_agent_final(game)
     finally:
         if prev is not None:
-            os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
-
-    assert len(local.legacy) == 1          # durable legacy publish still out
-    assert len(local.streams) == 0         # framework owns lk.transcription
-
-
-def test_agent_final_off_mirrors_onto_the_stream_wire():
-    # Rollback (flag off): the manual stream mirror is the single source and
-    # rides the wire the glass reads, same segment id, final=true.
-    game, local = _make_game()
-
-    class _AudioPub:
-        kind = rtc.TrackKind.KIND_AUDIO
-        sid = "TR_audio1"
-
-    local.track_publications = {"TR_audio1": _AudioPub()}
-    prev = os.environ.get("LILY_VOICE_SYNCED_TRANSCRIPT")
-    os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = "off"
-    try:
-        _run_agent_final(game)
-    finally:
-        if prev is None:
-            os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
-        else:
             os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
 
     assert len(local.legacy) == 1

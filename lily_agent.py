@@ -46,6 +46,11 @@ from livekit.agents import (
     StopResponse,
     cli,
     function_tool,
+    # WO-LILY-UI-SYNC-TYPEWRITER-001: the sentence tokenizer the direct-
+    # synthesis path in _lily_aligned_tts_frames builds — deliberately the
+    # same one Agent.default.tts_node hands StreamAdapter, so provider
+    # chunking is unchanged by the bypass.
+    tokenize,
 )
 from livekit.agents.llm import ChatMessage
 from livekit.agents.types import NOT_GIVEN
@@ -9325,8 +9330,99 @@ class LilyAgent(Agent):
         async def _replay():
             yield full
 
+        # WO-LILY-UI-SYNC-TYPEWRITER-001 (1.6.10 merge review): flag-on, take
+        # the direct-synthesis path so the per-WORD timings actually survive.
+        # See _lily_aligned_tts_frames for why the default node cannot carry
+        # them. Flag-off this is the untouched pre-WO call.
+        if lily_config.voice_synced_transcript_enabled():
+            async for frame in self._lily_aligned_tts_frames(full, model_settings):
+                yield frame
+            return
+
         async for frame in Agent.default.tts_node(self, _replay(), model_settings):
             yield frame
+
+    async def _lily_aligned_tts_frames(self, full: str, model_settings):
+        """Synthesize `full` per sentence straight off LilyTTS, preserving the
+        per-word timings on the way out.
+
+        WHY THIS BYPASSES `Agent.default.tts_node`
+        (WO-LILY-UI-SYNC-TYPEWRITER-001, found on the 1.6.10 merge review).
+        The default node wraps any TTS whose `capabilities.streaming` is False
+        — which LilyTTS is — in `tts.StreamAdapter`. StreamAdapterWrapper._run
+        consumes the inner stream with `output_emitter.push(audio.frame.data.
+        tobytes())`: it forwards the PCM and DISCARDS `frame.userdata`, which
+        is exactly where `AudioEmitter.push_timed_transcript` puts the words.
+        It then substitutes its own SENTENCE-level TimedString per token. So
+        every per-word timing LilyChunkedStream decodes from
+        /stream/with-timestamps was being thrown away one layer above it.
+        Measured through the real framework classes, same TTS instance, same
+        vendor payload:
+            direct synthesize() -> [('Which ',0.0,0.3), ('planet ',0.3,0.65),
+                                    ('is ',0.65,0.8), ('biggest?',0.8,1.2)]
+            via StreamAdapter    -> [('Which planet is biggest?', 0.0, NOT_GIVEN)]
+        The display still moved (the synchronizer paces words from sentence
+        annotations plus its speaking-rate estimate), so this failed silently —
+        the whole with-timestamps round-trip bought nothing.
+
+        Yielding `ev.frame` straight from `LilyTTS.synthesize()` keeps
+        `userdata` intact, so `_tts_inference_task` reads the words off
+        `USERDATA_TIMED_TRANSCRIPT` and the synchronizer releases each word at
+        its real onset.
+
+        WHAT IS PRESERVED, deliberately, one for one with the default node:
+          - Sentence tokenizer: the same `blingfire.SentenceTokenizer(
+            retain_format=True)` the default node builds, so chunking to the
+            provider is unchanged. `xml_aware` is False because expressive is
+            structurally impossible here — `_resolve_expressive_options()`
+            returns None unless the TTS is a `livekit.agents.inference.TTS`,
+            and LilyTTS is a direct provider plugin.
+          - Serial per-sentence synthesis: StreamAdapter's own loop awaits each
+            sentence before the next, so TTFB and pipelining are identical —
+            this is not a latency change.
+          - `conn_options`: the session's tts_conn_options, the same object
+            StreamAdapter passed the wrapped synthesize (its max_retry=0 opts
+            applied only to its own outer stream).
+          - `_set_expressive(False)`: the framework-internal per-turn flag the
+            default node sets. Documented no-op for a TTS that does not
+            tokenize its own input; set anyway so nothing observes a stale
+            value.
+          - ALL of LilyChunkedStream's accounting rides untouched inside
+            `_run`: the 3,800-char chunk split, claim-vs-delivery
+            `chunks_delivered` / `undelivered_remainder` tail recovery, the
+            HOTFIX-005 X5 zero-bytes clean retry, the silent-mute guard,
+            PATCH-003 P7 pace levels, and the pooled TLS session.
+          - P0-C: `full` is the corrected post-TTS text the caller already
+            bound via `note_post_tts_text`. Nothing here re-derives text.
+
+        The running `elapsed` is the reason `synthesize(time_offset=...)`
+        exists: each request's alignment restarts at 0.0, so without it every
+        sentence would re-emit onsets from zero and the synchronizer would read
+        time as going backwards mid-turn.
+        """
+        activity = self._get_activity_or_raise()
+        tts_impl = activity.tts
+        if tts_impl is None:
+            raise RuntimeError("tts_node called but no TTS is available")
+
+        tts_impl._set_expressive(False)
+        conn_options = activity.session.conn_options.tts_conn_options
+        tokenizer = tokenize.blingfire.SentenceTokenizer(retain_format=True)
+
+        # A turn with no sentence boundary still yields one token; an empty
+        # tokenize (whitespace-only `full`) falls back to the text itself so a
+        # turn can never silently vanish between the pipeline and the provider.
+        sentences = [s for s in tokenizer.tokenize(full) if s.strip()] or [full]
+
+        elapsed = 0.0
+        for sentence in sentences:
+            stream = tts_impl.synthesize(
+                sentence, conn_options=conn_options, time_offset=elapsed
+            )
+            async with stream:
+                async for ev in stream:
+                    elapsed += ev.frame.duration
+                    yield ev.frame
 
 
 # ---------------------------------------------------------------------------

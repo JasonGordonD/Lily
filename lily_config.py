@@ -1136,12 +1136,27 @@ def board_on_playout_start() -> bool:
 
 
 def voice_synced_transcript_enabled() -> bool:
-    """WO-LILY-UI-SYNC-TYPEWRITER-001 master switch. DEFAULT TRUE.
+    """WO-LILY-UI-SYNC-TYPEWRITER-001 master switch. DEFAULT FALSE.
+
+    THE FEATURE LANDS DARK. It shipped default-TRUE on the strength of a
+    manual, unrecorded probe that /stream/with-timestamps returns per-char
+    alignment for eleven_v3. That is a vendor-side property of an ALPHA
+    model — it can differ by account, by plan, and over time — and nothing
+    in the request tells you whether it held. Default-on meant a vendor
+    change would land straight on a live table. The evidence path is now
+    reproducible: run `scripts/eleven_alignment_gate.py` (the
+    eleven-alignment-gate job in cache-canary.yml, workflow_dispatch) for a
+    GREEN/RED verdict against the locked config, then verify one live call,
+    THEN enable by setting LILY_VOICE_SYNCED_TRANSCRIPT as a deploy env var.
+    deploy.yml already forwards it, so switching on is a var flip with no
+    code change — and so is switching back off.
 
     On: the framework's TranscriptSynchronizer drives Lily's agent
     transcript word-by-word against real audio playout (RoomOptions
     text_output on, sync_transcription; TTS emits per-word TimedString via
-    /stream/with-timestamps; use_tts_aligned_transcript). json_format stays
+    /stream/with-timestamps; use_tts_aligned_transcript; LilyAgent.tts_node
+    synthesizes per sentence straight off LilyTTS so those per-word timings
+    are not discarded by the framework's StreamAdapter). json_format stays
     off — the browser SDK does not parse the TimedString envelope, so words
     ride plain-text and the board keys on playout-synced word arrival.
     The board types the question in sync with her voice; the manual
@@ -1150,10 +1165,10 @@ def voice_synced_transcript_enabled() -> bool:
     suppressed (the framework owns the agent wire) — the legacy
     rtc.Transcription completion publish stays as the durable/cut record.
 
-    Off: the documented rollback to the pre-WO manual-publish path
-    (text_output=False, full-line interim paste + client 40ms stagger).
-    A pure env flip, no redeploy."""
-    return _get_bool("LILY_VOICE_SYNCED_TRANSCRIPT", True)
+    Off (the default): the pre-WO manual-publish path, byte-identical —
+    text_output=False, the raw /stream endpoint, full-line interim paste +
+    client 40ms stagger."""
+    return _get_bool("LILY_VOICE_SYNCED_TRANSCRIPT", False)
 
 
 def audeering_enabled() -> bool:

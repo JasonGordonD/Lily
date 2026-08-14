@@ -11,13 +11,26 @@ The board pasted the whole question at playout start and ran a cosmetic
 ~40ms/word chalk stagger unrelated to what Lily was actually saying. This
 wires the board's typewriter to her VOICE, word by word, via the
 framework's audio-playout transcript synchronizer. Feature master switch
-`LILY_VOICE_SYNCED_TRANSCRIPT` (default ON; a pure env flip rolls back to
-the pre-WO manual-publish path — no redeploy).
+`LILY_VOICE_SYNCED_TRANSCRIPT`.
 
-Vendor gate (run first): `POST /v1/text-to-speech/{voice}/stream/with-timestamps`
-with the EXACT locked config (`eleven_v3`, voice `W3C2vBPukr5b5jvoXhPK`,
-per-voice `voice_settings`, `pcm_24000`) returns per-CHARACTER alignment
-(char + start/end secs) for eleven_v3 → GREEN → word-level implemented.
+**THE FEATURE LANDS DARK — `LILY_VOICE_SYNCED_TRANSCRIPT` DEFAULTS OFF.**
+It was written default-ON on the strength of a manual, unrecorded probe
+that `/stream/with-timestamps` returns per-char alignment for `eleven_v3`.
+That is a vendor-side property of an ALPHA model — it can differ by account,
+by plan, and over time — and nothing in the request reports whether it held,
+so default-on meant a vendor change would land straight on a live table.
+The evidence path is now reproducible (item 8): run the alignment gate for a
+GREEN/RED verdict against the locked config, verify one live call, THEN
+enable by setting the env var. `deploy.yml` already forwards it, so both
+switching on and rolling back are var flips with no code change. Flag-off is
+byte-identical to the pre-WO path (raw `/stream`, `text_output=False`,
+full-line interim paste) and the full suite is green in BOTH states.
+
+Vendor gate: `POST /v1/text-to-speech/{voice}/stream/with-timestamps` with
+the EXACT locked config (`eleven_v3`, voice `W3C2vBPukr5b5jvoXhPK`, per-voice
+`voice_settings`, `pcm_24000`) returns per-CHARACTER alignment (char +
+start/end secs) for eleven_v3 → GREEN → word-level implemented. Re-runnable
+as `scripts/eleven_alignment_gate.py`.
 
 1. **lily_tts.py.** `LilyChunkedStream._run` switches (when on) to
    `/stream/with-timestamps` — request body BYTE-IDENTICAL to the raw path
@@ -92,16 +105,73 @@ present at 1.6.10: `voice.io.TimedString`, `TTSCapabilities.aligned_transcript`
 `TextOutputOptions(sync_transcription, json_format)`, and the
 `_forward_user_transcript` None-guard the user-forward neutralisation rides
 (voice/room_io/room_io.py:366). Flag-off is byte-identical to the pre-WO
-path. TWO OPEN DEFECTS are recorded against the feature, not fixed here
-(see the WO report): (i) at 1.6.10 `Agent.default.tts_node` wraps any
-`streaming=False` TTS in `StreamAdapter`, which forwards only
-`frame.data.tobytes()` — so LilyTTS's per-WORD `TimedString`s are dropped
-before the framework sees them and are replaced by StreamAdapter's own
-SENTENCE-level ones; the display is still playout-synced, but the
-`/stream/with-timestamps` round-trip currently buys nothing; (ii) a 200
-from that endpoint whose body is not NDJSON parses to zero audio while
-`chunks_delivered == chunks_total`, so the turn goes SILENT with no
-tail-recovery and no alarm.
+path. The review found TWO DEFECTS, both since FIXED (below).
+
+**FIX 1 — the word-level path was dead code (`lily_agent.py`).** Every
+spoken turn goes through `Agent.default.tts_node`, which wraps any TTS whose
+`capabilities.streaming` is False — LilyTTS is — in `tts.StreamAdapter`.
+`StreamAdapterWrapper._run` forwards the inner stream as
+`output_emitter.push(audio.frame.data.tobytes())`: the PCM survives,
+`frame.userdata` does NOT, and that is exactly where
+`push_timed_transcript` puts the words. It then substituted ONE
+sentence-level `TimedString` per token. Measured through the real framework
+classes, same TTS instance, same vendor payload:
+
+```
+direct synthesize() -> ('Which ',0.0,0.3) ('planet ',0.3,0.65)
+                       ('is ',0.65,0.8)   ('biggest?',0.8,1.2)
+via StreamAdapter   -> ('Which planet is biggest?', 0.0, NOT_GIVEN)
+```
+
+Every per-word timing decoded from `/stream/with-timestamps` was thrown away
+one layer above the code that produced it. It failed SILENTLY because the
+synchronizer still paces words off sentence annotations plus its
+speaking-rate estimate — the display moved, so nothing looked wrong; the
+round-trip simply bought nothing. New `LilyAgent._lily_aligned_tts_frames`
+synthesizes per sentence straight off `LilyTTS.synthesize()` and yields
+`ev.frame`, keeping `userdata` intact. Deliberately one-for-one with the
+default node: same `blingfire.SentenceTokenizer(retain_format=True)`, same
+serial per-sentence loop (StreamAdapter's is serial too, so TTFB is
+unchanged), same `tts_conn_options`, same `_set_expressive(False)`
+(expressive is structurally impossible here — `_resolve_expressive_options`
+returns None unless the TTS is an `inference.TTS`). All of
+`LilyChunkedStream`'s accounting rides untouched inside `_run`. Post-fix,
+through the agent seam: seven per-word `TimedString`s with real start AND
+end times, concatenating back to the exact spoken text.
+
+`LilyTTS.synthesize()` gains `time_offset` for this: each request's
+alignment restarts at 0.0, so a multi-sentence turn would re-emit onsets
+from zero at every sentence and the synchronizer would read time as going
+backwards. The agent accumulates aired `frame.duration` and passes it as the
+next sentence's base — onsets now run 0.000 → 2.010 across a two-sentence
+turn instead of resetting.
+
+**FIX 2 — silent-mute guard (`lily_tts.py`).** A 200 from
+`/stream/with-timestamps` whose body is not NDJSON — a vendor framing change,
+a plan downgrade serving raw `/stream` bytes, an error envelope with a 200 —
+failed `json.loads` on every line, skipped them all, and completed the chunk
+loop NORMALLY, advancing `chunks_delivered`. Measured pre-fix against a
+raw-PCM 200: `0` bytes pushed, `chunks_delivered == 1/1`,
+`undelivered_remainder == ""`. So Lily went MUTE, the claim-vs-delivery
+ledger recorded a clean delivery, the game believed the question had been
+asked, and cut-recovery never armed — the exact silent mid-turn death WS-2's
+accounting exists to prevent. A chunk that pushed zero audio now raises
+`_EmptyTimedResponse` (an `aiohttp.ClientError` subclass, so it takes the
+IDENTICAL path a torn stream takes: one HOTFIX-005 X5 clean re-fetch, then
+`APIConnectionError` with the chunk left undelivered). Post-fix on the same
+input: `chunks_delivered == 0/1`, `undelivered_remainder == "Which planet is
+biggest?"`, cut-recovery armed, one `LILY_TTS | TIMED_EMPTY_RESPONSE` error
+line carrying counts only — no body, no headers, nothing that could carry the
+api key. Timed path only; the raw path is untouched.
+
+Tests: `tests/test_tts_word_alignment_seam.py` (5 — words survive the agent
+seam, monotonic across sentences, per-sentence requests with the locked body,
+concatenation reproduces the text, single-sentence turn) and 3 silent-mute
+cases in `test_tts_chunk_safety.py` (empty 200 is a chunk failure, a chunk
+that DID air stays delivered, raw path unaffected). The two `_drive_tts_node`
+harnesses now record BOTH synthesis exits so the golden-line and
+post-transform-text assertions hold in either flag state. Full suite green in
+BOTH flag states: **2,629**.
 
 ## 2026-08-14 — WO-PRMPT-LILY-GROUP-RECONCILE-001: auto-reconciler for fragmented returning-player identity groups
 

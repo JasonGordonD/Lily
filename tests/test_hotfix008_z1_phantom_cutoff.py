@@ -361,19 +361,22 @@ def test_genuine_bargein_still_records_its_real_partial_marked():
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-    # WO-LILY-UI-SYNC-TYPEWRITER-001 (1.6.10 merge): PIN the flag to its
-    # default rather than inheriting the ambient environment. The stream-leg
-    # assertion below is flag-dependent, and LILY_VOICE_SYNCED_TRANSCRIPT is
-    # documented as a pure env flip with no redeploy — so the rollback
-    # configuration must also run this suite green. Without the pop, a
-    # developer or CI shell exporting the rollback value failed this test
-    # and made the rollback look broken. Same pop-the-var idiom as
-    # test_transcript_sync / test_transcript_forwarding.
-    prev = os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+    # WO-LILY-UI-SYNC-TYPEWRITER-001 (1.6.10 merge): PIN the flag rather than
+    # inheriting the ambient environment. The stream-leg assertion below is
+    # flag-dependent, and LILY_VOICE_SYNCED_TRANSCRIPT is a pure env flip with
+    # no redeploy — so BOTH configurations must run this suite green. Set to
+    # "true" because the assertion below is the flag-ON shape; the review
+    # flipped the shipped default to OFF, so this can no longer be spelled as
+    # "pop the var". Same pin-the-var idiom as test_transcript_sync /
+    # test_transcript_forwarding.
+    prev = os.environ.get("LILY_VOICE_SYNCED_TRANSCRIPT")
+    os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = "true"
     try:
         _run(scenario())
     finally:
-        if prev is not None:
+        if prev is None:
+            os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+        else:
             os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
     assert [r["text"] for r in game.transcripts.rows] == [partial + CUT_MARK]
     assert game.sk.agent_turns == [partial]

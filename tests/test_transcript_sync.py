@@ -51,25 +51,30 @@ def _game_with_spy():
 
 
 def test_playout_start_no_interim_when_framework_drives_progressive():
-    # WO-LILY-UI-SYNC-TYPEWRITER-001 (default ON): the framework's
+    # WO-LILY-UI-SYNC-TYPEWRITER-001, flag ON: the framework's
     # sync_transcription types the line word-by-word against audio playout,
     # so the manual full-line interim paste is dropped. The completion
-    # publish still lands the durable/cut record.
-    prev = os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+    # publish still lands the durable/cut record. Explicitly SET (not popped)
+    # since the 1.6.10 merge review flipped the default to OFF — the feature
+    # lands dark and is enabled by env var after the vendor gate.
+    prev = os.environ.get("LILY_VOICE_SYNCED_TRANSCRIPT")
+    os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = "true"
     try:
         game, spy = _game_with_spy()
         game.note_post_tts_text("s1", "Round two, and this one is a trap.")
         game.note_playout_started("s1")
         assert spy.calls == []
     finally:
-        if prev is not None:
+        if prev is None:
+            os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+        else:
             os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
 
 
 def test_playout_start_publishes_the_bound_text_as_interim_when_off():
-    # Rollback (flag off): the legacy interim paste at playout start stays.
-    prev = os.environ.get("LILY_VOICE_SYNCED_TRANSCRIPT")
-    os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = "off"
+    # The DEFAULT (flag off): the legacy interim paste at playout start stays.
+    # Popped rather than set, so this also pins the shipped default.
+    prev = os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
     try:
         game, spy = _game_with_spy()
         game.note_post_tts_text("s1", "Round two, and this one is a trap.")
@@ -79,9 +84,7 @@ def test_playout_start_publishes_the_bound_text_as_interim_when_off():
             "speech_id": "s1", "interrupted": False, "final": False,
         }]
     finally:
-        if prev is None:
-            os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
-        else:
+        if prev is not None:
             os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
 
 
