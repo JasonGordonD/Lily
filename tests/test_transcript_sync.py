@@ -15,6 +15,7 @@ The Y5 one-shot consume contract is untouched: the interim path PEEKS.
 """
 
 import inspect
+import os
 import sys
 from pathlib import Path
 
@@ -49,14 +50,39 @@ def _game_with_spy():
     return game, spy
 
 
-def test_playout_start_publishes_the_bound_text_as_interim():
-    game, spy = _game_with_spy()
-    game.note_post_tts_text("s1", "Round two, and this one is a trap.")
-    game.note_playout_started("s1")
-    assert spy.calls == [{
-        "text": "Round two, and this one is a trap.",
-        "speech_id": "s1", "interrupted": False, "final": False,
-    }]
+def test_playout_start_no_interim_when_framework_drives_progressive():
+    # WO-LILY-UI-SYNC-TYPEWRITER-001 (default ON): the framework's
+    # sync_transcription types the line word-by-word against audio playout,
+    # so the manual full-line interim paste is dropped. The completion
+    # publish still lands the durable/cut record.
+    prev = os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+    try:
+        game, spy = _game_with_spy()
+        game.note_post_tts_text("s1", "Round two, and this one is a trap.")
+        game.note_playout_started("s1")
+        assert spy.calls == []
+    finally:
+        if prev is not None:
+            os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
+
+
+def test_playout_start_publishes_the_bound_text_as_interim_when_off():
+    # Rollback (flag off): the legacy interim paste at playout start stays.
+    prev = os.environ.get("LILY_VOICE_SYNCED_TRANSCRIPT")
+    os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = "off"
+    try:
+        game, spy = _game_with_spy()
+        game.note_post_tts_text("s1", "Round two, and this one is a trap.")
+        game.note_playout_started("s1")
+        assert spy.calls == [{
+            "text": "Round two, and this one is a trap.",
+            "speech_id": "s1", "interrupted": False, "final": False,
+        }]
+    finally:
+        if prev is None:
+            os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+        else:
+            os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
 
 
 def test_peek_does_not_consume_the_binding():

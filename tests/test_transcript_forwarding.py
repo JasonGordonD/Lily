@@ -18,6 +18,7 @@ Same import boundary note as test_hotfix006_transitions.py.
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -138,15 +139,7 @@ def test_user_forward_carries_the_bound_player_name():
     assert local.streams[0].attributes.get("prmpt.speaker_label") == "Maya"
 
 
-def test_agent_final_mirrors_onto_the_stream_wire():
-    game, local = _make_game()
-
-    class _AudioPub:
-        kind = rtc.TrackKind.KIND_AUDIO
-        sid = "TR_audio1"
-
-    local.track_publications = {"TR_audio1": _AudioPub()}
-
+def _run_agent_final(game) -> None:
     async def _go():
         game.publish_agent_transcription_nowait(
             "Correct — Jupiter!", speech_id="speech_9", interrupted=False,
@@ -155,9 +148,52 @@ def test_agent_final_mirrors_onto_the_stream_wire():
 
     asyncio.new_event_loop().run_until_complete(_go())
 
-    # Legacy publish still goes out for older clients…
+
+def test_agent_final_default_legacy_only_framework_owns_the_stream():
+    # WO-LILY-UI-SYNC-TYPEWRITER-001 (default ON): the framework's
+    # sync_transcription owns the lk.transcription text stream, so the manual
+    # stream mirror is suppressed to avoid a duplicate, differently-segmented
+    # line. The legacy rtc.Transcription completion publish stays as the
+    # durable/older-client record.
+    game, local = _make_game()
+
+    class _AudioPub:
+        kind = rtc.TrackKind.KIND_AUDIO
+        sid = "TR_audio1"
+
+    local.track_publications = {"TR_audio1": _AudioPub()}
+    prev = os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+    try:
+        _run_agent_final(game)
+    finally:
+        if prev is not None:
+            os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
+
+    assert len(local.legacy) == 1          # durable legacy publish still out
+    assert len(local.streams) == 0         # framework owns lk.transcription
+
+
+def test_agent_final_off_mirrors_onto_the_stream_wire():
+    # Rollback (flag off): the manual stream mirror is the single source and
+    # rides the wire the glass reads, same segment id, final=true.
+    game, local = _make_game()
+
+    class _AudioPub:
+        kind = rtc.TrackKind.KIND_AUDIO
+        sid = "TR_audio1"
+
+    local.track_publications = {"TR_audio1": _AudioPub()}
+    prev = os.environ.get("LILY_VOICE_SYNCED_TRANSCRIPT")
+    os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = "off"
+    try:
+        _run_agent_final(game)
+    finally:
+        if prev is None:
+            os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+        else:
+            os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
+
     assert len(local.legacy) == 1
-    # …and the SAME final text now rides the stream wire the glass reads.
     assert len(local.streams) == 1
     stream = local.streams[0]
     assert stream.topic == "lk.transcription"

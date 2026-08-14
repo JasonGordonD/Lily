@@ -52,7 +52,7 @@ from livekit.agents.types import NOT_GIVEN
 from livekit.agents.utils import is_given
 from livekit.agents.voice import Agent, AgentSession
 from livekit.agents.voice.agent_session import SessionConnectOptions
-from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions
+from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions, TextOutputOptions
 from livekit.agents.voice.agent_activity import _SpeechHandleContextVar
 from livekit.agents.voice.background_audio import (
     AudioConfig,
@@ -9202,6 +9202,24 @@ class LilyAgent(Agent):
             pass
         return "low"
 
+    async def transcription_node(self, text, model_settings):
+        """WO-LILY-UI-SYNC-TYPEWRITER-001: finalise Lily's forwarded
+        transcript.
+
+        Under use_tts_aligned_transcript the framework feeds this node the
+        TTS-ALIGNED text — the per-word TimedString stream LilyTTS emits from
+        the CORRECTED post-TTS `full` (tts_node rewrites/clips/substitutes
+        before synthesis, then notes `full`). So what flows here is exactly
+        what the room heard, word-aligned to playout — never the raw pre-TTS
+        model stream that raced the corrected text (P0-C). This override is a
+        deliberate identity forward of that stream (markup stripping still
+        happens at the room-output wire layer); it exists so the P0-C
+        guarantee is explicit and independently testable, and so the delivery
+        stays str|TimedString for the board's word-timed reveal.
+        """
+        async for delta in text:
+            yield delta
+
     async def tts_node(self, text, model_settings):
         chunks = []
         async for chunk in text:
@@ -9961,6 +9979,13 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=stt,
         llm=general_vocal_llm,
         tts=lily_tts_instance,  # voice1 (primary) via lily_config.lily_voice_id()
+        # WO-LILY-UI-SYNC-TYPEWRITER-001: read the TTS-provided per-word
+        # timings (LilyTTS emits TimedString off /stream/with-timestamps) so
+        # the transcript the framework forwards is the CORRECTED post-TTS text
+        # aligned to audio playout — never the raw pre-TTS model stream (P0-C).
+        # Flag-gated with the RoomOptions text_output below so the whole
+        # feature is one env switch.
+        use_tts_aligned_transcript=lily_config.voice_synced_transcript_enabled(),
         vad=silero.VAD.load(),  # barge-in enabled; no STT gating during TTS
         # THE READ TIMEOUT THAT ACTUALLY APPLIES. 0f31b71 raised the adult
         # lane's client read budget to 30s because livekit-plugins-openai
@@ -10866,12 +10891,62 @@ async def entrypoint(ctx: JobContext) -> None:
             audio_input=AudioInputOptions(
                 noise_cancellation=lily_noise_cancellation_options(),
             ),
-            # P0-C: RoomIO otherwise publishes the pre-TTS model stream.
-            # Lily publishes one final transcription after playout from the
-            # exact post-transform text that entered TTS.
-            text_output=False,
+            # WO-LILY-UI-SYNC-TYPEWRITER-001: when on, the framework's
+            # TranscriptSynchronizer forwards Lily's transcript word-by-word
+            # against real audio playout (use_tts_aligned_transcript above
+            # feeds it the per-word TTS timings for precise per-word release),
+            # so each word lands on lk.transcription in sync with her voice
+            # and the board types the question to that cadence. P0-C is held
+            # by use_tts_aligned_transcript: the forwarded text is the
+            # TTS-aligned CORRECTED text, not the raw model stream. The manual
+            # interim full-line publish is dropped and the manual agent
+            # lk.transcription leg is suppressed (see
+            # publish_agent_transcription_nowait) so this is the single agent
+            # wire — no duplicate lines.
+            #
+            # json_format is deliberately OFF (plain-text deltas): the browser
+            # SDK (livekit-client 2.18 / components-react 2.9) concatenates
+            # transcription chunks as raw strings and does NOT parse the
+            # json_format TimedString envelope, so json_format would render
+            # raw JSON in the shared, all-tenant transcript panel with no
+            # client-side benefit. Plain-text playout-synced word ARRIVAL is
+            # what the board keys on (arrival-order reveal), and it keeps the
+            # panel's Lily captions correct.
+            #
+            # Off (rollback): text_output=False keeps the pre-WO manual
+            # publish path (RoomIO would otherwise forward the pre-TTS model
+            # stream — the original P0-C reason).
+            text_output=(
+                TextOutputOptions(sync_transcription=True, json_format=False)
+                if lily_config.voice_synced_transcript_enabled()
+                else False
+            ),
         ),
     )
+
+    # WO-LILY-UI-SYNC-TYPEWRITER-001: enabling text_output re-activates the
+    # framework's USER transcript forwarding too, which would forward the raw
+    # diarized STT text ("[S1] …", attributed to the device participant) and
+    # DOUBLE Lily's own roster-aware user publish (publish_user_transcript_
+    # nowait, which strips the speaker tag and binds the player name). Keep
+    # Lily's label-aware user path as the single user source by neutralising
+    # the framework's user forwarder via its own None-guard in
+    # _forward_user_transcript. Agent forwarding (the delivery sync) is
+    # untouched. Defensive getattr chain: a private seam, no-op if absent.
+    if lily_config.voice_synced_transcript_enabled():
+        try:
+            room_io = getattr(session, "_room_io", None)
+            if room_io is not None and getattr(room_io, "_user_tr_output", None) is not None:
+                room_io._user_tr_output = None
+                logger.info(
+                    "LILY_TRANSCRIPT | framework user-forward neutralised — "
+                    "Lily's roster-aware user publish stays the single source"
+                )
+        except Exception:
+            logger.exception(
+                "LILY_TRANSCRIPT | could not neutralise framework user-forward "
+                "— user transcript may double until reviewed"
+            )
 
     # --- Acoustic pipeline: room audio -> devAIce (WO-LILY-AUDEERING-001) ---
     # Missing AUDEERING_API_KEY -> pipeline is None (breaker open, one

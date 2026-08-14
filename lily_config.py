@@ -1135,6 +1135,27 @@ def board_on_playout_start() -> bool:
     return _get_bool("LILY_BOARD_ON_PLAYOUT_START", True)
 
 
+def voice_synced_transcript_enabled() -> bool:
+    """WO-LILY-UI-SYNC-TYPEWRITER-001 master switch. DEFAULT TRUE.
+
+    On: the framework's TranscriptSynchronizer drives Lily's agent
+    transcript word-by-word against real audio playout (RoomOptions
+    text_output on, sync_transcription; TTS emits per-word TimedString via
+    /stream/with-timestamps; use_tts_aligned_transcript). json_format stays
+    off — the browser SDK does not parse the TimedString envelope, so words
+    ride plain-text and the board keys on playout-synced word arrival.
+    The board types the question in sync with her voice; the manual
+    interim full-line publish (lily_speech_delivery.note_playout_started)
+    is dropped and the completion publish's lk.transcription stream leg is
+    suppressed (the framework owns the agent wire) — the legacy
+    rtc.Transcription completion publish stays as the durable/cut record.
+
+    Off: the documented rollback to the pre-WO manual-publish path
+    (text_output=False, full-line interim paste + client 40ms stagger).
+    A pure env flip, no redeploy."""
+    return _get_bool("LILY_VOICE_SYNCED_TRANSCRIPT", True)
+
+
 def audeering_enabled() -> bool:
     """Master switch for the acoustic pipeline (HOSTLOOP-001 C11).
     DEFAULT FALSE: the 6-module 5s-cadence upload burned quota with no

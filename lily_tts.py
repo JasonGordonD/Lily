@@ -19,6 +19,8 @@ Retained from the Lovebirds baseline:
 """
 
 import asyncio
+import base64
+import json
 import logging
 import re
 from dataclasses import dataclass, replace
@@ -34,6 +36,7 @@ from livekit.agents import (
     utils,
 )
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
+from livekit.agents.voice.io import TimedString
 
 import lily_config
 
@@ -115,7 +118,14 @@ class LilyTTS(tts.TTS):
         model_id: str = MODEL_ID,
     ) -> None:
         super().__init__(
-            capabilities=tts.TTSCapabilities(streaming=False),
+            # aligned_transcript advertises that this TTS can return per-word
+            # timings (via /stream/with-timestamps) so the framework's
+            # TranscriptSynchronizer can pace the transcript against audio
+            # playout when the session sets use_tts_aligned_transcript=True
+            # (WO-LILY-UI-SYNC-TYPEWRITER-001). streaming stays False — the
+            # ChunkedStream contract is unchanged; the endpoint carrying the
+            # alignment is still a one-shot HTTP stream per chunk.
+            capabilities=tts.TTSCapabilities(streaming=False, aligned_transcript=True),
             sample_rate=SAMPLE_RATE,
             num_channels=NUM_CHANNELS,
         )
@@ -199,9 +209,88 @@ class LilyTTS(tts.TTS):
         )
 
 
+class _WordTimingAggregator:
+    """Aggregate ElevenLabs per-CHARACTER alignment into per-WORD TimedString
+    tokens for the framework's aligned-transcript path
+    (WO-LILY-UI-SYNC-TYPEWRITER-001).
+
+    /stream/with-timestamps returns, per streamed object, an `alignment`
+    with parallel `characters` / `character_start_times_seconds` /
+    `character_end_times_seconds` arrays. Characters arrive in arbitrary
+    slices across objects, and a word can straddle two objects, so chars are
+    buffered and a token is emitted only once its trailing whitespace run has
+    been seen to END (a following non-ws char), or at flush.
+
+    A token keeps its trailing whitespace so the plain concatenation of every
+    token reproduces the spoken text exactly (what the transcript panel
+    renders). `start_time` is the first character's onset; `end_time` is the
+    last character's offset. Times are absolute across the whole turn: each
+    text chunk is a separate request whose alignment restarts at 0, so a
+    per-chunk `offset` (accumulated audio seconds of prior chunks) is added on
+    feed, keeping word onsets monotonic for the synchronizer.
+    """
+
+    def __init__(self) -> None:
+        self._buf: list[tuple[str, float, float]] = []
+
+    def feed(
+        self, characters, starts, ends, offset: float
+    ) -> list[TimedString]:
+        n = min(len(characters), len(starts), len(ends))
+        for i in range(n):
+            self._buf.append(
+                (characters[i], float(starts[i]) + offset, float(ends[i]) + offset)
+            )
+        return self._extract(final=False)
+
+    def flush(self) -> list[TimedString]:
+        return self._extract(final=True)
+
+    def _extract(self, *, final: bool) -> list[TimedString]:
+        out: list[TimedString] = []
+        buf = self._buf
+        while buf:
+            n = len(buf)
+            # first non-whitespace char (leading ws stays with this token)
+            i = 0
+            while i < n and buf[i][0].isspace():
+                i += 1
+            if i >= n:
+                # buffer is whitespace-only — only a leftover trailing space
+                if final:
+                    self._emit(out, buf[:])
+                    buf.clear()
+                break
+            # word body
+            j = i
+            while j < n and not buf[j][0].isspace():
+                j += 1
+            # trailing whitespace run
+            k = j
+            while k < n and buf[k][0].isspace():
+                k += 1
+            # complete once the ws run has ended (a following non-ws seen),
+            # or at flush; otherwise the run may continue in the next object
+            if k < n or final:
+                self._emit(out, buf[:k])
+                del buf[:k]
+                continue
+            break
+        return out
+
+    @staticmethod
+    def _emit(out: list[TimedString], chars: list[tuple[str, float, float]]) -> None:
+        if not chars:
+            return
+        text = "".join(c for c, _, _ in chars)
+        if not text:
+            return
+        out.append(TimedString(text, start_time=chars[0][1], end_time=chars[-1][2]))
+
+
 class LilyChunkedStream(tts.ChunkedStream):
     # ChunkedStream subclass interface (_run(output_emitter) signature and
-    # AudioEmitter initialize/push/flush) verified unchanged at 1.6.6.
+    # AudioEmitter initialize/push/flush) verified unchanged at 1.6.6/1.6.8.
     def __init__(
         self,
         *,
@@ -223,6 +312,12 @@ class LilyChunkedStream(tts.ChunkedStream):
         self.chunks_total = 0
         self.chunks_delivered = 0
         self.undelivered_remainder = ""
+        # WO-LILY-UI-SYNC-TYPEWRITER-001: when on, _run pulls from
+        # /stream/with-timestamps and emits per-word TimedString so the
+        # framework paces the transcript to audio playout. Snapshotted here
+        # (not read mid-stream) so one synthesize() call is internally
+        # consistent even across an env flip.
+        self._timed = lily_config.voice_synced_transcript_enabled()
 
     @staticmethod
     def _split_text(text: str) -> list[str]:
@@ -263,9 +358,16 @@ class LilyChunkedStream(tts.ChunkedStream):
         text_chunks = self._split_text(self._input_text)
         self.chunks_total = len(text_chunks)
 
+        # WO-LILY-UI-SYNC-TYPEWRITER-001: the with-timestamps endpoint returns
+        # base64 audio + per-character alignment in one stream so we can emit
+        # per-word TimedString for the framework's aligned transcript. The
+        # request BODY is byte-identical to the raw path — voice/model/
+        # settings/output_format are operator-locked and the endpoint swap
+        # must not alter any of them. Off ⇒ the legacy raw /stream path.
+        endpoint = "/stream/with-timestamps" if self._timed else "/stream"
         url = (
             f"{ELEVENLABS_API_BASE}/text-to-speech/{self._opts.voice_id}"
-            f"/stream?output_format={self._opts.output_format}"
+            f"{endpoint}?output_format={self._opts.output_format}"
         )
 
         try:
@@ -335,19 +437,68 @@ class LilyChunkedStream(tts.ChunkedStream):
                                 initialized = True
 
                             carry = b""
-                            async for audio_chunk, _ in resp.content.iter_chunks():
-                                data = carry + audio_chunk
-                                usable = len(data) - (len(data) % 2)
-                                if usable > 0:
-                                    output_emitter.push(data[:usable])
+                            if not self._timed:
+                                async for audio_chunk, _ in resp.content.iter_chunks():
+                                    data = carry + audio_chunk
+                                    usable = len(data) - (len(data) % 2)
+                                    if usable > 0:
+                                        output_emitter.push(data[:usable])
+                                        total_bytes += usable
+                                        chunk_count += 1
+                                    carry = data[usable:]
+                                if len(carry) >= 2:
+                                    usable = len(carry) - (len(carry) % 2)
+                                    output_emitter.push(carry[:usable])
                                     total_bytes += usable
                                     chunk_count += 1
-                                carry = data[usable:]
-                            if len(carry) >= 2:
-                                usable = len(carry) - (len(carry) % 2)
-                                output_emitter.push(carry[:usable])
-                                total_bytes += usable
-                                chunk_count += 1
+                            else:
+                                # with-timestamps: newline-delimited JSON, each
+                                # object carrying base64 PCM + per-char
+                                # alignment. Onsets are chunk-relative (this is
+                                # a fresh request), so offset by the audio
+                                # already aired to keep word times monotonic
+                                # across the turn. Words never straddle text
+                                # chunks (the splitter breaks on whitespace),
+                                # so one aggregator per chunk, flushed at end.
+                                agg = _WordTimingAggregator()
+                                chunk_offset = total_bytes / float(SAMPLE_RATE * 2)
+                                async for raw_line in resp.content:
+                                    line = raw_line.strip()
+                                    if not line:
+                                        continue
+                                    try:
+                                        obj = json.loads(line)
+                                    except (ValueError, UnicodeDecodeError):
+                                        continue
+                                    audio_b64 = obj.get("audio_base64") or obj.get("audio")
+                                    if audio_b64:
+                                        data = carry + base64.b64decode(audio_b64)
+                                        usable = len(data) - (len(data) % 2)
+                                        if usable > 0:
+                                            output_emitter.push(data[:usable])
+                                            total_bytes += usable
+                                            chunk_count += 1
+                                        carry = data[usable:]
+                                    align = obj.get("alignment") or obj.get(
+                                        "normalized_alignment"
+                                    )
+                                    if align:
+                                        words = agg.feed(
+                                            align.get("characters") or [],
+                                            align.get("character_start_times_seconds") or [],
+                                            align.get("character_end_times_seconds") or [],
+                                            chunk_offset,
+                                        )
+                                        if words:
+                                            output_emitter.push_timed_transcript(words)
+                                if len(carry) >= 2:
+                                    usable = len(carry) - (len(carry) % 2)
+                                    output_emitter.push(carry[:usable])
+                                    total_bytes += usable
+                                    chunk_count += 1
+                                tail_words = agg.flush()
+                                if tail_words:
+                                    output_emitter.push_timed_transcript(tail_words)
                         break  # chunk fully streamed
                     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                         pushed_this_chunk = total_bytes - bytes_at_chunk_start

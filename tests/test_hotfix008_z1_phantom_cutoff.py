@@ -363,11 +363,16 @@ def test_genuine_bargein_still_records_its_real_partial_marked():
     _run(scenario())
     assert [r["text"] for r in game.transcripts.rows] == [partial + CUT_MARK]
     assert game.sk.agent_turns == [partial]
-    # The published glass segment carries the same marked real partial —
-    # and the phantom published nothing.
+    # The durable records carry the marked real partial — and the phantom
+    # published nothing.
     published = [s.segments[0].text for s in game.participant.published]
     assert published == [partial + CUT_MARK]
-    assert game.participant.streamed == [partial + CUT_MARK]
+    # WO-LILY-UI-SYNC-TYPEWRITER-001 (default ON): the manual lk.transcription
+    # stream mirror is suppressed — the framework's own final chunk carries
+    # the truncation on the wire. The legacy publish + transcript rows above
+    # remain the durable cut record. (The flag-off stream mirror is covered
+    # in test_transcript_forwarding.)
+    assert game.participant.streamed == []
 
 
 def test_no_cut_off_row_without_genuine_truncation():
