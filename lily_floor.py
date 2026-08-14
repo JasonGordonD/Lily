@@ -20,6 +20,7 @@ import lily_config
 import lily_evaluation
 import lily_nbest
 import lily_persistence
+import lily_say_gate
 import lily_scorekeeper
 
 import logging
@@ -332,6 +333,91 @@ class LilyFloorMixin:
             return False
         ref = now if now is not None else time.time()
         return (ref - since) >= lily_config.responsiveness_budget_seconds()
+
+    # -- WO-LILY-NEVER-SILENT-001: the anti-silence floor -------------------
+    #
+    # A host-directed final is answered, or the room hears dead air — a party
+    # host's one unforgivable failure. This is the single counterweight wired
+    # at every silence outcome on that path: an empty/fail-closed generation
+    # (the empty-STOP guard yields the line), a say-pipeline suppression
+    # (tts_node schedules it), and the address-unanswered deadline (the
+    # watchdog fires it).
+    #
+    # `_awaiting_address_since` IS the verify-nothing-aired surface: FL-1 sets
+    # it on every host-directed final and note_playout_started clears it the
+    # instant real audio starts — so a truthy latch means "a host-directed
+    # final is owed a response and none has aired". `sk.host_speaking` is the
+    # second surface (her audio live right now). The floor stands down under
+    # a STOP/hold/question-pending (operator-ruled or room-owned silences —
+    # the same states gated_say already refuses). `_floor_fired_for_ts` keeps
+    # it to ONE line per outstanding address: a barge-in that cancels the
+    # floor before playout leaves the latch set, so there is no retry storm;
+    # a NEW host-directed final mints a new `_awaiting_address_since` and the
+    # floor may speak once for that one too.
+
+    def floor_line_owed(self) -> bool:
+        """True when a host-directed final is outstanding with nothing on the
+        air — the one condition under which the floor speaks. False while a
+        STOP/hold/question-pending binds the floor (those are operator-ruled
+        or room-owned silences), while her own audio is live, or once the
+        floor already fired for this address."""
+        since = self._awaiting_address_since
+        if not since:
+            return False
+        if (
+            self._delivery_stop_sticky
+            or self._hold_active
+            or self._question_pending
+        ):
+            return False
+        if getattr(self.sk, "host_speaking", False):
+            return False
+        if getattr(self, "_floor_fired_for_ts", 0.0) == since:
+            return False
+        return True
+
+    def _floor_context(self) -> str:
+        """"game" mid-game, else "lobby" (the pre-game hail case)."""
+        return (
+            "game"
+            if getattr(self, "game_started", False)
+            and not getattr(self, "game_over", False)
+            else "lobby"
+        )
+
+    def next_floor_line(self) -> str:
+        """The next rotated floor line for the current game context; marks
+        this outstanding address as floored (one line per address)."""
+        nonce = int(getattr(self, "_floor_line_nonce", 0) or 0)
+        self._floor_line_nonce = nonce + 1
+        self._floor_fired_for_ts = self._awaiting_address_since
+        return lily_say_gate.lily_floor_line(self._floor_context(), nonce)
+
+    def floor_line_if_owed(self, reason: str) -> str | None:
+        """The synchronous floor. If a host-directed final is owed a response
+        and nothing has aired, return the line to speak (marking the address
+        floored) and log it; else None. The empty-STOP guard yields this line
+        as its generation content instead of failing closed into silence."""
+        if not self.floor_line_owed():
+            return None
+        line = self.next_floor_line()
+        logger.warning(
+            "LILY_FLOOR | NEVER_SILENT | session=%s reason=%s context=%s "
+            "line=%r — host-directed final left silent; airing floor line",
+            self.sk.session_id, reason, self._floor_context(), line,
+        )
+        return line
+
+    def fire_floor_line(self, reason: str) -> bool:
+        """The dispatched floor: air the floor line as its own deterministic
+        turn — the say-pipeline-suppressed and watchdog paths, where there is
+        no live generation to yield into. Rides gated_say(text=...) so every
+        hygiene/leak/claim gate and the barge-in cancel path govern it exactly
+        like any other line. Returns True when a line was dispatched."""
+        line = self.floor_line_if_owed(reason)
+        if line is None:
+            return False
+        return self.gated_say(None, "floor", "", source=reason, text=line)
 
     def _question_pending_timed_out(self, now: float | None = None) -> bool:
         if not self._question_pending:
