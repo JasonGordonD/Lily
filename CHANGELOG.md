@@ -5,6 +5,63 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — WO-LILY-BARGE-RESILIENCE-001: she cannot be thrown off a barge
+
+Adults who may be drinking barge into MCQs and freeform to stop her and ask
+things. Barge-in stays an immediate cancel by design (Y7); this WO governs
+everything *after* the cancel. Spec: `~/lily-evidence/barge-resilience-000/
+SPEC.md` (session `lily-6A32BD-741b9b66`). Priority: scoring integrity, then
+"she never restates a result twice," then resume fidelity. Builds on
+QUESTION-FIRING-001 (delivery side) and NEVER-SILENT-001 (silence recovery).
+
+1. **P1 — verdict doubling under barge.** The q1 result aired THREE times
+   (transcript 205/216/249) because all three anti-repeat guards — C6
+   receipt-note, N12 `register_transition_narration`, `ORGANIC_PREEMPTED` —
+   bind at on-air CONFIRM, and a barge cancels the airing turn BEFORE it
+   confirms. New durable fact **"result for qN stated on air"** stamped at the
+   AIRING itself: `LilyGame._result_aired` + `note_result_aired` /
+   `result_aired_for` / `result_aired_recent` / `clear_result_aired` /
+   `stamp_result_aired_from_turn` (`lily_speech_delivery.py`), fired from
+   `tts_node` (`lily_agent.py`) on any outbound turn whose text matches
+   `lily_verdict_narration` against the open transition's journaled answer —
+   before the TTS frames yield, so a barge can no longer un-stamp it. Then
+   (a) the keyed `adjudicate_verdict` SAY is **hard-gated** on the fact
+   (`result_preaired` in `adjudicate`): once the result is on air the keyed
+   verdict is suppressed and its stage journaled+confirmed so N+1 still
+   releases; and (b) the C6 anti-double is extended into the **organic
+   system-prompt wrap** — a new `StateView.result_aired` slot injects
+   "ALREADY-RULED — do NOT restate it" while the fact is fresh
+   (`lily_glass.py`). The fact clears at the next non-steal `open_window` (a
+   steal rides the same question and never clears). Reuses the transition
+   journal + the receipt machinery; no new subsystem, Y7 untouched.
+2. **P0-4 — clipped-question grace scoring (scoring-side belt to
+   QUESTION-FIRING-001's delivery-side suspenders).** `_replay_pre_window_
+   answers` scanned only `ordered[0]` for a Tier-1 correct answer, so a
+   clipped/late-window early answer sitting behind an unrelated first buzz was
+   left inert until the (unreliable-for-a-clipped-question) window-close path —
+   the 12:28 Q3 "prostate" 0-score. It now scans EVERY replayed candidate and
+   adjudicates the first correct one into a clean window (dedupe by candidate
+   keeps it single). New reconciliation belt `LilyScorekeeper.reconcile_
+   attempts_scored` (fed by `_note_captured_answer` /
+   `_captured_answer_utterances`) runs at the end of `adjudicate`: every
+   captured answer utterance must still be an adjudicable candidate at the
+   ruling, else `RECONCILE_UNSCORED` fires loudly — a scored-0 miss is now
+   loud in its own session.
+3. **P0-3 — unread-choice MCQ answer (verified + pinned).** An answer naming a
+   choice not yet read aloud ("D" while only A-B aired) already scores against
+   the FULL armed sheet — `mc_early_answer_check` evaluates `self.armed_
+   question`, never the aired prefix. No code change; pinned by tests.
+4. **P2 — barge-to-ask ordering (R3).** `_question_barge_resume_watch` now
+   DEFERS the resume while she is on the air (`host_speaking`) answering the
+   interjected question ("what are the rules?"), so the pending read resumes
+   AFTER her answer instead of racing it — a bounded re-check loop
+   (`_BARGE_RESUME_MAX_DEFERRALS`), same idiom as the stale-claim watchdog, so
+   it can never leak. An answer that bound meanwhile stands the resume down.
+5. **Tests.** `tests/test_barge_resilience_001.py` (10: airing stamp, D1-D4
+   doubling, organic-wrap injection + clear) and
+   `tests/test_barge_resilience_001_scoring.py` (11: P0-1/2/3/4/5/6 scoring
+   integrity + R3 ordering). Full suite green: **2595** (2574 baseline + 21).
+
 ## 2026-08-14 — WO-LILY-HOTFIX-CHECKPOINT-MODE: checkpoint KeyError('mode') silently voiding all durable session state (P0)
 
 Live P0 from a call audit on session `lily-6A32BD-741b9b66` (served on 2b3e005).
