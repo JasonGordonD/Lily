@@ -5,6 +5,68 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — WO-PRMPT-LILY-GROUP-RECONCILE-001: auto-reconciler for fragmented returning-player identity groups
+
+One INDIVIDUAL fragmented across **31 voiceprint groups / 7 memory groups** in
+production. Root cause: an unrecognized session mints a fresh ephemeral
+room-name group and enrolls voiceprints under it; the `NAME_DOOR_AMBIGUOUS`
+fast lane then declined on >1 candidate, so a fragmented returner could never
+recover and the split self-worsened.
+
+**Deliverable 1 — auto-reconciler (permanent code).**
+- `lily_persistence.lily_merge_groups(supabase, canonical, duplicates, *, reason)`
+  — re-keys every group-keyed row onto the canonical group across
+  `lily_sessions`, `lily_memories`, `lily_group_facts`, `lily_asked_history`,
+  `lily_speaker_voiceprints`, `lily_group_prefs`, `lily_voice_identity`.
+  RE-KEY ONLY: unique-key collisions keep the newest and log the superseded
+  row's full content in a per-merge JSON audit (`LILY_MERGE_GROUPS`);
+  `lily_voice_identity` RETIRES the loser (never deletes — migration 021).
+  Session-keyed tables (`lily_transcripts`, `lily_answers`,
+  `lily_addressee_log`, `lily_acoustic_trajectories`, `lily_session_reports`,
+  `lily_image_attempts`) have no `group_id` and are RETAINED on their historical
+  `session_id`, re-parented transitively via `lily_sessions`. No DDL; idempotent.
+- **Merge triggers.** Verify-time heal in `upgrade_group_id` — a voice-verified
+  bind onto an existing group folds this session's ephemeral room-name orphan
+  (`old == session_id`) into the canonical group (`verify_time_heal`), gated so
+  a multi-player name-set family is never swept into one member's individual
+  group. Background sweep after a voice match
+  (`_merge_name_fragments_bg`) merges other **single-player, voice-linked**
+  fragments of the same individual (`background_name_fragment_sweep`).
+- **Safety bar** (`lily_reconcile_safety_bar`): auto-merge requires voice link
+  OR same device key OR a single-player group with matching sole name AND a
+  matcher-confirmed voice. Name-only overlap → `MERGE_CANDIDATE` (logged, never
+  merged). Individual-level: a multi-player group is a different collection.
+- **Stop the bleeding** (`_effective_enroll_group_id`): session-end voiceprint
+  enrollment keys to the stable device candidate group (dispatch/token
+  metadata) instead of the ephemeral room name when the live group is the
+  `room_name` fallback and the candidate was not voice-rejected. Only the
+  voiceprint WRITE is redirected; memory reads stay quarantined until a voice
+  match. `game._carried_device_group_id` remembers the device key even when its
+  memory is empty.
+- **Name-door softening** (`maybe_recognize_by_stated_name`): >1 candidate now
+  stages the most-recent WEAKLY (`AMBIGUOUS_PICKED_RECENT`, `verified=False`, so
+  the biometric still outranks); flat refusal survives only past
+  `_NAME_DOOR_AMBIGUOUS_CEILING` (12).
+
+**Deliverable 2 — consolidation script** `scripts/lily_group_reconcile.py`:
+`--dry-run` (default, read-only) prints/saves the full merge plan;
+`--execute` (explicit opt-in) runs `lily_merge_groups` per cluster
+(canonical = richest memory, tie-break recency; single-player groups sharing
+one sole name). Dry-run against PRMPT (read-only) found **1 cluster** —
+individual `rami` across 3 single-player groups (canonical `lily-A9B757`,
+q_sum=12; duplicates `grp_91940d8f…` and the audited ephemeral orphan
+`lily-6A32BD-741b9b66`); plan saved to
+`~/lily-evidence/group-reconcile-001/dry_run_plan.json`. `--execute` NOT run —
+coordinator consolidates after review.
+
+Also fixed a pre-existing leaked-coroutine warning: the glass state-publish
+chokepoint now builds `publish_metadata` only under a running loop (same guard
+as `publish_attributes_nowait`), so synchronous unit fixtures don't orphan it.
+
+Tests: `tests/test_group_reconcile.py` (merge, collisions, retention,
+idempotency, safety bar, fragment scan) + name-door softening cases in
+`tests/test_name_stated_recognition.py`. Full suite green.
+
 ## 2026-08-14 — WO-LILY-HOTFIX-CHECKPOINT-MODE: checkpoint KeyError('mode') silently voiding all durable session state (P0)
 
 Live P0 from a call audit on session `lily-6A32BD-741b9b66` (served on 2b3e005).

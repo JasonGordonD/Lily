@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_agent
 import lily_persistence
-from lily_identity import _STRONG_GROUP_SOURCES
+from lily_identity import _STRONG_GROUP_SOURCES, _NAME_DOOR_AMBIGUOUS_CEILING
 from test_recognition_variety import _make_game
 
 REAL_TABLE = "grp_0b07f989673dcf11e62da96343a39fd4006c1405"
@@ -126,9 +126,29 @@ def test_the_ledger_records_a_name_match_as_a_name_match():
     assert g.upgrades == [(REAL_TABLE, "name_stated")]
 
 
-def test_two_tables_with_the_same_name_resolve_to_neither():
-    """Being slow is recoverable; merging two families' histories is not."""
+def test_ambiguous_name_stages_the_most_recent_candidate_weakly():
+    """RECONCILE-001 (e) — softening. The old rule refused on >1 candidate,
+    which permanently killed the fast lane for a FRAGMENTED returner (one
+    person split across many groups is the common case, not two families).
+    Now the most-recent candidate is staged WEAKLY: the door opens, but
+    verified stays False so the ECAPA matcher still runs and still
+    outranks/rejects — a wrong guess never sticks, and a confirmed match
+    heals the split. lily_groups_for_player_name returns most-recent-first,
+    so groups[0] is the pick."""
     g = _game(groups_for_name=[REAL_TABLE, "grp_some_other_rami"])
+    assert _run(g.maybe_recognize_by_stated_name("Rami")) is True
+    assert g.upgrades == [(REAL_TABLE, "name_stated")]
+    assert g.device_identity_verified is False, (
+        "an ambiguous name must not close the door on the biometric"
+    )
+
+
+def test_too_many_same_name_candidates_still_wait_for_the_voice():
+    """Flat refusal survives past the ambiguity ceiling — a crowd of
+    same-name candidates too large to be one fragmented person, where a
+    wrong guess is likely and the voice is the only safe arbiter."""
+    groups = [f"grp_rami_{i}" for i in range(_NAME_DOOR_AMBIGUOUS_CEILING + 1)]
+    g = _game(groups_for_name=groups)
     assert _run(g.maybe_recognize_by_stated_name("Rami")) is False
     assert g.upgrades == []
 

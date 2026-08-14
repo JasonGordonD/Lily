@@ -2992,6 +2992,53 @@ also re-dispatched, which is where the *repetition* comes from — so barge-in
 failure and repeating herself are one fault, not two. The sink now breaks once
 the probe is full (`PROBE_COMPLETE`).
 
+### Group reconciliation — one individual, one identity (WO-PRMPT-LILY-GROUP-RECONCILE-001)
+
+The centroid arm above stopped orphaning *centroids* on a room name, but the
+**Speechmatics voiceprint arm** (`lily_enroll_voiceprints`) still keyed to
+`self.group_id` unconditionally — so every unrecognized session minted a fresh
+ephemeral room-name group and enrolled its voiceprints there. Production showed
+one individual (`rami`) split across **31 voiceprint groups / 7 memory groups**;
+the fast lane self-worsened (`NAME_DOOR_AMBIGUOUS` fired for a fragmented
+returner and declined, so it never recovered).
+
+Three changes close it, all **individual-level** — the recognition unit is the
+voice, not the group id, and a group is a *collection* of individuals:
+
+- **Stop the bleeding.** `_effective_enroll_group_id()` keys voiceprint
+  enrollment to the **stable device candidate** (the browser's dispatch/token
+  group) instead of the ephemeral room name, whenever the live group is the
+  `room_name` fallback and the candidate was not voice-*rejected*. Same-device
+  is an approved merge basis; reading that group's memory stays quarantined
+  until a voice match — only the *write* is redirected.
+- **Heal as we recognize.** `lily_merge_groups(canonical, [duplicates])`
+  re-keys every group-keyed row (`lily_sessions`, `lily_memories`,
+  `lily_group_facts`, `lily_asked_history`, `lily_speaker_voiceprints`,
+  `lily_group_prefs`, `lily_voice_identity`) onto the canonical group — RE-KEY
+  ONLY, unique-key collisions keep the newest and log the superseded row in a
+  JSON audit; `lily_voice_identity` *retires* rather than deletes. Session-keyed
+  rows (`lily_transcripts`, `lily_answers`, …) have no `group_id` and are
+  retained on their historical `session_id`, re-parented via `lily_sessions`. A
+  voice-verified upgrade folds the ephemeral orphan in at verification time
+  (`verify_time_heal`), and a background sweep merges other single-player voice-
+  linked fragments (`background_name_fragment_sweep`).
+- **Safety bar (`lily_reconcile_safety_bar`).** Auto-merge requires a voice
+  link, a same device key, OR a single-player group with a matching sole name
+  **and** a matcher-confirmed voice — never a shared first name alone
+  (`MERGE_CANDIDATE`, logged, not merged). A multi-player group is a different
+  collection and is never merged into an individual.
+- **Name-door softening.** `maybe_recognize_by_stated_name` no longer flat-
+  refuses on >1 candidate (the common case for a fragmented returner). It stages
+  the most-recent candidate **weakly** (`AMBIGUOUS_PICKED_RECENT`,
+  `verified=False`, so the ECAPA matcher still outranks/rejects); flat refusal
+  survives only past `_NAME_DOOR_AMBIGUOUS_CEILING` (12) — a crowd too large to
+  be one person.
+
+Consolidation is scriptable: `scripts/lily_group_reconcile.py --dry-run`
+(default, read-only) prints/saves the full merge plan; `--execute` (explicit
+opt-in) runs it. This narrows the modelling limit noted above — centroid
+segmentation by speaker label is still the remaining half.
+
 
 ## Environment
 

@@ -54,6 +54,15 @@ _KNOWN_GROUP_SOURCES = _STRONG_GROUP_SOURCES + (
     "name_stated",           # the player said a name this group's file knows
 )
 
+# RECONCILE-001 (e): the name-door serves fragmented returners, for whom >1
+# same-name candidate is the COMMON case (one person split across many
+# groups), so it stages the most-recent candidate weakly instead of refusing.
+# Flat refusal survives only past this ceiling — a crowd of same-name
+# candidates too large to be one fragmented person, where a wrong guess is
+# likely and the voice is the only safe arbiter. Sits above the observed worst
+# case (7 memory groups for a single individual) so real returners are served.
+_NAME_DOOR_AMBIGUOUS_CEILING = 12
+
 
 class LilyIdentityMixin:
     def late_recognition_blocked_reason(self) -> str | None:
@@ -750,9 +759,112 @@ class LilyIdentityMixin:
         ):
             return
         asyncio.ensure_future(lily_persistence.lily_enroll_voiceprints(
-            self.stt, self.supabase, lambda: self.group_id, self.sk,
+            self.stt, self.supabase, self._effective_enroll_group_id, self.sk,
             trigger=trigger,
         ))
+
+    def _effective_enroll_group_id(self) -> str:
+        """Group id voiceprint enrollment writes under. RECONCILE-001 (d) —
+        stop the bleeding: when the LIVE group is the ephemeral room-name
+        fallback but a device-STABLE candidate group was carried in
+        (dispatch/participant token metadata — the browser's localStorage id),
+        enroll under the DEVICE group. That stable key recurs every session
+        from the same browser, so the individual's voiceprints ACCUMULATE in
+        one place and the next session's matcher has real centroids to compare
+        — instead of a throwaway room name that mints a fresh fragment per
+        unrecognized session (the 31-group split). Same-device is an approved
+        merge basis; only the voiceprint WRITE is redirected — reading that
+        group's MEMORY stays quarantined until a voice match. A voice-REJECTED
+        candidate (a stranger on a shared device) is never written under, and
+        once identity is verified/upgraded self.group_id already IS the real
+        group, so the live id is used unchanged."""
+        live = self.group_id
+        if getattr(self, "group_id_source", "") != "room_name":
+            return live
+        if getattr(self, "device_identity_verified", False):
+            return live
+        if getattr(self, "device_identity_rejected", False):
+            return live
+        carried = getattr(self, "_carried_device_group_id", None)
+        if carried and carried != live:
+            return carried
+        return live
+
+    def _schedule_fragment_merge(self, canonical_group_id, emb, identities) -> None:
+        """RECONCILE-001 (b) background arm: after a voice-verified match,
+        sweep OTHER single-player fragments of the SAME individual into the
+        canonical group. Fire-and-forget, off the vocal path."""
+        if (
+            self.supabase is None
+            or not canonical_group_id
+            or emb is None
+            or not lily_config.voice_identity_enabled()
+        ):
+            return
+        asyncio.ensure_future(
+            self._merge_name_fragments_bg(
+                canonical_group_id, emb, list(identities or [])
+            )
+        )
+
+    async def _merge_name_fragments_bg(
+        self, canonical_group_id, emb, identities
+    ) -> None:
+        """Find single-player fragments sharing this individual's name(s),
+        confirm each by a voice link (its stored centroid vs the live
+        embedding), merge the voice-linked ones, and log the rest as
+        MERGE_CANDIDATE (name-only overlap never merges — safety bar)."""
+        try:
+            names = {
+                str(n).strip()
+                for n in (self.memory_player_names or [])
+                if str(n).strip()
+            }
+            if not names:
+                return
+            threshold = lily_config.voice_identity_match_threshold()
+            by_group: dict = {}
+            for row in identities or []:
+                gid = row.get("group_id") if isinstance(row, dict) else None
+                if gid and gid not in by_group:
+                    by_group[gid] = row.get("centroid")
+            to_merge: list = []
+            for name in names:
+                fragments = await lily_persistence.lily_find_name_fragments(
+                    self.supabase, canonical_group_id, name
+                )
+                for frag in fragments:
+                    gid = frag["group_id"]
+                    centroid = by_group.get(gid)
+                    sim = (
+                        lily_voice_identity.lily_cosine_similarity(emb, centroid)
+                        if centroid is not None else None
+                    )
+                    frag_voice = sim is not None and sim >= threshold
+                    frag["voice_match"] = frag_voice
+                    if lily_persistence.lily_reconcile_safety_bar(
+                        canonical_group_id, frag, voice_linked=frag_voice
+                    ):
+                        if gid not in to_merge:
+                            to_merge.append(gid)
+                    else:
+                        logger.info(
+                            "LILY_MERGE_GROUPS | MERGE_CANDIDATE | canonical=%s "
+                            "fragment=%s name=%s voice_sim=%s — name match "
+                            "without a confirmed voice link; NOT merging",
+                            canonical_group_id, gid, name,
+                            f"{sim:.3f}" if sim is not None else "none",
+                        )
+            if to_merge:
+                await lily_persistence.lily_merge_groups(
+                    self.supabase, canonical_group_id, to_merge,
+                    reason="background_name_fragment_sweep",
+                )
+        except Exception as e:
+            logger.warning(
+                "LILY_MERGE_GROUPS | BACKGROUND_SWEEP_FAILED | canonical=%s: %s",
+                canonical_group_id, e,
+            )
 
     # -- durable voice identity (WO-LILY-VOICE-IDENTITY-001) --------------------
     #
@@ -1005,6 +1117,7 @@ class LilyIdentityMixin:
             )
             if staged:
                 await self._promote_device_candidate("voice_identity_match")
+                self._schedule_fragment_merge(match["group_id"], emb, identities)
                 return True
             # V7: the biometric resolved an identity but the matched group
             # has no memory to stage (a thin prior table below the
@@ -1022,6 +1135,7 @@ class LilyIdentityMixin:
                 match["group_id"], "voice_identity_match"
             )
             self.device_identity_verified = True
+            self._schedule_fragment_merge(match["group_id"], emb, identities)
             return True
         except Exception as e:
             self._voice_identity_resolved = True
@@ -1212,6 +1326,31 @@ class LilyIdentityMixin:
         await lily_persistence.lily_rekey_group(
             self.supabase, old, new_group_id, self.sk.session_id
         )
+        # RECONCILE-001 (b): heal as we recognize. When a VOICE-VERIFIED match
+        # binds this session to an existing group and the old id was the
+        # EPHEMERAL room-name orphan this session minted (old == session_id),
+        # fold that whole fragment into the canonical group so it stops
+        # existing — the conservative rekey above moved only a subset. Gated to
+        # the room-name throwaway so a multi-player name-set family is NEVER
+        # swept into one member's individual group on a single voice match
+        # (individual vs. collection). Voice verification linking the two
+        # groups is the safety bar.
+        if (
+            old
+            and old != new_group_id
+            and source in _STRONG_GROUP_SOURCES
+            and old == self.sk.session_id
+        ):
+            try:
+                await lily_persistence.lily_merge_groups(
+                    self.supabase, new_group_id, [old],
+                    reason=f"verify_time_heal:{source}",
+                )
+            except Exception as e:
+                logger.warning(
+                    "LILY_MERGE_GROUPS | VERIFY_TIME_HEAL_FAILED | old=%s "
+                    "new=%s: %s", old, new_group_id, e,
+                )
         # Asked history follows the resolved id (rekey moved this
         # session's rows; the reload pulls the group's PRIOR sessions so
         # the no-repeat guard covers rematches immediately).
@@ -1390,15 +1529,34 @@ class LilyIdentityMixin:
         # on this door, so the no-match hold may release.
         self._identity_name_door_checked = True
         groups = [g for g in groups if g and g != self.group_id]
-        if len(groups) != 1:
-            if len(groups) > 1:
-                logger.info(
-                    "LILY_MEMORY | NAME_DOOR_AMBIGUOUS | name=%s groups=%d — "
-                    "declining to guess which table this is",
-                    name, len(groups),
-                )
+        if not groups:
             return False
-        candidate = groups[0]
+        if len(groups) == 1:
+            candidate = groups[0]
+        elif len(groups) > _NAME_DOOR_AMBIGUOUS_CEILING:
+            # Pathological: too many same-name candidates to be one fragmented
+            # person; a wrong guess is likely, so wait for the voice.
+            logger.info(
+                "LILY_MEMORY | NAME_DOOR_AMBIGUOUS | name=%s groups=%d — past "
+                "the ambiguity ceiling (%d); waiting for the voice rather than "
+                "guessing",
+                name, len(groups), _NAME_DOOR_AMBIGUOUS_CEILING,
+            )
+            return False
+        else:
+            # RECONCILE-001 (e): >1 candidate is the COMMON case for a returner
+            # fragmented across groups. Stage the MOST RECENT candidate WEAKLY
+            # (verified=False below) — the ECAPA matcher still runs and still
+            # outranks/rejects it, and a confirmed match then folds the split
+            # groups together via the background merge. lily_groups_for_player_
+            # name returns most-recent-first, so groups[0] is the freshest.
+            candidate = groups[0]
+            logger.info(
+                "LILY_MEMORY | AMBIGUOUS_PICKED_RECENT | name=%s groups=%d "
+                "picked=%s — staged weakly; the voice matcher still outranks "
+                "and a confirmed match heals the fragments",
+                name, len(groups), candidate,
+            )
         staged = await self.stage_device_candidate(candidate, "name_stated")
         if not staged:
             return False
