@@ -1464,7 +1464,7 @@ class LilySpeechDeliveryMixin:
                 ratio = lily_evaluation.lily_question_spoken_ratio(
                     armed.get("prompt", ""), spoken_text
                 )
-                if ratio >= 0.9:
+                if ratio >= lily_evaluation.QUESTION_SPOKEN_NEAR_MISS_RATIO:
                     logger.warning(
                         "LILY_DELIVERY | STRICT_REWRITE | session=%s q=%d "
                         "reason=pending_near_verbatim ratio=%.2f",
@@ -1495,7 +1495,7 @@ class LilySpeechDeliveryMixin:
             ratio = lily_evaluation.lily_question_spoken_ratio(
                 armed.get("prompt", ""), spoken_text
             )
-            if ratio >= 0.9:
+            if ratio >= lily_evaluation.QUESTION_SPOKEN_NEAR_MISS_RATIO:
                 logger.warning(
                     "LILY_DELIVERY | STRICT_REWRITE | session=%s q=%d "
                     "reason=near_verbatim_unregistered ratio=%.2f",
@@ -1640,10 +1640,11 @@ class LilySpeechDeliveryMixin:
                 # BEFORE the window opened by design — spoken-time
                 # membership (WS-10) would reject them; the buffering
                 # already gated on the armed question's claimed delivery.
-                last_result = self.sk.on_transcript_segment(
+                seg_obj = lily_scorekeeper.TranscriptSegment(
                     is_final=True, now=replay_ts, assume_in_window=True,
                     **seg
                 )
+                last_result = self.sk._dispatch_segment(seg_obj)
                 last_text = seg.get("text") or ""
                 logger.info(
                     "LILY_ANSWER | PRE_WINDOW_REPLAY | session=%s q=%d "

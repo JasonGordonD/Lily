@@ -189,7 +189,6 @@ def lily_apply_category_proposal(existing_row, name, family, group_id) -> dict:
 async def lily_bank_generated_question(
     supabase,
     question: dict,
-    mode: str,
 ) -> Optional[int]:
     """Bank one VERIFIED generated question into lily_questions with
     near-dup detection at insert time (banking-on-generation — this is
@@ -219,7 +218,7 @@ async def lily_bank_generated_question(
         if not isinstance(acceptable, list) or not acceptable:
             acceptable = [str(question.get("canonical_answer") or "").lower()]
         payload = {
-            "mode": mode or "general",
+            "mode": "adult",
             "category": category,
             "question": prompt,
             "canonical_answer": str(question.get("canonical_answer") or ""),
@@ -227,9 +226,7 @@ async def lily_bank_generated_question(
             "difficulty_tier": int(question.get("difficulty_tier") or 2),
             "reveal_color": question.get("reveal_color") or "",
             "source": "generated",
-            # Consent-safety: adult-mode output never surfaces at a
-            # general-mode table (lily_memory.lily_bank_mode_filter).
-            "adult": (mode or "general") == "adult",
+            "adult": True,
             "status": "active",
         }
 
@@ -251,7 +248,7 @@ async def lily_bank_generated_question(
         logger.info(
             "LILY_BANK | BANKED | id=%s category=%s tier=%s mode=%s prompt=%r",
             row_id, category, payload.get("difficulty_tier"),
-            payload.get("mode", mode), prompt[:80],
+            payload.get("mode"), prompt[:80],
         )
         return row_id
     except Exception as e:

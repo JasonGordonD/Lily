@@ -44,9 +44,11 @@ def test_reasoning_legacy_multimodal_helper_uses_shared_policy():
 
 
 def test_every_remaining_gemini_lane_imports_shared_policy():
+    # lily_imagegen dropped from this list in WO-PRMPT-LILY-REFACTOR-001:
+    # its Gemini image path was deleted (all imagegen rides Grok Imagine),
+    # so it is no longer a Gemini lane.
     for module in (
         lily_reasoning,
-        lily_imagegen,
         lily_search,
     ):
         source = inspect.getsource(module)
@@ -54,9 +56,8 @@ def test_every_remaining_gemini_lane_imports_shared_policy():
 
 
 def test_image_and_grounding_configs_apply_safety_settings():
-    image_source = inspect.getsource(
-        lily_imagegen.lily_generate_image_bytes
-    )
+    # Image generation no longer routes through Gemini (the content-mode gate
+    # was removed; all image gen goes to Grok Imagine), so only the grounded
+    # search lane still applies Gemini safety settings.
     search_source = inspect.getsource(lily_search._lily_grounded_generate)
-    assert "safety_settings" in image_source
     assert "safety_settings" in search_source

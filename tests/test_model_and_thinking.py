@@ -222,7 +222,7 @@ def test_adult_mode_routes_image_gen_to_xai(monkeypatch):
 
     monkeypatch.setattr(lily_imagegen, "_generate_image_bytes_xai", _fake_xai)
     data, mime, mdl = asyncio.new_event_loop().run_until_complete(
-        lily_imagegen.lily_generate_image_bytes("a scene", mode="adult")
+        lily_imagegen.lily_generate_image_bytes("a scene")
     )
     # The adult style/intensity chokepoint (7be4fef) prepends the base
     # scene with the register-tagged art direction — the routing is what
@@ -230,51 +230,3 @@ def test_adult_mode_routes_image_gen_to_xai(monkeypatch):
     assert called["xai"][0].startswith("a scene")
     assert mdl == "grok-imagine-image"
     assert data == b"xai-bytes"
-
-
-def test_general_mode_does_not_touch_xai(monkeypatch):
-    # General deck must NEVER hit the adult provider.
-    async def _boom(prompt, *, model=None):
-        raise AssertionError("general mode must not route to xAI")
-
-    monkeypatch.setattr(lily_imagegen, "_generate_image_bytes_xai", _boom)
-
-    # Stub the Gemini client so no network call happens; assert general
-    # takes the Gemini branch (model = the standard Lite pin).
-    class _Inline:
-        data = b"gemini-bytes"
-        mime_type = "image/jpeg"
-
-    class _Part:
-        inline_data = _Inline()
-        text = None
-
-    class _Content:
-        parts = [_Part()]
-
-    class _Cand:
-        content = _Content()
-
-    class _Resp:
-        candidates = [_Cand()]
-
-    class _Models:
-        def generate_content(self, **kw):
-            return _Resp()
-
-    class _Client:
-        def __init__(self, **kw):
-            self.models = _Models()
-
-    monkeypatch.setattr(lily_imagegen.google_genai, "Client", _Client)
-    monkeypatch.setattr(lily_config, "google_api_key", lambda: "k")
-    data, mime, mdl = asyncio.new_event_loop().run_until_complete(
-        lily_imagegen.lily_generate_image_bytes("a scene", mode="general")
-    )
-    assert data == b"gemini-bytes"
-    assert mdl == "gemini-3.1-flash-lite-image"
-
-
-def test_default_mode_is_general():
-    sig = inspect.signature(lily_imagegen.lily_generate_image_bytes)
-    assert sig.parameters["mode"].default == "general"

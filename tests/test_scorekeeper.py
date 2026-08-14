@@ -287,18 +287,6 @@ def test_record_result_counts_answers_correct():
     assert sk.players["Sarah"]["answers_correct"] == 2
 
 
-def test_set_mode_records_mode_changes():
-    sk = make_sk()
-    sk.set_mode("adult")
-    sk.set_mode("adult")  # no-op: not a change
-    sk.set_mode("general")
-    sk.set_mode("bogus")  # rejected: not a change
-    assert sk.mode_changes == [
-        {"from": "general", "to": "adult", "at_question": 0},
-        {"from": "adult", "to": "general", "at_question": 0},
-    ]
-
-
 def test_state_block_contents():
     sk = make_sk()
     sk.set_phase("round")
@@ -317,7 +305,6 @@ def test_state_block_contents():
     block = sk.build_state_block(now=101.5)
     assert block.startswith("[GAME STATE]")
     assert "phase=round" in block
-    assert "mode=general" in block
     assert "Sarah: score=2 streak=1" in block
     # start_question bumped every player's counter (4 -> 5)
     assert "quiet for 5 questions" in block
@@ -331,7 +318,6 @@ def test_snapshot_rehydrate_roundtrip():
     sk = make_sk()
     sk.set_phase("round")
     sk.round = 2
-    sk.set_mode("adult")
     sk.record_result("Dave", correct=True, points=3)
     sk.start_question({"prompt": "q7", "canonical_answer": "42"})
     snap = sk.snapshot()
@@ -340,7 +326,6 @@ def test_snapshot_rehydrate_roundtrip():
     sk2.rehydrate(snap)
     assert sk2.phase == "round"
     assert sk2.round == 2
-    assert sk2.mode == "adult"
     assert sk2.question_number == sk.question_number
     assert sk2.players["Dave"]["score"] == 3
     assert sk2.current_answer == "42"

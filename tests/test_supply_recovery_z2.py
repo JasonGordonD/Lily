@@ -251,20 +251,20 @@ def test_spine_2260354c_supply_recovers_while_q1_window_cycles(monkeypatch):
 
 
 def test_retry_deescalates_effort(monkeypatch):
-    # De-escalation on the retry: general medium -> low, adult high ->
-    # medium. The original draw passes effort=None (config default).
-    for mode, expected in (("general", "low"), ("adult", "medium")):
-        game = _make_game(mode=mode)
-        _arm_q1_window_open(game)
-        _patch_bank(monkeypatch, [None, None, BANK_Q])
+    # De-escalation on the retry: the unified adult deck retries at "medium"
+    # (content-mode gate removed — effort no longer branches on mode). The
+    # original draw passes effort=None (config default).
+    game = _make_game()
+    _arm_q1_window_open(game)
+    _patch_bank(monkeypatch, [None, None, BANK_Q])
 
-        async def scenario():
-            game.start_prefetch()
-            await _drain(game)
+    async def scenario():
+        game.start_prefetch()
+        await _drain(game)
 
-        _run(scenario())
-        assert game.reasoning.calls[0].get("effort") is None
-        assert game.reasoning.calls[1].get("effort") == expected, mode
+    _run(scenario())
+    assert game.reasoning.calls[0].get("effort") is None
+    assert game.reasoning.calls[1].get("effort") == "medium"
 
 
 def test_total_supply_failure_one_honest_line_and_pause_offer(monkeypatch):
@@ -293,34 +293,6 @@ def test_total_supply_failure_one_honest_line_and_pause_offer(monkeypatch):
     assert game._supply_exhausted_notified is True
     # The honest state also reaches the state block.
     assert any("pause" in n for n in game.sk.status_notes)
-
-
-def test_deliberate_discard_does_not_trigger_recovery():
-    # A mode-switch discard is a deliberate empty result, not a supply
-    # failure: no recovery task, no retry budget burned.
-    game = _make_game()
-    _arm_q1_window_open(game)
-
-    class _FlippingReasoning(_FakeReasoning):
-        def __init__(self, game):
-            super().__init__(results=[dict(BANK_Q)])
-            self._game = game
-
-        async def prefetch_question(self, sk, **kw):
-            result = await super().prefetch_question(sk, **kw)
-            self._game.sk.mode = "adult"  # deck flips while draw in flight
-            return result
-
-    game.reasoning = _FlippingReasoning(game)
-
-    async def scenario():
-        game.start_prefetch()
-        await asyncio.sleep(0.05)
-
-    _run(scenario())
-    assert game.next_question is None  # MODE_SWITCH_DISCARD
-    assert getattr(game, "_supply_recovery_task", None) is None
-    assert getattr(game, "_supply_retry_attempts", 0) == 0
 
 
 # -- insurance telemetry (the zero-telemetry leg of the RCA) -------------------

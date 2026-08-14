@@ -134,10 +134,12 @@ class _DeckReasoning:
         self.calls: list[dict] = []
 
     async def prefetch_question(self, sk, **kw):
-        self.calls.append({"mode": sk.mode, **kw})
+        self.calls.append({**kw})
         if self.delay:
             await asyncio.sleep(self.delay)
-        deck = self.adult if sk.mode == "adult" else self.general
+        # Unified adult deck: serve the adult queue (fall back to general
+        # only if no adult questions were staged).
+        deck = self.adult if self.adult else self.general
         return deck.pop(0) if deck else None
 
     async def prefetch_picture_question(self, supabase, **kw):
@@ -219,117 +221,6 @@ def _drain(game: LilyGame, seconds: float = 0.05) -> None:
     asyncio.run(scenario())
 
 
-# ─── 1. mode switch flushes and re-arms from the adult deck ─────────────────
-
-def test_enter_adult_flushes_leftover_general_and_arms_adult():
-    # The exact live defect: a general question armed + one prefetched when
-    # the table switches to adult. Both must die; the adult deck arms.
-    reasoning = _DeckReasoning(general=[GENERAL_Q2], adult=[ADULT_Q, ADULT_Q2])
-    game = _make_game(reasoning)
-    _arm(game, GENERAL_Q)
-    game.next_question = dict(GENERAL_Q2)
-
-    async def scenario():
-        game.sk.set_mode("adult")
-        game.flush_for_mode_switch(source="enter_adult")
-        # Flushed synchronously — nothing from the general deck survives.
-        assert game.armed_question is None
-        assert game.next_question is None
-        assert game.sk.current_question is None
-        await asyncio.sleep(0.05)
-        for t in asyncio.all_tasks():
-            if t is not asyncio.current_task():
-                t.cancel()
-
-    asyncio.run(scenario())
-
-    # Re-armed from the ADULT deck via the prefetch auto-advance...
-    assert game.armed_question is not None
-    assert game.armed_question["id"] == ADULT_Q["id"]
-    assert game.armed_question["category"] == "adult_couples"
-    # ...through the armed pipeline: identity registered on the scorekeeper.
-    assert game.sk.current_question["id"] == ADULT_Q["id"]
-    # The nudge tells Lily to ask it from the state block, word for word.
-    assert any("state block" in i for i in game.session.instructions)
-    # The general leftover can never be served as adult material.
-    assert (game.armed_question or {}).get("prompt") != GENERAL_Q["prompt"]
-
-
-def test_flush_sets_honest_gap_note_and_clears_screen():
-    reasoning = _DeckReasoning(adult=[ADULT_Q])
-    game = _make_game(reasoning)
-    _arm(game, GENERAL_Q)
-
-    async def scenario():
-        game.sk.set_mode("adult")
-        game.flush_for_mode_switch(source="enter_adult")
-        # Honest one-beat gap in the state block, BEFORE the new draw lands.
-        assert any(
-            "deck switch committed" in n and "adult deck" in n
-            for n in game.sk.status_notes
-        )
-        await asyncio.sleep(0.05)
-        for t in asyncio.all_tasks():
-            if t is not asyncio.current_task():
-                t.cancel()
-
-    asyncio.run(scenario())
-
-    # The old question came off the glass (metadata cleared).
-    cleared = [
-        json.loads(r.metadata) for r in game.ctx.api.room.requests
-    ]
-    assert any(doc["question"] == "" for doc in cleared)
-
-
-def test_flush_cancels_inflight_prefetch_and_relaunches():
-    # A slow general-deck draw is in flight when the mode flips: the flush
-    # cancels it, relaunches immediately, and the adult question lands.
-    reasoning = _DeckReasoning(general=[GENERAL_Q2], adult=[ADULT_Q],
-                               delay=0.2)
-    game = _make_game(reasoning)
-
-    async def scenario():
-        game.start_prefetch()  # general-deck draw, slow
-        old_task = game._prefetch_task
-        await asyncio.sleep(0)
-        game.sk.set_mode("adult")
-        game.flush_for_mode_switch(source="enter_adult")
-        assert game._prefetch_task is not old_task  # relaunched NOW
-        assert game._prefetch_stall_ticks == 0      # watchdog cooperation
-        await asyncio.sleep(0.3)
-        for t in asyncio.all_tasks():
-            if t is not asyncio.current_task():
-                t.cancel()
-
-    asyncio.run(scenario())
-
-    assert game.armed_question is not None
-    assert game.armed_question["category"] == "adult_couples"
-
-
-def test_inflight_old_deck_draw_discarded_by_commit_guard():
-    # The cancel race: a draw past its last await commits AFTER the mode
-    # flipped. The supply_mode commit guard discards it — a wrong-deck
-    # question never lands in next_question.
-    reasoning = _DeckReasoning(general=[GENERAL_Q2], delay=0.05)
-    game = _make_game(reasoning)
-
-    async def scenario():
-        game.start_prefetch()  # drawing from the GENERAL deck
-        await asyncio.sleep(0.01)
-        game.sk.set_mode("adult")  # flip mid-flight, no flush: guard only
-        await asyncio.sleep(0.1)   # let the old draw complete
-        for t in asyncio.all_tasks():
-            if t is not asyncio.current_task():
-                t.cancel()
-
-    asyncio.run(scenario())
-
-    assert game.next_question is None
-    assert game.armed_question is None
-
-
 # ─── 2. adult reveal keyed exactly once; no unkeyed reveal path ──────────────
 
 def test_adult_reveal_keyed_once_zero_suppressions(caplog):
@@ -337,7 +228,6 @@ def test_adult_reveal_keyed_once_zero_suppressions(caplog):
     # only one dispatch is ever generated, the gate's suppression count
     # stays ZERO (dedup by construction, not by catching duplicates).
     game = _make_game()
-    game.sk.set_mode("adult")
     game.sk.bind_speaker("S1", "Rami")
     _arm(game, ADULT_Q)
     now = time.time()
@@ -379,7 +269,6 @@ def test_no_reveal_can_fire_without_armed_identity():
     # NOTHING (no reveal speech, no packet, no metadata): the freestyle
     # double-reveal class is structurally impossible from this path.
     game = _make_game()
-    game.sk.set_mode("adult")
     game.sk.bind_speaker("S1", "Rami")
     assert game.armed_question is None
 
@@ -388,132 +277,6 @@ def test_no_reveal_can_fire_without_armed_identity():
     assert game.session.instructions == []
     assert game._pending_reveal_event is None
     assert game.ctx.api.room.requests == []
-
-
-# ─── 3. general never bleeds post-switch ─────────────────────────────────────
-
-def test_general_never_bleeds_after_switch_across_questions():
-    reasoning = _DeckReasoning(general=[GENERAL_Q2], adult=[ADULT_Q, ADULT_Q2])
-    game = _make_game(reasoning)
-    game.sk.bind_speaker("S1", "Rami")
-    _arm(game, GENERAL_Q)
-    game.next_question = dict(GENERAL_Q2)
-
-    served: list[dict] = []
-
-    async def scenario():
-        game.sk.set_mode("adult")
-        game.flush_for_mode_switch(source="enter_adult")
-        await asyncio.sleep(0.05)
-        served.append(dict(game.armed_question))
-        # Play the question through the full pipeline: window -> reveal
-        # (adjudicate arms the next prefetched question afterwards).
-        now = time.time()
-        game.sk.open_answer_window(duration=30.0, now=now)
-        _final(game, "doggy style", "S1", now + 3)
-        await game.adjudicate(steal_allowed=False)
-        await asyncio.sleep(0.05)
-        served.append(dict(game.armed_question))
-        for t in asyncio.all_tasks():
-            if t is not asyncio.current_task():
-                t.cancel()
-
-    asyncio.run(scenario())
-
-    assert [q["id"] for q in served] == [ADULT_Q["id"], ADULT_Q2["id"]]
-    for q in served:
-        assert q["category"] in ADULT_CATEGORY_FAMILIES
-        assert q["prompt"] not in (GENERAL_Q["prompt"], GENERAL_Q2["prompt"])
-    # Every supply call after the switch drew in adult mode.
-    assert all(c["mode"] == "adult" for c in reasoning.calls)
-
-
-def test_flushed_general_question_stays_excluded_from_redraw():
-    # F+G seam: the drawn-set registered the general question before the
-    # flush; flushing must NOT un-exclude it — a question that touched the
-    # wrong segment is never re-served this session.
-    reasoning = _DeckReasoning(adult=[ADULT_Q])
-    game = _make_game(reasoning)
-    game._drawn_ids = set()
-    game._drawn_hashes = set()
-    assert game._register_draw(GENERAL_Q) is True  # drawn pre-switch
-    _arm(game, GENERAL_Q)
-
-    async def scenario():
-        game.sk.set_mode("adult")
-        game.flush_for_mode_switch(source="enter_adult")
-        await asyncio.sleep(0.05)
-        for t in asyncio.all_tasks():
-            if t is not asyncio.current_task():
-                t.cancel()
-
-    asyncio.run(scenario())
-
-    assert GENERAL_Q["id"] in game._drawn_ids  # still excluded
-    assert game._register_draw(dict(GENERAL_Q)) is False
-
-
-# ─── 4. back to normal flushes the adult armed question ─────────────────────
-
-def test_back_to_normal_transcript_path_flushes_adult_and_rearms_general():
-    # The deterministic transcript-event layer: "back to normal" flips the
-    # sticky flag, flushes the armed ADULT question, and the general deck
-    # re-arms — the adult question is never finished or revealed.
-    reasoning = _DeckReasoning(general=[GENERAL_Q2], adult=[ADULT_Q2])
-    game = _make_game(reasoning)
-    game.sk.set_mode("adult")
-    game.sk.bind_speaker("S1", "Rami")
-    _arm(game, ADULT_Q)
-
-    async def scenario():
-        game.on_transcript_event(
-            {"control_command": "back_to_normal", "player": "Rami",
-             "candidate_recorded": False},
-            "okay, back to normal please",
-            speaker_label="S1",
-        )
-        # Committed in code, instantly.
-        assert game.sk.mode == "general"
-        assert game.armed_question is None
-        assert game.sk.current_question is None
-        await asyncio.sleep(0.05)
-        for t in asyncio.all_tasks():
-            if t is not asyncio.current_task():
-                t.cancel()
-
-    asyncio.run(scenario())
-
-    assert game.armed_question is not None
-    assert game.armed_question["id"] == GENERAL_Q2["id"]
-    assert game.armed_question["category"] not in ADULT_CATEGORY_FAMILIES
-    # The revert speech is honest about the re-draw and forbids finishing
-    # the adult question.
-    revert = [i for i in game.session.instructions if "back to normal" in i]
-    assert revert and "re-drawing" in revert[0]
-
-
-def test_back_to_normal_noop_outside_adult_mode():
-    reasoning = _DeckReasoning(general=[GENERAL_Q2])
-    game = _make_game(reasoning)
-    _arm(game, GENERAL_Q)
-
-    async def scenario():
-        game.on_transcript_event(
-            {"control_command": "back_to_normal", "player": None,
-             "candidate_recorded": False},
-            "back to normal",
-            speaker_label="S1",
-        )
-        await asyncio.sleep(0.02)
-        for t in asyncio.all_tasks():
-            if t is not asyncio.current_task():
-                t.cancel()
-
-    asyncio.run(scenario())
-
-    # General mode: nothing flushed, nothing spoken, question survives.
-    assert game.armed_question["id"] == GENERAL_Q["id"]
-    assert game.session.instructions == []
 
 
 # ─── 5. category label follows the bank row ─────────────────────────────────
@@ -571,17 +334,16 @@ _BANK_ROWS = [
 ]
 
 
-def _fetch(category, mode, rows=_BANK_ROWS):
+def _fetch(category, rows=_BANK_ROWS):
     return asyncio.new_event_loop().run_until_complete(
-        lily_fetch_bank_question(_FakeSupabase(rows), category, 1, [],
-                                 mode=mode)
+        lily_fetch_bank_question(_FakeSupabase(rows), category, 1, [])
     )
 
 
 def test_adult_mode_bank_serves_only_adult_rows():
     # Even when the requested family matches a GENERAL row exactly, adult
     # mode never serves it — the adult deck is the only deck.
-    q = _fetch("academic", mode="adult")
+    q = _fetch("academic")
     assert q is not None
     assert q["id"] in ("kb_2", "kb_3")
     assert q["category"] in ADULT_CATEGORY_FAMILIES
@@ -590,39 +352,19 @@ def test_adult_mode_bank_serves_only_adult_rows():
 def test_adult_row_keeps_its_own_category_label():
     # The row's own category survives serving — the requested round family
     # never overwrites it (the "academic category" announcement defect).
-    q = _fetch("adult_kink", mode="adult")
+    q = _fetch("adult_kink")
     assert q is not None
     assert q["prompt"] == "adult kink q"
     assert q["category"] == "adult_kink"
 
 
-def test_general_mode_still_excludes_adult_rows():
-    # The pre-existing consent guard is untouched by the deck cut.
-    q = _fetch("academic", mode="general")
-    assert q is not None
-    assert q["id"] == "kb_1"
-    assert q["category"] == "academic"
-
-
 def test_adult_deck_exhaustion_returns_none_never_general():
     rows = [r for r in _BANK_ROWS if not r["adult"]]
-    assert _fetch("academic", mode="adult", rows=rows) is None
-
-
-def test_category_rotation_is_mode_aware():
-    game = _make_game()
-    assert game._category_for_round(1) == "academic"
-    game.sk.set_mode("adult")
-    assert game._category_for_round(1) == "adult_couples"
-    assert game._category_for_round(2) == "adult_kink"
-    assert game._category_for_round(3) == "adult_couples"
-    game.sk.set_mode("general")
-    assert game._category_for_round(1) == "academic"
+    assert _fetch("academic", rows=rows) is None
 
 
 def test_state_block_labels_armed_adult_question_with_bank_category():
     game = _make_game()
-    game.sk.set_mode("adult")
     _arm(game, ADULT_Q)
     block = game.build_state_block()
     assert "adult_couples" in block

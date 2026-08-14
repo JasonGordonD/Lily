@@ -185,8 +185,8 @@ class _FakeSupabase:
         return _FakeTable(self.store, name)
 
 
-def _bank(supabase, question, mode="general"):
-    return asyncio.run(lily_bank_generated_question(supabase, question, mode))
+def _bank(supabase, question):
+    return asyncio.run(lily_bank_generated_question(supabase, question))
 
 
 def _question(prompt, category="academic", **overrides):
@@ -211,7 +211,8 @@ def test_generated_question_is_banked_with_generated_source():
     assert len(rows) == 1
     assert rows[0]["source"] == "generated"
     assert rows[0]["status"] == "active"
-    assert rows[0]["adult"] is False
+    # Unified adult deck: generated rows bank as adult=True.
+    assert rows[0]["adult"] is True
     assert rows[0]["question"] == "Which river runs through Paris?"
 
 
@@ -231,7 +232,7 @@ def test_fuzzy_dup_same_category_is_discarded_at_insert():
 
 def test_adult_mode_banks_with_adult_flag():
     fake = _FakeSupabase()
-    _bank(fake, _question("Which emperor taxed beards?"), mode="adult")
+    _bank(fake, _question("Which emperor taxed beards?"))
     row = fake.store["lily_questions"][0]
     assert row["adult"] is True
     assert row["mode"] == "adult"

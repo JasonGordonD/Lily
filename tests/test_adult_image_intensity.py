@@ -13,20 +13,18 @@ def test_default_suggestive():
     assert sk.adult_image_intensity == "suggestive"
 
 
-def test_set_and_clear_on_adult_exit():
+def test_set_and_reject_intensity():
+    # Unified adult deck (content-mode gate removed): intensity is set and
+    # rejected directly; there is no adult-exit reset (no general deck).
     sk = LilyScorekeeper(session_id="s1")
-    sk.set_mode("adult")
     assert sk.set_adult_image_intensity("explicit") is True
     assert sk.adult_image_intensity == "explicit"
     assert sk.set_adult_image_intensity("nope") is False
     assert sk.adult_image_intensity == "explicit"
-    sk.set_mode("general")
-    assert sk.adult_image_intensity == "suggestive"
 
 
 def test_snapshot_rehydrate_and_state_block():
     sk = LilyScorekeeper(session_id="s1")
-    sk.set_mode("adult")
     sk.set_adult_image_intensity("explicit")
     snap = sk.snapshot()
     assert snap["adult_image_intensity"] == "explicit"

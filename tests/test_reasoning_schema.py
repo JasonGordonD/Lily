@@ -120,10 +120,11 @@ def test_verification_schema_shape():
 def test_generate_question_sets_grok_model_effort_and_budget():
     seen: dict = {}
     r = _reasoning_with_stub(seen, json.dumps(VALID_QUESTION))
-    q = _run(r.generate_question("pop culture", 2, "general", []))
+    q = _run(r.generate_question("pop culture", 2, []))
     assert q is not None and q["canonical_answer"] == "Back to the Future"
     assert seen["model"] == "grok-4.5"
-    assert seen["effort"] == "medium"
+    # Unified adult deck: authoring/verification always runs high.
+    assert seen["effort"] == "high"
     assert seen["max_tokens"] == lily_config.reasoning_max_output_tokens()
 
 
@@ -135,7 +136,8 @@ def test_verify_question_sets_grok_model_effort_and_budget():
     ok, reason = _run(r.verify_question(dict(VALID_QUESTION)))
     assert ok is True and reason == "checks out"
     assert seen["model"] == "grok-4.5"
-    assert seen["effort"] == "medium"
+    # Unified adult deck: authoring/verification always runs high.
+    assert seen["effort"] == "high"
     assert seen["max_tokens"] == lily_config.reasoning_max_output_tokens()
 
 
@@ -153,7 +155,7 @@ def test_judge_uses_grok_model_effort_and_judge_budget():
 def test_schema_mode_output_parses_without_fence_stripper():
     seen: dict = {}
     r = _reasoning_with_stub(seen, json.dumps(VALID_QUESTION))
-    q = _run(r.generate_question("pop culture", 2, "general", []))
+    q = _run(r.generate_question("pop culture", 2, []))
     # LIVEFIRE-001 CLASS 6 (6e): the model's own id (q_7294) is overridden
     # with a process-unique id at shape time — the model reuses 4-digit ids
     # across generations (the live q_4821 collision), so allocation owns it.
@@ -166,14 +168,14 @@ def test_fenced_output_still_recovered_by_defensive_parser():
     fenced = "```json\n" + json.dumps(VALID_QUESTION) + "\n```"
     seen: dict = {}
     r = _reasoning_with_stub(seen, fenced)
-    q = _run(r.generate_question("pop culture", 2, "general", []))
+    q = _run(r.generate_question("pop culture", 2, []))
     assert q is not None and q["canonical_answer"] == "Back to the Future"
 
 
 def test_garbage_output_returns_none():
     seen: dict = {}
     r = _reasoning_with_stub(seen, "the model rambled with no json at all")
-    q = _run(r.generate_question("pop culture", 2, "general", []))
+    q = _run(r.generate_question("pop culture", 2, []))
     assert q is None
 
 

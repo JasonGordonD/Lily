@@ -701,8 +701,6 @@ async def lily_author_question(
 
     Returns the question fields only; the image, the gate and the banking
     are the caller's."""
-    import json
-
     fmt = str(plan.get("format") or "identify")
     spec = lily_arsenal_formats.lily_format_spec(fmt) or {}
     brief = lily_arsenal_content.lily_brief(partition) or {}

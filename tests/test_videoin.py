@@ -33,22 +33,6 @@ def test_game_state_reads_never_open_the_camera():
         assert lily_detect_camera_request(t) is False, t
 
 
-# -- V3.2: adult mode closes + refuses the lane (structural) -------------------
-
-def test_entering_adult_closes_open_camera():
-    sk = LilyScorekeeper("v")
-    assert sk.set_camera_lane("open") is True
-    sk.set_mode("adult")
-    assert sk.camera_lane == "off"  # forced closed on adult entry
-
-
-def test_camera_refused_in_adult_mode():
-    sk = LilyScorekeeper("v")
-    sk.set_mode("adult")
-    assert sk.set_camera_lane("open") is False
-    assert sk.camera_lane == "off"
-
-
 # -- V2: grounded lane status + honest lines ----------------------------------
 
 def _game(mode="general", lane="off", frame=None):
@@ -58,12 +42,6 @@ def _game(mode="general", lane="off", frame=None):
     g.sk.camera_lane = lane
     g._latest_video_frame = frame
     return g
-
-
-def test_status_unavailable_in_adult():
-    s = _game(mode="adult").camera_lane_status()
-    assert s["available"] is False
-    assert s["unavailable_reason"] == "adult_mode"
 
 
 def test_line_offers_when_closed_available():
@@ -80,11 +58,6 @@ def test_line_open_with_frame_carries_person_constraint():
     line = _game(lane="open", frame=object()).camera_lane_state_line()
     assert "OBJECT or SCENE" in line
     assert "never identify" in line and "person" in line.lower()
-
-
-def test_line_adult_never_offers():
-    line = _game(mode="adult").camera_lane_state_line()
-    assert "NOT available" in line and "grown-up deck" in line
 
 
 # -- one frame, this turn, then gone (no retention) ---------------------------

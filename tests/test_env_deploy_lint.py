@@ -51,6 +51,9 @@ _DEPLOY = _REPO / ".github" / "workflows" / "deploy.yml"
 # deliberate ops decision (move it into deploy.yml's `vars.` block if you
 # want to override it in production). None of these is a `_require` boot key.
 LILY_LOCAL_ONLY_ENV = {
+    # xAI API base URL — ships on its in-code default (https://api.x.ai/v1);
+    # env hook exists for local/test override only (WO-PRMPT-LILY-REFACTOR-001).
+    "LILY_XAI_BASE_URL",
     # WS-16 dereverb node — DEFAULT OFF, enabling is gated on the decision
     # memo + operator sign-off; move to deploy.yml only at enablement.
     "LILY_DEREVERB_NODE",

@@ -32,6 +32,7 @@ The scorekeeper owns ORDER; the LLM owns CORRECTNESS.
 import logging
 import re as _re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -1777,6 +1778,32 @@ def _clamp_confidence(value) -> Optional[float]:
     return round(v, 3)
 
 
+@dataclass(frozen=True, slots=True)
+class TranscriptSegment:
+    """Parameter object for LilyScorekeeper.on_transcript_segment — the 17
+    STT-segment inputs, in their historical declaration order. Frozen: the
+    dispatcher and its handlers read these fields and never mutate them
+    (all derived quantities live in local variables / the result dict)."""
+
+    text: str
+    speaker_label: Optional[str] = None
+    speaker_id: Optional[str] = None
+    speaker_name: Optional[str] = None
+    is_final: bool = True
+    segment_start_time: Optional[float] = None
+    segment_end_time: Optional[float] = None
+    diarization_confidence: Optional[float] = None
+    acoustic_confidence: Optional[float] = None
+    timestamp_source: Optional[str] = None
+    timing_drift_seconds: Optional[float] = None
+    now: Optional[float] = None
+    timestamp: Optional[str] = None
+    addressee_confidence: Optional[float] = None
+    echo_copy_signal: Optional[bool] = None
+    assume_in_window: bool = False
+    utterance_id: Optional[str] = None
+
+
 class LilyScorekeeper:
     """Pure local game state for one Lily session."""
 
@@ -1794,7 +1821,6 @@ class LilyScorekeeper:
         # Game-level state
         self.phase: str = "lobby"          # lobby | round | final | wrapup
         self.round: int = 0
-        self.mode: str = "general"         # general | adult (sticky flag)
         # Pacing (group prefs WO): "timed" (the standard clock — exactly
         # today's behavior) | "relaxed" (looser tempo; the agent layer
         # stretches the answer window by LILY_RELAXED_WINDOW_MULTIPLIER).
@@ -1818,9 +1844,7 @@ class LilyScorekeeper:
         # VIDEOIN-001: the sparse camera lane (show-and-tell). "off" (DEFAULT)
         # — the camera never publishes until a player explicitly opens it;
         # "open" while a look-at-this exchange is live. Transient: the lane
-        # auto-closes after the exchange, nothing is retained, and it is
-        # STRUCTURALLY unavailable in the adult deck (set_mode('adult')
-        # forces it off — an open camera and adult content never coexist).
+        # auto-closes after the exchange, nothing is retained.
         self.camera_lane: str = "off"
         # Adult image intensity (player-chosen): suggestive | explicit.
         # Default suggestive until the table confirms explicit. Cleared to
@@ -1896,9 +1920,6 @@ class LilyScorekeeper:
         # Honest-failure status notes (spec §11.2) — reasoning-node failures
         # land here and surface in the state block.
         self.status_notes: list[str] = []
-
-        # Mode changes recorded for the session report (B3 game_stats).
-        self.mode_changes: list[dict] = []
 
         # Score ledger (WS-7 score integrity): every scoring mutation —
         # adjudicated answers, bonuses, make-goods, rehydration seeds —
@@ -2765,10 +2786,64 @@ class LilyScorekeeper:
             "attribution_demoted": bool,
           }
         """
-        t = now if now is not None else time.time()
-        ts = timestamp or _now_iso()
-        segment_conf = _clamp_confidence(addressee_confidence)
-        result = {
+        return self._dispatch_segment(TranscriptSegment(
+            text=text,
+            speaker_label=speaker_label,
+            speaker_id=speaker_id,
+            speaker_name=speaker_name,
+            is_final=is_final,
+            segment_start_time=segment_start_time,
+            segment_end_time=segment_end_time,
+            diarization_confidence=diarization_confidence,
+            acoustic_confidence=acoustic_confidence,
+            timestamp_source=timestamp_source,
+            timing_drift_seconds=timing_drift_seconds,
+            now=now,
+            timestamp=timestamp,
+            addressee_confidence=addressee_confidence,
+            echo_copy_signal=echo_copy_signal,
+            assume_in_window=assume_in_window,
+            utterance_id=utterance_id,
+        ))
+
+    def _dispatch_segment(self, seg: "TranscriptSegment") -> dict:
+        """STT-segment dispatcher (behavior-preserving extraction of the
+        historical on_transcript_segment body). Partials display, finals
+        score — never the reverse. Returns the event dict documented on
+        on_transcript_segment."""
+        t = seg.now if seg.now is not None else time.time()
+        ts = seg.timestamp or _now_iso()
+        segment_conf = _clamp_confidence(seg.addressee_confidence)
+        result = self._init_segment_result(seg, t, segment_conf)
+
+        if not seg.text or not seg.text.strip():
+            return result
+
+        if not seg.is_final:
+            # Partials never score and never mutate state.
+            return result
+
+        clean = seg.text.strip()
+
+        if self._handle_quarantine(seg, result, clean, t, ts):
+            return result
+
+        player, segment_conf = self._classify_speaker(
+            seg, result, clean, t, segment_conf
+        )
+        self._detect_intents(seg, result, clean, t, player)
+        self._record_bookkeeping(seg, result, clean, t, ts, player)
+        self._handle_answer_candidate(
+            seg, result, clean, t, ts, player, segment_conf
+        )
+        return result
+
+    def _init_segment_result(
+        self, seg: "TranscriptSegment", t: float,
+        segment_conf: Optional[float],
+    ) -> dict:
+        """Seed the per-segment event dict returned to the agent layer."""
+        return {
             "player": None,
             "attribution": None,
             "system_directed": False,
@@ -2789,18 +2864,13 @@ class LilyScorekeeper:
             # N9: this final's own transcript id (see below — minted when
             # the STT event supplies none). Every consumer that records an
             # utterance reads it from here.
-            "utterance_id": utterance_id,
+            "utterance_id": seg.utterance_id,
         }
 
-        if not text or not text.strip():
-            return result
-
-        if not is_final:
-            # Partials never score and never mutate state.
-            return result
-
-        clean = text.strip()
-
+    def _handle_quarantine(
+        self, seg: "TranscriptSegment", result: dict, clean: str,
+        t: float, ts: str,
+    ) -> bool:
         # Segment sanity gate (WO-LILY-OMNIBUS-003 WS-10): corrupted STT
         # finals — spans of minutes, or finals landing minutes after the
         # speech ended — poisoned windows and talk-time (104s/206s spans,
@@ -2814,13 +2884,13 @@ class LilyScorekeeper:
         # wait for window open inflates its apparent finalization lag —
         # re-running the gate would false-positive legit early answers.
         span_s = None
-        if segment_start_time is not None and segment_end_time is not None:
-            span_s = abs(segment_end_time - segment_start_time)
+        if seg.segment_start_time is not None and seg.segment_end_time is not None:
+            span_s = abs(seg.segment_end_time - seg.segment_start_time)
         lag_s = None
-        if segment_end_time is not None:
-            lag_s = t - segment_end_time
+        if seg.segment_end_time is not None:
+            lag_s = t - seg.segment_end_time
         reasons = []
-        if not assume_in_window:
+        if not seg.assume_in_window:
             if (
                 span_s is not None
                 and span_s > lily_config.segment_max_span_seconds()
@@ -2831,36 +2901,41 @@ class LilyScorekeeper:
                 and lag_s > lily_config.segment_max_finalization_lag_seconds()
             ):
                 reasons.append("lag")
-        if reasons:
-            reason = "+".join(reasons)
-            result["quarantined"] = True
-            result["quarantine_reason"] = reason
-            self.quarantined_segments.append({
-                "text": clean,
-                "speaker_label": speaker_label,
-                "segment_start_time": segment_start_time,
-                "segment_end_time": segment_end_time,
-                "span_seconds": round(span_s, 3) if span_s is not None else None,
-                "finalization_lag_seconds": (
-                    round(lag_s, 3) if lag_s is not None else None
-                ),
-                "reason": reason,
-                "timestamp": ts,
-                "timestamp_source": timestamp_source,
-                "timing_drift_seconds": timing_drift_seconds,
-            })
-            if len(self.quarantined_segments) > QUARANTINE_LOG_SIZE:
-                del self.quarantined_segments[:-QUARANTINE_LOG_SIZE]
-            logger.warning(
-                "LILY_SEGMENT | QUARANTINED | session=%s q=%d speaker=%s "
-                "reason=%s span_s=%s lag_s=%s text=%r",
-                self.session_id, self.question_number, speaker_label,
-                reason, span_s, lag_s, clean[:80],
-            )
-            return result
+        if not reasons:
+            return False
+        reason = "+".join(reasons)
+        result["quarantined"] = True
+        result["quarantine_reason"] = reason
+        self.quarantined_segments.append({
+            "text": clean,
+            "speaker_label": seg.speaker_label,
+            "segment_start_time": seg.segment_start_time,
+            "segment_end_time": seg.segment_end_time,
+            "span_seconds": round(span_s, 3) if span_s is not None else None,
+            "finalization_lag_seconds": (
+                round(lag_s, 3) if lag_s is not None else None
+            ),
+            "reason": reason,
+            "timestamp": ts,
+            "timestamp_source": seg.timestamp_source,
+            "timing_drift_seconds": seg.timing_drift_seconds,
+        })
+        if len(self.quarantined_segments) > QUARANTINE_LOG_SIZE:
+            del self.quarantined_segments[:-QUARANTINE_LOG_SIZE]
+        logger.warning(
+            "LILY_SEGMENT | QUARANTINED | session=%s q=%d speaker=%s "
+            "reason=%s span_s=%s lag_s=%s text=%r",
+            self.session_id, self.question_number, seg.speaker_label,
+            reason, span_s, lag_s, clean[:80],
+        )
+        return True
 
+    def _classify_speaker(
+        self, seg: "TranscriptSegment", result: dict, clean: str,
+        t: float, segment_conf: Optional[float],
+    ) -> tuple:
         player, method = self.resolve_speaker(
-            speaker_id, speaker_label, speaker_name, clean
+            seg.speaker_id, seg.speaker_label, seg.speaker_name, clean
         )
         result["player"] = player
         result["attribution"] = method
@@ -2872,13 +2947,13 @@ class LilyScorekeeper:
         # classified under the state it just created. Membership keys on
         # SPOKEN time (WS-10), so a late final lands in the window its
         # speech belongs to.
-        if assume_in_window or self.window_contains(segment_start_time, now=t):
-            span_key = player or speaker_label
+        if seg.assume_in_window or self.window_contains(seg.segment_start_time, now=t):
+            span_key = player or seg.speaker_label
             if span_key:
-                seg_start = segment_start_time if segment_start_time is not None else t
+                seg_start = seg.segment_start_time if seg.segment_start_time is not None else t
                 seg_end = (
-                    segment_end_time
-                    if segment_end_time is not None
+                    seg.segment_end_time
+                    if seg.segment_end_time is not None
                     else seg_start
                 )
                 self._note_speaker_span(
@@ -2894,13 +2969,13 @@ class LilyScorekeeper:
         # alignment-checked fused value; otherwise derive it locally from
         # the separate telemetry signals.
         has_separate_signal = (
-            _coerce_confidence(diarization_confidence) is not None
-            or _coerce_confidence(acoustic_confidence) is not None
+            _coerce_confidence(seg.diarization_confidence) is not None
+            or _coerce_confidence(seg.acoustic_confidence) is not None
         )
         fused_conf = _clamp_confidence(segment_conf)
         if fused_conf is None:
             fused_conf = lily_overlap_fused_confidence(
-                diarization_confidence, acoustic_confidence
+                seg.diarization_confidence, seg.acoustic_confidence
             )
             segment_conf = fused_conf if has_separate_signal else None
         else:
@@ -2915,7 +2990,7 @@ class LilyScorekeeper:
                 now=t, addressee_confidence=segment_conf
             ),
             self.overlap_flag, self.session_id, self.question_number,
-            player or speaker_label or "?",
+            player or seg.speaker_label or "?",
         )
 
         # Crosstalk fusion (WO-LILY-CROSSTALK-FUSION): when PRIOR_OVERLAP is
@@ -2942,7 +3017,12 @@ class LilyScorekeeper:
                 fused_conf,
                 lily_config.overlap_fusion_min_confidence(),
             )
+        return player, segment_conf
 
+    def _detect_intents(
+        self, seg: "TranscriptSegment", result: dict, clean: str,
+        t: float, player: Optional[str],
+    ) -> None:
         # System-directed classification — "Lily, are you there?" must not
         # count as an answer attempt during an open window.
         is_sys, pattern = lily_is_system_directed(clean)
@@ -2950,12 +3030,12 @@ class LilyScorekeeper:
         if is_sys:
             logger.info(
                 "LILY_INTENT | SYSTEM_DIRECTED | session=%s speaker=%s pattern=%s",
-                self.session_id, player or speaker_label, pattern,
+                self.session_id, player or seg.speaker_label, pattern,
             )
 
         # Sticky command detection — fragment-joined per speaker
         # (2s accumulation, so "back to" + "normal" across finals fires).
-        frag_key = player or speaker_label or "unknown"
+        frag_key = player or seg.speaker_label or "unknown"
         frags = self._recent_fragments.setdefault(frag_key, [])
         frags.append((t, clean))
         self._recent_fragments[frag_key] = [
@@ -2969,7 +3049,7 @@ class LilyScorekeeper:
             self._recent_fragments[frag_key] = []
             logger.info(
                 "LILY_INTENT | CONTROL_COMMAND | session=%s speaker=%s command=%s",
-                self.session_id, player or speaker_label, command,
+                self.session_id, player or seg.speaker_label, command,
             )
         else:
             # Media-mode spoken choice (sub-agent K) — same fragment-joined
@@ -2981,13 +3061,17 @@ class LilyScorekeeper:
                 self._recent_fragments[frag_key] = []
                 logger.info(
                     "LILY_INTENT | MEDIA_CHOICE | session=%s speaker=%s choice=%s",
-                    self.session_id, player or speaker_label, choice,
+                    self.session_id, player or seg.speaker_label, choice,
                 )
 
+    def _record_bookkeeping(
+        self, seg: "TranscriptSegment", result: dict, clean: str,
+        t: float, ts: str, player: Optional[str],
+    ) -> None:
         # Per-player bookkeeping
         duration = 0.0
-        if segment_start_time is not None and segment_end_time is not None:
-            duration = max(0.0, segment_end_time - segment_start_time)
+        if seg.segment_start_time is not None and seg.segment_end_time is not None:
+            duration = max(0.0, seg.segment_end_time - seg.segment_start_time)
         if duration <= 0:
             duration = len(clean.split()) * 0.4
 
@@ -3000,20 +3084,20 @@ class LilyScorekeeper:
             # window; survives question transitions (the echo may land in a
             # different window than the original).
             self._record_bound_answer(clean, player, t)
-        elif speaker_label:
-            self.unrostered_labels[speaker_label] = (
-                self.unrostered_labels.get(speaker_label, 0) + 1
+        elif seg.speaker_label:
+            self.unrostered_labels[seg.speaker_label] = (
+                self.unrostered_labels.get(seg.speaker_label, 0) + 1
             )
             result["unrostered"] = True
             logger.info(
                 "LILY_STATE | UNROSTERED_SPEAKER | session=%s label=%s text=%r",
-                self.session_id, speaker_label, clean[:80],
+                self.session_id, seg.speaker_label, clean[:80],
             )
 
         # Transcript buffer (rolling)
         self.transcript_buffer.append({
-            "speaker": player or speaker_label or "?",
-            "speaker_label": speaker_label,
+            "speaker": player or seg.speaker_label or "?",
+            "speaker_label": seg.speaker_label,
             "text": clean,
             "timestamp": ts,
             "duration": duration,
@@ -3021,221 +3105,225 @@ class LilyScorekeeper:
         if len(self.transcript_buffer) > TRANSCRIPT_BUFFER_SIZE:
             self.transcript_buffer = self.transcript_buffer[-TRANSCRIPT_BUFFER_SIZE:]
 
+    def _handle_answer_candidate(
+        self, seg: "TranscriptSegment", result: dict, clean: str,
+        t: float, ts: str, player: Optional[str],
+        segment_conf: Optional[float],
+    ) -> None:
         # Answer-window candidate recording: finals only, window open,
         # not system-directed, not a control command. Segments outside an
         # open window are game-inert — they reach Lily conversationally but
         # never the scoring path.
-        if (
+        if not (
             (
-                assume_in_window
-                or self.window_contains(segment_start_time, now=t)
+                seg.assume_in_window
+                or self.window_contains(seg.segment_start_time, now=t)
             )
-            and not is_sys
-            and not command
+            and not result["system_directed"]
+            and not result["control_command"]
             and not result.get("media_choice")
         ):
-            seg_start = (
-                segment_start_time if segment_start_time is not None else t
+            return
+        seg_start = (
+            seg.segment_start_time if seg.segment_start_time is not None else t
+        )
+        seg_end = (
+            seg.segment_end_time if seg.segment_end_time is not None else seg_start
+        )
+        # N9: capture binds an UTTERANCE, identified by its own
+        # transcript id — never "most recent", never "first-seen
+        # fragment for that speaker". The live q_1052 row recorded
+        # Rami's earlier "Go." while his actual "Okay. It's Jupiter."
+        # never entered the ledger at all: a DIFFERENT utterance sat in
+        # his slot. When the STT event carries no id we mint a stable
+        # one so the binding can never silently degrade to a slot.
+        uid = seg.utterance_id or self._mint_utterance_id(
+            seg.speaker_label, seg_start
+        )
+        result["utterance_id"] = uid
+        # N9 grace margin telemetry: how far past the deadline this
+        # answer was spoken. Non-positive = inside the window; positive
+        # = admitted on the STATED grace margin.
+        past_deadline = self.seconds_past_deadline(seg_start)
+        if past_deadline is not None and past_deadline > 0:
+            result["late_within_grace"] = True
+            result["seconds_late"] = past_deadline
+            logger.info(
+                "LILY_ANSWER | LATE_WITHIN_GRACE | session=%s q=%d "
+                "label=%s late=%.3fs grace=%.3fs text=%r",
+                self.session_id, self.question_number, seg.speaker_label,
+                past_deadline, lily_config.late_answer_grace_seconds(),
+                clean[:60],
             )
-            seg_end = (
-                segment_end_time if segment_end_time is not None else seg_start
+        # PATCH-001 T5(c) evaluator hygiene: a backchannel ("Yeah") or
+        # a bare roster-name fragment ("Chris.") in an open window is
+        # LOGGED, never adjudicated as an attempt — the live fixtures
+        # scored "Yeah" incorrect and wrote a null-player "Chris." row,
+        # consuming those players' judgments. Answer-surface matches
+        # always pass (a yes/no question keeps "yeah" scoreable).
+        # HOTFIX-006 N4 extends the same hook to meta-speech: questions
+        # to the host, corrections, complaints, procedural remarks.
+        non_answer = lily_evaluation.lily_non_answer_utterance(
+            clean, self.current_question, list(self.players)
+        )
+        if non_answer:
+            result["non_answer"] = non_answer
+            logger.info(
+                "LILY_ANSWER | NON_ANSWER_LOGGED | session=%s q=%d "
+                "label=%s reason=%s text=%r — not an attempt",
+                self.session_id, self.question_number,
+                seg.speaker_label, non_answer, clean[:60],
             )
-            # N9: capture binds an UTTERANCE, identified by its own
-            # transcript id — never "most recent", never "first-seen
-            # fragment for that speaker". The live q_1052 row recorded
-            # Rami's earlier "Go." while his actual "Okay. It's Jupiter."
-            # never entered the ledger at all: a DIFFERENT utterance sat in
-            # his slot. When the STT event carries no id we mint a stable
-            # one so the binding can never silently degrade to a slot.
-            uid = utterance_id or self._mint_utterance_id(
-                speaker_label, seg_start
-            )
-            result["utterance_id"] = uid
-            # N9 grace margin telemetry: how far past the deadline this
-            # answer was spoken. Non-positive = inside the window; positive
-            # = admitted on the STATED grace margin.
-            past_deadline = self.seconds_past_deadline(seg_start)
-            if past_deadline is not None and past_deadline > 0:
-                result["late_within_grace"] = True
-                result["seconds_late"] = past_deadline
-                logger.info(
-                    "LILY_ANSWER | LATE_WITHIN_GRACE | session=%s q=%d "
-                    "label=%s late=%.3fs grace=%.3fs text=%r",
-                    self.session_id, self.question_number, speaker_label,
-                    past_deadline, lily_config.late_answer_grace_seconds(),
-                    clean[:60],
-                )
-            # PATCH-001 T5(c) evaluator hygiene: a backchannel ("Yeah") or
-            # a bare roster-name fragment ("Chris.") in an open window is
-            # LOGGED, never adjudicated as an attempt — the live fixtures
-            # scored "Yeah" incorrect and wrote a null-player "Chris." row,
-            # consuming those players' judgments. Answer-surface matches
-            # always pass (a yes/no question keeps "yeah" scoreable).
-            # HOTFIX-006 N4 extends the same hook to meta-speech: questions
-            # to the host, corrections, complaints, procedural remarks.
-            non_answer = lily_evaluation.lily_non_answer_utterance(
-                clean, self.current_question, list(self.players)
-            )
-            if non_answer:
-                result["non_answer"] = non_answer
-                logger.info(
-                    "LILY_ANSWER | NON_ANSWER_LOGGED | session=%s q=%d "
-                    "label=%s reason=%s text=%r — not an attempt",
-                    self.session_id, self.question_number,
-                    speaker_label, non_answer, clean[:60],
-                )
-                return result
-            if player:
-                key = player
-            else:
-                # WS-8 ghost-label posture: an unbound single-utterance
-                # label duplicating a bound player's just-recorded answer
-                # inside the echo window is a diarizer echo phantom — fold
-                # it (no candidate, no score, no "and you are?" prompt)
-                # rather than letting a ceiling-spawned S5/S6/S7 absorb a
-                # reverberant copy of a real answer.
-                if self._ghost_fold_echo(
-                    speaker_label, clean, t, echo_copy_signal=echo_copy_signal
-                ):
-                    result["ghost_folded"] = True
-                    return result
-                # Open-floor fallback: unrostered answer is never silently
-                # attributed — recorded under its label for Lily to resolve
-                # in character ("great answer — and you are?").
-                key = f"unrostered:{speaker_label or 'UU'}"
-            existing = self.answer_candidates.get(key)
-            # N3 invariant 2: a candidate left over from an EARLIER
-            # question's window is not a slot this window's speech may
-            # revise into. In lily-4FB3B2 both answer rows were filed
-            # against q_4821 — close_answer_window never cleared candidates,
-            # so Rhonda's answer to the Frankenstein question was absorbed
-            # as a "revision" of her q_4821 candidate and inherited its
-            # question id. A final arriving in a DIFFERENT window starts a
-            # fresh candidate bound to the window it actually arrived in.
-            if existing is not None and not self.candidate_bound_to(
-                existing,
+            return
+        if player:
+            key = player
+        else:
+            # WS-8 ghost-label posture: an unbound single-utterance
+            # label duplicating a bound player's just-recorded answer
+            # inside the echo window is a diarizer echo phantom — fold
+            # it (no candidate, no score, no "and you are?" prompt)
+            # rather than letting a ceiling-spawned S5/S6/S7 absorb a
+            # reverberant copy of a real answer.
+            if self._ghost_fold_echo(
+                seg.speaker_label, clean, t, echo_copy_signal=seg.echo_copy_signal
+            ):
+                result["ghost_folded"] = True
+                return
+            # Open-floor fallback: unrostered answer is never silently
+            # attributed — recorded under its label for Lily to resolve
+            # in character ("great answer — and you are?").
+            key = f"unrostered:{seg.speaker_label or 'UU'}"
+        existing = self.answer_candidates.get(key)
+        # N3 invariant 2: a candidate left over from an EARLIER
+        # question's window is not a slot this window's speech may
+        # revise into. In lily-4FB3B2 both answer rows were filed
+        # against q_4821 — close_answer_window never cleared candidates,
+        # so Rhonda's answer to the Frankenstein question was absorbed
+        # as a "revision" of her q_4821 candidate and inherited its
+        # question id. A final arriving in a DIFFERENT window starts a
+        # fresh candidate bound to the window it actually arrived in.
+        if existing is not None and not self.candidate_bound_to(
+            existing,
+            self.answer_window_question_id,
+            self.answer_window_question_index,
+        ):
+            logger.info(
+                "LILY_ANSWER | STALE_CANDIDATE_REPLACED | session=%s "
+                "q=%d key=%s was=%s/%s now=%s/%s — a new window's "
+                "answer never revises the previous window's candidate",
+                self.session_id, self.question_number, key,
+                existing.get("window_question_id"),
+                existing.get("window_question_index"),
                 self.answer_window_question_id,
                 self.answer_window_question_index,
-            ):
-                logger.info(
-                    "LILY_ANSWER | STALE_CANDIDATE_REPLACED | session=%s "
-                    "q=%d key=%s was=%s/%s now=%s/%s — a new window's "
-                    "answer never revises the previous window's candidate",
-                    self.session_id, self.question_number, key,
-                    existing.get("window_question_id"),
-                    existing.get("window_question_index"),
-                    self.answer_window_question_id,
-                    self.answer_window_question_index,
-                )
-                del self.answer_candidates[key]
-                existing = None
-            if existing is None:
-                # First final claims the player's slot — its timestamp is
-                # their position in the answer order.
-                attempt_entry = {
-                    "text": clean,
-                    "segment_start_time": seg_start,
-                    "segment_end_time": seg_end,
-                    "timestamp": ts,
-                    "timestamp_source": timestamp_source,
-                    "timing_drift_seconds": timing_drift_seconds,
-                    # N9: the utterance's own identity travels with it.
-                    "utterance_id": uid,
-                }
-                if segment_conf is not None:
-                    attempt_entry["addressee_confidence"] = segment_conf
-                self.answer_candidates[key] = {
-                    "player": player,
-                    "speaker_label": speaker_label,
-                    "text": clean,
-                    "utterance_id": uid,
-                    "segment_start_time": seg_start,
-                    "segment_end_time": seg_end,
-                    "timestamp": ts,
-                    "unrostered": player is None,
-                    # N3 invariant 2: the question whose window this
-                    # candidate arrived in, stamped at RECORD time from the
-                    # identity captured at window-open. Adjudication filters
-                    # on it and the ledger write carries it — nothing is
-                    # inferred from whatever happens to be armed later.
-                    "window_question_id": self.answer_window_question_id,
-                    "window_question_index": self.answer_window_question_index,
-                    "window_registered": self.answer_window_registered,
-                    "addressee_fused_confidence": result.get(
-                        "addressee_fused_confidence"
-                    ),
-                    "addressee_confidence": segment_conf,
-                    "diarization_confidence": _coerce_confidence(
-                        diarization_confidence
-                    ),
-                    "acoustic_confidence": _coerce_confidence(acoustic_confidence),
-                    "timestamp_source": timestamp_source,
-                    "timing_drift_seconds": timing_drift_seconds,
-                    # Every in-window final from this player, in order —
-                    # adjudication judges the whole set (self-correction,
-                    # live 2026-07-15: "the spine… no, the femur" must be
-                    # able to score on the femur).
-                    "attempts": [attempt_entry],
-                }
-                result["candidate_recorded"] = True
-                self._note_addressee_confidence(segment_conf)
-                if player:
-                    self.players[player]["answers_attempted"] += 1
-                logger.info(
-                    "LILY_STATE | ANSWER_CANDIDATE | session=%s q=%d key=%s t=%.3f text=%r",
-                    self.session_id, self.question_number, key, seg_start, clean[:80],
-                )
-                self.note_recent_answer_text(clean)
-            else:
-                # Self-correction (live 2026-07-15 fix): a later final from
-                # the SAME player is a revision, not noise. It joins their
-                # attempt set and becomes their current answer; their ORDER
-                # position stays the first final (first-final-wins orders
-                # players against each other, it never locks a player out
-                # of revising). Adjudication scores the earliest CORRECT
-                # attempt across the table, so a revision can win only from
-                # its own (later) timestamp.
-                existing["text"] = clean
-                existing["utterance_id"] = uid
-                existing["timestamp"] = ts
-                existing["segment_end_time"] = seg_end
-                existing["addressee_fused_confidence"] = result.get(
+            )
+            del self.answer_candidates[key]
+            existing = None
+        if existing is None:
+            # First final claims the player's slot — its timestamp is
+            # their position in the answer order.
+            attempt_entry = {
+                "text": clean,
+                "segment_start_time": seg_start,
+                "segment_end_time": seg_end,
+                "timestamp": ts,
+                "timestamp_source": seg.timestamp_source,
+                "timing_drift_seconds": seg.timing_drift_seconds,
+                # N9: the utterance's own identity travels with it.
+                "utterance_id": uid,
+            }
+            if segment_conf is not None:
+                attempt_entry["addressee_confidence"] = segment_conf
+            self.answer_candidates[key] = {
+                "player": player,
+                "speaker_label": seg.speaker_label,
+                "text": clean,
+                "utterance_id": uid,
+                "segment_start_time": seg_start,
+                "segment_end_time": seg_end,
+                "timestamp": ts,
+                "unrostered": player is None,
+                # N3 invariant 2: the question whose window this
+                # candidate arrived in, stamped at RECORD time from the
+                # identity captured at window-open. Adjudication filters
+                # on it and the ledger write carries it — nothing is
+                # inferred from whatever happens to be armed later.
+                "window_question_id": self.answer_window_question_id,
+                "window_question_index": self.answer_window_question_index,
+                "window_registered": self.answer_window_registered,
+                "addressee_fused_confidence": result.get(
                     "addressee_fused_confidence"
-                )
-                if segment_conf is not None:
-                    existing["addressee_confidence"] = segment_conf
-                existing["diarization_confidence"] = _coerce_confidence(
-                    diarization_confidence
-                )
-                existing["acoustic_confidence"] = _coerce_confidence(
-                    acoustic_confidence
-                )
-                existing["timestamp_source"] = timestamp_source
-                existing["timing_drift_seconds"] = timing_drift_seconds
-                existing.setdefault("attempts", []).append(
-                    {
-                        "text": clean,
-                        "segment_start_time": seg_start,
-                        "segment_end_time": seg_end,
-                        "timestamp": ts,
-                        "timestamp_source": timestamp_source,
-                        "timing_drift_seconds": timing_drift_seconds,
-                        "utterance_id": uid,
-                        **(
-                            {"addressee_confidence": segment_conf}
-                            if segment_conf is not None
-                            else {}
-                        ),
-                    }
-                )
-                result["candidate_recorded"] = True
-                self._note_addressee_confidence(segment_conf)
-                logger.info(
-                    "LILY_STATE | ANSWER_REVISED | session=%s q=%d key=%s t=%.3f text=%r",
-                    self.session_id, self.question_number, key, seg_start, clean[:80],
-                )
-
-        return result
+                ),
+                "addressee_confidence": segment_conf,
+                "diarization_confidence": _coerce_confidence(
+                    seg.diarization_confidence
+                ),
+                "acoustic_confidence": _coerce_confidence(seg.acoustic_confidence),
+                "timestamp_source": seg.timestamp_source,
+                "timing_drift_seconds": seg.timing_drift_seconds,
+                # Every in-window final from this player, in order —
+                # adjudication judges the whole set (self-correction,
+                # live 2026-07-15: "the spine… no, the femur" must be
+                # able to score on the femur).
+                "attempts": [attempt_entry],
+            }
+            result["candidate_recorded"] = True
+            self._note_addressee_confidence(segment_conf)
+            if player:
+                self.players[player]["answers_attempted"] += 1
+            logger.info(
+                "LILY_STATE | ANSWER_CANDIDATE | session=%s q=%d key=%s t=%.3f text=%r",
+                self.session_id, self.question_number, key, seg_start, clean[:80],
+            )
+            self.note_recent_answer_text(clean)
+        else:
+            # Self-correction (live 2026-07-15 fix): a later final from
+            # the SAME player is a revision, not noise. It joins their
+            # attempt set and becomes their current answer; their ORDER
+            # position stays the first final (first-final-wins orders
+            # players against each other, it never locks a player out
+            # of revising). Adjudication scores the earliest CORRECT
+            # attempt across the table, so a revision can win only from
+            # its own (later) timestamp.
+            existing["text"] = clean
+            existing["utterance_id"] = uid
+            existing["timestamp"] = ts
+            existing["segment_end_time"] = seg_end
+            existing["addressee_fused_confidence"] = result.get(
+                "addressee_fused_confidence"
+            )
+            if segment_conf is not None:
+                existing["addressee_confidence"] = segment_conf
+            existing["diarization_confidence"] = _coerce_confidence(
+                seg.diarization_confidence
+            )
+            existing["acoustic_confidence"] = _coerce_confidence(
+                seg.acoustic_confidence
+            )
+            existing["timestamp_source"] = seg.timestamp_source
+            existing["timing_drift_seconds"] = seg.timing_drift_seconds
+            existing.setdefault("attempts", []).append(
+                {
+                    "text": clean,
+                    "segment_start_time": seg_start,
+                    "segment_end_time": seg_end,
+                    "timestamp": ts,
+                    "timestamp_source": seg.timestamp_source,
+                    "timing_drift_seconds": seg.timing_drift_seconds,
+                    "utterance_id": uid,
+                    **(
+                        {"addressee_confidence": segment_conf}
+                        if segment_conf is not None
+                        else {}
+                    ),
+                }
+            )
+            result["candidate_recorded"] = True
+            self._note_addressee_confidence(segment_conf)
+            logger.info(
+                "LILY_STATE | ANSWER_REVISED | session=%s q=%d key=%s t=%.3f text=%r",
+                self.session_id, self.question_number, key, seg_start, clean[:80],
+            )
 
     # -- game flow ---------------------------------------------------------
 
@@ -3711,45 +3799,12 @@ class LilyScorekeeper:
             return True
         return False
 
-    def set_mode(self, mode: str) -> None:
-        if mode not in ("general", "adult"):
-            return
-        if mode != self.mode:
-            logger.info(
-                "LILY_STATE | MODE_CHANGE | session=%s from=%s to=%s",
-                self.session_id, self.mode, mode,
-            )
-            self.mode_changes.append({
-                "from": self.mode,
-                "to": mode,
-                "at_question": self.question_number,
-            })
-        self.mode = mode
-        # No residue: leaving adult always resets image intensity.
-        if mode == "general":
-            self.adult_image_intensity = "suggestive"
-        # VIDEOIN-001 V3 constraint 2 (structural): entering the adult deck
-        # CLOSES and disables the camera lane for the session-mode — an open
-        # camera and adult content must never coexist. Not a setting.
-        if mode == "adult" and self.camera_lane != "off":
-            logger.info(
-                "LILY_STATE | CAMERA_LANE_CLOSED | session=%s reason=adult_mode",
-                self.session_id,
-            )
-            self.camera_lane = "off"
-
     def set_camera_lane(self, state: str) -> bool:
         """VIDEOIN-001: open/close the sparse camera lane. Structurally
         REFUSED in the adult deck (open camera never coexists with adult
         content). Returns True if the state was accepted."""
         value = (state or "").strip().lower()
         if value not in ("off", "open"):
-            return False
-        if value == "open" and self.mode == "adult":
-            logger.info(
-                "LILY_STATE | CAMERA_LANE_REFUSED | session=%s reason=adult_mode",
-                self.session_id,
-            )
             return False
         if value != self.camera_lane:
             logger.info(
@@ -3996,7 +4051,7 @@ class LilyScorekeeper:
         total_questions = self.rounds_total * self.questions_per_round
         lines.append(
             f"phase={self.phase} round={self.round}/{self.rounds_total} "
-            f"mode={self.mode} pacing={self.pacing} "
+            f"pacing={self.pacing} "
             f"format={self.round_format} media={self.media_mode} "
             f"adult_image={self.adult_image_intensity} "
             f"question={q_in_round}/{self.questions_per_round} in this round "
@@ -4051,7 +4106,6 @@ class LilyScorekeeper:
             "session_id": self.session_id,
             "phase": self.phase,
             "round": self.round,
-            "mode": self.mode,
             "pacing": self.pacing,
             "delivery_pace": self.delivery_pace,
             "round_format": self.round_format,
@@ -4066,7 +4120,6 @@ class LilyScorekeeper:
             "players": {name: dict(s) for name, s in self.players.items()},
             "unrostered_labels": dict(self.unrostered_labels),
             "status_notes": list(self.status_notes),
-            "mode_changes": list(self.mode_changes),
             "score_ledger": [dict(e) for e in self.score_ledger],
         }
 
@@ -4076,7 +4129,6 @@ class LilyScorekeeper:
             return
         self.phase = snap.get("phase", self.phase)
         self.round = snap.get("round", self.round)
-        self.mode = snap.get("mode", self.mode)
         self.pacing = snap.get("pacing", self.pacing)
         self.delivery_pace = snap.get("delivery_pace", self.delivery_pace)
         if self.delivery_pace not in ("normal", "slow"):
@@ -4099,7 +4151,6 @@ class LilyScorekeeper:
         self.rounds_total = snap.get("rounds_total", self.rounds_total)
         self.current_question = snap.get("current_question")
         self.current_answer = (self.current_question or {}).get("canonical_answer")
-        self.mode_changes = list(snap.get("mode_changes") or [])
         for name, s in (snap.get("players") or {}).items():
             self.players[name] = dict(s)
         # Score-ledger restore (WS-7): the ledger travels with the

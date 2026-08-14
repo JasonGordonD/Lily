@@ -32,7 +32,8 @@ def _make_game(mode="general", supabase=object()):
 
 
 def test_activation_on_when_lane_healthy(monkeypatch):
-    monkeypatch.setenv("GOOGLE_API_KEY", "g")
+    # Unified adult deck: image-gen availability reads the xAI key.
+    monkeypatch.setenv("XAI_API_KEY", "x")
     game = _make_game()
     assert game.picture_activation_outcome() == "on"
 
@@ -44,7 +45,7 @@ def test_activation_blocked_when_generation_key_missing(monkeypatch):
 
 
 def test_activation_blocked_when_pipeline_down(monkeypatch):
-    monkeypatch.setenv("GOOGLE_API_KEY", "g")
+    monkeypatch.setenv("XAI_API_KEY", "x")
     game = _make_game(supabase=None)
     assert game.picture_activation_outcome() == "unavailable_pipeline"
 

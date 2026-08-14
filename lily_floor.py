@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import re
 import time
 
 import lily_addressee
@@ -521,11 +520,11 @@ class LilyFloorMixin:
             )
         self._armed_speech_misses = 0
         self._undelivered_ticks = 0
-        # P0-B: every STOP retires armed/prefetched game content for THIS
-        # session and freezes every future delivery owner until explicit
-        # resume. Adult content retains its existing hard burn semantics.
-        if self.sk.mode == "adult":
-            self._burn_pending_adult_questions(reason="stop_in_adult")
+        # P0-B: every STOP freezes every future delivery owner until explicit
+        # resume. Armed/prefetched content SURVIVES the freeze and delivers on
+        # resume (LIVEFIRE-001 CLASS 4b freeze-not-burn) — the content-mode
+        # gate's adult hard-burn was removed with the gate (no revert deck to
+        # protect against).
         self._freeze_game_delivery_for_stop()
         # 3. Interrupt the live session speech if the framework holds one.
         session = getattr(self, "session", None)

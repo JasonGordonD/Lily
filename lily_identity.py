@@ -9,7 +9,6 @@ consolidates the recognition surface -- it does not re-litigate W1c's mint gate.
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import time
 import uuid
@@ -19,17 +18,8 @@ import lily_evaluation
 import lily_forget
 import lily_memory
 import lily_persistence
-import lily_say_gate
-import lily_scorekeeper
 import lily_voice_embedder
 import lily_voice_identity
-from lily_binding import (
-    LilyFragmentAccumulator,
-    lily_extract_explicit_name,
-    lily_is_valid_name,
-    lily_names_probably_same,
-)
-from lily_voice_switch import lily_list_voices, lily_switch_voice
 
 import logging
 logger = logging.getLogger("lily_agent")

@@ -22,15 +22,15 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=False)
 
-from livekit import rtc, api
+from livekit import rtc
 from livekit.agents import (
     APIConnectionError,
     APIConnectOptions,
@@ -69,7 +69,6 @@ from livekit.plugins.speechmatics import (
 
 import lily_addressee
 import lily_addressee_classifier
-import lily_arsenal
 import lily_assessment
 import lily_audeering_client
 import lily_audeering_consumers
@@ -103,14 +102,13 @@ from lily_binding import (
 )
 from lily_reasoning import LilyReasoning
 import lily_scorekeeper
-from lily_scorekeeper import LilyScorekeeper, lily_detect_state_contradiction
+from lily_scorekeeper import LilyScorekeeper
 import lily_images
 import lily_vision
 from lily_tts import LilyTTS, lily_prewarm_tts_connection
 from lily_vision import lily_analyze_image
 from lily_voice_switch import lily_list_voices, lily_switch_voice
 import lily_voice_embedder
-import lily_voice_identity
 
 logger = logging.getLogger("lily_agent")
 
@@ -333,7 +331,7 @@ def lily_build_grok_vocal_llm(
         reasoning_effort=effort,
         client=openai_sdk.AsyncClient(
             api_key=api_key,
-            base_url="https://api.x.ai/v1",
+            base_url=lily_config.xai_base_url(),
             max_retries=0,
             default_headers=(
                 {"x-grok-conv-id": conversation_id}
@@ -721,7 +719,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._mc_delivery_stem_words = 0
         self._nbest_by_key = {}
         self._next_question_reserve = None
-        self._next_question_reserve_mode = None
         self._open_transition_qnum = None
         self._pacing_stated_this_session = False
         self._pending_delivery_qnum = None
@@ -2347,10 +2344,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             pending.add("voice")
         if intents["adult"]:
             requested.add("adult")
-            if self.sk.mode == "adult":
-                pending.discard("adult")
-            else:
-                pending.add("adult")
+            pending.discard("adult")
         if intents["age_mentioned"]:
             requested.add("consent")
             if self._age_consent_confirmed:
@@ -2379,8 +2373,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self._setup_heat_requested = intents["heat"]
             requested.add("heat")
             if (
-                self.sk.mode == "adult"
-                and self.sk.adult_image_intensity == intents["heat"]
+                self.sk.adult_image_intensity == intents["heat"]
                 and self.sk.media_mode == "pictures"
             ):
                 pending.discard("heat")
@@ -2673,10 +2666,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # category they carry (the fetch prefers a family match but always
         # serves the row's own label); this family is what generation and
         # bank preference ask for.
-        if self.sk.mode == "adult":
-            return ADULT_CATEGORY_FAMILIES[
-                (rnd - 1) % len(ADULT_CATEGORY_FAMILIES)
-            ]
         # Operator-requested topic wins over the family rotation for the
         # round it was set on (getattr: test harnesses build via __new__).
         override = self._category_override.get(rnd)
@@ -3341,7 +3330,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # Near-miss: table already heard a high-similarity performance —
         # confirm + open, never UNDELIVERED_REFIRE the same Q again.
         last_ratio = float(self._last_armed_speech_ratio or 0.0)
-        if last_ratio >= 0.9:
+        if last_ratio >= lily_evaluation.QUESTION_SPOKEN_NEAR_MISS_RATIO:
             logger.warning(
                 "LILY_WATCHDOG | UNDELIVERED_NEAR_MISS | session=%s q=%d "
                 "ratio=%.2f — confirming delivery without re-air",
@@ -3627,78 +3616,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         return full in recent
 
 
-
-
-
-
-
-
-
-    def flush_for_mode_switch(self, source: str) -> None:
-        """Sticky mode just flipped (EITHER direction — adult entry,
-        spoken "back to normal", child-signal veto, breaker trip): the
-        armed and prefetched questions were drawn from the OLD deck, so
-        they are dead. Flush them, cancel the in-flight draw, and start a
-        fresh prefetch from the new deck immediately — the prefetch
-        auto-advance re-arms and nudges when it lands, and the idle
-        watchdog backstops. Flushed questions STAY in the drawn-set
-        (_register_draw): a question that touched the wrong segment is
-        never re-served this session. The state block is honest about the
-        one-beat gap via a status note the next successful draw clears.
-
-        Call AFTER sk.set_mode(...) — the flush reads the NEW mode."""
-        # PATCH-002 M4: an aired stem is a promise. If the question being
-        # flushed already put its stem on the air but never opened a
-        # window (completed), that is an abandoned stem — terminate its
-        # dispatch record with a cancellation event so it never vanishes
-        # silently (the "name three of the—" orphan).
-        self._terminate_aired_stem(reason=f"mode_flush:{source}")
-        mode = self.sk.mode
-        logger.info(
-            "LILY_STATE | MODE_FLUSH | session=%s mode_now=%s source=%s "
-            "flushed_armed=%s flushed_prefetched=%s",
-            self.sk.session_id, mode, source,
-            (self.armed_question or {}).get("id"),
-            (self.next_question or {}).get("id"),
-        )
-        if self._window_timer and not self._window_timer.done():
-            self._window_timer.cancel()
-        self.sk.close_answer_window()
-        self._stop_bed()
-        self._steal_window = False
-        self.armed_question = None
-        self.next_question = None
-        self.sk.current_question = None
-        self._armed_speech_misses = 0
-        # Cancel the in-flight draw: it is pulling from the wrong deck.
-        # Clearing the handle lets start_prefetch() relaunch NOW instead
-        # of waiting for the cancellation to land; if the stale task is
-        # already past its last await, its own commit guard (supply_mode
-        # check in _prefetch_inner) discards whatever it returns. Reset
-        # the stall counter so the idle watchdog cooperates with the
-        # fresh task instead of racing the cancelled one.
-        task = self._prefetch_task
-        if task is not None and not task.done():
-            task.cancel()
-        self._prefetch_task = None
-        self._prefetch_stall_ticks = 0
-        if self.game_started and not self.game_over:
-            deck = "adult" if mode == "adult" else "general"
-            self.sk.set_status_note(
-                f"deck switch committed: the next question is being drawn "
-                f"from the {deck} deck and lands in the state block in a "
-                "beat. Vamp honestly until it does — never re-ask, finish, "
-                "or reveal anything from the previous deck, and never "
-                "invent a question"
-            )
-            self._set_ui_phase("question")
-            # Clear the old deck's question off the glass — screen truth
-            # must match the switch the room just heard.
-            asyncio.ensure_future(self.publish_metadata(""))
-        self.publish_attributes_nowait()
-        if not self.game_over:
-            self.start_prefetch()
-
     def _curate_generated_question(
         self,
         question: dict,
@@ -3766,7 +3683,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 )
         if self.supabase is not None:
             asyncio.ensure_future(lily_bank.lily_bank_generated_question(
-                self.supabase, dict(question), self.sk.mode,
+                self.supabase, dict(question),
             ))
         return question
 
@@ -4217,7 +4134,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # Remember ratio for undelivered reconcile (near-miss must not
             # re-air after the table already heard the Q).
             self._last_armed_speech_ratio = ratio
-            if ratio >= 0.9:
+            if ratio >= lily_evaluation.QUESTION_SPOKEN_NEAR_MISS_RATIO:
                 # Gun 3 fix: high-similarity turn already aired the Q but
                 # the structural claim missed — confirm + open, do NOT
                 # full re-read (live double-question class).
@@ -4670,7 +4587,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                         {key: hyps} if len(hyps) > 1 else None
                     ),
                 ),
-                adult=(self.sk.mode == "adult"),
             )
             verdict = lily_evaluation.lily_parse_judge_response(raw)
             logger.info(
@@ -5114,8 +5030,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                                 acceptable_answers=acceptable,
                                 hypotheses_by_speaker=hyp_map or None,
                             ),
-                adult=(self.sk.mode == "adult"),
-            )
+                        )
                         verdict = lily_evaluation.lily_parse_judge_response(raw)
                     except Exception as e:
                         logger.error("LILY_JUDGE | call failed: %s", e)
@@ -6176,7 +6091,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # the armed/supply cursor (burned/discarded never increment it).
             "questions_played": self.questions_asked_count(),
             "per_player": per_player,
-            "mode_changes": list(self.sk.mode_changes),
             "callouts": list(self.highlights),
             "score_reconciliation": {
                 "ok": not mismatches,
@@ -6412,7 +6326,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # reserve is in-flight and dead too — burn it with the rest.
             self._burn_question(self._next_question_reserve, reason="answer_leak")
             self._next_question_reserve = None
-            self._next_question_reserve_mode = None
             burned = True
         if not burned:
             return
@@ -6427,162 +6340,26 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     # -- acoustic pipeline: child-signal veto + trajectory rows -----------------------
 
     def on_child_signal(self, event: dict) -> None:
-        """SAFETY-CRITICAL adult-mode VETO (WO-LILY-AUDEERING-001 Task 4).
-
-        Veto-only, BOTH tiers (high_halt and borderline_step_up): the
-        child signal can EXIT or BLOCK adult mode, NEVER authorize it —
-        whole-room verbal consensus remains necessary and is no longer
-        sufficient. The module estimates how the speaker SOUNDS, not
-        necessarily the actual attributes of the speaker (age MAE ±8.46yr).
-
-        Adult mode ACTIVE + ladder trips -> exit through the SAME sticky-flag
-        path as the spoken "back to normal" command: sk.set_mode("general")
-        + attribute publish + deterministic revert flow. Instant, in-character
-        line, no explanation of the mechanism, general category next.
-        """
-        if self.sk.mode != "adult":
-            return
-        # NO override exists for an active child signal — architect mode
-        # included (RESTORED 2026-07-16; a concurrent rewrite added an
-        # architect bypass here, letting an env flag disregard a detected
-        # young-voice signal while adult content played. The invariant is
-        # absolute: the signal can EXIT or BLOCK adult mode, and nothing
-        # may authorize past it).
+        """audEERING child-voice signal. The content-mode gate (and its
+        adult-mode exit) was removed with WO-PRMPT-LILY-REFACTOR-001; this
+        handler no longer changes deck state. Logged for the record only
+        (voice-based age detection is pre-deployment)."""
         logger.warning(
-            "LILY_AUDEERING_VETO | ADULT_MODE_EXIT | session=%s tier=%s %s",
+            "LILY_AUDEERING_VETO | CHILD_SIGNAL | session=%s tier=%s %s",
             self.sk.session_id, event.get("tier"),
             lily_audeering_consumers.PERCEIVED_FRAMING,
         )
-        self.sk.set_mode("general")  # sticky flag flips instantly, in code
-        getattr(self, "exit_adult_vocal", lambda: None)()  # restore the general vocal node
-        # D: same flush as every other mode switch — the armed adult
-        # question is dead and the general deck re-draws immediately.
-        self.flush_for_mode_switch(source="child_signal")
-        self.publish_attributes_nowait()
-        if self.session is not None:
-            self.gated_say(
-                None,
-                "mode_revert",
-                "Adult mode is now OFF — committed, in code. Switch back "
-                "to the regular deck instantly with a light, in-character "
-                "pivot line. Do NOT explain why, do NOT mention any "
-                "system, audio, detection, or safety mechanism — just "
-                "change gears like a host reading the room. The general "
-                "deck is re-drawing; ask the next question when it lands "
-                "in the state block — never continue the adult one.",
-                source="child_signal",
-            )
-
-    # -- adult-mode vocal swap (owner directive 2026-08-06) -------------------
-    #
-    # Both general and adult vocal lanes now use Grok 4.5. The hook remains
-    # for an explicit adult model/effort override, while the adult prompt
-    # layer still supplies the register.
-
-    def enter_adult_vocal(self) -> bool:
-        """Apply an optional adult Grok model/effort override."""
-        agent = getattr(self, "agent", None)
-        update = getattr(agent, "update_options", None)
-        key = lily_config.xai_api_key()
-        if update is None or not key:
-            logger.error(
-                "LILY_ADULT_VOCAL | SWAP_UNAVAILABLE | session=%s "
-                "reason=%s — adult rounds stay on the general Grok node",
-                self.sk.session_id,
-                "no_xai_key" if update is not None else "no_agent_handle",
-            )
-            return False
-        llm = self._adult_llm
-        if llm is None:
-            try:
-                llm = lily_build_grok_vocal_llm(
-                    model=lily_config.adult_vocal_model(),
-                    api_key=key,
-                    effort=lily_config.adult_vocal_effort(),
-                    conversation_id=self.grok_conversation_id,
-                )
-            except Exception as e:
-                logger.error(
-                    "LILY_ADULT_VOCAL | SWAP_UNAVAILABLE | session=%s "
-                    "reason=llm_construction_failed error=%s",
-                    self.sk.session_id, e,
-                )
-                return False
-            self._adult_llm = llm
-            # Y1c: the freshly built adult transport gets the same per-call
-            # cache accounting as the general node.
-            wire = self._llm_metrics_wire
-            if wire is not None:
-                try:
-                    wire(llm)
-                except Exception:
-                    pass
-        try:
-            update(llm=llm)
-        except Exception as e:
-            logger.error(
-                "LILY_ADULT_VOCAL | SWAP_FAILED | session=%s error=%s",
-                self.sk.session_id, e,
-            )
-            return False
-        logger.warning(
-            "LILY_ADULT_VOCAL | SWAPPED_IN | session=%s model=%s effort=%s",
-            self.sk.session_id, lily_config.adult_vocal_model(),
-            lily_config.adult_vocal_effort(),
-        )
-        return True
-
-    def exit_adult_vocal(self) -> None:
-        """Restore the general Grok vocal configuration on any adult exit —
-        idempotent; a session that never swapped is a no-op."""
-        agent = getattr(self, "agent", None)
-        update = getattr(agent, "update_options", None)
-        general = self._general_llm
-        if update is None or general is None:
-            return
-        try:
-            update(llm=general)
-            logger.warning(
-                "LILY_ADULT_VOCAL | SWAPPED_OUT | session=%s — general "
-                "vocal node restored", self.sk.session_id,
-            )
-        except Exception as e:
-            logger.error(
-                "LILY_ADULT_VOCAL | RESTORE_FAILED | session=%s error=%s",
-                self.sk.session_id, e,
-            )
 
     def on_child_gate_lost(self, reason: str) -> None:
-        """Mid-session CLOSED->OPEN breaker transition while adult mode is
-        active -> automatic exit through the SAME sticky-flag revert path
-        as the spoken "back to normal" (WO-DESYNC-A, RESTORED 2026-07-16 —
-        a concurrent rewrite demoted this to a log line, leaving the adult
-        deck running with the child-signal sensor dead. The sensor and the
-        deck deploy as one unit: sensor down means deck down, fail CLOSED,
-        mid-session included)."""
-        if self.sk.mode != "adult":
-            return
+        """Mid-session breaker transition on the child-gate sensor. The
+        content-mode gate (and its adult-mode exit) was removed with
+        WO-PRMPT-LILY-REFACTOR-001; this handler no longer changes deck
+        state. Logged for the record only."""
         logger.warning(
             "LILY_ADULT_GATE | CHILD_GATE_LOST | session=%s "
-            "breaker_reason=%s action=adult_mode_exit",
+            "breaker_reason=%s action=none",
             self.sk.session_id, reason,
         )
-        self.sk.set_mode("general")  # sticky flag flips instantly, in code
-        getattr(self, "exit_adult_vocal", lambda: None)()  # restore the general vocal node
-        self.flush_for_mode_switch(source="child_gate")
-        self.publish_attributes_nowait()
-        if self.session is not None:
-            self.gated_say(
-                None,
-                "mode_revert",
-                "Adult mode is now OFF — committed, in code. Switch back "
-                "to the regular deck instantly with a light, in-character "
-                "pivot line. Do NOT explain why, do NOT mention any "
-                "system, audio, detection, or safety mechanism. The "
-                "general deck is re-drawing; ask the next question when "
-                "it lands in the state block.",
-                source="child_gate",
-            )
 
     def log_acoustic_trajectory(self) -> None:
         """One lily_acoustic_trajectories row per finalized user turn —
@@ -7690,130 +7467,16 @@ class LilyAgent(Agent):
         context: RunContext,
         confirmed_all_18_plus: bool = False,
     ) -> str:
-        """Switch to the adult deck after every player verbally confirms 18+.
-
-        Architect mode is a deployment-authenticated override. A player
-        merely claiming to be the architect does not enable it.
-        """
-        # SENSOR GATE — "sensor" mode only (owner directive 2026-08-06:
-        # the deck is OPEN by default; the Audeering age read is
-        # unreliable in live rooms and the lane is quota-blocked, which
-        # had made the deck permanently unavailable). In open mode the
-        # spoken 18+ ceremony below is the gate; when the sensor IS
-        # running, an ACTIVE child veto still blocks entry in every mode
-        # (checked further down — that invariant is untouched).
-        if (
-            lily_config.adult_deck_gate_mode() == "sensor"
-            and not lily_audeering_client.lily_child_gate_ready()
-        ):
-            logger.warning(
-                "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
-                "reason=child_gate_unavailable | session=%s",
-                self._game.sk.session_id,
-            )
-            return (
-                "The grown-up deck is NOT available tonight — one of the "
-                "systems it depends on isn't running. Refuse warmly, in "
-                "character ('the grown-up deck's taking the night off — "
-                "general it is'), never name any mechanism, and do not "
-                "retry this tool tonight. Consensus cannot change this."
-            )
-        # Degraded-persistence gate (2026-07-16): a memoryless session has
-        # no persisted consent audit trail — the adult deck requires one.
-        if self._game.supabase is None:
-            logger.warning(
-                "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
-                "reason=no_persistence_no_consent_audit | session=%s",
-                self._game.sk.session_id,
-            )
-            return (
-                "The grown-up deck is NOT available tonight — refuse "
-                "warmly in character, never name any mechanism, and do "
-                "not retry this tool tonight."
-            )
-        architect = lily_config.architect_mode()
-        # HOTFIX-004 / P0-3: the deterministic spoken latch is the authority.
-        # A model boolean alone can never enter ("Should I verify?" remains
-        # false), but once the real utterance latched, a false/missing model
-        # flag must not force the player through the ceremony again.
-        age_consent_heard = getattr(self._game, "_age_consent_confirmed", False)
-        if not architect and not age_consent_heard:
-            logger.warning(
-                "LILY_ADULT_GATE | ADULT_MODE_DECLINED | "
-                "reason=age_confirmation_required | model_flag=%s "
-                "consent_heard=%s | session=%s",
-                confirmed_all_18_plus, age_consent_heard,
-                self._game.sk.session_id,
-            )
-            return (
-                "Adult mode is NOT enabled yet. Ask every player directly: "
-                "'Please confirm out loud that you are 18 or older and want "
-                "the grown-up deck.' Wait for an explicit spoken YES from the "
-                "table — a question like 'should I verify?' is NOT consent."
-            )
-        if architect:
-            logger.warning(
-                "LILY_ADULT_GATE | ARCHITECT_OVERRIDE | session=%s "
-                "action=adult_mode_entry",
-                self._game.sk.session_id,
-            )
-        # The child-signal veto is absolute: it may EXIT or BLOCK adult
-        # mode, and NOTHING — architect mode included — may override an
-        # ACTIVE signal to authorize entry (standing invariant from
-        # WO-LILY-AUDEERING-001; the override applies to the age ceremony
-        # only).
-        if self._game.acoustic.child_veto_active():
-            logger.warning(
-                "LILY_AUDEERING_VETO | ADULT_MODE_DECLINED | session=%s %s",
-                self._game.sk.session_id,
-                lily_audeering_consumers.PERCEIVED_FRAMING,
-            )
-            return (
-                "Adult mode is NOT available right now — keep the general "
-                "deck. Deflect lightly and in character ('let's keep it "
-                "classy tonight') and move on. Do NOT explain why, do NOT "
-                "mention any system, audio, detection, or safety mechanism, "
-                "and do not retry this tool this round."
-            )
-        self._game.sk.set_mode("adult")  # sticky flag — reverts only via
-        # the deterministic "back to normal" path, a fresh consensus, the
-        # child-signal ladder veto (on_child_signal), or a mid-session
-        # breaker trip (on_child_gate_lost) — all the same sticky path.
-        # Vocal swap (owner directive 2026-08-06): Grok voices the adult
-        # deck — Gemini's hard filter blocks it. Failure keeps Gemini
-        # (degraded, loud), never blocks entry.
-        getattr(self._game, "enter_adult_vocal", lambda: None)()
-        # D: no question survives the deck change — the leftover general
-        # question is flushed (the live "powerhouse of the cell" defect)
-        # and the adult deck starts drawing immediately.
-        self._game.flush_for_mode_switch(source="enter_adult")
-        getattr(self._game, "mark_setup_applied", lambda *_: None)(
-            "adult", "consent"
-        )
-        # flush_for_mode_switch already published nowait; a second awaited
-        # publish only delayed the tool result / follow-up turn.
-        self._game.publish_attributes_nowait()
+        """Legacy tool. The content-mode gate was removed
+        (WO-PRMPT-LILY-REFACTOR-001) and the adult deck is now the unified
+        standard deck — there is no separate mode to enter. Kept registered
+        so an existing tool call resolves cleanly; map/tool cleanup is a
+        separate follow-up."""
         return (
-            "Adult mode is ON (sticky"
-            + (", architect override" if architect else ", 18+ confirmed")
-            + "). The layer is active; same house "
-            "rules. The deck switched with it: any earlier question is "
-            "flushed, and the first adult question is being drawn now — "
-            "it lands in the state block in a beat. NEVER serve a "
-            "leftover general question as adult material and NEVER "
-            "freestyle one; vamp for a beat until the state block shows "
-            "the adult question, then ask it word for word. "
-            "ADULT PICTURES: adult image heat defaults to SUGGESTIVE. "
-            "Ask the whole table clearly: for grown-up pictures do they "
-            "want spicy-but-suggestive, full explicit, or a mix? (A mix "
-            "varies the heat question to question.) Wait for the table "
-            "(not one enthusiast) to agree, then call "
-            "lily_set_adult_image_intensity with intensity="
-            "'suggestive'|'explicit'|'mix' and confirmed_table=true — that "
-            "call also turns picture rounds ON when the lane is healthy "
-            "(media_mode=pictures). Do not assume explicit. Re-ask only if "
-            "they change it. Heat alone without that tool does NOT make "
-            "pictures live."
+            "You are already on the standard deck — there is no separate "
+            "grown-up mode to switch into. Keep hosting as normal; adult "
+            "image heat and picture rounds are set through "
+            "lily_set_adult_image_intensity."
         )
 
     @function_tool()
@@ -7829,11 +7492,6 @@ class LilyAgent(Agent):
         mode is on and the table has clearly chosen. Default stays
         suggestive until they pick.
         """
-        if self._game.sk.mode != "adult":
-            return (
-                "Adult image intensity is only available in adult mode. "
-                "Enter the grown-up deck first, then ask the table."
-            )
         level = (intensity or "").strip().lower()
         if level not in ("suggestive", "explicit", "mix"):
             return (
@@ -8335,16 +7993,6 @@ class LilyAgent(Agent):
                 "No topic caught — ask the table what subject they want and "
                 "call this again with it."
             )
-        if game.sk.mode == "adult":
-            # The adult deck rotates its OWN families and a custom label
-            # must never ride an adult question (the deck-identity firewall:
-            # adult questions announced as an academic category was a live
-            # defect). Redirect honestly — never a flat denial.
-            return (
-                f"Custom topics run on the general deck. Say 'back to "
-                f"normal' first, then name {subject!r} again and I'll build "
-                "the round."
-            )
         target_round = game._round_for_next_question()
         game._category_override[target_round] = subject
         # Persist the category as a first-class bank entry (idempotent by
@@ -8649,7 +8297,7 @@ class LilyAgent(Agent):
 
         # Adult layer: additive injection/removal keyed on the sticky flag.
         adult_idx = _idx_by_id(self._CTX_ID_ADULT)
-        if self._game.sk.mode == "adult" and adult_idx is None:
+        if adult_idx is None:
             items.insert(
                 anchor,
                 ChatMessage(
@@ -8658,8 +8306,6 @@ class LilyAgent(Agent):
                     content=[LILY_ADULT_LAYER],
                 ),
             )
-        elif self._game.sk.mode != "adult" and adult_idx is not None:
-            items.pop(adult_idx)  # removing the layer fully reverts her
 
         # Returning-table memory: one persistent [RETURNING TABLE] system
         # block, injected the same additive way as the adult layer
@@ -10039,21 +9685,17 @@ async def entrypoint(ctx: JobContext) -> None:
             len(_focus_kwargs.get("focus_speakers") or []),
         )
 
-    # --- Session: one Grok 4.5 vocal host across general + adult layers ---
+    # --- Session: one Grok 4.5 vocal host (unified adult deck) ---
+    # WO-PRMPT-LILY-REFACTOR-001: the content-mode gate and the adult vocal
+    # swap were removed. The single lane boots on the adult vocal config
+    # (adult_vocal_model()/adult_vocal_effort()), which default to
+    # vocal_model()/vocal_effort() — identical unless LILY_ADULT_VOCAL_MODEL
+    # or LILY_ADULT_VOCAL_EFFORT is set.
     general_vocal_llm = lily_build_grok_vocal_llm(
-        model=lily_config.vocal_model(),
+        model=lily_config.adult_vocal_model(),
         api_key=lily_config.xai_api_key(),
-        effort=lily_config.vocal_effort(),
+        effort=lily_config.adult_vocal_effort(),
         conversation_id=game.grok_conversation_id,
-    )
-    game._general_llm = general_vocal_llm
-    game._adult_llm = (
-        general_vocal_llm
-        if (
-            lily_config.adult_vocal_model() == lily_config.vocal_model()
-            and lily_config.adult_vocal_effort() == lily_config.vocal_effort()
-        )
-        else None
     )
     lily_tts_instance = LilyTTS()  # voice1 (primary)
     game.tts = lily_tts_instance  # P7: reachable for set_delivery_pace

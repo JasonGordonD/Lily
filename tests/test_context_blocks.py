@@ -131,22 +131,19 @@ def test_temporal_context_carries_utc_and_session_elapsed():
 
 # -- adult layer: add/remove on the sticky flag --------------------------------------
 
-def test_adult_layer_added_and_removed_on_sticky_mode():
+def test_adult_layer_always_present():
+    # Unified adult deck (content-mode gate removed): the adult layer is
+    # always injected and never removed.
     agent, game = _make_agent()
     ctx = ChatContext.empty()
-    game.sk.mode = "adult"
     agent._apply_context_blocks(ctx)
     assert any(_ADULT_LAYER_MARKER in _message_text(m) for m in ctx.items)
     assert _ADULT_LAYER_MARKER in _message_text(ctx.items[0])
-    # Idempotent while sticky:
+    # Idempotent — re-applying does not duplicate the layer:
     agent._apply_context_blocks(ctx)
     assert sum(
         _ADULT_LAYER_MARKER in _message_text(m) for m in ctx.items
     ) == 1
-    # Removal fully reverts:
-    game.sk.mode = "general"
-    agent._apply_context_blocks(ctx)
-    assert not any(_ADULT_LAYER_MARKER in _message_text(m) for m in ctx.items)
 
 
 # -- memory block: once ---------------------------------------------------------------

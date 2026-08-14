@@ -41,23 +41,8 @@ def _reserve_game() -> LilyGame:
 def test_promote_reserve_moves_reserve_to_head():
     g = _reserve_game()
     g._next_question_reserve = {"id": "q9", "category": "space"}
-    g._next_question_reserve_mode = "general"
     g._promote_reserve()
     assert g.next_question == {"id": "q9", "category": "space"}
-    assert g._next_question_reserve is None
-    assert g._next_question_reserve_mode is None
-
-
-def test_promote_reserve_discards_a_cross_deck_reserve():
-    # THE cross-deck test: the reserve was drawn under the general deck, but
-    # the deck has flipped to adult while it sat. It must be DISCARDED, never
-    # promoted — a general question can never surface in an adult round.
-    g = _reserve_game()
-    g.sk.mode = "adult"                       # deck flipped after the draw
-    g._next_question_reserve = {"id": "q9", "category": "space"}
-    g._next_question_reserve_mode = "general"
-    g._promote_reserve()
-    assert g.next_question is None            # discarded, head left empty
     assert g._next_question_reserve is None
 
 
@@ -112,14 +97,12 @@ def test_adult_objection_burns_the_reserve():
     g.armed_question = None
     g.next_question = None
     g._next_question_reserve = {"id": "q9"}
-    g._next_question_reserve_mode = "adult"
     burned = []
     g._burn_question = lambda q, reason: burned.append((q.get("id"), reason))
     g.publish_attributes_nowait = lambda: None
     assert g._burn_pending_adult_questions(reason="age_unconfirmed") is True
     assert ("q9", "age_unconfirmed") in burned
     assert g._next_question_reserve is None
-    assert g._next_question_reserve_mode is None
 
 
 # -- the four invariants, made explicit (team-lead 3a ruling) --------------

@@ -5,6 +5,48 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — WO-PRMPT-LILY-REFACTOR-001: TranscriptSegment + content-mode gate deletion + sweeteners
+
+Three parallel workstreams, one squash commit to main (SHA in the deploy run;
+an entry cannot carry its own commit SHA).
+
+1. **TranscriptSegment (behavior-preserving).** The 510-line / 17-param
+   `LilyScorekeeper.on_transcript_segment` is now a thin façade (historical
+   signature kept — 28 pinning test files call it positionally) over a frozen
+   `TranscriptSegment` dataclass and a ~22-line `_dispatch_segment` dispatcher
+   with extracted `_handle_*` branch methods. Behavior preservation proven by
+   output-sequence snapshot: pre/post hashes identical across the 525-test
+   pinning subset (`f8b4a484…`); exception semantics and field order preserved.
+2. **Content-mode gate DELETED (deliberate behavior change, operator-ordered).**
+   Adult deck is the unified experience. Removed: `sk.mode`/`set_mode`/
+   `mode_changes` apparatus, spoken 18+ consent ceremony (`lily_enter_adult_mode`
+   stubbed), child-signal mode exits (handlers log-only; audEERING telemetry
+   wiring kept; voice-based age detection retired per operator — facial
+   recognition planned), "back to normal" revert, `flush_for_mode_switch`,
+   adult/general vocal swap (boot builds the single vocal LLM from
+   `adult_vocal_model()`/`adult_vocal_effort()` — verified no-op in prod), the
+   Gemini image path (all imagegen → Grok Imagine), supply mode-reconciliation
+   subsystem. **BREAKING signatures** (no `mode` param): `lily_partitions_for`,
+   `lily_bank_generated_question`, `lily_bank_mode_filter`, plus
+   reasoning/imagegen/persistence internals and `judge` (adult param dropped).
+   Bank serving filter pinned `.eq("adult", True)` — general (`adult=false`)
+   rows remain in the DB, unreachable but preserved; column drop is a separate
+   OR-side migration. Non-uniform survivors (operator-ruled): custom-category
+   overrides keep working, camera lane stays available, STOP freeze-not-burn
+   (LIVEFIRE-001 4b) preserved. Net −44 obsolete tests (consent/veto/mode-switch
+   assertions), each deletion justified in the WO report.
+3. **Sweeteners.** `QUESTION_SPOKEN_NEAR_MISS_RATIO = 0.9` named in
+   `lily_evaluation` (4 sites); xAI base URL routed through
+   `lily_config.xai_base_url()` (5 sites; `LILY_XAI_BASE_URL` is
+   local-only/default-backed per the env lint); dead-import sweep across 10
+   modules + orphan `QUESTION_SPOKEN_VERBATIM_RATIO` removed.
+
+Diff: 50 files, +632/−1,814 (production 21 files +507/−993; tests 29 files
++125/−821). Full suite GREEN: 2,542 passed / 0 failed (was 2,586; −44 obsolete
+mode tests). Ops note: repo var `LILY_VOCAL_MODEL` corrected from stale
+`grok-4-fast-non-reasoning` to `grok-4.5` (operator order) — applies from this
+deploy.
+
 ## 2026-08-13 — REFACTOR W3b: LilyGame.bare() + getattr-fog deletion
 
 The follow-up to the W3 split: production code can now trust its own fields. The

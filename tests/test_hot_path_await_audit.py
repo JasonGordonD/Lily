@@ -34,11 +34,10 @@ def test_start_game_awaits_identity_not_attributes():
     assert "publish_attributes_nowait()" in src
 
 
-def test_enter_adult_and_award_bonus_publish_nowait():
-    adult_src = inspect.getsource(lily_agent.LilyAgent.lily_enter_adult_mode)
-    assert "await self._game.publish_attributes()" not in adult_src
-    assert "publish_attributes_nowait()" in adult_src
-
+def test_award_bonus_publishes_nowait():
+    # lily_enter_adult_mode is now a stub (content-mode gate removed) and no
+    # longer publishes; the hot-path nowait discipline still applies to
+    # lily_award_bonus.
     bonus_src = inspect.getsource(lily_agent.LilyAgent.lily_award_bonus)
     assert "await self._game.publish_attributes()" not in bonus_src
     assert "publish_attributes_nowait()" in bonus_src

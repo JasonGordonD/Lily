@@ -49,7 +49,7 @@ import lily_config
 
 logger = logging.getLogger("lily_vision")
 
-_XAI_URL = "https://api.x.ai/v1/chat/completions"
+_XAI_URL = f"{lily_config.xai_base_url()}/chat/completions"
 _DEFAULT_PROMPT = "Describe this image in detail."
 _TIMEOUT_S = 30.0
 

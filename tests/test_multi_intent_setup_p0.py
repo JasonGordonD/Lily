@@ -77,17 +77,17 @@ def test_be8d8b_setup_blocks_start_and_does_not_draw_general_picture():
 
     assert intents["start"] is True
     assert game._setup_start_requested is True
+    # 'adult' is no longer a pending setup job — the unified adult deck is
+    # always active (content-mode gate removed), so requesting it is a no-op.
     assert game.pending_setup_jobs() == {
-        "adult",
         "consent",
         "heat",
         "pictures",
         "voice",
     }
     assert game.start_blocked_reason() == "setup_pending"
-    # Adult/heat must commit first; no general-partition activation.
+    # Heat must commit first; no premature picture activation.
     assert calls == []
-    assert game.sk.mode == "general"
     assert game.sk.media_mode == "voice_only"
 
 

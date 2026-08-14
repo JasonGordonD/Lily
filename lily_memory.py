@@ -481,15 +481,11 @@ def lily_build_memory_block(
 # KB-bank mode guard (pure) — consent-safety for the adult column
 # ---------------------------------------------------------------------------
 
-def lily_bank_mode_filter(rows, mode: str) -> list:
-    """Filter curated-bank rows by session mode: adult=true rows surface
-    ONLY when mode == 'adult'. General mode hard-excludes them — an
-    adult-register question must never land at a general-mode table.
+def lily_bank_mode_filter(rows) -> list:
+    """Curated-bank rows pass through unfiltered — the unified adult deck
+    surfaces every row (adult=true included).
     Pure (lives here so it's testable offline; lily_persistence applies it)."""
-    rows = list(rows or [])
-    if (mode or "general") == "adult":
-        return rows
-    return [r for r in rows if not (r or {}).get("adult")]
+    return list(rows or [])
 
 
 # ---------------------------------------------------------------------------

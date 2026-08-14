@@ -103,12 +103,10 @@ RUN_STALE_AFTER_SECONDS = 900.0
 ARSENAL_DUP_RATIO = 0.82
 
 
-def lily_partitions_for(mode: str, intensity: Optional[str]) -> list:
-    """Which arsenal partition(s) a session draws from. General deck ->
-    'general'. Adult deck -> the heat-matched partition; 'mix' draws from
-    BOTH adult partitions (each watermark fires on its own count)."""
-    if mode != "adult":
-        return ["general"]
+def lily_partitions_for(intensity: Optional[str]) -> list:
+    """Which arsenal partition(s) a session draws from — the heat-matched
+    adult partition; 'mix' draws from BOTH adult partitions (each watermark
+    fires on its own count)."""
     level = (intensity or "suggestive").strip().lower()
     if level == "explicit":
         return ["adult_explicit"]

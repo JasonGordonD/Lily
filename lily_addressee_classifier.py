@@ -39,7 +39,7 @@ utterance); this module never imports livekit or supabase.
 import json
 import re as _re
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 # -- classification vocabulary ------------------------------------------------

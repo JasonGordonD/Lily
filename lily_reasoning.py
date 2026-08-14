@@ -270,7 +270,7 @@ Write ONE trivia question following these constraints:
   right overall. difficulty_tier {difficulty_tier} of 4 (1 = warm-up
   ~65% success, 4 = final round ~40-45% success).
 - Category: {category}.
-- Mode: {mode}. In adult mode: innuendo and wordplay, surprising sex-ed
+- Mode: adult. In adult mode: innuendo and wordplay, surprising sex-ed
   facts, pop culture scandal, drinking culture, questionable historical
   decisions — about the world, never about the people in the room.
 - Do NOT repeat or closely resemble any of these already-used questions:
@@ -527,7 +527,7 @@ class LilyReasoning:
         # the heavy tier works instead of 400ing. Everything else keeps the
         # chat-completions path (grok-4.2 / grok-4.5 base tiers).
         if _lily_uses_responses_api(model):
-            endpoint = "https://api.x.ai/v1/responses"
+            endpoint = f"{lily_config.xai_base_url()}/responses"
             # System instruction rides `input` as a system-role turn; the
             # multi-agent model has no response_format, so the JSON contract
             # is prompt-enforced (fences stripped on the way out).
@@ -544,7 +544,7 @@ class LilyReasoning:
             if not _lily_is_multi_agent_model(model):
                 body["max_output_tokens"] = max_tokens
         else:
-            endpoint = "https://api.x.ai/v1/chat/completions"
+            endpoint = f"{lily_config.xai_base_url()}/chat/completions"
             messages = []
             if system_instruction:
                 messages.append({"role": "system", "content": system_instruction})
@@ -639,7 +639,6 @@ class LilyReasoning:
         self,
         category: str,
         difficulty_tier: int,
-        mode: str,
         avoid_questions: list[str],
         multiple_choice: bool = False,
         avoid_answers: Optional[list] = None,
@@ -649,7 +648,6 @@ class LilyReasoning:
         prompt = _GENERATION_PROMPT.format(
             category=category,
             difficulty_tier=difficulty_tier,
-            mode=mode,
             avoid_block=avoid_block,
         )
         # Answer-level no-repeat (migration 017): this group has already
@@ -684,18 +682,10 @@ class LilyReasoning:
         raw = await self._generate_grok_json(
             prompt + _GROK_QUESTION_SHAPE_ADDENDUM,
             max_tokens=lily_config.reasoning_max_output_tokens(),
-            model=(
-                lily_config.adult_reasoning_model()
-                if mode == "adult"
-                else lily_config.reasoning_model()
-            ),
+            model=lily_config.adult_reasoning_model(),
             # Z2 (HOTFIX-008): a supply-recovery retry passes a de-escalated
             # effort so a hard draw does not reproduce the stall verbatim.
-            effort=effort or (
-                lily_config.adult_reasoning_effort("high")
-                if mode == "adult"
-                else lily_config.reasoning_effort()
-            ),
+            effort=effort or lily_config.adult_reasoning_effort("high"),
         )
         # Schema mode: the output IS the JSON document — parse it directly.
         parsed: Optional[dict] = None
@@ -721,12 +711,10 @@ class LilyReasoning:
         return parsed
 
     async def verify_question(
-        self, question: dict, mode: str = "general"
+        self, question: dict
     ) -> tuple[bool, str]:
-        """Verification at prefetch time on Grok 4.5.
-
-        General runs medium; adult authoring/verification is always high.
-        """
+        """Verification at prefetch time on Grok 4.5. Authoring/verification
+        always runs high."""
         prompt = _VERIFICATION_PROMPT.format(
             question_json=json.dumps(question, ensure_ascii=False)
         )
@@ -754,16 +742,8 @@ class LilyReasoning:
         raw = await self._generate_grok_json(
             prompt + _GROK_VERDICT_SHAPE_ADDENDUM,
             max_tokens=lily_config.reasoning_max_output_tokens(),
-            model=(
-                lily_config.adult_reasoning_model()
-                if mode == "adult"
-                else lily_config.reasoning_model()
-            ),
-            effort=(
-                lily_config.adult_reasoning_effort("high")
-                if mode == "adult"
-                else lily_config.reasoning_effort()
-            ),
+            model=lily_config.adult_reasoning_model(),
+            effort=lily_config.adult_reasoning_effort("high"),
         )
         # Schema mode: direct parse first; fence stripping is a defensive
         # last resort. Honest failure stays intact — an unparseable verdict
@@ -877,7 +857,7 @@ class LilyReasoning:
         async def _generate_verify_choices() -> dict:
             question = await asyncio.wait_for(
                 self.generate_question(
-                    category, difficulty_tier, scorekeeper.mode,
+                    category, difficulty_tier,
                     avoid_questions, multiple_choice=multiple_choice,
                     avoid_answers=avoid_answers, effort=effort,
                 ),
@@ -887,7 +867,7 @@ class LilyReasoning:
                 raise RuntimeError("question generation returned unparseable JSON")
             pre_verify_answer = str(question.get("canonical_answer", ""))
             ok, reason = await asyncio.wait_for(
-                self.verify_question(question, mode=scorekeeper.mode),
+                self.verify_question(question),
                 timeout=lily_config.prefetch_timeout_seconds(),
             )
             if not ok:
@@ -978,7 +958,6 @@ class LilyReasoning:
                 question_id=question_id,
                 prompt=prompt,
                 aspect_ratio="16:9",
-                mode="adult",
                 intensity=intensity,
             )
         prompt = (
@@ -1002,7 +981,6 @@ class LilyReasoning:
         kind: str,
         question_index: int,
         session_id: str,
-        mode: str = "general",
         intensity: str = "suggestive",
         exclude_ids: Optional[set] = None,
         exclude_hashes: Optional[set] = None,
@@ -1047,7 +1025,7 @@ class LilyReasoning:
             if kind == "real_or_imagined":
                 return await lily_imagegen.lily_build_real_or_imagined_question(
                     supabase, index=question_index, session_id=session_id,
-                    approve=self.approve_entity_image, mode=mode,
+                    approve=self.approve_entity_image,
                     intensity=intensity,
                 )
             if kind == "real_entity":
@@ -1071,7 +1049,7 @@ class LilyReasoning:
     # -- Tier-2 judge transport (contract in lily_evaluation) ----------------
 
     async def judge(
-        self, system_instructions: str, user_prompt: str, *, adult: bool = False
+        self, system_instructions: str, user_prompt: str
     ) -> str:
         """One non-spoken LLM turn for Tier-2 adjudication. Returns the raw
         model text (parsed by lily_evaluation.lily_parse_judge_response).
@@ -1118,7 +1096,6 @@ class LilyReasoning:
         Runs at replenishment time only, never on a delivery path: the
         arsenal's whole promise is that the question a player hears was
         generated long before they asked for it."""
-        import lily_arsenal
         import lily_arsenal_content
         import lily_arsenal_formats
         import lily_arsenal_gen
@@ -1142,9 +1119,6 @@ class LilyReasoning:
                 return await lily_imagegen.lily_generate_image_bytes(
                     prompt,
                     aspect_ratio="16:9",
-                    mode="adult"
-                    if part in lily_arsenal.ADULT_PARTITIONS
-                    else "general",
                     intensity=heat or "suggestive",
                 )
 

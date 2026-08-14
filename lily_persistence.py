@@ -24,8 +24,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import httpx
-from postgrest.exceptions import APIError as PostgrestAPIError
 from supabase import Client as SupabaseClient, create_client as create_supabase_client
 from supabase.client import ClientOptions as SupabaseClientOptions
 
@@ -100,7 +98,7 @@ def lily_init_session(
                     "session_id": session_id,
                     "group_id": group_id or session_id,
                     "phase": "lobby",
-                    "mode": "general",
+                    "mode": "adult",
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="session_id",
@@ -724,7 +722,6 @@ async def lily_fetch_bank_question(
     category: str,
     difficulty_tier: int,
     exclude_prompts: list[str],
-    mode: str = "general",
     exclude_ids: Optional[set] = None,
     exclude_hashes: Optional[set] = None,
     exclude_answers: Optional[set] = None,
@@ -744,8 +741,8 @@ async def lily_fetch_bank_question(
     exact stage while Lily narrated a custom Cape Cod round over the top.
     A named topic gets that topic or an honest refusal — never "anything".
 
-    Mode guard (consent-safety): adult=true bank rows are returned ONLY
-    when mode == 'adult' — general mode hard-excludes them.
+    Unified adult deck: adult-register bank rows are served (the
+    content-mode gate was removed, WO-PRMPT-LILY-REFACTOR-001).
 
     Asked-history guard (bank-curation WO, migration 010): rows whose
     kb_ id is in `exclude_ids`, whose normalized-text hash is in
@@ -772,10 +769,8 @@ async def lily_fetch_bank_question(
                 supabase.table("lily_questions")
                 .select("*")
                 .eq("status", "active")
-                # Adult mode serves the adult deck only; general mode hard
-                # excludes it. Deck exhaustion falls through to mode-aware
-                # generation, never across the consent boundary.
-                .eq("adult", mode == "adult")
+                # Unified adult deck: serve adult-register rows.
+                .eq("adult", True)
             )
             if stage_category is not None:
                 query = query.eq("category", stage_category)
@@ -799,7 +794,7 @@ async def lily_fetch_bank_question(
             rows = await asyncio.to_thread(
                 _query_stage, stage_category, stage_tier
             )
-            pool = lily_memory.lily_bank_mode_filter(rows.data or [], mode)
+            pool = lily_memory.lily_bank_mode_filter(rows.data or [])
             candidates = [
                 r for r in pool
                 if r.get("question") and r["question"] not in exclude_prompts

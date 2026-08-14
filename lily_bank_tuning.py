@@ -23,7 +23,6 @@ applies row updates. It never raises into the session.
 
 import asyncio
 import logging
-from typing import Optional
 
 logger = logging.getLogger("lily_bank_tuning")
 

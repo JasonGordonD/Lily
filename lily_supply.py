@@ -10,21 +10,12 @@ LilyGame.__init__ until the bare()/getattr-fog step."""
 from __future__ import annotations
 
 import asyncio
-import json
-import re
-import time
-import uuid
 
 import lily_arsenal
 import lily_bank
-import lily_bank_tuning
 import lily_config
-import lily_evaluation
 import lily_images
 import lily_persistence
-import lily_reasoning
-import lily_say_gate
-import lily_scorekeeper
 
 import logging
 logger = logging.getLogger("lily_agent")
@@ -296,12 +287,6 @@ class LilySupplyMixin:
                 self.ensure_supply_recovery(trigger="prefetch_failed")
 
         async def _prefetch_inner() -> None:
-            # Deck identity for THIS draw (WO-LILY-DESYNC-HONESTY-001 D):
-            # captured once at the top — if the sticky mode flips while the
-            # draw is in flight (adult entry / back-to-normal), the commit
-            # guard below discards the wrong-deck question instead of
-            # serving it (the "wait, THAT's the adult section?" class).
-            supply_mode = self.sk.mode
             rnd = self._round_for_next_question()
             category = self._category_for_round(rnd)
             tier = self._difficulty_for_round(rnd)
@@ -343,14 +328,13 @@ class LilySupplyMixin:
                 # arsenal is empty for this partition do we fall to live
                 # generation (rung 2), and only at PREFETCH — the delivery
                 # path itself never generates.
-                question = await self._arsenal_picture_draw(supply_mode)
+                question = await self._arsenal_picture_draw()
                 if question is None:
                     question = await self.reasoning.prefetch_picture_question(
                         self.supabase,
                         kind=picture_kind,
                         question_index=self.sk.question_number,
                         session_id=self.sk.session_id,
-                        mode=supply_mode,
                         intensity=self.sk.adult_image_intensity,
                         exclude_ids=history_ids, exclude_hashes=history_hashes,
                     )
@@ -386,7 +370,6 @@ class LilySupplyMixin:
                     from_bank = await asyncio.wait_for(
                         lily_persistence.lily_fetch_bank_question(
                             self.supabase, category, tier, self.used_prompts,
-                            mode=supply_mode,
                             exclude_ids=history_ids,
                             exclude_hashes=history_hashes,
                             exclude_answers=set(history_answers),
@@ -438,7 +421,6 @@ class LilySupplyMixin:
                     question = await asyncio.wait_for(
                         lily_persistence.lily_fetch_bank_question(
                             self.supabase, category, tier, self.used_prompts,
-                            mode=supply_mode,
                             exclude_ids=history_ids, exclude_hashes=history_hashes,
                             exclude_answers=set(history_answers),
                             strict_category=strict,
@@ -468,10 +450,10 @@ class LilySupplyMixin:
                 else:
                     logger.error(
                         "LILY_PREFETCH | INSURANCE_BANK_EMPTY | session=%s "
-                        "q=%d category=%r mode=%s — generation failed and "
+                        "q=%d category=%r — generation failed and "
                         "the curated bank has no eligible row (supply low)",
                         self.sk.session_id, self.sk.question_number,
-                        category, supply_mode,
+                        category,
                     )
             if question is None:
                 # Z2: nothing landed from generation, pictures, or the
@@ -490,21 +472,6 @@ class LilySupplyMixin:
                     "id=%s prompt=%r",
                     self.sk.session_id, question.get("id"),
                     str(question.get("prompt", ""))[:80],
-                )
-                question = None
-            # Mode-switch commit guard (WO-LILY-DESYNC-HONESTY-001 D): the
-            # sticky mode flipped while this draw was in flight — the
-            # question came from the OLD deck. Discard it; the mode-switch
-            # flush already relaunched a fresh draw from the new deck (and
-            # the idle watchdog backstops). The question stays in the
-            # drawn-set on purpose: a flushed/discarded draw is never
-            # re-served this session.
-            if question is not None and self.sk.mode != supply_mode:
-                logger.info(
-                    "LILY_PREFETCH | MODE_SWITCH_DISCARD | session=%s "
-                    "drawn_for=%s mode_now=%s id=%s",
-                    self.sk.session_id, supply_mode, self.sk.mode,
-                    question.get("id"),
                 )
                 question = None
             # A custom-category request can cancel a draw after its final
@@ -535,10 +502,8 @@ class LilySupplyMixin:
                 # N+2 in the reserve. The head-only machinery (settle, THE
                 # registration point, auto-advance) is deliberately skipped
                 # here; it runs when this question is PROMOTED to the head at
-                # arm. Stamp the draw mode so promotion can reject a deck that
-                # flipped while the reserve sat.
+                # arm.
                 self._next_question_reserve = question
-                self._next_question_reserve_mode = self.sk.mode
                 self._note_supply_landed()
             elif (
                 question is not None
@@ -822,7 +787,7 @@ class LilySupplyMixin:
                 # De-escalate: adult authoring runs high by default, general
                 # runs medium — the retry drops a band so a hard draw does
                 # not reproduce the stall verbatim.
-                effort = "medium" if self.sk.mode == "adult" else "low"
+                effort = "medium"
                 logger.warning(
                     "LILY_SUPPLY | RETRY | session=%s q=%d attempt=%d/%d "
                     "trigger=%s effort=%s — re-running the failed prefetch",
@@ -920,7 +885,6 @@ class LilySupplyMixin:
             question = await asyncio.wait_for(
                 lily_persistence.lily_fetch_bank_question(
                     self.supabase, category, tier, self.used_prompts,
-                    mode=self.sk.mode,
                     exclude_ids=history_ids, exclude_hashes=history_hashes,
                     exclude_answers=history_answers,
                     # HOTFIX-006 N2: the third door into the generic round.
@@ -1011,7 +975,6 @@ class LilySupplyMixin:
                 question = await asyncio.wait_for(
                     lily_persistence.lily_fetch_bank_question(
                         self.supabase, category, tier, self.used_prompts,
-                        mode=self.sk.mode,
                         exclude_ids=history_ids,
                         exclude_hashes=history_hashes,
                         exclude_answers=history_answers,
@@ -1096,18 +1059,12 @@ class LilySupplyMixin:
         if reserve is None:
             return
         self._next_question_reserve = None
-        reserve_mode = self._next_question_reserve_mode
-        self._next_question_reserve_mode = None
-        if self._is_burned(reserve) or (
-            reserve_mode is not None and reserve_mode != self.sk.mode
-        ):
+        if self._is_burned(reserve):
             logger.info(
                 "LILY_SUPPLY | RESERVE_DISCARD | session=%s id=%s "
-                "drawn_mode=%s mode_now=%s — deck flipped or answer aired "
-                "while the reserve sat; discarding (head left empty to "
-                "re-prefetch)",
-                self.sk.session_id, reserve.get("id"), reserve_mode,
-                self.sk.mode,
+                "— answer aired while the reserve sat; discarding (head "
+                "left empty to re-prefetch)",
+                self.sk.session_id, reserve.get("id"),
             )
             return
         if self.sk.media_mode != "pictures":
@@ -1270,7 +1227,7 @@ class LilySupplyMixin:
         self.start_prefetch()  # N+2 begins while N+1 plays out
         return True
 
-    async def _arsenal_picture_draw(self, supply_mode: str) -> dict | None:
+    async def _arsenal_picture_draw(self) -> dict | None:
         """First rung of the picture supply ladder: draw a pre-generated
         pair from the standing arsenal. ZERO generation on this path — the
         whole point is cold-start pictures with no Grok wait. Returns the
@@ -1283,21 +1240,19 @@ class LilySupplyMixin:
         pair this group has not seen."""
         if getattr(self, "supabase", None) is None:
             logger.warning(
-                "LILY_SUPPLY | PICTURE_DRAW | id=none url=no mode=%s "
+                "LILY_SUPPLY | PICTURE_DRAW | id=none url=no "
                 "reason=no_supabase",
-                supply_mode,
             )
             return None
         group_id = getattr(self, "group_id", None)
         if not group_id:
             logger.warning(
-                "LILY_SUPPLY | PICTURE_DRAW | id=none url=no mode=%s "
+                "LILY_SUPPLY | PICTURE_DRAW | id=none url=no "
                 "reason=no_group_id",
-                supply_mode,
             )
             return None
         intensity = getattr(self.sk, "adult_image_intensity", "suggestive")
-        partitions = lily_arsenal.lily_partitions_for(supply_mode, intensity)
+        partitions = lily_arsenal.lily_partitions_for(intensity)
         # Answer-level belt over the DB group no-repeat: steer clear of
         # answers this group has already played on any supply path.
         try:
@@ -1323,17 +1278,17 @@ class LilySupplyMixin:
                 qid = q.get("id") or q.get("arsenal_id") or "?"
                 if not signed:
                     logger.warning(
-                        "LILY_SUPPLY | PICTURE_DRAW | id=%s url=no mode=%s "
+                        "LILY_SUPPLY | PICTURE_DRAW | id=%s url=no "
                         "partition=%s reason=sign_failed — skip row, try next",
-                        qid, supply_mode, partition,
+                        qid, partition,
                     )
                     continue
                 q["image_url"] = signed
-                self._kick_arsenal_replenish(partition, supply_mode, intensity)
+                self._kick_arsenal_replenish(partition, intensity)
                 logger.info(
-                    "LILY_SUPPLY | PICTURE_DRAW | id=%s url=yes mode=%s "
+                    "LILY_SUPPLY | PICTURE_DRAW | id=%s url=yes "
                     "partition=%s",
-                    qid, supply_mode, partition,
+                    qid, partition,
                 )
                 return q
         # Every candidate partition came up empty. This is the exact moment
@@ -1341,10 +1296,10 @@ class LilySupplyMixin:
         # against a shelf with nothing on it — and it must never again pass
         # in silence. WARN here, then fall to the next supply rung.
         logger.warning(
-            "LILY_SUPPLY | PICTURE_DRAW | id=none url=no mode=%s "
+            "LILY_SUPPLY | PICTURE_DRAW | id=none url=no "
             "partitions=%s — arsenal empty for group; fall through to live "
             "generation. Seed: python3 -m lily_arsenal_seed --partition all",
-            supply_mode, ",".join(partitions),
+            ",".join(partitions),
         )
         logger.warning(
             "ARSENAL_LOW | partitions=%s group=%s — no ready entry for this "
@@ -1355,7 +1310,7 @@ class LilySupplyMixin:
         return None
 
     def _kick_arsenal_replenish(
-        self, partition: str, supply_mode: str, intensity: str
+        self, partition: str, intensity: str
     ) -> None:
         """Fire watermark-gated replenishment in the BACKGROUND — never
         awaited, never on the delivery path. Checks the served/ready
@@ -1390,7 +1345,7 @@ class LilySupplyMixin:
                 await lily_arsenal.lily_arsenal_replenish(
                     self.supabase,
                     partition=partition,
-                    generate_one=self._arsenal_generate_one(supply_mode, intensity),
+                    generate_one=self._arsenal_generate_one(intensity),
                 )
             except Exception as e:
                 logger.warning(
@@ -1400,7 +1355,7 @@ class LilySupplyMixin:
 
         asyncio.ensure_future(_run())
 
-    def _arsenal_generate_one(self, supply_mode: str, intensity: str):
+    def _arsenal_generate_one(self, intensity: str):
         """Build the generate_one callable the replenisher pumps: one
         fresh picture pair per call, or None when generation is
         unavailable so the replenisher stops cleanly. Each partition banks
@@ -1479,7 +1434,6 @@ class LilySupplyMixin:
         # is invalid for pictures too. Clear it with the head (invariant: head
         # cleared => reserve cleared).
         self._next_question_reserve = None
-        self._next_question_reserve_mode = None
         task = self._prefetch_task
         if task is not None and not task.done():
             task.cancel()
@@ -1577,7 +1531,6 @@ class LilySupplyMixin:
             # flight — retire it with the rest, never serve it.
             self._burn_question(self._next_question_reserve, reason=reason)
             self._next_question_reserve = None
-            self._next_question_reserve_mode = None
             burned = True
         if burned:
             logger.warning(

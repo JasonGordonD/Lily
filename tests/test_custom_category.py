@@ -146,19 +146,6 @@ def test_override_applies_to_the_next_questions_round_when_midround():
     assert game._category_for_round(3) == CATEGORY_FAMILIES[2]
 
 
-def test_adult_mode_redirects_without_denying_or_crossing_the_firewall():
-    """The adult deck rotates its OWN families; a custom label must never
-    ride an adult question (announcing an adult question as an academic
-    category was a live defect). Redirect honestly — never a flat 'no'."""
-    game = _make_game(question_number=0, mode="adult")
-    msg = _call_set_category(game, "Game of Thrones")
-    # No override set on the adult deck.
-    assert game._category_override == {}
-    # Honest redirect that still names the topic and the way back.
-    assert "back to normal" in msg.lower()
-    assert "Game of Thrones" in msg
-
-
 def test_before_game_start_the_round_is_still_really_built():
     """AMENDED BY N2. This used to assert the tool sets the override and
     prefetches NOTHING before the game starts — which meant a lobby request

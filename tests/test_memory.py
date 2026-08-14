@@ -204,22 +204,13 @@ BANK_ROWS = [
 ]
 
 
-def test_general_mode_excludes_adult_rows():
-    filtered = lily_bank_mode_filter(BANK_ROWS, "general")
-    assert [r["id"] for r in filtered] == [1, 3, 4]
-
-
-def test_adult_mode_returns_all_rows():
-    filtered = lily_bank_mode_filter(BANK_ROWS, "adult")
+def test_bank_filter_passes_all_rows():
+    # Unified adult deck (content-mode gate removed): the filter no longer
+    # takes a mode and no longer excludes adult rows — every row passes.
+    filtered = lily_bank_mode_filter(BANK_ROWS)
     assert [r["id"] for r in filtered] == [1, 2, 3, 4]
 
 
-def test_missing_or_unknown_mode_defaults_safe():
-    assert all(not r.get("adult") for r in lily_bank_mode_filter(BANK_ROWS, None))
-    assert all(not r.get("adult") for r in lily_bank_mode_filter(BANK_ROWS, ""))
-    assert all(not r.get("adult") for r in lily_bank_mode_filter(BANK_ROWS, "weird"))
-
-
 def test_filter_handles_empty_rows():
-    assert lily_bank_mode_filter([], "general") == []
-    assert lily_bank_mode_filter(None, "adult") == []
+    assert lily_bank_mode_filter([]) == []
+    assert lily_bank_mode_filter(None) == []

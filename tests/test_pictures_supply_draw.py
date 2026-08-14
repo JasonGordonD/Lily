@@ -65,7 +65,7 @@ def test_arsenal_draw_sets_signed_image_url(monkeypatch):
     monkeypatch.setattr(
         "lily_images.lily_arsenal_image_url", fake_sign
     )
-    q = _run(g._arsenal_picture_draw("adult"))
+    q = _run(g._arsenal_picture_draw())
     assert q is not None
     assert q["image_url"] == "https://signed.example/ars_1.png"
 
@@ -89,7 +89,7 @@ def test_arsenal_sign_failure_does_not_return_storage_path(monkeypatch):
     monkeypatch.setattr(
         "lily_images.lily_arsenal_image_url", fake_sign
     )
-    assert _run(g._arsenal_picture_draw("adult")) is None
+    assert _run(g._arsenal_picture_draw()) is None
 
 
 def test_voice_only_slot_gate_blocks_picture_kind():

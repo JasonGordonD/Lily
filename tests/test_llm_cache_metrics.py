@@ -133,16 +133,13 @@ def test_cancelled_calls_are_counted():
     assert cache["cancelled_calls"] == 1
 
 
-def test_wiring_is_component_level_on_both_transports():
-    """Source pins: the general node is wired at session build, the adult
-    node at swap-in, and the DEPRECATED session-level subscription is still
-    never used."""
+def test_wiring_is_component_level_on_the_vocal_transport():
+    """Source pins: the single vocal node is wired at session build (the
+    adult vocal swap was removed with the content-mode gate), and the
+    DEPRECATED session-level subscription is still never used."""
     src = inspect.getsource(lily_agent)
     assert src.count('_wire_llm_metrics(general_vocal_llm)') == 1
-    # Adult swap-in re-uses the same wire via the game handle.
     assert '_llm_metrics_wire' in src
-    enter_src = inspect.getsource(lily_agent.LilyGame.enter_adult_vocal)
-    assert '_llm_metrics_wire' in enter_src
     # U3(b) stays honored: no AgentSession-level metrics subscription.
     assert 'session.on("metrics_collected"' not in src
     assert "session.on('metrics_collected'" not in src

@@ -89,7 +89,7 @@ def _reasoning_with_queue(seen: list, raws: list[str]) -> LilyReasoning:
 def test_mc_generation_prompt_demands_four_choices():
     seen: list = []
     r = _reasoning_with_queue(seen, [json.dumps(MC_QUESTION)])
-    q = _run(r.generate_question("academic", 2, "general", [], multiple_choice=True))
+    q = _run(r.generate_question("academic", 2, [], multiple_choice=True))
     assert q is not None and q["choices"] == CHOICES
     prompt = seen[0]["prompt"]
     assert "MULTIPLE-CHOICE" in prompt

@@ -109,9 +109,14 @@ def lily_normalize_answer(text: str) -> str:
 # registration is STRUCTURAL (the q_{N}_delivery claim), and the ratio
 # is logged as `LILY_WINDOW | RATIO | … telemetry` and acted on by
 # nothing. The constants stay for log continuity and analysis.
-QUESTION_SPOKEN_VERBATIM_RATIO = 0.6
 QUESTION_SPOKEN_PARAPHRASE_RATIO = 0.3
 QUESTION_SPOKEN_MIN_HITS = 2
+
+# Near-miss gate: at/above this spoken/prompt ratio the table is treated as
+# having already heard the question — confirm delivery without re-airing, or
+# rewrite the pending turn strictly (near_verbatim / UNDELIVERED_NEAR_MISS /
+# NUDGE_NEAR_MISS sites in lily_speech_delivery and lily_agent).
+QUESTION_SPOKEN_NEAR_MISS_RATIO = 0.9
 
 
 def lily_question_spoken_ratio(

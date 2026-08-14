@@ -252,7 +252,7 @@ def test_generation_routes_to_grok_in_adult_mode(monkeypatch):
 
     monkeypatch.setattr(lily_imagegen, "_generate_image_bytes_xai", fake_xai)
     data, mime, model = run(
-        lily_imagegen.lily_generate_image_bytes("invented place", mode="adult")
+        lily_imagegen.lily_generate_image_bytes("invented place")
     )
     assert "invented place" in calls["xai"]["prompt"]
     assert "comic-book" in calls["xai"]["prompt"]
@@ -275,22 +275,22 @@ def test_adult_style_intensity_and_content_brief():
     assert lily_imagegen.lily_normalize_adult_image_intensity("nope") == "suggestive"
 
 
-def test_real_or_imagined_generated_adult_threads_mode_and_names_grok(monkeypatch):
-    # The builder's GENERATED branch must thread mode='adult' down to
-    # generation and label the license note with the Grok adult model.
+def test_real_or_imagined_generated_names_grok(monkeypatch):
+    # Unified adult deck: the GENERATED branch routes to the Grok adult
+    # image model and labels the license note with it (no mode threading).
     seen = {}
 
     async def fake_gen_q_image(supabase, **kw):
-        seen["mode"] = kw.get("mode")
+        seen["called"] = True
         return "https://cdn.example/lily-images/generated/adult.png"
 
     monkeypatch.setattr(
         lily_imagegen, "lily_generate_question_image", fake_gen_q_image
     )
     q = run(lily_imagegen.lily_build_real_or_imagined_question(
-        object(), index=1, session_id="room-1", mode="adult"
+        object(), index=1, session_id="room-1"
     ))
-    assert seen["mode"] == "adult"
+    assert seen.get("called") is True
     assert q["image_source"] == "generated"
     assert lily_imagegen.lily_config.adult_imagegen_model() in q[
         "image_license_note"

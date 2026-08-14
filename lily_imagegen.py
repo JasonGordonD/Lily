@@ -41,17 +41,13 @@ generator this round needs, and it composes with I's real-photo sourcing;
 an emoji round would not exercise the donor stack at all.
 """
 
-import asyncio
 import base64
 import logging
 from typing import Final, Optional
 
 import aiohttp
-from google import genai as google_genai
-from google.genai import types as genai_types
 
 import lily_config
-import lily_gemini_safety
 import lily_images
 import lily_search
 
@@ -281,7 +277,7 @@ def lily_adult_style(
     return f"{base} {LILY_ADULT_IMAGE_STYLE} {addendum}".strip()
 
 
-_XAI_IMAGES_URL: Final = "https://api.x.ai/v1/images/generations"
+_XAI_IMAGES_URL: Final = f"{lily_config.xai_base_url()}/images/generations"
 
 
 async def _generate_image_bytes_xai(
@@ -366,81 +362,31 @@ async def lily_generate_image_bytes(
     aspect_ratio: str = "16:9",
     api_key: Optional[str] = None,
     model: Optional[str] = None,
-    mode: str = "general",
     intensity: str = "suggestive",
 ) -> tuple[bytes, str, str]:
     """One image generation call. Returns (image_bytes, mime_type, model).
 
-    Provider routing by DECK (read-only on mode — never touches the adult
-    gate): general/standard -> Gemini image model; adult -> xAI Grok Imagine
-    (Gemini refuses adult content). On adult mode the prompt is always
-    run through lily_adult_style(intensity=...) before the wire so the
-    comic / permissive-wear / kink / caption brief cannot be skipped.
-    RAISES RuntimeError with the provider's message on any failure —
-    callers (the no-silent-crash wrappers below) turn that into a visible
-    lily_image_attempts error row. Aspect ratio is clamped before the wire
-    (the donor crash class: an off-list value 400s AFTER a good render)."""
+    Adult deck -> xAI Grok Imagine. The prompt is always run through
+    lily_adult_style(intensity=...) before the wire so the comic /
+    permissive-wear / kink / caption brief cannot be skipped. RAISES
+    RuntimeError with the provider's message on any failure — callers
+    (the no-silent-crash wrappers below) turn that into a visible
+    lily_image_attempts error row."""
     if not (prompt or "").strip():
         raise RuntimeError("empty image prompt")
-    if mode == "adult":
-        # Adult deck -> Grok. Style chokepoint applies here so every adult
-        # generation (demo, picture rounds, bank image_prompt) gets the
-        # same art brief + player-chosen intensity. P3: a 'mix' session
-        # resolves to a concrete render level per question (the prompt is
-        # the deterministic seed) and the resolved level is logged so the
-        # mix distribution is a log query.
-        render_level = lily_resolve_render_intensity(intensity, prompt)
-        if (intensity or "").strip().lower() == "mix":
-            logger.info(
-                "LILY_IMAGEGEN | MIX_RESOLVED | render_level=%s", render_level
-            )
-        styled = lily_adult_style(prompt, intensity=render_level)
-        return await _generate_image_bytes_xai(styled, model=model)
-    mdl = model or lily_config.imagegen_model()
-    clamped = clamp_and_log(aspect_ratio)
-    config_kwargs = {
-        "safety_settings": (
-            lily_gemini_safety.lily_gemini_safety_settings()
+    # Adult deck -> Grok. Style chokepoint applies here so every
+    # generation (demo, picture rounds, bank image_prompt) gets the
+    # same art brief + player-chosen intensity. P3: a 'mix' session
+    # resolves to a concrete render level per question (the prompt is
+    # the deterministic seed) and the resolved level is logged so the
+    # mix distribution is a log query.
+    render_level = lily_resolve_render_intensity(intensity, prompt)
+    if (intensity or "").strip().lower() == "mix":
+        logger.info(
+            "LILY_IMAGEGEN | MIX_RESOLVED | render_level=%s", render_level
         )
-    }
-    if clamped != "auto":
-        config_kwargs["image_config"] = genai_types.ImageConfig(
-            aspect_ratio=clamped
-        )
-    config = genai_types.GenerateContentConfig(**config_kwargs)
-    client = google_genai.Client(api_key=api_key or lily_config.google_api_key())
-    response = await asyncio.wait_for(
-        asyncio.to_thread(
-            client.models.generate_content,
-            model=mdl,
-            contents=prompt,
-            config=config,
-        ),
-        timeout=GENERATION_TIMEOUT_SECONDS,
-    )
-    text_reason = ""
-    for candidate in getattr(response, "candidates", None) or []:
-        content = getattr(candidate, "content", None)
-        for part in getattr(content, "parts", None) or []:
-            inline = getattr(part, "inline_data", None)
-            data = getattr(inline, "data", None) if inline else None
-            if data:
-                mime = getattr(inline, "mime_type", None) or "image/png"
-                logger.info(
-                    "LILY_IMAGEGEN | GENERATED | model=%s bytes=%d aspect=%s",
-                    mdl, len(data), clamped,
-                )
-                return data, mime, mdl
-            part_text = getattr(part, "text", None)
-            if part_text:
-                text_reason = part_text
-    # Empty candidate / text-only refusal — surface the provider's words
-    # (the donor's silent-rejection problem: the model refuses without the
-    # caller ever learning why).
-    raise RuntimeError(
-        "no image in response"
-        + (f": {text_reason[:300]}" if text_reason else " (possible safety rejection)")
-    )
+    styled = lily_adult_style(prompt, intensity=render_level)
+    return await _generate_image_bytes_xai(styled, model=model)
 
 
 async def lily_generate_question_image(
@@ -450,7 +396,6 @@ async def lily_generate_question_image(
     question_id: str,
     prompt: str,
     aspect_ratio: str = "16:9",
-    mode: str = "general",
     intensity: str = "suggestive",
 ) -> Optional[str]:
     """NO-SILENT-CRASH wrapper: generate + store one INVENTED-content image
@@ -481,15 +426,11 @@ async def lily_generate_question_image(
             "(no double spend)", session_id, question_id,
         )
         return memoized
-    attempt_model = (
-        lily_config.adult_imagegen_model() if mode == "adult"
-        else lily_config.imagegen_model()
-    )
+    attempt_model = lily_config.adult_imagegen_model()
     try:
         data, mime, mdl = await lily_generate_image_bytes(
             prompt,
             aspect_ratio=aspect_ratio,
-            mode=mode,
             intensity=intensity,
         )
     except Exception as e:
@@ -510,9 +451,9 @@ async def lily_generate_question_image(
         # explicit-tier rejection rate reads as tuning signal, not breakage.
         if rejected:
             logger.info(
-                "LILY_IMAGEGEN | CONTENT_REJECTED | mode=%s intensity=%s "
+                "LILY_IMAGEGEN | CONTENT_REJECTED | intensity=%s "
                 "model=%s q=%s — falling back pictureless (honest line)",
-                mode, intensity, attempt_model, question_id,
+                intensity, attempt_model, question_id,
             )
         return None
     url = await lily_images.lily_upload_image_bytes(
@@ -606,7 +547,6 @@ async def lily_build_real_or_imagined_question(
     session_id: str,
     difficulty_tier: int = 2,
     approve=None,
-    mode: str = "general",
     intensity: str = "suggestive",
 ) -> Optional[dict]:
     """Build one 'real or imagined' question: even indexes serve a REAL
@@ -691,15 +631,12 @@ async def lily_build_real_or_imagined_question(
         qid = f"roi_{index:04d}"
         url = await lily_generate_question_image(
             supabase, session_id=session_id, question_id=qid,
-            prompt=gen_prompt, aspect_ratio="16:9", mode=mode,
+            prompt=gen_prompt, aspect_ratio="16:9",
             intensity=intensity,
         )
         if url is None:
             return None  # error row already written; text-only fallback
-        gen_model = (
-            lily_config.adult_imagegen_model() if mode == "adult"
-            else lily_config.imagegen_model()
-        )
+        gen_model = lily_config.adult_imagegen_model()
         return {
             "id": qid,
             "category": "real or imagined",

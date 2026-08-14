@@ -248,6 +248,13 @@ def xai_api_key() -> Optional[str]:
     return _get("XAI_API_KEY")
 
 
+def xai_base_url() -> str:
+    """xAI (Grok) API base — vision, imagegen, and reasoning surfaces all
+    ride https://api.x.ai/v1. Network policy: reachable only from the
+    deployment, never local/dev."""
+    return _get("LILY_XAI_BASE_URL", "https://api.x.ai/v1")
+
+
 def vision_model() -> str:
     return "grok-4.5"
 

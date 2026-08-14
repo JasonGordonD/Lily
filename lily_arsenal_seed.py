@@ -462,11 +462,9 @@ def _build_bindings():
     reasoning = lily_reasoning.LilyReasoning()
 
     async def imagegen(prompt, partition, intensity):
-        mode = "adult" if partition in lily_arsenal.ADULT_PARTITIONS else "general"
         return await lily_imagegen.lily_generate_image_bytes(
             prompt,
             aspect_ratio="16:9",
-            mode=mode,
             intensity=intensity or "suggestive",
         )
 

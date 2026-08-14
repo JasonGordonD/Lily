@@ -215,7 +215,6 @@ def test_picture_slots_enabled_in_adult_mode():
     # downstream). The only picture gate left is media_mode.
     game = _make_game()
     game.sk.set_media_mode("pictures")
-    game.sk.set_mode("adult")
     # Reference round: every question is real-or-imagined.
     game.sk.question_number = 8  # mid round 2
     assert game._picture_kind_for_slot(
@@ -338,10 +337,9 @@ def test_real_picture_prefetch_accepts_supply_exclusions(monkeypatch):
     assert calls
 
 
-def test_adult_mode_reaches_builder_and_threads_mode(monkeypatch):
-    # WO-LILY-ADULT-PICTURES-001: adult mode no longer short-circuits;
-    # prefetch reaches the real_or_imagined builder and threads mode='adult'
-    # so generation routes to the Grok adult model downstream.
+def test_adult_mode_reaches_builder(monkeypatch):
+    # Unified adult deck: prefetch reaches the real_or_imagined builder
+    # (generation routes to the Grok adult model downstream).
     reasoning = lily_reasoning.LilyReasoning.__new__(lily_reasoning.LilyReasoning)
     reasoning.approve_entity_image = None
     seen = {}
@@ -361,11 +359,10 @@ def test_adult_mode_reaches_builder_and_threads_mode(monkeypatch):
         kind="real_or_imagined",
         question_index=7,
         session_id="room",
-        mode="adult",
     ))
     assert result is not None
     assert result["id"] == "roi_0007"
-    assert seen["mode"] == "adult"
+    assert result["image_source"] == "generated"
 
 
 def test_excluded_picture_id_skips_builder(monkeypatch):

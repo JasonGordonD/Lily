@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 import json
-import re
 import time
 
 from dataclasses import dataclass, field
@@ -23,9 +22,7 @@ import lily_capabilities
 import lily_forget
 import lily_memory
 import lily_config
-import lily_images
 import lily_scorekeeper
-import lily_vision
 from lily_scorekeeper import lily_detect_state_contradiction
 
 import logging
@@ -176,7 +173,7 @@ class LilyGlassMixin:
                 "phase": phase or self._phase_hold or self.ui_phase,
                 "round": str(self.sk.round),
                 "question_number": str(self.sk.question_number),
-                "mode": self.sk.mode,  # deterministic sticky flag (§11.4)
+                "mode": "adult",  # unified deck (§11.4)
                 # SEAM ADDITION (group prefs WO): `pacing` — "timed" |
                 # "relaxed" — joins the LWW attribute set so the frontend
                 # can style/omit its countdown UI; answer_window.duration_ms
@@ -972,28 +969,6 @@ class LilyGlassMixin:
         if command == "forget_me":
             self._on_forget_requested(player or speaker_label)
             return
-        if command == "back_to_normal":
-            if self.sk.mode == "adult":
-                self.sk.set_mode("general")  # sticky flag flips instantly
-                getattr(self, "exit_adult_vocal", lambda: None)()  # restore the general vocal node
-                # D: no question survives the deck change — the armed
-                # adult question is flushed and the general deck re-draws
-                # immediately.
-                self.flush_for_mode_switch(source="back_to_normal")
-                self.publish_attributes_nowait()
-                self.gated_say(
-                    None,
-                    "mode_revert",
-                    "A player said 'back to normal'. Adult mode is now "
-                    "OFF — committed, in code. Switch registers "
-                    "instantly, no ceremony, no residue. The general "
-                    "deck is re-drawing: the next question lands in the "
-                    "state block in a beat — never re-ask, finish, or "
-                    "reveal the adult question; vamp lightly until the "
-                    "new one appears.",
-                    source="voice_command",
-                )
-            return
         if command in ("pacing_relaxed", "pacing_timed"):
             # Group prefs WO: the spoken pacing choice is committed in code
             # (flag + persisted prefs) before Lily says a word about it —
@@ -1346,7 +1321,7 @@ class LilyGlassMixin:
         actually reads off — the anti-fabrication mechanism ('picture
         search is off tonight' was false against the ledger; tone cannot
         be the mechanism). Pure read, no side effects."""
-        adult = self.sk.mode == "adult"
+        adult = True
         gen_key = bool(
             lily_config.xai_api_key() if adult else lily_config.google_api_key_present()
         )
@@ -1403,13 +1378,13 @@ class LilyGlassMixin:
         anti-fabrication read behind every camera claim — she offers the
         camera only when it is genuinely available, and says she sees
         something only when a frame has actually been attached this turn."""
-        adult = self.sk.mode == "adult"
         return {
-            # V3.2: structurally unavailable in the adult deck.
-            "available": not adult,
+            # Camera lane is available regardless of deck (the adult-deck
+            # mutual-exclusion was removed with the content-mode gate).
+            "available": True,
             "open": getattr(self.sk, "camera_lane", "off") == "open",
             "frame_pending": self._latest_video_frame is not None,
-            "unavailable_reason": "adult_mode" if adult else None,
+            "unavailable_reason": None,
         }
 
     def camera_lane_state_line(self) -> str | None:

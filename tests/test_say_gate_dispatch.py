@@ -442,7 +442,8 @@ def test_bank_fetcher_excludes_burned_rows():
         {"id": 2, "question": "retired q", "canonical_answer": "y",
          "category": "academic", "difficulty_tier": 1, "status": "retired"},
         {"id": 3, "question": "active q", "canonical_answer": "z",
-         "category": "academic", "difficulty_tier": 1, "status": "active"},
+         "category": "academic", "difficulty_tier": 1, "status": "active",
+         "adult": True},
     ]
     fake = _FakeSupabase(rows)
     q = asyncio.new_event_loop().run_until_complete(
@@ -456,9 +457,11 @@ def test_bank_fetcher_excludes_burned_rows():
 def test_bank_fetcher_randomizes_bounded_candidates(monkeypatch):
     rows = [
         {"id": 1, "question": "first", "canonical_answer": "a",
-         "category": "academic", "difficulty_tier": 1, "status": "active"},
+         "category": "academic", "difficulty_tier": 1, "status": "active",
+         "adult": True},
         {"id": 2, "question": "second", "canonical_answer": "b",
-         "category": "academic", "difficulty_tier": 1, "status": "active"},
+         "category": "academic", "difficulty_tier": 1, "status": "active",
+         "adult": True},
     ]
     monkeypatch.setattr("lily_persistence.random.choice", lambda values: values[-1])
     q = asyncio.new_event_loop().run_until_complete(
@@ -470,7 +473,7 @@ def test_bank_fetcher_randomizes_bounded_candidates(monkeypatch):
 def test_bank_fetcher_treats_missing_status_as_active():
     # Pre-009 schema tolerance: no status key reads as active.
     rows = [{"id": 4, "question": "legacy q", "canonical_answer": "w",
-             "category": "academic", "difficulty_tier": 1}]
+             "category": "academic", "difficulty_tier": 1, "adult": True}]
     q = asyncio.new_event_loop().run_until_complete(
         lily_fetch_bank_question(_FakeSupabase(rows), "academic", 1, [])
     )
@@ -560,7 +563,7 @@ def test_bank_fetcher_passes_choices_and_image_prompt_through():
     rows = [{
         "id": 5, "question": "mc bank q", "canonical_answer": "b",
         "acceptable_answers": ["b"], "category": "academic",
-        "difficulty_tier": 1, "status": "active",
+        "difficulty_tier": 1, "status": "active", "adult": True,
         "choices": ["a", "b", "c", "d"],
         "image_prompt": "product photo of a thing",
     }]
@@ -574,7 +577,7 @@ def test_bank_fetcher_passes_choices_and_image_prompt_through():
 
 def test_bank_fetcher_omits_absent_choices_and_prompt():
     rows = [{"id": 6, "question": "plain q", "canonical_answer": "x",
-             "category": "academic", "difficulty_tier": 1,
+             "category": "academic", "difficulty_tier": 1, "adult": True,
              "status": "active", "choices": None, "image_prompt": None}]
     q = asyncio.new_event_loop().run_until_complete(
         lily_fetch_bank_question(_FakeSupabase(rows), "academic", 1, [])

@@ -123,27 +123,23 @@ def _run(coro):
 # -- binding C: partition selection --------------------------------------------
 
 
-def test_partitions_general_deck():
-    assert lily_arsenal.lily_partitions_for("general", None) == ["general"]
-
-
 def test_partitions_adult_suggestive():
-    assert lily_arsenal.lily_partitions_for("adult", "suggestive") == ["adult_suggestive"]
+    assert lily_arsenal.lily_partitions_for("suggestive") == ["adult_suggestive"]
 
 
 def test_partitions_adult_explicit():
-    assert lily_arsenal.lily_partitions_for("adult", "explicit") == ["adult_explicit"]
+    assert lily_arsenal.lily_partitions_for("explicit") == ["adult_explicit"]
 
 
 def test_partitions_adult_mix_draws_both():
-    assert lily_arsenal.lily_partitions_for("adult", "mix") == [
+    assert lily_arsenal.lily_partitions_for("mix") == [
         "adult_suggestive",
         "adult_explicit",
     ]
 
 
 def test_partitions_default_is_suggestive():
-    assert lily_arsenal.lily_partitions_for("adult", None) == ["adult_suggestive"]
+    assert lily_arsenal.lily_partitions_for(None) == ["adult_suggestive"]
 
 
 # -- binding A: zero-generation draw -------------------------------------------
@@ -363,17 +359,17 @@ def test_agent_draw_repartitions_on_heat_flip(monkeypatch):
 
     monkeypatch.setattr(lily_arsenal, "lily_arsenal_draw", fake_draw)
 
-    _run(game._arsenal_picture_draw("adult"))
+    _run(game._arsenal_picture_draw())
     assert asked == ["adult_suggestive"]
 
     asked.clear()
     game.sk.adult_image_intensity = "explicit"
-    _run(game._arsenal_picture_draw("adult"))
+    _run(game._arsenal_picture_draw())
     assert asked == ["adult_explicit"]
 
     asked.clear()
     game.sk.adult_image_intensity = "mix"
-    _run(game._arsenal_picture_draw("adult"))
+    _run(game._arsenal_picture_draw())
     assert asked == ["adult_suggestive", "adult_explicit"]
 
 
@@ -391,12 +387,12 @@ def test_agent_draw_none_without_group_or_pipeline(monkeypatch):
     g1 = _game()
     g1.supabase = None
     g1.group_id = "g1"
-    assert _run(g1._arsenal_picture_draw("general")) is None
+    assert _run(g1._arsenal_picture_draw()) is None
 
     g2 = _game()
     g2.supabase = object()
     g2.group_id = None
-    assert _run(g2._arsenal_picture_draw("general")) is None
+    assert _run(g2._arsenal_picture_draw()) is None
 
 
 def test_agent_arsenal_rung_serves_with_no_generator_present(monkeypatch):
@@ -407,10 +403,10 @@ def test_agent_arsenal_rung_serves_with_no_generator_present(monkeypatch):
     from lily_scorekeeper import LilyScorekeeper
 
     sb = _FakeSupabase()
-    sb.seed_ready("general", 3)
+    sb.seed_ready("adult_suggestive", 3)
     game = LilyGame.bare()
     game.sk = LilyScorekeeper("arsw3")
-    game.sk.mode = "general"
+    game.sk.adult_image_intensity = "suggestive"
     game.supabase = sb
     game.group_id = "g1"
     game.asked_history = []
@@ -421,7 +417,7 @@ def test_agent_arsenal_rung_serves_with_no_generator_present(monkeypatch):
 
     monkeypatch.setattr("lily_images.lily_arsenal_image_url", fake_sign)
     # Deliberately NO game.reasoning attribute.
-    q = _run(game._arsenal_picture_draw("general"))
+    q = _run(game._arsenal_picture_draw())
     assert q is not None
     assert str(q.get("image_url", "")).startswith("https://")
     assert q["image_source"] == "arsenal"

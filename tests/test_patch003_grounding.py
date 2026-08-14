@@ -40,7 +40,7 @@ def test_status_reads_each_field_separately(monkeypatch):
 
 
 def test_healthy_lane_off_grounds_not_switched_on_never_off_tonight(monkeypatch):
-    monkeypatch.setenv("GOOGLE_API_KEY", "g")
+    monkeypatch.setenv("XAI_API_KEY", "x")
     game = _make_game(media_mode="voice_only")
     line = game.picture_lane_state_line()
     assert "NOT switched on" in line
@@ -63,7 +63,7 @@ def test_unreachable_pipeline_reads_off(monkeypatch):
 
 
 def test_pictures_on_grounds_claim_to_a_real_push(monkeypatch):
-    monkeypatch.setenv("GOOGLE_API_KEY", "g")
+    monkeypatch.setenv("XAI_API_KEY", "x")
     game = _make_game(media_mode="pictures")
     line = game.picture_lane_state_line()
     assert "pictures ARE on" in line

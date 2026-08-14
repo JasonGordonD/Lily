@@ -78,7 +78,7 @@ LIVE_GENERIC_ROWS = [
         "question": ("In Mumbai or Delhi, dinner gets paid for in this "
                      "Indian currency."),
         "canonical_answer": "rupee", "acceptable_answers": ["rupee", "rupees"],
-        "adult": False, "status": "active",
+        "adult": True, "status": "active",
     },
     {
         "id": 4002, "category": "pop_culture", "difficulty_tier": 2,
@@ -86,21 +86,21 @@ LIVE_GENERIC_ROWS = [
                      "band."),
         "canonical_answer": "One Direction",
         "acceptable_answers": ["one direction", "1d"],
-        "adult": False, "status": "active",
+        "adult": True, "status": "active",
     },
     {
         "id": 4003, "category": "pop_culture", "difficulty_tier": 3,
         "question": ("A stolen envelope of cash, the Bates Motel, and one "
                      "infamous shower — name this 1960 Hitchcock thriller."),
         "canonical_answer": "Psycho", "acceptable_answers": ["psycho"],
-        "adult": False, "status": "active",
+        "adult": True, "status": "active",
     },
     {
         "id": 4004, "category": "pop_culture", "difficulty_tier": 2,
         "question": ("Amy Winehouse said no, no, no in this Grammy-winning "
                      "one-word hit."),
         "canonical_answer": "Rehab", "acceptable_answers": ["rehab"],
-        "adult": False, "status": "active",
+        "adult": True, "status": "active",
     },
 ]
 
@@ -109,7 +109,7 @@ CAPE_COD_BANK_ROW = {
     "question": "This canal cuts Cape Cod off from the Massachusetts mainland.",
     "canonical_answer": "the Cape Cod Canal",
     "acceptable_answers": ["cape cod canal", "the cape cod canal"],
-    "adult": False, "status": "active",
+    "adult": True, "status": "active",
 }
 
 CAPE_COD_GENERATED = [
@@ -231,13 +231,13 @@ def _reasoning(generated=(), available=True):
     queue = [dict(q) for q in generated]
     node.generated_calls = []
 
-    async def _generate_question(category, tier, mode, avoid, **kw):
+    async def _generate_question(category, tier, avoid, **kw):
         node.generated_calls.append(category)
         if not available or not queue:
             return None
         return queue.pop(0)
 
-    async def _verify_question(question, mode="general"):
+    async def _verify_question(question):
         return True, "ok"
 
     node.generate_question = _generate_question
@@ -699,12 +699,12 @@ def test_the_fixed_rotation_still_gets_the_any_row_insurance_draw():
     table named, where "anything" is a lie rather than a fallback."""
     sb = _Supabase(questions=LIVE_GENERIC_ROWS)
     row = asyncio.run(lily_fetch_bank_question(
-        sb, "no_such_family", 2, [], mode="general",
+        sb, "no_such_family", 2, [],
     ))
     assert row is not None, "the family rotation must never starve"
 
     strict = asyncio.run(lily_fetch_bank_question(
-        sb, "Cape Cod", 2, [], mode="general", strict_category=True,
+        sb, "Cape Cod", 2, [], strict_category=True,
     ))
     assert strict is None, "a Cape Cod draw may only return Cape Cod"
 
@@ -714,7 +714,7 @@ def test_strict_draw_still_crosses_difficulty_tiers_within_the_topic():
     tier is still a Cape Cod question."""
     sb = _Supabase(questions=[CAPE_COD_BANK_ROW])  # tier 1
     row = asyncio.run(lily_fetch_bank_question(
-        sb, "Cape Cod", 3, [], mode="general", strict_category=True,
+        sb, "Cape Cod", 3, [], strict_category=True,
     ))
     assert row is not None and row["category"] == "Cape Cod"
 
@@ -730,16 +730,6 @@ def test_asked_history_category_survives_a_pre_migration_schema():
     ))
     assert len(sb.asked_rows) == 1
     assert "category" not in sb.asked_rows[0]
-
-
-def test_adult_mode_still_redirects_instead_of_building():
-    """PROTECTED (deck-identity firewall): a custom label must never ride an
-    adult question. Unchanged by N2 — redirect, never a flat denial."""
-    game = _make_game(_reasoning(CAPE_COD_GENERATED), _Supabase())
-    game.sk.mode = "adult"
-    msg = _ask_for(game, "Cape Cod")
-    assert "back to normal" in msg.lower()
-    assert game._category_override == {}
 
 
 def test_the_build_budget_is_bounded_and_configurable():

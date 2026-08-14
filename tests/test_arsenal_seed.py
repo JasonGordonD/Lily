@@ -261,11 +261,11 @@ def test_retire_never_deletes():
 
 
 def test_mix_heat_draws_from_both_adult_partitions():
-    assert lily_arsenal.lily_partitions_for("adult", "mix") == [
+    assert lily_arsenal.lily_partitions_for("mix") == [
         "adult_suggestive", "adult_explicit",
     ]
-    assert lily_arsenal.lily_partitions_for("adult", "explicit") == ["adult_explicit"]
-    assert lily_arsenal.lily_partitions_for("general", None) == ["general"]
+    assert lily_arsenal.lily_partitions_for("explicit") == ["adult_explicit"]
+    assert lily_arsenal.lily_partitions_for("suggestive") == ["adult_suggestive"]
 
 
 # -- A6: idempotency, concurrency, resumability -------------------------------

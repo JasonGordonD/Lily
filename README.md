@@ -3,8 +3,10 @@
 Lily hosts live trivia nights for 2–6 people sharing one room and one microphone.
 Real-time diarization supplies best-effort speaker labels; confirmed binding turns
 those labels into names. She scores per player, adjudicates who answered first,
-generates her own questions on the fly, and runs an opt-in, consent-gated 18+ mode.
-One agent, one prompt file plus one additive adult layer, one game-state object.
+generates her own questions on the fly, and serves the 18+ deck as the standard
+experience (content-mode gating removed in WO-PRMPT-LILY-REFACTOR-001; Lily
+serves unified content under one LLM). One agent, one prompt file plus one
+always-on adult prompt layer, one game-state object.
 
 Built from the PRMPT fleet's paid-for lessons: Lovebirds' production one-mic
 diarization, name binding, voiceprint persistence, TTS wrapper and its bug fixes —
@@ -100,8 +102,9 @@ question ABOUT stopping froze the game and cost the table its queued content.
 - **4b — freeze, never burn**: `_freeze_game_delivery_for_stop` no longer
   burns/nulls `armed_question`/`next_question`. STOP freezes supply (sticky
   latch, closed window, cancelled prefetch) but the armed and prefetched
-  cards SURVIVE and deliver on resume. Adult content keeps its consent-driven
-  hard burn (a safety semantic, not the general kb_* retirement removed here).
+  cards SURVIVE and deliver on resume. (The former adult-mode hard burn on STOP
+  was removed with the content-mode gate in WO-PRMPT-LILY-REFACTOR-001 — it
+  served the deleted mode-revert flow; freeze-not-burn now applies uniformly.)
 - Fixture replay: "Why why why stop? Why?" does not trigger the primitive;
   an armed card survives a genuine STOP
   (`tests/test_livefire_class4_stop_brake.py`; the pre-Class-4 "stop clears
@@ -346,7 +349,7 @@ a deck that has since flipped (mode mismatch) or one already burned is
 DISCARDED at promotion — never served cross-deck — and registration runs there,
 once, as the head. Every site that empties the head keeps the invariant: arm
 promotes, the picture-lane refresh clears the reserve (a pictureless reserve is
-invalid for pictures), and both burn paths (adult objection, answer leak) retire
+invalid for pictures), and the answer-leak burn path retires
 the reserve with everything else in flight. `tests/test_prefetch_reserve.py`
 pins the cross-deck discard explicitly.
 
@@ -418,10 +421,12 @@ lead the voice).
 (aed + audioQuality + expression + prosody + scene + speakerAttributes,
 continuous 5s window / 5s interval) is gated behind
 **`LILY_AUDEERING_ENABLED`** (default `false`). No pipeline code deleted;
-the pipeline still constructs and REGISTERS, so `lily_child_gate_ready`
-reads not-started and adult mode fails CLOSED under
-`adult_deck_gate_mode=sensor` exactly as before. Flag true restores
-everything, including the child-signal sensor.
+the pipeline still constructs and REGISTERS. (Since
+WO-PRMPT-LILY-REFACTOR-001 the child-signal handlers are log-only — the
+mode-exit they used to trigger was deleted with the content-mode gate;
+voice-based age detection is retired per operator ruling, with facial
+recognition planned as its replacement.) Flag true restores the sensor
+telemetry.
 
 **C12 — preemptive generation.** Session B measured 100% discard
 (invalidated=10, used=0). Diagnosis: not the equality check (word-level,
@@ -479,8 +484,8 @@ No fixes under this clause; recommended as the next work order.
 |---|---|
 | Framework | `livekit-agents==1.6.8` (plugin family pinned to match; endpointing uses `TurnHandlingOptions.endpointing` with FIXED mode; the LiveKit Turn Detector default remains off) |
 | STT | Speechmatics — `en`, diarization, `model=ENHANCED`; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`): `speaker_sensitivity=0.35`, `prefer_current_speaker=True`, `max_speakers=7`, FIXED turn mode, `ignore_speakers=["__ASSISTANT__"]`, player-name vocab, and StartRecognition `get_speakers`/volume injection. `LilySpeechmaticsSTT` maps the 1.6.8 plugin onto the supported RT `model` property; deprecated `operating_point` never reaches the wire. |
-| Vocal LLM | `grok-4.5` for general + adult; `low` routine effort, per-turn `medium` for dispute/ambiguity/multi-intent/meta; adult behavior is an additive prompt layer, not a provider swap |
-| Question reasoning | `grok-4.5` Responses API; general author/verify/distractors `medium`, every adult sub-theme/category/question author/verify `high`; never speaks or mutates state |
+| Vocal LLM | `grok-4.5`; `low` routine effort, per-turn `medium` for dispute/ambiguity/multi-intent/meta; the adult prompt layer is always-on (content-mode gate removed, WO-PRMPT-LILY-REFACTOR-001) |
+| Question reasoning | `grok-4.5` Responses API; author/verify `high` (unified adult deck); never speaks or mutates state |
 | TTS | ElevenLabs v3 via `lily_tts.py` (`/v1/text-to-speech/{voice_id}/stream`; the dialogue endpoint stays off per fleet revert). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`) |
 | VAD | Silero — barge-in enabled; STT is never gated during TTS |
 | Persistence | Supabase (`lily_*` tables), fail-fast init, checkpoint on score change / 60s / key events |
@@ -511,6 +516,27 @@ owning one invariant ("what is true?"), with LilyGame kept as the director:
 The extracts are byte-identical moves (`self.*` unchanged; `class LilyGame(...)`
 inherits the mixins). `game_control()` / `may()` and the GameControl parity
 shadow stay in the director — the authority flip + latch deletion are W4.
+
+## TranscriptSegment + content-mode removal (WO-PRMPT-LILY-REFACTOR-001)
+
+- **`TranscriptSegment`** (`lily_scorekeeper.py`, module-level frozen/slots
+  dataclass): replaces the 17-param signature on the STT hot path. The public
+  `on_transcript_segment(...)` façade keeps its historical signature, packs the
+  17 args into one `TranscriptSegment`, and delegates to `_dispatch_segment`
+  (a ~22-line dispatcher over `_handle_*` branch methods: quarantine, speaker
+  classification, intent detection, bookkeeping, answer-candidate). Field order
+  matches the old parameter order. The speech-delivery pre-window replay builds
+  a `TranscriptSegment` directly.
+- **Content-mode gating removed.** The adult/general sticky flag (`sk.mode`,
+  `set_mode`, `mode_changes`), the consent ceremony, the child-signal mode
+  exits, the "back to normal" revert, and the mode-reconciliation supply
+  subsystem are deleted; Lily serves unified content under one LLM. Breaking
+  signatures: `lily_partitions_for`, `lily_bank_generated_question`,
+  `lily_bank_mode_filter` (and the reasoning/imagegen/persistence internals)
+  no longer take `mode`. The bank serves `adult=true` rows only; general rows
+  remain in the DB unreferenced. Non-uniform survivors (operator-ruled):
+  custom-category overrides still work, camera lane stays available, STOP
+  freezes-not-burns (LIVEFIRE-001 4b).
 
 ## Architecture invariants
 
@@ -551,8 +577,7 @@ shadow stay in the director — the authority flip + latch deletion are W4.
   `lily_parse_lobby_setup_intents()` extracts start, voice, adult, pictures,
   heat, and age-presence from the same final before any start dispatch.
   Requested jobs enter a setup ledger and clear only after their real state
-  mutation succeeds. Adult+picture setup does not draw from the general
-  partition while adult/heat tools are pending. The state block lists pending
+  mutation succeeds. The state block lists pending
   jobs and forbids `lily_begin_round`; VAD blocks the split-final race where
   "I want to play" is followed immediately by a longer setup utterance.
 - **One start owner.** Standalone kickoff fragments/category teasers
@@ -577,11 +602,11 @@ shadow stay in the director — the authority flip + latch deletion are W4.
   `acceptable_answers` (uncertainty escalates, never rejects); Tier-2 is one
   non-spoken LLM call that judges against the supplied canonical answer only — it
   never re-derives the fact.
-- **Sticky commands enforced in code:** "skip", "back to normal" (adult-mode
-  revert), and the pacing choices ("let's play relaxed" / "timed rounds") flip
+- **Sticky commands enforced in code:** "skip" and the pacing choices
+  ("let's play relaxed" / "timed rounds") flip
   deterministic flags at the transcript-event layer; the prompt is
-  texture, not the mechanism. The adult layer is additively injected/removed on the
-  sticky `mode` flag — removal fully reverts her.
+  texture, not the mechanism. (The "back to normal" adult-mode revert was
+  deleted with the content-mode gate; the adult layer is always-on.)
 - **Responsiveness is measured at the air, not dispatch.** A host-directed
   final starts `_awaiting_address_since`; generating or queueing a response
   does not clear it. Only the framework's real playout-start transition

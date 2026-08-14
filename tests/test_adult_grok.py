@@ -104,39 +104,6 @@ def _make_game():
     return game
 
 
-def test_enter_adult_vocal_swaps_and_exit_restores(monkeypatch):
-    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
-    game = _make_game()
-    sentinel = object()
-    game._adult_llm = sentinel  # constructed-once cache path
-    assert game.enter_adult_vocal() is True
-    assert game.agent.updates == [{"llm": sentinel}]
-    game.exit_adult_vocal()
-    assert game.agent.updates[-1] == {"llm": game._general_llm}
-
-
-def test_enter_adult_vocal_without_key_degrades_loudly(monkeypatch, caplog):
-    monkeypatch.delenv("XAI_API_KEY", raising=False)
-    game = _make_game()
-    with caplog.at_level(logging.ERROR):
-        assert game.enter_adult_vocal() is False
-    assert game.agent.updates == []  # Gemini stays — degraded, not broken
-    assert any("SWAP_UNAVAILABLE" in r.message for r in caplog.records)
-
-
-def test_adult_entry_and_every_exit_are_hooked():
-    """Source-level pin: the enter tool swaps in; all three exit paths
-    (back-to-normal, child-signal veto, child-gate lost) swap out."""
-    # REFACTOR W3: one exit path (child-gate-lost, in on_transcript_event) moved
-    # to lily_glass with the transcript surface; scan both owner modules.
-    root = Path(lily_reasoning.__file__).parent
-    src = root.joinpath("lily_agent.py").read_text(encoding="utf-8")
-    glass = root.joinpath("lily_glass.py").read_text(encoding="utf-8")
-    combined = src + glass
-    assert combined.count('getattr(self, "exit_adult_vocal", lambda: None)()') == 3
-    assert 'getattr(self._game, "enter_adult_vocal", lambda: None)()' in src
-
-
 # -- generation routing --------------------------------------------------------
 
 
@@ -168,7 +135,7 @@ def _make_reasoning():
 
 def test_adult_question_generation_routes_to_grok():
     r = _make_reasoning()
-    q = _run(r.generate_question("after dark", 2, "adult", []))
+    q = _run(r.generate_question("after dark", 2, []))
     assert q is not None and q["canonical_answer"] == "yes"
     assert len(r.calls["grok"]) == 1 and not r.calls["gemini"]
     # The JSON shape addendum rides the Grok prompt (no server schema).
@@ -177,7 +144,7 @@ def test_adult_question_generation_routes_to_grok():
 
 def test_general_question_generation_routes_to_grok():
     r = _make_reasoning()
-    q = _run(r.generate_question("history", 2, "general", []))
+    q = _run(r.generate_question("history", 2, []))
     assert q is not None and q["canonical_answer"] == "yes"
     assert len(r.calls["grok"]) == 1 and not r.calls["gemini"]
 
@@ -191,8 +158,7 @@ def test_adult_verification_routes_to_grok():
 
     r._generate_grok_json = _fake_grok
     ok, reason = _run(
-        r.verify_question({"prompt": "Test?", "canonical_answer": "yes"},
-                          mode="adult")
+        r.verify_question({"prompt": "Test?", "canonical_answer": "yes"})
     )
     assert ok is True
     assert len(r.calls["grok"]) == 1 and not r.calls["gemini"]
@@ -234,7 +200,7 @@ def _judge_probe(monkeypatch, *, adult, has_xai_key=True):
     monkeypatch.setattr(
         lily_config, "xai_api_key", lambda: "xai-test" if has_xai_key else None
     )
-    asyncio.run(r.judge("instructions", "prompt", adult=adult))
+    asyncio.run(r.judge("instructions", "prompt"))
     return calls
 
 

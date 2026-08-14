@@ -9,7 +9,6 @@ a mixin (self.* bindings unchanged), so LilyGame stays the director.
 from __future__ import annotations
 
 import logging
-import re
 import time
 
 import lily_evaluation
