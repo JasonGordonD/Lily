@@ -8777,6 +8777,15 @@ class LilyAgent(Agent):
             "speech handle fails closed (claims release; no silent lobby)",
             getattr(self._game.sk, "session_id", "?"),
         )
+        # WO-LILY-LLM-USAGE-PERSISTENCE: stamp this call's finish verdict so
+        # the matching per-call usage row records the dead-air empty-STOP.
+        # This is the diagnostic the 08-14 lobby dead-air could not confirm.
+        try:
+            sm = getattr(self._game, "_session_metrics", None)
+            if sm is not None:
+                sm.note_finish_state(_current_speech_id(), "stop_empty", True)
+        except Exception:
+            pass
         raise APIConnectionError(
             "lily empty STOP: LLM returned no text and no tools after retry",
             retryable=True,
@@ -9824,6 +9833,36 @@ async def entrypoint(ctx: JobContext) -> None:
 
     _wire_llm_metrics(general_vocal_llm)
     game._llm_metrics_wire = _wire_llm_metrics
+    # WO-LILY-LLM-USAGE-PERSISTENCE: durably persist every per-call usage row
+    # (token/latency + the empty-STOP finish flag) so the dead-air class is
+    # answerable from the db, not logs alone. The collector holds only metric
+    # fields; this sink enriches with session/phase/model and fires the
+    # fail-open write WITHOUT awaiting, so the cross-region round trip never
+    # blocks the audio pipeline. game._session_metrics lets llm_node's
+    # empty-STOP guard stash its finish verdict for the matching call.
+    game._session_metrics = session_metrics
+    _vocal_model = (
+        getattr(getattr(general_vocal_llm, "_opts", None), "model", None)
+        or getattr(general_vocal_llm, "model", None)
+    )
+
+    def _persist_llm_usage(fields: dict) -> None:
+        try:
+            sb = getattr(game, "supabase", None)
+            if sb is None:
+                return
+            row = dict(fields)
+            row["session_id"] = game.sk.session_id
+            row["phase"] = getattr(game, "ui_phase", None)
+            row["model"] = _vocal_model
+            row["purpose"] = "vocal"
+            asyncio.ensure_future(
+                lily_persistence.lily_write_llm_usage(sb, row)
+            )
+        except Exception as e:
+            logger.debug("LILY_METRICS | USAGE_PERSIST_SKIPPED | %s", e)
+
+    session_metrics.set_usage_sink(_persist_llm_usage)
     # Y2 measurement gate: count the framework's preemptive-invalidation
     # warnings (and, when debug is on, the used-lines) off its own logger.
     # The settle-vs-volatile-split decision closes on this number.
