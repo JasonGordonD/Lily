@@ -166,11 +166,6 @@ def reasoning_effort() -> str:
     return "medium"
 
 
-def gemini_vision_gate_model() -> str:
-    """Temporary multimodal gate model until the Grok vision PR."""
-    return "gemini-3.1-pro-preview"
-
-
 def assessment_model() -> str:
     return "grok-4.5"
 

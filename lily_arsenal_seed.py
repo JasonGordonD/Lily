@@ -540,16 +540,14 @@ def lily_preflight() -> dict:
             _real(lily_config.supabase_url())
             and _real(lily_config.supabase_service_role_key())
         ),
-        "google": _real(lily_config.google_api_key()),
         "xai": _real(lily_config.xai_api_key()),
         "exa": _real(lily_config.exa_api_key()),
     }
-    checks["can_seed_general"] = checks["supabase"] and checks["google"]
-    # Adult partitions render on Grok AND are authored on Grok; the
-    # classifier is Gemini either way, so both keys are required.
-    checks["can_seed_adult"] = (
-        checks["supabase"] and checks["xai"] and checks["google"]
-    )
+    # Both decks render, author, AND content-gate on Grok now (the Gemini
+    # image path and the Gemini content gate were removed): seeding any
+    # partition needs supabase + xai.
+    checks["can_seed_general"] = checks["supabase"] and checks["xai"]
+    checks["can_seed_adult"] = checks["supabase"] and checks["xai"]
     return checks
 
 
@@ -562,8 +560,7 @@ def lily_format_preflight(checks: dict) -> str:
         "PICTURE ARSENAL — preflight",
         "-" * 52,
         f"  [{mark(checks['supabase'])}] SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY",
-        f"  [{mark(checks['google'])}] GOOGLE_API_KEY   (general images + the content gate)",
-        f"  [{mark(checks['xai'])}] XAI_API_KEY      (adult images + adult authoring)",
+        f"  [{mark(checks['xai'])}] XAI_API_KEY      (all images + authoring + content gate)",
         f"  [{mark(checks['exa'])}] EXA_API_KEY      (optional — real images: real_or_imagined + era_or_origin dating)",
         "",
         f"  general partition:  {'ready to seed' if checks['can_seed_general'] else 'CANNOT SEED'}",

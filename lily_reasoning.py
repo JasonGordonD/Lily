@@ -1,9 +1,9 @@
 """
 lily_reasoning.py — LILY background reasoning node.
 
-Question authoring/verification/distractors run on Grok 4.5 through xAI's
-Responses API. Gemini remains temporarily isolated for multimodal image
-gating and the not-yet-migrated judge lane.
+Question authoring/verification/distractors, Tier-2 judging, and
+image-content gating all run on Grok (4.5 / vision) through xAI. The
+legacy Gemini SDK lane has been removed from this node.
 
 Responsibilities:
   - Question prefetch (N+1): the next question is generated in the
@@ -33,12 +33,8 @@ from typing import Optional
 
 import aiohttp
 
-from google import genai as google_genai
-from google.genai import types as genai_types
-
 import lily_config
 import lily_evaluation
-import lily_gemini_safety
 # Web tools + image pipeline (WO-LILY-OMNIBUS-002): lily_search and
 # lily_imagegen are REASONING-NODE-ONLY — this module is their one legal
 # consumer seam. The vocal node (lily_agent) must never import them; web
@@ -64,7 +60,10 @@ _CURRENT_EVENTS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Legacy Gemini constants remain only for judge/image-gate migration seams.
+# Thinking-effort levels for the reasoning lanes: authoring/verification and
+# Tier-2 adjudication both run HIGH (operator rule 2026-08-06). The live Grok
+# path reads effort through the lily_config accessors; these named constants
+# pin the policy and are asserted by tests/test_model_and_thinking.py.
 REASONING_THINKING_LEVEL = "high"
 # Tier-2 adjudication of a close/ambiguous player answer is a HIGH-stakes
 # reasoning call (operator rule 2026-08-06: adjudication -> HIGH). The 12s
@@ -148,80 +147,19 @@ def _lily_extract_responses_text(data) -> str:
             return _lily_strip_json_fences("".join(parts))
     raise RuntimeError("xAI adult generation malformed Responses payload")
 
-# Adult-product context (§11.1): explicit safety settings on every call —
-# an unconfigured node goes mute mid-innuendo-round with zero diagnostics.
-_SAFETY_SETTINGS = lily_gemini_safety.lily_gemini_safety_settings()
-
 # Structured output (2026-07-14 P1 fix: QUESTION_PARSE_FAILED -> PREFETCH_FAILED):
-# every generation/verification call pins BOTH response_mime_type="application/json"
-# AND a response_schema, so the model returns schema-conformant JSON and the
-# regex/fence-stripping parse path is retired to a defensive last resort.
+# Grok JSON mode carries no server-side schema, so these addenda pin the exact
+# JSON shapes the question/verdict transports must return; a plain json.loads
+# is the primary parser and the fence-stripping path is a defensive last resort.
 #
-# The question schema carries ALL fields — current plus reserved-for-later
-# sub-agents — so downstream schema evolution is additive, never breaking:
+# The question shape carries ALL fields — current plus reserved-for-later
+# sub-agents — so downstream evolution is additive, never breaking. Reserved
+# optional fields, populated by later sub-agents (NOT emitted by the base
+# authoring prompt):
 #   choices            (exactly 4 strings; multiple-choice, sub-agent G — ACTIVE:
-#                       populated when the round runs multiple choice)
+#                       added via _MC_CHOICES_ADDENDUM when the round runs MC)
 #   image_url / image_source (generated|web|none; images, sub-agent H)
 #   proposed_category  (category proposals, sub-agent F)
-_QUESTION_RESPONSE_SCHEMA = genai_types.Schema(
-    type=genai_types.Type.OBJECT,
-    properties={
-        "id": genai_types.Schema(
-            type=genai_types.Type.STRING,
-            description="Question id, shape q_<4 digits>.",
-        ),
-        "category": genai_types.Schema(type=genai_types.Type.STRING),
-        "difficulty_tier": genai_types.Schema(
-            type=genai_types.Type.INTEGER,
-            description="1 (warm-up) to 4 (final round).",
-        ),
-        "prompt": genai_types.Schema(
-            type=genai_types.Type.STRING,
-            description="The question exactly as Lily should speak it.",
-        ),
-        "canonical_answer": genai_types.Schema(type=genai_types.Type.STRING),
-        "acceptable_answers": genai_types.Schema(
-            type=genai_types.Type.ARRAY,
-            items=genai_types.Schema(type=genai_types.Type.STRING),
-            description="Lowercase canonical answer plus common variants.",
-        ),
-        "reveal_color": genai_types.Schema(
-            type=genai_types.Type.STRING,
-            description="One short spicy fact or trap-note for the reveal.",
-        ),
-        # Reserved (optional) fields — populated by later sub-agents.
-        "choices": genai_types.Schema(
-            type=genai_types.Type.ARRAY,
-            items=genai_types.Schema(type=genai_types.Type.STRING),
-            min_items=4,
-            max_items=4,
-            nullable=True,
-            description="Exactly 4 options for multiple-choice questions "
-                        "(sub-agent G). Omit for open questions.",
-        ),
-        "image_url": genai_types.Schema(
-            type=genai_types.Type.STRING, nullable=True,
-        ),
-        "image_source": genai_types.Schema(
-            type=genai_types.Type.STRING,
-            enum=["generated", "web", "none"],
-            nullable=True,
-            description="Provenance of image_url (sub-agent H).",
-        ),
-        "proposed_category": genai_types.Schema(
-            type=genai_types.Type.STRING, nullable=True,
-            description="Model-proposed category (sub-agent F).",
-        ),
-    },
-    required=[
-        "id", "category", "difficulty_tier", "prompt",
-        "canonical_answer", "acceptable_answers", "reveal_color",
-    ],
-)
-
-# Grok JSON mode carries no server-side schema — these addenda pin the
-# exact shapes the Gemini response_schema enforces, for the adult-deck
-# transport. The defensive parsers downstream cover any drift.
 _GROK_QUESTION_SHAPE_ADDENDUM = """
 
 Respond with ONLY a JSON object, no markdown fences, with EXACTLY these
@@ -239,22 +177,6 @@ Respond with ONLY a JSON object, no markdown fences, with EXACTLY these
 fields: "verdict" ("pass" or "fail"), "reason" (string), and
 "corrected_canonical_answer" (string, ONLY when a small correction fixes
 the question; null otherwise)."""
-
-_VERIFICATION_RESPONSE_SCHEMA = genai_types.Schema(
-    type=genai_types.Type.OBJECT,
-    properties={
-        "verdict": genai_types.Schema(
-            type=genai_types.Type.STRING, enum=["pass", "fail"],
-        ),
-        "reason": genai_types.Schema(type=genai_types.Type.STRING),
-        "corrected_canonical_answer": genai_types.Schema(
-            type=genai_types.Type.STRING, nullable=True,
-            description="Only when a small correction fixes the question; "
-                        "null otherwise.",
-        ),
-    },
-    required=["verdict", "reason"],
-)
 
 _GENERATION_PROMPT = """You write questions for Lily, a live voice trivia host.
 
@@ -298,8 +220,8 @@ Respond with ONLY a JSON object, no markdown fences:
  "corrected_canonical_answer": "<only if a small correction fixes it, else null>"}}"""
 
 # Multiple-choice generation (sub-agent G): appended to the generation
-# prompt when the active round runs multiple choice. The `choices` slot
-# already exists in _QUESTION_RESPONSE_SCHEMA (exactly 4 strings, nullable).
+# prompt when the active round runs multiple choice. The `choices` slot is
+# documented in _GROK_QUESTION_SHAPE_ADDENDUM (exactly 4 strings, optional).
 _MC_CHOICES_ADDENDUM = """
 This is a MULTIPLE-CHOICE question. ALSO include a "choices" array in the
 JSON object — EXACTLY 4 options, each short and speakable:
@@ -329,19 +251,6 @@ question:
 
 Respond with ONLY a JSON object, no markdown fences:
 {{"distractors": ["<plausible>", "<plausible>", "<clearly wrong>"]}}"""
-
-_DISTRACTOR_RESPONSE_SCHEMA = genai_types.Schema(
-    type=genai_types.Type.OBJECT,
-    properties={
-        "distractors": genai_types.Schema(
-            type=genai_types.Type.ARRAY,
-            items=genai_types.Schema(type=genai_types.Type.STRING),
-            min_items=3,
-            max_items=3,
-        ),
-    },
-    required=["distractors"],
-)
 
 
 def _strip_fences(text: str) -> str:
@@ -426,70 +335,6 @@ class LilyReasoning:
     """The background reasoning node. Never speaks; writes enriched state
     (prefetched questions, failure notes) for the vocal node to perform."""
 
-    def __init__(self, api_key: Optional[str] = None) -> None:
-        # Own client — separate HTTP transport from the vocal node's
-        # livekit-plugins-google client (spec §11.5).
-        self._client = google_genai.Client(
-            api_key=api_key or lily_config.google_api_key()
-        )
-        # Gemini remains only for multimodal image gating until M5c.
-        self._model = lily_config.gemini_vision_gate_model()
-        self._vocal_model = lily_config.judge_model()
-
-    async def _generate(
-        self,
-        model: str,
-        prompt: str,
-        thinking_level: str,
-        system_instruction: Optional[str] = None,
-        response_mime_type: Optional[str] = None,
-        response_schema: Optional[genai_types.Schema] = None,
-        max_output_tokens: Optional[int] = None,
-    ) -> str:
-        config = genai_types.GenerateContentConfig(
-            # Default sampling params — never override temperature/top_p/top_k
-            # on Gemini 3.x (spec §4.4).
-            thinking_config=genai_types.ThinkingConfig(
-                thinking_level=thinking_level
-            ),
-            safety_settings=_SAFETY_SETTINGS,
-            # P1 root cause (2026-07-14 19:27 logs): on Gemini 3.x thinking
-            # tokens count toward max_output_tokens. The shared 800-token
-            # vocal budget let 3.1-pro's thinking starve the JSON body into
-            # truncation — every call here now names its own budget.
-            max_output_tokens=(
-                max_output_tokens
-                if max_output_tokens is not None
-                else lily_config.vocal_max_output_tokens()
-            ),
-            system_instruction=system_instruction,
-            response_mime_type=response_mime_type,
-            response_schema=response_schema,
-        )
-        response = await asyncio.to_thread(
-            self._client.models.generate_content,
-            model=model,
-            contents=prompt,
-            config=config,
-        )
-        text = getattr(response, "text", None)
-        if not text:
-            # Empty candidate is a loggable event, never silence (§11.1).
-            logger.warning(
-                "LILY_REASONING | EMPTY_CANDIDATE | model=%s — retrying once",
-                model,
-            )
-            response = await asyncio.to_thread(
-                self._client.models.generate_content,
-                model=model,
-                contents=prompt,
-                config=config,
-            )
-            text = getattr(response, "text", None)
-        if not text:
-            raise RuntimeError(f"empty candidate from {model} after retry")
-        return text
-
     async def _generate_grok_json(
         self,
         prompt: str,
@@ -503,8 +348,8 @@ class LilyReasoning:
         """Structured Grok transport for every question/reasoning lane.
 
         Grok 4.5 and multi-agent models use Responses API; legacy base models
-        retain chat-completions compatibility. Same honest-failure contract
-        as _generate: raises on failure; prefetch falls back visibly.
+        retain chat-completions compatibility. Honest-failure contract: raises
+        on failure; prefetch falls back visibly.
 
         `effort` is INJECTED per call (operator directive 2026-08-08):
         the lanes have different economics, so a live prefetch a player is

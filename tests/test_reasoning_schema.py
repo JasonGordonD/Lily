@@ -14,7 +14,7 @@ PREFETCH_FAILED. Two root causes, both pinned here:
    the hot path) and the Tier-2 judge on LILY_JUDGE_MAX_OUTPUT_TOKENS
    (default 1024; latency-relevant, small verdict).
 
-This file imports lily_reasoning (and therefore google-genai).
+This file imports lily_reasoning (the Grok reasoning transport).
 """
 
 import asyncio
@@ -25,10 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_config
-import lily_reasoning
 from lily_reasoning import (
-    _QUESTION_RESPONSE_SCHEMA,
-    _VERIFICATION_RESPONSE_SCHEMA,
     LilyReasoning,
     _shape_question,
     lily_parse_question_json,
@@ -75,44 +72,14 @@ def _reasoning_with_stub(monkeypatch_target: dict, raw: str) -> LilyReasoning:
 
 
 # -- schema shape ---------------------------------------------------------------
-
-def test_question_schema_has_all_current_fields():
-    props = _QUESTION_RESPONSE_SCHEMA.properties
-    for field in (
-        "id", "category", "difficulty_tier", "prompt",
-        "canonical_answer", "acceptable_answers", "reveal_color",
-    ):
-        assert field in props, f"missing current field {field}"
-    assert set(_QUESTION_RESPONSE_SCHEMA.required) == {
-        "id", "category", "difficulty_tier", "prompt",
-        "canonical_answer", "acceptable_answers", "reveal_color",
-    }
-
-
-def test_question_schema_reserves_future_subagent_fields():
-    props = _QUESTION_RESPONSE_SCHEMA.properties
-    # Sub-agent G: multiple choice — exactly 4 options.
-    assert "choices" in props
-    assert props["choices"].min_items == 4
-    assert props["choices"].max_items == 4
-    assert props["choices"].nullable is True
-    # Sub-agent H: images.
-    assert "image_url" in props
-    assert "image_source" in props
-    assert list(props["image_source"].enum) == ["generated", "web", "none"]
-    # Sub-agent F: category proposals.
-    assert "proposed_category" in props
-    # Reserved fields must NOT be required — current output stays valid.
-    for reserved in ("choices", "image_url", "image_source", "proposed_category"):
-        assert reserved not in _QUESTION_RESPONSE_SCHEMA.required
-
-
-def test_verification_schema_shape():
-    props = _VERIFICATION_RESPONSE_SCHEMA.properties
-    assert list(props["verdict"].enum) == ["pass", "fail"]
-    assert "reason" in props
-    assert props["corrected_canonical_answer"].nullable is True
-    assert set(_VERIFICATION_RESPONSE_SCHEMA.required) == {"verdict", "reason"}
+# test_question_schema_has_all_current_fields,
+# test_question_schema_reserves_future_subagent_fields, and
+# test_verification_schema_shape DELETED (WO-PRMPT-LILY-GEMINI-EXCISION-001):
+# they asserted the genai_types.Schema constants (_QUESTION_RESPONSE_SCHEMA /
+# _VERIFICATION_RESPONSE_SCHEMA) that were removed with the reasoning node's
+# dead google-genai lane. The live Grok path pins the same shapes via the
+# _GROK_*_SHAPE_ADDENDUM prompt strings, exercised by the call-contract tests
+# below.
 
 
 # -- generation call contract -----------------------------------------------------

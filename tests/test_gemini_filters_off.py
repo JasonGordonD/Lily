@@ -8,7 +8,6 @@ from google.genai import types as gt
 
 import lily_gemini_safety
 import lily_imagegen
-import lily_reasoning
 import lily_search
 
 
@@ -37,18 +36,18 @@ def test_livekit_plugin_policy_matches_sdk_policy():
     assert all(item["threshold"] == "BLOCK_NONE" for item in settings)
 
 
-def test_reasoning_legacy_multimodal_helper_uses_shared_policy():
-    assert {
-        item.category for item in lily_reasoning._SAFETY_SETTINGS
-    } == EXPECTED
+# test_reasoning_legacy_multimodal_helper_uses_shared_policy DELETED
+# (WO-PRMPT-LILY-GEMINI-EXCISION-001): it asserted lily_reasoning._SAFETY_SETTINGS,
+# which was removed with the reasoning node's dead google-genai lane.
 
 
 def test_every_remaining_gemini_lane_imports_shared_policy():
-    # lily_imagegen dropped from this list in WO-PRMPT-LILY-REFACTOR-001:
-    # its Gemini image path was deleted (all imagegen rides Grok Imagine),
-    # so it is no longer a Gemini lane.
+    # lily_imagegen dropped from this list in WO-PRMPT-LILY-REFACTOR-001 (its
+    # Gemini image path was deleted); lily_reasoning dropped in
+    # WO-PRMPT-LILY-GEMINI-EXCISION-001 (its google-genai lane was excised —
+    # it no longer imports lily_gemini_safety). Only lily_search remains a
+    # Gemini lane.
     for module in (
-        lily_reasoning,
         lily_search,
     ):
         source = inspect.getsource(module)

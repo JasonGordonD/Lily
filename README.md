@@ -490,11 +490,13 @@ No fixes under this clause; recommended as the next work order.
 | VAD | Silero — barge-in enabled; STT is never gated during TTS |
 | Persistence | Supabase (`lily_*` tables), fail-fast init, checkpoint on score change / 60s / key events |
 
-All remaining Gemini lanes share `lily_gemini_safety`: harassment, hate,
-sexually explicit and dangerous-content blocking are explicitly
-`BLOCK_NONE` for reasoning/judge, assessment, image generation and
-grounding/search. `PROHIBITED_CONTENT`/SPII are provider-controlled and are
-handled by deterministic failure paths, not misrepresented as configurable.
+The one remaining Gemini lane — grounded web search (`lily_search`) — uses
+`lily_gemini_safety`: harassment, hate, sexually explicit and
+dangerous-content blocking are explicitly `BLOCK_NONE`. Reasoning/judge,
+assessment and image generation now run on Grok 4.5 / Grok Imagine, so they
+no longer carry the SDK safety policy. `PROHIBITED_CONTENT`/SPII are
+provider-controlled and are handled by deterministic failure paths, not
+misrepresented as configurable.
 For a keyed question delivery, `PROHIBITED_CONTENT` bypasses the failed model
 and emits the already-vetted `rendered_armed_question()` sheet once; ordinary
 conversation fails closed without retry. The block log carries request/model/
@@ -818,14 +820,12 @@ Every model ID below was verified live on the funded keys before wiring.
   verdicts; dedicated image models still render pixels.
 - **Post-session assessment:** `grok-4.5` `high`, offline only; report fill
   and reconciliation never add latency to a live room.
-- **Image gen — standard deck:** `gemini-3.1-flash-lite-image` (Nano Banana 2
-  Lite; `lily_config.imagegen_model`) on the classic `generate_content` path
-  (no Interactions API migration needed).
-- **Image gen — adult deck:** xAI Grok Imagine `grok-imagine-image`
-  (`lily_config.adult_imagegen_model`) via `_generate_image_bytes_xai`, because
-  Gemini refuses adult content. `lily_generate_image_bytes(..., mode=...)` picks
-  the provider READ-ONLY on deck — the adult gate is untouched. Adult
-  picture-trivia is LIVE (WO-LILY-ADULT-PICTURES-001): the adult deck supplies
+- **Image gen — single deck (xAI Grok Imagine):** `grok-imagine-image`
+  (`lily_config.adult_imagegen_model`) via `_generate_image_bytes_xai`. All
+  generated images — general and adult — route through Grok Imagine; the legacy
+  standard-deck path was removed. `lily_generate_image_bytes` runs every
+  prompt through the adult-style chokepoint at player-chosen `intensity` before
+  the wire. Adult picture-trivia is LIVE (WO-LILY-ADULT-PICTURES-001): the adult deck supplies
   picture rounds exactly like the other decks. `_picture_kind_for_slot` gates
   on `media_mode` only, and `prefetch_picture_question` threads `mode='adult'`
   through `lily_build_real_or_imagined_question` so its GENERATED branch routes
@@ -1427,9 +1427,9 @@ off the reveal moment:
   must see the just-armed question); those turns also pause preemptive
   generation (`LilyGame.instructed_reply`) instead of paying for runs that are
   dead by construction, resuming on playout completion.
-- **Dedicated reasoning-node token budget (P1 truncation root cause):** on
-  Gemini 3.x thinking tokens count toward `max_output_tokens`; the reasoning
-  node shared the vocal node's 800-token budget and 3.1-pro's medium thinking
+- **Dedicated reasoning-node token budget (P1 truncation root cause):**
+  reasoning-model thinking tokens count toward `max_output_tokens`; the
+  reasoning node once shared the vocal node's 800-token budget and thinking
   starved the question JSON into mid-object truncation. Generation and
   verification now run on `LILY_REASONING_MAX_OUTPUT_TOKENS` (default 4096 —
   prefetch is off the hot path), the Tier-2 judge on
@@ -1471,8 +1471,8 @@ lily_images.py       lily-images bucket storage ({source}/{sha1}.{ext}), cache-f
                      bank helpers, visible lily_image_attempts rows
 lily_search.py       Exa + Tavily native lifts (httpx) — REASONING NODE ONLY (import
                      tripwire); conservative real-entity image sourcing
-lily_imagegen.py     JRVS image-gen clone: aspect clamp, Gemini generation for
-                     invented content, 'real or imagined' reference round
+lily_imagegen.py     JRVS image-gen clone: aspect clamp, Grok Imagine generation
+                     for invented content, 'real or imagined' reference round
 lily_persistence.py  Supabase: sessions, transcripts, answers audit, voiceprints, KB bank
 lily_memory.py       persistent cross-session memory: session summaries, the
                      [RETURNING TABLE] block, KB-bank adult-mode guard (stdlib-only)
@@ -2705,7 +2705,9 @@ generated** — a plausible-but-wrong landmark is a lie on the screen.
 ### Image generation — JRVS clone (invented content only)
 
 `lily_imagegen.py` is a native lift of the maya_jrvs image stack onto Lily's
-Gemini infra (`LILY_IMAGEGEN_MODEL`, default `gemini-2.5-flash-image`):
+xAI Grok Imagine infra (all generated images route through
+`_generate_image_bytes_xai` / `lily_config.adult_imagegen_model`,
+`grok-imagine-image`):
 
 - **background-task pattern** — generation runs at prefetch time only, never
   inside a live turn;
@@ -3021,12 +3023,11 @@ the table is mid-turn), `LILY_GROUP_ID` (group-identity override),
 memo section; `bvc` and every unknown value coerce to `off`),
 `LILY_JOB_MEMORY_LIMIT_MB`, `LILY_REASONING_MAX_OUTPUT_TOKENS` (default 4096) /
 `LILY_JUDGE_MAX_OUTPUT_TOKENS` (default 1024) — dedicated reasoning/judge budgets
-(thinking tokens count toward `max_output_tokens` on Gemini 3.x) · web tools
+(reasoning-model thinking tokens count toward `max_output_tokens`) · web tools
 (reasoning node only): `EXA_API_KEY` / `TAVILY_API_KEY` (missing key = tool
 disabled, text-only behavior) · `XAI_API_KEY` (Grok vision — player-photo
 analysis via `lily_vision`; missing key = she receives photos but honestly
-says she can't look tonight) · `LILY_IMAGEGEN_MODEL` (default
-`gemini-2.5-flash-image`, invented-content picture questions) · acoustic
+says she can't look tonight) · acoustic
 pipeline: `AUDEERING_API_KEY` plus the `AUDEERING_*` tunables listed in the
 acoustic-pipeline section (missing key = breaker open, session unaffected).
 No secrets in this repo — configure via the deployment
@@ -3047,3 +3048,5 @@ and `livekit.toml` — a mismatch means rooms spin forever with no agent joining
    (empty = safety-settings regression); "back to normal" reverts instantly.
 8. Reconnect: scores intact from checkpoint. 9. Second browser tab mid-game:
    scoreboard populates from state sync on arrival.
+
+Shipped: WO-PRMPT-LILY-GEMINI-EXCISION-001 (SHA in git log)

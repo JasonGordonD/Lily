@@ -5,6 +5,45 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — WO-PRMPT-LILY-GEMINI-EXCISION-001: dead google-genai reasoning lane removed
+
+Follow-up to REFACTOR-001 (which deleted the Gemini image path). The reasoning
+node's google-genai lane was already dead — every live call routes through
+`_generate_grok_json`; `LilyReasoning._generate` had zero callers.
+
+1. **lily_reasoning.py.** Deleted `LilyReasoning._generate` (the
+   `google_genai.Client` path), the `__init__` client construction plus
+   `self._model` / `self._vocal_model` (all unused), `_SAFETY_SETTINGS`, and the
+   three `genai_types.Schema` constants (`_QUESTION_RESPONSE_SCHEMA`,
+   `_VERIFICATION_RESPONSE_SCHEMA`, `_DISTRACTOR_RESPONSE_SCHEMA`) — the live
+   Grok path pins shapes via the `_GROK_*_SHAPE_ADDENDUM` prompt strings, into
+   which the reserved-field documentation was folded. Removed imports
+   `from google import genai as google_genai`, `from google.genai import types
+   as genai_types`, `import lily_gemini_safety`. `google_api_key()` /
+   `google_api_key_present()` / the `GOOGLE_API_KEY` boot requirement are
+   untouched — the grounded-search lane (`lily_search`) still needs the key.
+2. **lily_config.py.** Deleted `gemini_vision_gate_model()` (zero callers after
+   `self._model` removal).
+3. **lily_arsenal_seed.py.** Preflight readiness repointed to current reality:
+   general and adult images render, author, and content-gate on Grok, so
+   `can_seed_general` / `can_seed_adult` now gate on supabase + xai (was
+   supabase + google / supabase + xai + google); the dead `google` check and its
+   preflight line were dropped.
+4. **README + env docs.** Two-deck image-gen section rewritten to single-deck
+   xAI Grok Imagine; `lily_imagegen.py` listing, the JRVS-clone section, and the
+   `LILY_IMAGEGEN_MODEL` env note updated. `lily_search` / `lily_gemini_safety` /
+   `GOOGLE_API_KEY` are the only remaining Gemini surface.
+5. **Tests.** Deleted four tests of the dead lane:
+   `test_gemini_filters_off.py::test_reasoning_legacy_multimodal_helper_uses_shared_policy`
+   (asserted `_SAFETY_SETTINGS`) and `test_reasoning_schema.py`'s three
+   `genai_types.Schema`-shape tests; the shared-policy lane list shrank to
+   `lily_search`. Suite green: 2538 passed (was 2542; −4 justified deletions).
+
+Note: `LILY_IMAGEGEN_MODEL` / `lily_config.imagegen_model()` (default
+`gemini-3.1-flash-lite-image`) has no production caller — its Gemini consumer
+was removed in REFACTOR-001 — but is still asserted by two tests, so the env
+plumbing was left in place (not zero-referenced).
+
 ## 2026-08-14 — WO-PRMPT-LILY-REFACTOR-001: TranscriptSegment + content-mode gate deletion + sweeteners
 
 Three parallel workstreams, one squash commit to main (SHA in the deploy run;
