@@ -5,6 +5,63 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — WO-LILY-QUESTION-FIRING-001: kill the reveal→next-question dead time
+
+Audited session lily-6A32BD-741b9b66 (evidence `~/lily-evidence/…/raw_logs.txt`).
+Questions serve instantly from the arsenal, but the *delivery* stalled: after a
+reveal, `RevealDeliveryFusionClip` clips the fused next-question off the reveal
+turn (correct — keeps reveals clean), and the deferred standalone delivery then
+waited for the 2-agent-turn `LILY_WINDOW DELIVERY_NUDGE` before airing. Q3 was
+armed+ready at 12:33:14 but did not air until 12:34:08 — ~5.8s of pure
+clip→wait→nudge dead time net of a user STOP/resume, and in the worst case the
+clipped question was shown on screen but never voiced (the "prostate" answer
+scored 0). Root cause of the worst case: the reveal was barged/STOP-resumed, so
+the normal post-reveal breath seam (`transition_complete` → `_advance_after_breath`)
+never ran and `dispatch_armed_question` stayed wedged behind N12's
+verdict-airing guard — only the nudge, which bypasses N12, eventually recovered.
+
+1. **Immediate post-reveal delivery (Fix 1).** `RevealDeliveryFusionClip.apply`
+   now calls `LilyGame.note_fusion_clipped_delivery()` after it clips a fused
+   question. When a question is armed AND supply is ready, that arms an
+   *immediate* breathed dispatch — after the operator-pinned
+   `inter_question_breath_seconds()` (PACING-001, 0.8s, value untouched and never
+   bypassed) — instead of waiting out the nudge. The nudge stays as the fallback
+   for every other case. `lily_agent.py`: new `note_fusion_clipped_delivery`,
+   `_fire_owed_fusion_delivery`, `_clear_owed_fusion_delivery`. The dispatch
+   bypasses the N12 verdict-airing wedge on purpose (the clip only fires once the
+   reveal has aired) but keeps every other load-bearing gate: supply readiness,
+   an already-answered question, an open window / live ruling, and — via
+   `gated_say`'s `question_delivery` path — hold, question_pending, and
+   address_unanswered (EXPECT_BLOCKED).
+2. **Delivery watchdog (Fix 2).** `_fusion_delivery_watchdog` guarantees a
+   clipped question airs: if the owed delivery has not fired within
+   N = `WATCHDOG_INTERVAL_SECONDS` (10s) of the clip, it re-emits through the
+   normal delivery path. N is the established watchdog cadence — comfortably past
+   the immediate path (~breath) and the 2-turn nudge — so it only ever fires in
+   the pathological "shown on screen, never voiced" hole; a true backstop, not a
+   competitor. The task is cancelled with the idle watchdog at session close.
+   Claim discipline (the `q_{N}_delivery` claim + `_pending_delivery_qnum` +
+   `_active_delivery_qnum` + the journaled `next_delivery` stage) stands the owed
+   marker down the instant any lane owns the delivery, so the immediate path and
+   the nudge can never both fire. The PRE_WINDOW_REPLAY / LATE_WITHIN_GRACE path
+   already captured the audited "prostate" answer (evidence:
+   `LILY_ANSWER | PRE_WINDOW_REPLAY | q=3 text='The prostate.'`), so the grace
+   was **not** widened — the scored-0 traced to the delayed delivery, which
+   Fixes 1+2 resolve by airing the question promptly into a clean window.
+3. **Prefetch economics — skip, don't retune (Fix 3).** `LilySupplyMixin`'s
+   `_prefetch_inner` now skips the live pre-generation attempt when a deliverable
+   is already stocked (`_skip_live_pregen_when_stocked`: a `next_question` head or
+   a `_next_question_reserve` in hand). That attempt times out ~100% at
+   `prefetch_timeout_seconds` and the curated bank covers the draw anyway, so the
+   empty slot fills from the bank instead (`LILY_PREFETCH | SKIP_LIVE_PREGEN`).
+   Replenishment generation when stock is LOW (nothing in hand) runs exactly as
+   today. Grok models, efforts, and `prefetch_timeout_seconds` are untouched.
+4. **Tests.** New `tests/test_question_firing_001.py` (9): immediate clipped-
+   question delivery, breath respected before it, watchdog re-emission, no
+   double-delivery (immediate + nudge, via claim discipline and the DUP guard),
+   address_unanswered and answered-question gates hold, and skip-pregen only when
+   stocked. Full suite green (2547, was 2538).
+
 ## 2026-08-14 — WO-PRMPT-LILY-GEMINI-EXCISION-001: dead google-genai reasoning lane removed
 
 Follow-up to REFACTOR-001 (which deleted the Gemini image path). The reasoning

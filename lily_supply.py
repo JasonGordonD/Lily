@@ -51,6 +51,21 @@ class LilySupplyMixin:
             return True
         return False
 
+    def _skip_live_pregen_when_stocked(self) -> bool:
+        """WO-LILY-QUESTION-FIRING-001 Fix 3 — prefetch economics. Skip the live
+        pre-generation attempt when a deliverable is already stocked: a head
+        (`next_question`) or a depth-2 reserve (`_next_question_reserve`) in
+        hand. In that state generation is doomed waste — it times out ~100% at
+        prefetch_timeout_seconds and the curated bank covers the draw anyway, so
+        the empty slot fills from the bank instead. Replenishment generation
+        when stock is LOW (nothing in hand) runs exactly as today. Models,
+        efforts, and prefetch_timeout_seconds are untouched — this only decides
+        whether to make the call at all."""
+        return (
+            getattr(self, "next_question", None) is not None
+            or getattr(self, "_next_question_reserve", None) is not None
+        )
+
     def custom_round_registrations(self, category: str) -> list:
         """Question ids registered for `category` this session (read-only)."""
         key = lily_bank.lily_normalize_category_name(category)
@@ -377,16 +392,29 @@ class LilySupplyMixin:
                         ),
                         timeout=20.0,
                     )
-                question = await self.reasoning.prefetch_question(
-                    self.sk,
-                    category=category,
-                    difficulty_tier=tier,
-                    avoid_questions=self.used_prompts,
-                    from_bank=from_bank,
-                    multiple_choice=mc,
-                    avoid_answers=history_answers,
-                    effort=effort,
-                )
+                if self._skip_live_pregen_when_stocked():
+                    # WO-LILY-QUESTION-FIRING-001 Fix 3: a deliverable is already
+                    # in hand — the live generation is pure waste (times out
+                    # ~100% at prefetch_timeout_seconds; the curated bank covers
+                    # the draw anyway). Skip it and fall through to the bank.
+                    logger.info(
+                        "LILY_PREFETCH | SKIP_LIVE_PREGEN | session=%s q=%d "
+                        "— stock in hand; drawing from the bank instead of a "
+                        "live generation",
+                        self.sk.session_id, self.sk.question_number,
+                    )
+                    question = None
+                else:
+                    question = await self.reasoning.prefetch_question(
+                        self.sk,
+                        category=category,
+                        difficulty_tier=tier,
+                        avoid_questions=self.used_prompts,
+                        from_bank=from_bank,
+                        multiple_choice=mc,
+                        avoid_answers=history_answers,
+                        effort=effort,
+                    )
                 if question is not None and not str(
                     question.get("id", "")
                 ).startswith("kb_"):
