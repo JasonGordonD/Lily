@@ -73,6 +73,71 @@ was unanswerable from the database after a session.
    and the writer's no-op on a missing client / raising client. Full suite green.
 
 No prompt or model changes.
+## 2026-08-14 — WO-LILY-NEVER-SILENT-001: the anti-silence floor
+
+Lily is a party host; a party host never goes silent when spoken to. Live
+lily-EFC239: a player said "Hello?" then "Lily." — two host-directed hails —
+and got ~48s of silence to session close (a bare hail produced an empty
+generation; the empty-STOP guard fail-closed into silence). This WO makes
+every suppression/guard outcome on a host-directed final degrade to a short
+in-character line, never to silence.
+
+**One mechanism, one line set, three wiring sites.**
+
+1. **`lily_say_gate.py` — the deterministic line set.** `LILY_FLOOR_LINES`
+   (contexts `"lobby"` and `"game"`, three rotating lines each) and pure
+   `lily_floor_line(context, nonce)`. Sheets, not generations: zero-latency,
+   model-free, incapable of failing on the one path whose job is never to
+   fail. Rotation means a recurring floor never airs the same words twice
+   running (air-dup / repeat lints stay quiet). Matches the existing
+   receipt/verdict sheet idiom in the same module.
+
+2. **`lily_floor.py` — the firing logic (`LilyFloorMixin`).**
+   `floor_line_owed()` is the verify-nothing-aired / scoping check:
+   `_awaiting_address_since` (set on every host-directed final by FL-1, cleared
+   at real playout by `note_playout_started`) truthy = a host-directed final
+   is owed a response and none has aired. Stands the floor down under
+   STOP/hold/question-pending (operator-ruled or room-owned silences — the
+   same states `gated_say` refuses) and while `sk.host_speaking`. A one-line-
+   per-address latch (`_floor_fired_for_ts`) keeps it to a single beat: a
+   barge-in that cancels the floor before playout leaves the latch set (no
+   retry storm), while a NEW host-directed final mints a new latch and may be
+   floored once too. `floor_line_if_owed(reason)` returns the line (synchronous
+   yield path); `fire_floor_line(reason)` dispatches it through
+   `gated_say(None, "floor", "", text=line)` (the schedule path) so every
+   hygiene/leak/claim gate and the barge-in cancel path govern it like any
+   other line — no bespoke bypass. `_floor_context()` picks `"game"` mid-game
+   else `"lobby"` (the pre-game hail).
+
+3. **`lily_agent.py` — the three sites.**
+   - **Empty-STOP guard** (the incident's leading mechanism): before failing
+     closed, if a host-directed final is owed a response, yield the floor line
+     as the generation's own content instead of raising into silence. The
+     guard's purpose is preserved — an empty stays empty, no garbage airs; the
+     opener re-greet / fail-closed path is untouched when no address is owed.
+   - **`tts_node` terminal `Silence`**: when the say pipeline suppressed a turn
+     with no regen/retry scheduled (empty-candidate give-up, stubborn repeat,
+     …) and a final is still owed, `_lily_schedule_floor_if_owed` schedules the
+     floor line (a genuine duplicate/held suppression already cleared the latch
+     — its original aired — so nothing fires there).
+   - **`_wp_address_unanswered` watchdog**: the warn-only path now also fires
+     the floor when a direct address passes the responsiveness budget
+     (`responsiveness_budget_seconds()`, PATCH-003 P9 — the existing deadline,
+     no new constant), closing the "reply never dispatched" gap.
+
+   New game-state fields `_floor_fired_for_ts` / `_floor_line_nonce` in
+   `_init_all_game_state`. Deadline: the synchronous sites (empty-STOP yield,
+   tts_node) fire the instant the cycle ends with nothing — waiting would only
+   add dead air; the watchdog uses the existing 3.0s responsiveness budget.
+
+**Tests.** `tests/test_never_silent_floor.py` (18): line-set rotation/fallback;
+`floor_line_owed` across lobby-hail / mid-game / STOP-hold-question-pending /
+host-speaking / one-line-per-address / real-playout-clears; empty generation
+after a hail airs the floor line; empty generation with no address still fails
+closed; a normal reply never triggers the floor (no double-speak); say-
+suppression schedules the floor only when owed; watchdog fires past-budget /
+stands down within budget; `fire_floor_line` rides `gated_say`. Full suite
+green: 2556 passed (2538 baseline + 18).
 
 ## 2026-08-14 — WO-PRMPT-LILY-GEMINI-EXCISION-001: dead google-genai reasoning lane removed
 

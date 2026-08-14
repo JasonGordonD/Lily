@@ -544,6 +544,53 @@ def lily_verdict_reair_line(
     return f"Nobody had it — {answer_text}."
 
 
+# ---------------------------------------------------------------------------
+# WO-LILY-NEVER-SILENT-001 — THE ANTI-SILENCE FLOOR (deterministic sheets).
+#
+# A party host never goes silent when spoken to. When a host-directed final's
+# response cycle ends with nothing on the air — an empty/suppressed
+# generation, a fail-closed guard — the floor airs ONE short in-character line
+# instead of dead air (the live lily-EFC239 incident: "Hello?" then "Lily.",
+# then 48s of silence to session close). These are SHEETS, not generations:
+# zero-latency, model-free, and so incapable of failing on the one path whose
+# whole job is never to fail. They ride the ordinary gated_say(text=...) /
+# yield funnel — every hygiene, leak and claim gate, and the barge-in cancel
+# path, govern them exactly like any other deterministic line. The guard's
+# original purpose (don't air garbage) is preserved; only silence stops being
+# the fallback.
+#
+# Two contexts, chosen by game state:
+#   * "lobby" — pre-game (covers the bare hail): answer the presence AND
+#     nudge toward starting / options, in one beat.
+#   * "game"  — mid-game: acknowledge and hand the floor straight back.
+# Each context rotates a small set so a floor that recurs never airs the same
+# words twice running (the air-dup / repeat lints stay quiet; the room never
+# hears the same canned line back to back).
+# ---------------------------------------------------------------------------
+
+LILY_FLOOR_LINES: dict = {
+    "lobby": (
+        "Yeah, I'm here — want the quick how-it-works, or should we just go?",
+        "Right here with you. Say the word and we'll get rolling, or ask me anything.",
+        "I've got you. We can start whenever — just say go.",
+    ),
+    "game": (
+        "I'm here — the floor's yours.",
+        "Still with you. Go ahead.",
+        "Right here — take it away.",
+    ),
+}
+
+
+def lily_floor_line(context: str, nonce: int) -> str:
+    """One short in-character anti-silence line for `context`
+    ("lobby"/"game"), rotated by `nonce` so a recurring floor never airs the
+    same words twice running. An unknown context falls back to "lobby" —
+    answer presence, never silence. Pure."""
+    lines = LILY_FLOOR_LINES.get(context) or LILY_FLOOR_LINES["lobby"]
+    return lines[nonce % len(lines)]
+
+
 # False on-screen picture claims (WO-B4) — "look at the screen" / "picture
 # is up" only when lily_control.image_shown confirmed the armed URL.
 _FALSE_ON_SCREEN_RE = re.compile(

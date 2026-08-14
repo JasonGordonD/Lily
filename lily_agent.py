@@ -690,6 +690,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._durable_asked_qnum = None
         self._explain_request_note = None
         self._first_human_utterance_seen = False
+        # WO-LILY-NEVER-SILENT-001: the anti-silence floor. `_floor_fired_for_ts`
+        # pins the outstanding-address timestamp the floor last spoke for (one
+        # line per address; a barge-in before playout can't restart a storm),
+        # `_floor_line_nonce` rotates the deterministic line set.
+        self._floor_fired_for_ts = 0.0
+        self._floor_line_nonce = 0
         self._game_start_committed = False
         self._gamecontrol_divergences = {}
         self._general_llm = None
@@ -2932,6 +2938,16 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 self.sk.session_id,
                 lily_config.responsiveness_budget_seconds(),
             )
+            # WO-LILY-NEVER-SILENT-001: the warn used to be the whole response
+            # — the address sat unanswered past the budget and nothing aired
+            # (the reply was never dispatched, or died before the guard/tts
+            # sites could floor it). Air the floor line so a direct address
+            # past its deadline still gets a beat. The deadline IS
+            # responsiveness_budget_seconds (address_unanswered's own gate,
+            # PATCH-003 P9 — no new constant); floor_line_owed re-verifies
+            # nothing is airing and the one-line-per-address latch keeps it to
+            # a single beat.
+            self.fire_floor_line("address_unanswered")
         elif not self._awaiting_address_since:
             self._address_unanswered_warned = False
         return "address_checked"
@@ -7241,6 +7257,26 @@ def run_say_pipeline(turn: "SpeechTurn"):
                 transform.name,
             )
     return None
+
+
+def _lily_schedule_floor_if_owed(game, reason: str) -> None:
+    """WO-LILY-NEVER-SILENT-001: when the say pipeline suppressed a turn to
+    terminal silence (no regen/retry scheduled) and a host-directed final is
+    still owed a response, schedule the deterministic floor line so the
+    suppression degrades to a short in-character beat rather than dead air. A
+    genuine duplicate/held suppression already cleared the address latch (its
+    original aired), so fire_floor_line's owed-check keeps this to the paths
+    where nothing did. Scheduled (not called inline) to match the regen/retry
+    dispatch idiom; guarded so a fake game in tests is a no-op."""
+    fire = getattr(game, "fire_floor_line", None)
+    owed = getattr(game, "floor_line_owed", None)
+    if not callable(fire) or not callable(owed) or not owed():
+        return
+
+    async def _run() -> None:
+        fire(reason)
+
+    asyncio.ensure_future(_run())
 # ---------------------------------------------------------------------------
 # The agent
 # ---------------------------------------------------------------------------
@@ -8766,6 +8802,37 @@ class LilyAgent(Agent):
             yield sheet
             return
 
+        # WO-LILY-NEVER-SILENT-001: two empties, no armed sheet — the exact
+        # class that aired 48s of dead air after a bare hail. If a host-directed
+        # final is still owed a response and nothing has aired, yield the
+        # deterministic floor line as THIS generation's content instead of
+        # failing closed into silence. It rides tts_node's hygiene/claim gates
+        # and the barge-in cancel path like any other turn. The guard's purpose
+        # is preserved — an empty stays empty, no garbage airs — silence just
+        # stops being the fallback. (Fakes without the game surface fall through
+        # to the unchanged fail-closed path below.)
+        floor_fn = getattr(self._game, "floor_line_if_owed", None)
+        floor_line = floor_fn("empty_stop") if callable(floor_fn) else None
+        if floor_line:
+            logger.error(
+                "LILY_LLM | EMPTY_STOP_FLOOR | session=%s chars=%d — airing "
+                "floor line so a host-directed final is never met with silence",
+                getattr(self._game.sk, "session_id", "?"), len(floor_line),
+            )
+            # Usage stamp (merge reconciliation): the generation WAS empty even
+            # though the floor line rescued the turn — record it with a tag
+            # distinct from the fail-closed path so forensics can tell them apart.
+            try:
+                sm = getattr(self._game, "_session_metrics", None)
+                if sm is not None:
+                    sm.note_finish_state(
+                        _current_speech_id(), "stop_empty_floor", True
+                    )
+            except Exception:
+                pass
+            yield floor_line
+            return
+
         # F1: fail-closed is correct for the empty handle, but two empties
         # at cold open used to leave the room mute (checkers: "broken
         # agent"). Schedule one inventory-keyed opener re-dispatch before
@@ -8980,6 +9047,11 @@ class LilyAgent(Agent):
         if isinstance(outcome, Silence):
             if outcome.schedule is not None:
                 asyncio.ensure_future(outcome.schedule())
+            else:
+                # WO-LILY-NEVER-SILENT-001: a terminal suppression (empty-
+                # candidate give-up, stubborn repeat, ...) with no regen/retry
+                # of its own must not leave a host-directed final in silence.
+                _lily_schedule_floor_if_owed(self._game, "say_suppressed")
             yield _lily_silence_frame()
             return
 
