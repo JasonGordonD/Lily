@@ -5,6 +5,104 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — WO-LILY-UI-SYNC-TYPEWRITER-001: type the question in sync with Lily's voice (word-level)
+
+The board pasted the whole question at playout start and ran a cosmetic
+~40ms/word chalk stagger unrelated to what Lily was actually saying. This
+wires the board's typewriter to her VOICE, word by word, via the
+framework's audio-playout transcript synchronizer. Feature master switch
+`LILY_VOICE_SYNCED_TRANSCRIPT` (default ON; a pure env flip rolls back to
+the pre-WO manual-publish path — no redeploy).
+
+Vendor gate (run first): `POST /v1/text-to-speech/{voice}/stream/with-timestamps`
+with the EXACT locked config (`eleven_v3`, voice `W3C2vBPukr5b5jvoXhPK`,
+per-voice `voice_settings`, `pcm_24000`) returns per-CHARACTER alignment
+(char + start/end secs) for eleven_v3 → GREEN → word-level implemented.
+
+1. **lily_tts.py.** `LilyChunkedStream._run` switches (when on) to
+   `/stream/with-timestamps` — request body BYTE-IDENTICAL to the raw path
+   (voice/model/settings/output_format are operator-locked; the endpoint
+   swap alters none of them). It base64-decodes the PCM, aggregates the
+   per-character alignment into per-WORD `TimedString` (new
+   `_WordTimingAggregator`; words keep trailing whitespace so concatenation
+   reproduces the spoken text, onsets offset per text-chunk so they stay
+   monotonic across the turn), and emits them via
+   `output_emitter.push_timed_transcript`. All existing accounting is
+   preserved: chunk-splitting, claim-vs-delivery tail recovery, the
+   zero-bytes clean-retry, pace levels, pooled TLS.
+   `TTSCapabilities(aligned_transcript=True)`.
+2. **lily_agent.py — AgentSession.** `use_tts_aligned_transcript` (flag-gated)
+   so the framework forwards the TTS-ALIGNED CORRECTED text — the exact
+   post-transform `full` the tts_node hands to synthesis — never the raw
+   pre-TTS model stream (P0-C held by construction).
+3. **lily_agent.py — RoomOptions.** `text_output=False` → (flag on)
+   `TextOutputOptions(sync_transcription=True, json_format=False)`: the
+   TranscriptSynchronizer releases each word onto `lk.transcription` against
+   real audio playout (per-word timing from the aligned TTS transcript), so
+   the board types to her cadence via word ARRIVAL. json_format is
+   deliberately OFF — the browser SDK (livekit-client 2.18 /
+   components-react 2.9) concatenates transcription chunks as raw strings and
+   does not parse the json_format TimedString envelope, so it would render
+   raw JSON in the shared all-tenant panel with no client benefit. Enabling
+   text_output also re-activates the framework's USER forwarder (raw diarized
+   text, no roster name) — neutralised post-`start()` via its own None-guard
+   so Lily's label-aware `publish_user_transcript_nowait` stays the single
+   user source.
+4. **lily_agent.py — `transcription_node`.** Explicit identity forward of the
+   aligned corrected stream (str|TimedString) — the testable P0-C anchor.
+5. **lily_speech_delivery.py:826.** The full-line interim paste at
+   `note_playout_started` is dropped (flag on) — the framework now drives the
+   progressive display. The completion publish stays.
+6. **lily_glass.py — `publish_agent_transcription_nowait`.** The manual
+   `lk.transcription` stream leg is suppressed (flag on) so the framework
+   owns the agent wire — no duplicate, differently-segmented line. The legacy
+   `rtc.Transcription` completion publish + `record_agent_turn` stay as the
+   durable/cut record; the framework's own final chunk
+   (`transcription_final=true`) is the board's snap-complete/barge-in signal.
+7. **deploy.yml.** Forwards `LILY_VOICE_SYNCED_TRANSCRIPT` (docker `-e` + job
+   `env` from `vars`).
+
+8. **scripts/eleven_alignment_gate.py + cache-canary.yml** (added on the
+   1.6.10 merge). The vendor gate that the word-level decision rests on,
+   as a re-runnable script instead of a one-off manual probe: one POST to
+   `/stream/with-timestamps` with the locked config read STRAIGHT OUT of
+   `lily_tts` (`MODEL_ID` / `OUTPUT_FORMAT` / `_voice_settings_for`), so it
+   can never gate a config production does not send. Prints GREEN/RED plus
+   char- and word-timing samples; `ELEVEN_API_KEY` from env and never
+   echoed; exits 0 either way. Rides `cache-canary.yml` (workflow_dispatch)
+   as its own `continue-on-error` job — Lily's live-fire vendor probes live
+   there. `deploy.yml` is NOT gated by it.
+
+Tests: new word-aggregation + with-timestamps `_run` cases (endpoint,
+body-identity, monotonic words, cross-object word, tail-recovery); the
+forwarding/sync/cut tests are made flag-aware (default-on suppression +
+flag-off legacy mirror). Full suite green (2,581; 2,574 baseline + 7);
+**2,621 after the merge onto 1.6.10 main** (2,614 baseline + 7).
+
+UI side (prmpt_ui, Lily-scoped, operator-gated deploy) delivered separately.
+
+**MERGE + ADVERSARIAL REVIEW (onto `cdb959f`, LiveKit Agents 1.6.10).**
+Merged clean except CHANGELOG (both dated sections kept). The likely
+collision — `note_playout_started` — auto-merged CORRECTLY: main's
+`DISPATCH_TO_AIR_MS` block survives and the interim full-line paste is
+gated off behind the flag. Every framework surface the WO touches verified
+present at 1.6.10: `voice.io.TimedString`, `TTSCapabilities.aligned_transcript`
+(tts/tts.py:57), `AudioEmitter.push_timed_transcript`, the
+`use_tts_aligned_transcript` `AgentSession` kwarg (voice/agent_session.py:382),
+`TextOutputOptions(sync_transcription, json_format)`, and the
+`_forward_user_transcript` None-guard the user-forward neutralisation rides
+(voice/room_io/room_io.py:366). Flag-off is byte-identical to the pre-WO
+path. TWO OPEN DEFECTS are recorded against the feature, not fixed here
+(see the WO report): (i) at 1.6.10 `Agent.default.tts_node` wraps any
+`streaming=False` TTS in `StreamAdapter`, which forwards only
+`frame.data.tobytes()` — so LilyTTS's per-WORD `TimedString`s are dropped
+before the framework sees them and are replaced by StreamAdapter's own
+SENTENCE-level ones; the display is still playout-synced, but the
+`/stream/with-timestamps` round-trip currently buys nothing; (ii) a 200
+from that endpoint whose body is not NDJSON parses to zero audio while
+`chunks_delivered == chunks_total`, so the turn goes SILENT with no
+tail-recovery and no alarm.
+
 ## 2026-08-14 — WO-PRMPT-LILY-GROUP-RECONCILE-001: auto-reconciler for fragmented returning-player identity groups
 
 One INDIVIDUAL fragmented across **31 voiceprint groups / 7 memory groups** in

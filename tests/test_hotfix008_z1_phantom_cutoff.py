@@ -44,6 +44,7 @@ import ast
 import asyncio
 import inspect
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -360,14 +361,32 @@ def test_genuine_bargein_still_records_its_real_partial_marked():
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-    _run(scenario())
+    # WO-LILY-UI-SYNC-TYPEWRITER-001 (1.6.10 merge): PIN the flag to its
+    # default rather than inheriting the ambient environment. The stream-leg
+    # assertion below is flag-dependent, and LILY_VOICE_SYNCED_TRANSCRIPT is
+    # documented as a pure env flip with no redeploy — so the rollback
+    # configuration must also run this suite green. Without the pop, a
+    # developer or CI shell exporting the rollback value failed this test
+    # and made the rollback look broken. Same pop-the-var idiom as
+    # test_transcript_sync / test_transcript_forwarding.
+    prev = os.environ.pop("LILY_VOICE_SYNCED_TRANSCRIPT", None)
+    try:
+        _run(scenario())
+    finally:
+        if prev is not None:
+            os.environ["LILY_VOICE_SYNCED_TRANSCRIPT"] = prev
     assert [r["text"] for r in game.transcripts.rows] == [partial + CUT_MARK]
     assert game.sk.agent_turns == [partial]
-    # The published glass segment carries the same marked real partial —
-    # and the phantom published nothing.
+    # The durable records carry the marked real partial — and the phantom
+    # published nothing.
     published = [s.segments[0].text for s in game.participant.published]
     assert published == [partial + CUT_MARK]
-    assert game.participant.streamed == [partial + CUT_MARK]
+    # WO-LILY-UI-SYNC-TYPEWRITER-001 (default ON): the manual lk.transcription
+    # stream mirror is suppressed — the framework's own final chunk carries
+    # the truncation on the wire. The legacy publish + transcript rows above
+    # remain the durable cut record. (The flag-off stream mirror is covered
+    # in test_transcript_forwarding.)
+    assert game.participant.streamed == []
 
 
 def test_no_cut_off_row_without_genuine_truncation():

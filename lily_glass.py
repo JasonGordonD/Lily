@@ -500,8 +500,23 @@ class LilyGlassMixin:
 
         try:
             loop = asyncio.get_running_loop()
+            # Legacy rtc.Transcription: durable record + older clients. It
+            # surfaces via the deprecated TranscriptionReceived event, which
+            # the modern useTranscriptions panel does NOT read, so it never
+            # duplicates the framework's text-stream lines — always scheduled.
             loop.create_task(_publish())
-            loop.create_task(_publish_stream())
+            # WO-LILY-UI-SYNC-TYPEWRITER-001: when the framework drives the
+            # agent transcript (RoomOptions text_output on), IT owns the
+            # lk.transcription text stream. Publishing this manual stream too
+            # would put a second, differently-segmented copy of every Lily
+            # turn on the wire — a duplicate line in the panel and a rival
+            # segment for the board. Suppress the manual stream leg; the
+            # framework's own final chunk (transcription_final=true) is the
+            # board's snap-complete signal, and this call's legacy publish +
+            # record_agent_turn remain the durable/cut record. Off ⇒ the
+            # manual stream stays the single source (legacy path).
+            if not lily_config.voice_synced_transcript_enabled():
+                loop.create_task(_publish_stream())
         except RuntimeError:
             pass
 

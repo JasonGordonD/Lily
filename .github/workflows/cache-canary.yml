@@ -4,6 +4,15 @@ name: Grok cache canary
 # with the production prompt; fails if the second shows zero cached
 # tokens. Manual dispatch only — it spends (a tiny amount of) real API
 # credit, so it never runs on push.
+#
+# WO-LILY-UI-SYNC-TYPEWRITER-001 adds a SECOND, INDEPENDENT job here: the
+# ElevenLabs alignment gate. Same shape (manual dispatch, real vendor
+# credit, tiny spend), different vendor — this workflow is where Lily's
+# live-fire vendor probes live, so the gate rides it rather than minting a
+# parallel workflow. It is deliberately a separate job, not a step of
+# `canary`: the two probes share nothing, and a Grok cache failure must
+# not hide the alignment verdict (or vice versa). The deploy pipeline
+# (deploy.yml) is untouched by design — this never gates a ship.
 on:
   workflow_dispatch:
 
@@ -25,3 +34,32 @@ jobs:
         env:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
         run: python scripts/grok_cache_canary.py
+
+  # WO-LILY-UI-SYNC-TYPEWRITER-001 vendor gate. INFORMATIONAL ONLY.
+  #
+  # Proves that /stream/with-timestamps returns per-CHARACTER alignment for
+  # the LOCKED production config (voice/model/voice_settings read straight
+  # out of lily_tts, so the gate cannot drift from what ships). That is a
+  # vendor-side property of an alpha model — it can change under us — and
+  # LILY_VOICE_SYNCED_TRANSCRIPT's word-level path is only sound while it
+  # holds. GREEN/RED is printed in the log; the script exits 0 either way
+  # and `continue-on-error` is belt-and-braces, so a RED is a signal to
+  # keep the flag off, never a red X on someone else's dispatch.
+  eleven-alignment-gate:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run ElevenLabs alignment gate
+        env:
+          ELEVEN_API_KEY: ${{ secrets.ELEVEN_API_KEY }}
+        run: python scripts/eleven_alignment_gate.py

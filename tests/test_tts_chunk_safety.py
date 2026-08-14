@@ -17,6 +17,8 @@ against fake aiohttp/emitter doubles, so no livekit runtime is needed.
 """
 
 import asyncio
+import base64
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from lily_tts import (
     MAX_CHUNK_SIZE,
     LilyChunkedStream,
     _TTSOpts,
+    _WordTimingAggregator,
 )
 
 
@@ -164,6 +167,9 @@ def _make_stream(text: str, session: _FakeSession) -> LilyChunkedStream:
     stream.chunks_total = 0
     stream.chunks_delivered = 0
     stream.undelivered_remainder = ""
+    # These cases script raw-PCM responses (the legacy /stream path); the
+    # timed /stream/with-timestamps path has its own cases below.
+    stream._timed = False
     return stream
 
 
@@ -208,3 +214,184 @@ def test_full_delivery_leaves_no_remainder():
     assert stream.chunks_delivered == 2
     assert stream.undelivered_remainder == ""
     assert emitter.flushed
+
+
+# --------------------------------------------------------------------------
+# WO-LILY-UI-SYNC-TYPEWRITER-001: word-level aligned transcript
+# (/stream/with-timestamps). The timed path decodes base64 PCM, aggregates
+# per-character alignment into per-word TimedString, and preserves every
+# accounting invariant the raw path has.
+# --------------------------------------------------------------------------
+
+class _FakeTimedContent:
+    """Async-iterable of newline-delimited JSON lines (with-timestamps)."""
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for line in self._lines:
+            yield line
+
+
+class _FakeTimedResp:
+    def __init__(self, status=200, objs=None, err=""):
+        self.status = status
+        lines = [(json.dumps(o) + "\n").encode() for o in (objs or [])]
+        self.content = _FakeTimedContent(lines)
+        self._err = err
+
+    async def text(self):
+        return self._err
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _RecordingSession:
+    """Records the POST url + json body, serves scripted timed responses."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+        self.urls = []
+        self.bodies = []
+
+    def post(self, url, **kwargs):
+        self.urls.append(url)
+        self.bodies.append(kwargs.get("json"))
+        resp = self._responses[self.calls]
+        self.calls += 1
+        return resp
+
+
+class _TimedEmitter(_FakeEmitter):
+    def __init__(self):
+        super().__init__()
+        self.timed = []
+
+    def push_timed_transcript(self, delta):
+        if isinstance(delta, list):
+            self.timed.extend(delta)
+        else:
+            self.timed.append(delta)
+
+
+def _pcm(n_samples: int) -> bytes:
+    return b"\x01\x00" * n_samples
+
+
+def _align_obj(chars, starts, ends, pcm_samples):
+    return {
+        "audio_base64": base64.b64encode(_pcm(pcm_samples)).decode(),
+        "alignment": {
+            "characters": list(chars),
+            "character_start_times_seconds": list(starts),
+            "character_end_times_seconds": list(ends),
+        },
+    }
+
+
+def _make_timed_stream(text, session):
+    stream = _make_stream(text, session)
+    stream._timed = True
+    return stream
+
+
+def test_timed_path_hits_with_timestamps_endpoint_and_body_is_identical():
+    text = "Hi there."
+    obj = _align_obj(
+        list("Hi there."),
+        [0.0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28, 0.32],
+        [0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28, 0.32, 0.36],
+        10,
+    )
+    session = _RecordingSession([_FakeTimedResp(200, [obj])])
+    stream = _make_timed_stream(text, session)
+    emitter = _TimedEmitter()
+    asyncio.run(stream._run(emitter))
+
+    assert session.urls[0].startswith(
+        "https://api.elevenlabs.io/v1/text-to-speech/v1/stream/with-timestamps"
+    )
+    # Body identity: the operator-locked keys are exactly what the raw path
+    # sends — the endpoint swap must not alter voice/model/settings/format.
+    body = session.bodies[0]
+    assert body["text"] == text
+    assert body["model_id"] == "eleven_v3"
+    assert body["apply_text_normalization"] == "auto"
+    assert set(body["voice_settings"]) == {
+        "stability", "similarity_boost", "style", "use_speaker_boost", "speed",
+    }
+    assert emitter.pushed  # audio reached the air
+    assert emitter.flushed
+
+
+def test_timed_path_emits_monotonic_words_that_reconstruct_the_text():
+    text = "Hi there."
+    obj = _align_obj(
+        list("Hi there."),
+        [0.0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28, 0.32],
+        [0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28, 0.32, 0.36],
+        10,
+    )
+    session = _RecordingSession([_FakeTimedResp(200, [obj])])
+    stream = _make_timed_stream(text, session)
+    emitter = _TimedEmitter()
+    asyncio.run(stream._run(emitter))
+
+    assert [str(t) for t in emitter.timed] == ["Hi ", "there."]
+    starts = [t.start_time for t in emitter.timed]
+    assert starts == sorted(starts)  # monotonic non-decreasing
+    assert "".join(str(t) for t in emitter.timed) == text
+
+
+def test_timed_word_straddling_two_objects_emits_one_token():
+    # "there" split across two streamed objects must not become two words.
+    obj1 = _align_obj(list("the"), [0.0, 0.04, 0.08], [0.04, 0.08, 0.12], 4)
+    obj2 = _align_obj(list("re "), [0.12, 0.16, 0.20], [0.16, 0.20, 0.24], 4)
+    session = _RecordingSession([_FakeTimedResp(200, [obj1, obj2])])
+    stream = _make_timed_stream("there ", session)
+    emitter = _TimedEmitter()
+    asyncio.run(stream._run(emitter))
+    assert [str(t) for t in emitter.timed] == ["there "]
+    assert abs(emitter.timed[0].start_time - 0.0) < 1e-9
+
+
+def test_timed_path_records_undelivered_tail_on_second_chunk_death():
+    # Same claim-vs-delivery invariant as the raw path, on with-timestamps.
+    sent_a = "A" * 2500 + ". "
+    sent_b = "B" * 2500 + "."
+    text = sent_a + sent_b
+    obj = _align_obj(["A"], [0.0], [0.04], 4)
+    session = _RecordingSession([
+        _FakeTimedResp(200, [obj]),          # chunk 1 airs
+        _FakeTimedResp(500, err="boom"),     # chunk 2 dies
+    ])
+    stream = _make_timed_stream(text, session)
+    emitter = _TimedEmitter()
+    with pytest.raises(APIStatusError):
+        asyncio.run(stream._run(emitter))
+    assert stream.chunks_total == 2
+    assert stream.chunks_delivered == 1
+    assert stream.undelivered_remainder == sent_b
+    assert emitter.pushed
+    assert not emitter.flushed
+
+
+def test_word_timing_aggregator_offset_makes_second_chunk_monotonic():
+    agg = _WordTimingAggregator()
+    out = agg.feed(list("Hi "), [0.0, 0.05, 0.10], [0.05, 0.10, 0.15], 0.0)
+    out += agg.flush()
+    assert [str(t) for t in out] == ["Hi "]
+    # a later chunk's onsets are offset past the audio already aired
+    agg2 = _WordTimingAggregator()
+    out2 = agg2.feed(list("bye"), [0.0, 0.05, 0.10], [0.05, 0.10, 0.15], 2.0)
+    out2 += agg2.flush()
+    assert abs(out2[0].start_time - 2.0) < 1e-9

@@ -901,18 +901,27 @@ class LilySpeechDeliveryMixin:
         # completion publish (same segment id, final, cut marker if any)
         # replaces it in place. Peek, never consume — the one-shot binding
         # still belongs to playout completion (the durable record).
-        try:
-            airing = self.peek_post_tts_text(speech_id)
-            if airing:
-                self.publish_agent_transcription_nowait(
-                    airing, speech_id=speech_id, interrupted=False,
-                    final=False,
+        # WO-LILY-UI-SYNC-TYPEWRITER-001: with the framework driving the
+        # progressive word-by-word display (RoomOptions text_output on,
+        # sync_transcription), this full-line interim paste is exactly the
+        # "whole string at once, then a cosmetic client stagger" it was a
+        # stopgap for — drop it and let the framework's playout-synced
+        # forwarding fill the panel and the board. The completion publish
+        # (final=True) below still lands as the durable/cut record. When the
+        # feature is off, the legacy interim paste stays.
+        if not lily_config.voice_synced_transcript_enabled():
+            try:
+                airing = self.peek_post_tts_text(speech_id)
+                if airing:
+                    self.publish_agent_transcription_nowait(
+                        airing, speech_id=speech_id, interrupted=False,
+                        final=False,
+                    )
+            except Exception:
+                logger.exception(
+                    "LILY_TRANSCRIPT | INTERIM_PUBLISH_FAILED — completion "
+                    "publish still covers this turn"
                 )
-        except Exception:
-            logger.exception(
-                "LILY_TRANSCRIPT | INTERIM_PUBLISH_FAILED — completion "
-                "publish still covers this turn"
-            )
         if self._awaiting_address_since:
             # A dispatch is only an intention. Clear at real playout so a
             # queued, wedged, or suppressed handle cannot hide the
