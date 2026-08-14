@@ -627,6 +627,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     # acknowledgment fires at most once per session.
     _late_recognition_fired: bool = False
     _late_recognition_pending: bool = False
+    # ANTIREPEAT-PROTOCOL-001: the durable recognition-stated-on-air fact
+    # and the greet-composed-recognition latch (class defaults so __new__
+    # harnesses read sane state; full contract comments in
+    # _init_all_game_state).
+    _recognition_aired: dict | None = None
+    _greet_carried_recognition: bool = False
     # CLASS 7 (LIVEFIRE-001) 7a: latched True when start_game commits. After
     # the round has started, recognition speech ("welcome back, want relaxed
     # pacing?") is FORBIDDEN — the live beat aired as act=game_start and stole
@@ -719,6 +725,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._glass_image_pending_at = None
         self._glass_image_url = None
         self._glass_published_qnum = None
+        # ANTIREPEAT-PROTOCOL-001: this session's greet composed the
+        # returning-table acknowledgment — when the session_greet claim
+        # CONFIRMS on air, note_recognition_aired("greet") stamps.
+        self._greet_carried_recognition = False
         self._hold_active = False
         self._hold_reason = None
         self._hold_since = 0.0
@@ -764,10 +774,17 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._reair_gate_armed = False
         self._reair_turn_pending = False
         self._recent_finals = []
+        # ANTIREPEAT-PROTOCOL-001: the durable "recognition stated on air"
+        # fact ({source, text, at} or None) — the _result_aired pattern on
+        # the recognition lane, stamped by whichever lane first carries the
+        # welcome-back (confirmed greet / organic name-door turn / the late
+        # beat's dispatch). Permanent for the session: recognition happens
+        # once a night. Replaces _recognized_at_greet, an inert kill-switch
+        # that was initialized and never set.
+        self._recognition_aired = None
         self._recognition_dispute = False
         self._recognition_dispute_why_answered = False
         self._recognition_why_note = None
-        self._recognized_at_greet = False
         self._returner_claim_seen = False
         self._returner_honesty_note = None
         self._session_closed = False
@@ -2567,10 +2584,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # prefs / what's-new — are NOT part of the cold opener. This block is
         # gated on the first human utterance, which is false at the cold-open
         # dispatch, so the opener stays a bare intro + orienting beat and the
-        # beats land through their mid-session paths. No _recognized_at_greet
-        # is set: recognition is single-sourced through the late-recognition /
-        # game-start paths, which closes the greet-dispatch↔memory-promotion
-        # race without a mirrored guard.
+        # beats land through their mid-session paths. When the memory branch
+        # DOES compose (utterance seen, block present), the greet carries the
+        # recognition: _greet_carried_recognition latches and the session_greet
+        # CONFIRM stamps the durable recognition_aired fact
+        # (ANTIREPEAT-PROTOCOL-001 — this is the wiring the deleted inert
+        # _recognized_at_greet flag never had), retiring the late beat.
         # HOTFIX-010 V4 edge (B): when a DEVICE candidate is pending (device
         # looks familiar, no present voice verified), PART TWO above already
         # owns the turn — "ask who's playing, verify voice first". The
@@ -2584,6 +2603,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self, "device_candidate_group_id", None
         ):
             if self.memory_block:
+                # ANTIREPEAT-PROTOCOL-001: this greet carries the
+                # returning-table acknowledgment — the confirm hook in
+                # on_agent_speech_finished stamps recognition_aired once it
+                # genuinely plays out (an interrupted greet stamps nothing,
+                # keeping recognition available for the retry or late beat).
+                self._greet_carried_recognition = True
                 parts.append(
                     "Your memory KNOWS this TABLE (the [RETURNING TABLE] "
                     "context carries this group's history), but that is a "
@@ -4069,6 +4094,18 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         ):
             self._whats_new_pending = False
             self._stamp_feature_version()
+        # ANTIREPEAT-PROTOCOL-001: the greet that composed the returning-
+        # table acknowledgment has genuinely played out — recognition is on
+        # air. Stamp the durable fact (retires the late beat and every other
+        # recognition lane). Confirm-gated, same discipline as the what's-new
+        # stamp above: an interrupted greet keeps recognition available.
+        if (
+            getattr(self, "_greet_carried_recognition", False)
+            and self.say_registry.state("session_greet")
+            == lily_say_gate.CLAIM_CONFIRMED
+        ):
+            self._greet_carried_recognition = False
+            self.note_recognition_aired("greet")
         if self._pending_reveal_event is not None:
             # Reveal speech finished without a speaking-start hook having
             # fired the packet (safety net) — emit now so the UI never hangs.

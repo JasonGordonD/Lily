@@ -853,6 +853,13 @@ machine ran clean; the defects were experiential:
   clarify, host speech, or question transition sets
   `late_recognition: DEFERRED`; the reveal/round-score completion seam flushes
   it before N+1. Recognition never overlays a live question.
+  ANTIREPEAT-PROTOCOL-001: recognition airs ONCE per session, enforced by the
+  durable `recognition_aired` fact (`note_recognition_aired`, the
+  `_result_aired` pattern) — stamped at greet confirm, at a name-door
+  promotion (whose organic turn carries the memory; the late beat is
+  short-circuited), or at the beat's own dispatch — and every recognition
+  lane retires once it is set; the prompt's CONTINUITY PROTOCOL section is
+  the behavioral rail.
 - **Claimed returner is persistent session truth.** Phrases including
   "not my first time" and "I have been at/on your table before" set
   `_returner_claim_seen` for the whole call. A blank lookup never disproves

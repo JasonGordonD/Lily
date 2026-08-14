@@ -32,7 +32,7 @@ def _make_game():
     game.game_started = True
     game._late_recognition_fired = False
     game._late_recognition_pending = False
-    game._recognized_at_greet = False
+    game._recognition_aired = None
     game.pending_clarify = {}
     game.instructed_replies = []
     game.instructed_reply = lambda t: game.instructed_replies.append(t)
@@ -43,9 +43,13 @@ def _make_game():
 # -- P5: recognition-once ------------------------------------------------------
 
 
-def test_recognized_at_greet_kills_the_late_beat():
+def test_recognition_already_aired_kills_the_late_beat():
+    # ANTIREPEAT-PROTOCOL-001: the P5 guard's inert _recognized_at_greet
+    # flag is replaced by the durable recognition_aired fact — same
+    # contract, now actually wired (stamped at greet confirm / name-door
+    # promotion / the beat's own dispatch).
     game = _make_game()
-    game._recognized_at_greet = True
+    game.note_recognition_aired("greet")
     game.maybe_fire_late_recognition()
     assert game.instructed_replies == []
     assert game._late_recognition_fired is True  # consumed, never re-armed

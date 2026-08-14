@@ -48,7 +48,7 @@ def _game(*, resolved, supabase=object(), memory_block="", spoken=True):
     g.memory_player_names = ["Rami", "Rhonda", "Chris"] if memory_block else []
     g.device_candidate_group_id = None
     g._voice_identity_resolved = resolved
-    g._recognized_at_greet = False
+    g._recognition_aired = None
     g._first_human_utterance_seen = spoken
     g.forget_state = None
     g.group_prefs = None

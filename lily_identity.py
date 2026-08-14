@@ -54,6 +54,14 @@ _KNOWN_GROUP_SOURCES = _STRONG_GROUP_SOURCES + (
     "name_stated",           # the player said a name this group's file knows
 )
 
+# ANTIREPEAT-PROTOCOL-001: promotion triggers that ARE the stated-name door
+# (maybe_recognize_by_stated_name's two exits). A promotion under one of
+# these answers a name the player JUST said, so the ORGANIC reply already
+# in flight picks up the promoted memory_block (_apply_context_blocks
+# injects it into that turn's context) and carries the welcome-back BY
+# CONSTRUCTION — the promotion tail must not also fire the late beat.
+_NAME_DOOR_TRIGGERS = ("name_stated", "device_plus_name")
+
 # RECONCILE-001 (e): the name-door serves fragmented returners, for whom >1
 # same-name candidate is the COMMON case (one person split across many
 # groups), so it stages the most-recent candidate weakly instead of refusing.
@@ -116,13 +124,20 @@ class LilyIdentityMixin:
         and triggers nothing. Device-id resolution at the door remains
         the fast path — if the greeting hasn't gone out yet, the greeting
         itself acts on the memory and this stays silent."""
-        if not self.memory_block or self._late_recognition_fired:
-            return False
-        # P5: recognized AT the greet — the door already caught them; the
-        # late beat is a duplicate and is killed for the session.
-        if self._recognized_at_greet:
+        # ANTIREPEAT-PROTOCOL-001 (supersedes P5's _recognized_at_greet, an
+        # inert flag that was initialized and never set): recognition content
+        # has already reached the air — the confirmed greet, the organic
+        # name-door turn, or an earlier beat. The durable fact (the
+        # _result_aired pattern generalized) retires this beat PERMANENTLY:
+        # the room heard the welcome-back once, and no later promotion (an
+        # ECAPA match converging on a fragmented returner's second group —
+        # the match-time group-equality guard's blind spot) may air it again.
+        # Checked FIRST so a stray pending bit is cleared too.
+        if self._recognition_aired is not None:
             self._late_recognition_fired = True
             self._late_recognition_pending = False
+            return False
+        if not self.memory_block or self._late_recognition_fired:
             return False
         # getattr: test harnesses build LilyGame via __new__.
         registry = getattr(self, "say_registry", None)
@@ -157,17 +172,12 @@ class LilyIdentityMixin:
             return False
         self._late_recognition_fired = True
         self._late_recognition_pending = False
-        # Stored 'usual' honored for the remainder: apply stored pacing
-        # only when this session hasn't spoken its own choice.
-        try:
-            stored_pacing = (self.prefs or {}).get("pacing")
-            if stored_pacing in ("timed", "relaxed") and (
-                stored_pacing != self.sk.pacing
-            ):
-                self.sk.set_pacing(stored_pacing)
-                self.publish_attributes_nowait()
-        except Exception:
-            pass
+        # Stored 'usual' honored for the remainder. The application now
+        # ALSO runs at every promotion tail (_apply_stored_pacing,
+        # ANTIREPEAT-PROTOCOL-001) so a short-circuited or refused beat
+        # never drops it; kept here too for beats reached without a
+        # promotion (idempotent — applies only on a difference).
+        self._apply_stored_pacing()
         # V1 (HOTFIX-010): a match on the GROUP is not per-person recognition.
         # The old beat injected memory_player_names[:4] — a multi-session
         # union never scrubbed of STT conflations — and recited it as the
@@ -223,6 +233,11 @@ class LilyIdentityMixin:
             # burned; the seam flush retries it.
             self._late_recognition_fired = False
             self._late_recognition_pending = True
+        else:
+            # ANTIREPEAT-PROTOCOL-001: the beat carried the welcome-back
+            # to dispatch — stamp the durable fact so no other lane (a
+            # later promotion, the game-start ride-along) re-airs it.
+            self.note_recognition_aired("late_recognition_beat")
         return dispatched
 
     def flush_late_recognition_at_seam(self) -> bool:
@@ -230,6 +245,67 @@ class LilyIdentityMixin:
         if not self._late_recognition_pending:
             return False
         return self.maybe_fire_late_recognition()
+
+    # -- ANTIREPEAT-PROTOCOL-001: the RECOGNITION-stated-on-air fact ---------
+    #
+    # BARGE-RESILIENCE-001 P1's _result_aired pattern, generalized to the
+    # recognition lane. Live 2026-08-14 11:31: a name-door promotion BOTH
+    # fed the in-flight organic reply (memory_block → _apply_context_blocks)
+    # AND fired the late-recognition beat from the promotion tail — the same
+    # welcome-back content through two independent lanes, ten seconds apart,
+    # because no shared "recognition stated on air" fact existed (the beat
+    # dispatches keyless, so the say-gate registry never deduped it, and
+    # _recognized_at_greet was initialized but never set — an inert
+    # kill-switch, now deleted in favor of this fact). Session-scoped and
+    # permanent: recognition happens once a night by definition, so unlike
+    # _result_aired there is no clear.
+
+    def note_recognition_aired(
+        self, source: str, text: str | None = None
+    ) -> None:
+        """Stamp that recognition/welcome-back content has gone to air (or
+        is carried by a turn already in flight, for the name-door organic
+        case). Idempotent: the first airing wins, so the record names the
+        lane the room actually heard. Stamping retires the late beat and
+        its pending bit — every recognition producer consults this fact."""
+        if self._recognition_aired is not None:
+            return
+        self._recognition_aired = {
+            "source": source,
+            "text": (text or "").strip(),
+            "at": time.monotonic(),
+        }
+        self._late_recognition_fired = True
+        self._late_recognition_pending = False
+        logger.info(
+            "LILY_MEMORY | RECOGNITION_AIRED | session=%s source=%s — "
+            "recognition is on air; every other recognition lane is retired "
+            "for the session (ANTIREPEAT-PROTOCOL-001)",
+            getattr(self.sk, "session_id", "?"), source,
+        )
+
+    def recognition_aired(self) -> dict | None:
+        """The recognition-aired record ({source, text, at}), or None."""
+        return self._recognition_aired
+
+    def _apply_stored_pacing(self) -> None:
+        """Apply the group's stored 'usual' pacing when it differs from the
+        live flag. Extracted from the late-recognition beat (ANTIREPEAT-
+        PROTOCOL-001): the application used to run ONLY when the beat fired,
+        so a short-circuited (name-door) or refused beat silently dropped
+        the table's saved pacing. Trigger-independent — called from every
+        promotion tail and from the beat itself; idempotent (set_pacing is
+        a no-op on equality). Session-spoken choices still win: the prefs
+        merge at promotion keys session values over stored ones."""
+        try:
+            stored_pacing = (self.prefs or {}).get("pacing")
+            if stored_pacing in ("timed", "relaxed") and (
+                stored_pacing != self.sk.pacing
+            ):
+                self.sk.set_pacing(stored_pacing)
+                self.publish_attributes_nowait()
+        except Exception:
+            pass
 
     async def stage_device_candidate(
         self,
@@ -454,10 +530,31 @@ class LilyIdentityMixin:
         self._device_candidate_prefs = {}
         self._device_candidate_voiceprints = []
         self.memory_settled.set()
-        # Task 1 (RECOGNITION-VARIETY): a voiceprint verification landing
-        # after the greeting is the same late-recognition moment as a
-        # name-hash upgrade — same acknowledgment beat, same one-shot.
-        self.maybe_fire_late_recognition()
+        # ANTIREPEAT-PROTOCOL-001: stored pacing applies at the PROMOTION,
+        # not inside the beat — trigger-independent, so a short-circuited
+        # beat never costs the table its saved 'usual'.
+        self._apply_stored_pacing()
+        if trigger in _NAME_DOOR_TRIGGERS and self.memory_block:
+            # Name-door short-circuit (ANTIREPEAT-PROTOCOL-001): the organic
+            # reply answering the name utterance carries the just-promoted
+            # memory block by construction — firing the late beat too was
+            # the 2026-08-14 11:31 double welcome-back (same content, two
+            # lanes, ten seconds apart). Stamp the durable fact and retire
+            # the beat instead of dispatching it. The prefs offer needs no
+            # beat either: the memory block's "usual:" line plus the system
+            # prompt's standing instruction carry it.
+            self.note_recognition_aired("name_door_organic")
+            logger.info(
+                "LILY_MEMORY | LATE_RECOGNITION_SHORT_CIRCUIT | session=%s "
+                "trigger=%s group=%s — the organic turn carries the "
+                "recognition; the late beat is retired",
+                getattr(self.sk, "session_id", "?"), trigger, candidate,
+            )
+        else:
+            # Task 1 (RECOGNITION-VARIETY): a voiceprint verification landing
+            # after the greeting is the same late-recognition moment as a
+            # name-hash upgrade — same acknowledgment beat, same one-shot.
+            self.maybe_fire_late_recognition()
         logger.info(
             "LILY_MEMORY | DEVICE_CANDIDATE_VERIFIED | trigger=%s group=%s "
             "— returning memory promoted",
@@ -1444,9 +1541,26 @@ class LilyIdentityMixin:
         # greeting may be waiting on (the live race: participant metadata
         # landed AFTER the entrypoint's initial load gave up).
         self.memory_settled.set()
-        # Task 1: recognition that arrives AFTER the door becomes a
-        # recovery moment, not a silent nothing.
-        self.maybe_fire_late_recognition()
+        # ANTIREPEAT-PROTOCOL-001: pacing application is promotion-side and
+        # trigger-independent (the stored prefs were just reconciled above).
+        self._apply_stored_pacing()
+        if source in _NAME_DOOR_TRIGGERS and self.memory_block:
+            # Name-door short-circuit, upgrade-tail leg: a name-door
+            # promotion awaits THIS upgrade before its own tail runs, so
+            # without the guard here the beat fired from inside the upgrade
+            # — same 11:31 double, one call frame earlier. The organic turn
+            # answering the name utterance carries the memory.
+            self.note_recognition_aired("name_door_organic")
+            logger.info(
+                "LILY_MEMORY | LATE_RECOGNITION_SHORT_CIRCUIT | session=%s "
+                "trigger=%s group=%s — the organic turn carries the "
+                "recognition; the late beat is retired (upgrade tail)",
+                getattr(self.sk, "session_id", "?"), source, new_group_id,
+            )
+        else:
+            # Task 1: recognition that arrives AFTER the door becomes a
+            # recovery moment, not a silent nothing.
+            self.maybe_fire_late_recognition()
         self.fire_enrollment("group_id_upgrade")
 
     async def maybe_recognize_by_stated_name(self, player_name: str) -> bool:

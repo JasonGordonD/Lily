@@ -29,6 +29,7 @@ _PROMPTS_DIR = Path(lily_agent.__file__).resolve().parent / "prompts"
 _SYSTEM_SECTIONS = [
     "identity",
     "voice",
+    "continuity",
     "game_rules",
     "state",
     "tools",

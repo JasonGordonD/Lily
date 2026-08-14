@@ -26,7 +26,7 @@ def _game(**kw):
     game.memory_block = "[RETURNING TABLE]\n18 games."
     game._late_recognition_fired = False
     game._late_recognition_pending = False
-    game._recognized_at_greet = False
+    game._recognition_aired = None
     game.game_started = True  # past the door path
     game.prefs = {}
     for k, v in kw.items():

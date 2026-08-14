@@ -5,6 +5,68 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — WO-LILY-ANTIREPEAT-PROTOCOL-001: one continuous take + the recognition_aired backstop
+
+Four live instances of one defect class today — content aired twice through
+independent lanes (double greeting, double welcome-back recognition, double
+verdicts, a stacked two-part question). Operator directive: stop
+point-patching; a structural protocol (improvise freely INSIDE rails, never
+repeat what's already been said) plus a durable data-side backstop for the
+live duplicate.
+
+**PART A — CONTINUITY PROTOCOL (prompt).** One static `<continuity>` section
+in `lily_system.txt` (after `<voice>`; `_SYSTEM_SECTIONS` updated
+deliberately): (1) SAID STAYS SAID — a greeting/welcome-back/recognition/
+verdict/score/callback/offer that aired is never re-delivered, only advanced
+from or referenced obliquely; (2) every beat is a CONTINUATION — instructed
+beats start where the last words ended, never a second hello; (3) at most
+ONE question per spoken turn, "or"-folded; (4) requested/cut re-airs are
+re-worded fresh, never verbatim; inside the rails, improvisation is free.
+Static text — the prompt prefix stays byte-identical across turns
+(`test_precall_cache_readiness.py` green). Lane-level reinforcements stay:
+the greeting one-question rule (today's), the lobby ONE-ASK block, the regen
+re-air directives, NEVER THE SAME BEAT TWICE (phrasing variety — a different
+axis than these content rails).
+
+**PART B — durable `recognition_aired` fact (the BARGE-RESILIENCE-001
+`_result_aired` pattern on the recognition lane).** Root cause of the 11:31
+double welcome-back: a name-door promotion BOTH fed the in-flight organic
+reply (memory_block → `_apply_context_blocks`) AND fired
+`maybe_fire_late_recognition` from the promotion tail — keyless dispatch, no
+registry dedupe, no shared "recognition stated on air" fact.
+1. **Name-door short-circuit.** A promotion triggered by the stated-name
+   door (`name_stated` / `device_plus_name`) no longer fires the late beat —
+   the organic turn answering the name utterance carries the memory by
+   construction. Guarded at BOTH tails (`_promote_device_candidate` and
+   `upgrade_group_id`, which the promotion awaits first). The stored-pacing
+   APPLICATION moves to the promotion (`_apply_stored_pacing`,
+   trigger-independent; it used to run only inside the beat); the prefs
+   OFFER needs no beat — the memory block's `usual:` line plus the standing
+   prompt instruction carry it (verified, pinned).
+2. **`note_recognition_aired` / `recognition_aired`** (`lily_identity.py`):
+   idempotent first-airing-wins fact, stamped (a) at a name-door promotion,
+   (b) when the late beat's dispatch succeeds, (c) when a greet that
+   composed the returning-table acknowledgment CONFIRMS on air
+   (`_greet_carried_recognition` → session_greet confirm in
+   `on_agent_speech_finished` — confirm-gated, so a cut greet stamps
+   nothing). `maybe_fire_late_recognition` checks the fact FIRST and retires
+   permanently. The inert `_recognized_at_greet` kill-switch (initialized,
+   never set) is **DELETED** — the fact is its wired replacement. No
+   tts_node text-matching stamp for organic welcome-backs: no deterministic
+   signal exists that could not false-positive and suppress a legitimate
+   first recognition; the short-circuit + beat/greet stamps cover every
+   producing lane.
+3. **ECAPA convergence hole closed.** A voice match landing AFTER a
+   name-door promotion on a *different* group (fragmented returner — the
+   match-time group-equality guard cannot catch it) promotes memory/prefs
+   silently: the fact retires the beat, nothing new airs (pinned by trace
+   test).
+
+Tests: `tests/test_antirepeat_protocol.py` (16 — the 11:31 fixture
+failing-first: pre-fix the name-door promotion dispatched the
+`late_recognition` beat over the organic reply). Full suite green on 3.11
+AND 3.13: **2,647** (2,631 baseline + 16).
+
 ## 2026-08-14 — Opener orienting beat: one question, "or"-joined (operator directive)
 
 Live pattern: "Who's at the mic tonight, and what should I call you?" —
