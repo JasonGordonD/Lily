@@ -110,6 +110,7 @@ class StateView:
     explain_note: Optional[str] = None
     contest_note: Optional[str] = None
     late_answer_note: Optional[str] = None
+    result_aired: Optional[str] = None
     lobby: list = field(default_factory=list)
 
     # The ONE authority for stable-block field order.
@@ -122,7 +123,7 @@ class StateView:
         "why_note", "identity_probe", "returner_claim", "late_recognition",
         "recognition_dispute", "ambiguous_yes", "setup_pending",
         "adult_consent", "floor_speaking", "explain_note", "contest_note",
-        "late_answer_note", "lobby",
+        "late_answer_note", "result_aired", "lobby",
     )
 
     def render(self) -> list:
@@ -1865,6 +1866,24 @@ class LilyGlassMixin:
                 "SAID-ALREADY (re-deliver NOTHING on this ledger unless a "
                 "player asks; mint fresh words instead): " + " || ".join(said)
             )
+        # BARGE-RESILIENCE-001 P1(b): the C6 anti-double, extended past the
+        # deterministic verdict beat into the organic wrap. While the "result
+        # stated on air" fact is fresh (cleared the moment the next question's
+        # window opens), a FREE conversational turn — the prefs confirmation,
+        # a bit of banter — must not re-announce the ruling the room just heard
+        # (transcript 249, the third restatement of the q1 result). Context
+        # only; the leak filter keeps it off the air.
+        try:
+            aired = self.result_aired_recent()
+            if aired and aired.get("text"):
+                view.result_aired = (
+                    "ALREADY-RULED: the room has JUST heard the result of the "
+                    "last question on the air — do NOT restate it, re-announce "
+                    "the answer, or re-award the point in this turn, not even "
+                    "as an opener; carry the conversation forward from here"
+                )
+        except Exception:
+            pass  # anti-double is enrichment; never breaks the state block
         if getattr(self, "device_candidate_group_id", None):
             view.device_candidate = (
                 "device memory candidate: UNVERIFIED — the device looks "

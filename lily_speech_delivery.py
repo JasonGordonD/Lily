@@ -90,6 +90,11 @@ _DELIVERY_MAX_CUT_REAIRS = 2
 _STALE_CLAIM_SECONDS = 12.0
 _STALE_CLAIM_MAX_RETRIES = 2   # re-dispatches per key before declaring the audio path down
 _STALE_CLAIM_MAX_RECHECKS = 20  # bounded host_speaking re-check loop (no task leak)
+# BARGE-RESILIENCE-001 P2 (R3): how many grace periods the barge-to-ask resume
+# may defer while she is answering the interjected question, before giving up
+# (bounded so the watchdog can never leak). Comfortably longer than any single
+# "what are the rules?" answer.
+_BARGE_RESUME_MAX_DEFERRALS = 20
 _PROGRESSION_ACTS = ("question_delivery", "question_nudge")
 
 # ---------------------------------------------------------------------------
@@ -511,6 +516,80 @@ class LilySpeechDeliveryMixin:
         if record.get("qnum") != qnum:
             return None
         return record.get("text") or None
+
+    # -- BARGE-RESILIENCE-001 P1: the RESULT-stated-on-air fact ------------
+    #
+    # The receipt above is a bare verdict WORD ("Correct!"), never the
+    # answer; it exists to let the verdict beat still air the reveal. This
+    # fact is the ANSWER (the full result) reaching the air, and it is the
+    # anti-double gate for the doubling class (transcript 205/216/249):
+    # every one of the three existing guards (C6 receipt-note, N12
+    # register_transition_narration, ORGANIC_PREEMPTED) binds only at
+    # on-air CONFIRM, and a barge cancels the airing turn BEFORE it confirms,
+    # so none of them stamped. This binds at the airing itself (tts_node,
+    # before the frames yield), so a barged reveal still records that the
+    # room heard the result — and the keyed verdict SAY is gated on it.
+
+    def note_result_aired(self, qnum: int, text: str) -> None:
+        """Stamp that qN's RESULT (canonical answer + a verdict cue) has
+        physically gone to air. Idempotent per question: the first airing
+        wins and later airings of the same qnum do not overwrite the record
+        (so the fact names the words the room first heard)."""
+        record = self._result_aired or {}
+        if record.get("qnum") == qnum:
+            return
+        self._result_aired = {
+            "qnum": qnum,
+            "text": (text or "").strip(),
+            "at": time.monotonic(),
+        }
+        logger.warning(
+            "LILY_RESULT | AIRED | session=%s q=%d text=%r — the result went "
+            "to air; the keyed verdict SAY is now gated and organic turns are "
+            "told not to restate it (BARGE-RESILIENCE-001 P1)",
+            self.sk.session_id, qnum, (text or "")[:80],
+        )
+
+    def result_aired_for(self, qnum: int) -> str | None:
+        """The result text already aired for question `qnum`, or None."""
+        record = self._result_aired or {}
+        if record.get("qnum") != qnum:
+            return None
+        return record.get("text") or None
+
+    def result_aired_recent(self) -> dict | None:
+        """The most recent result-aired record while it is still fresh —
+        i.e. not yet cleared by the next question's window open. Read by the
+        organic system-prompt wrap so a free conversational turn cannot
+        re-announce the ruling the room just heard (transcript 249)."""
+        return self._result_aired or None
+
+    def clear_result_aired(self) -> None:
+        """Drop the result-aired fact — called at the next non-steal window
+        open, when the table has moved on to answering a new question and the
+        prior ruling can no longer be doubled."""
+        self._result_aired = None
+
+    def stamp_result_aired_from_turn(self, text: str) -> None:
+        """AIRING hook (tts_node): if this outbound turn narrates the open
+        transition's result — its canonical answer alongside a verdict cue
+        (lily_verdict_narration) — record that the result reached air for the
+        transition's question. Runs at the say gate, before the TTS frames
+        yield, so a barge that cancels the turn mid-playout cannot un-stamp
+        what already aired. Never breaks the audio path."""
+        try:
+            qnum = self._open_transition_qnum
+            if qnum is None:
+                return
+            reveal = self._transition_entry(qnum, "reveal") or {}
+            answer = str((reveal.get("detail") or {}).get("answer") or "")
+            if not answer:
+                return
+            if lily_scorekeeper.lily_verdict_narration(text, answer) is None:
+                return
+            self.note_result_aired(qnum, text)
+        except Exception:
+            pass
 
     def _answer_receipt_owed(self, verdict: str, receipt_id: str) -> bool:
         """Guards for one receipt, read at fire time. Deliberately narrow:
@@ -1661,22 +1740,36 @@ class LilySpeechDeliveryMixin:
             acceptable = question.get("acceptable_answers") or []
             ordered = self.sk.ordered_candidates()
             if ordered and acceptable and last_result is not None:
-                first = ordered[0]
                 threshold = self.sk.tier1_threshold(
                     now=replay_ts,
                     addressee_confidence=last_result.get(
                         "addressee_confidence"
                     ),
                 )
-                t1 = self._tier1_question(
-                    first["text"], question,
-                    key=first["player"]
-                    or f"unrostered:{first['speaker_label']}",
-                    threshold=threshold,
-                )
-                if t1["verdict"] == "correct":
+                # BARGE-RESILIENCE-001 P0-4: scan EVERY replayed candidate for
+                # a Tier-1 correct one, not just ordered[0]. A clipped/delayed
+                # question (shown on screen, never voiced) opens its window
+                # LATE — the early card-read answer may sit behind an unrelated
+                # first buzz, and gating the fast path on ordered[0] alone left
+                # a correct pre-window answer inert until the window-close path
+                # (the very path that was unreliable for a clipped question:
+                # the 12:28 Q3 "prostate" 0-score). Adjudicate on the first
+                # correct so the captured answer is scored now, in a clean
+                # window, exactly once (dedupe by candidate keeps it single).
+                correct_cand = None
+                for cand in ordered:
+                    t1 = self._tier1_question(
+                        cand["text"], question,
+                        key=cand["player"]
+                        or f"unrostered:{cand['speaker_label']}",
+                        threshold=threshold,
+                    )
+                    if t1["verdict"] == "correct":
+                        correct_cand = cand
+                        break
+                if correct_cand is not None:
                     self.send_event_nowait(
-                        "lock", {"name": first.get("player")}
+                        "lock", {"name": correct_cand.get("player")}
                     )
                     asyncio.ensure_future(
                         self.adjudicate(steal_allowed=False)
@@ -2050,17 +2143,30 @@ class LilySpeechDeliveryMixin:
         """Fallback arm of the C3d invariant: if the barge's own utterance
         never arrives to be judged, resume the read anyway. Grace matches the
         cut-recovery watchdog's (existing knob), so a real answer landing
-        just after the barge still wins the race and binds."""
-        await asyncio.sleep(lily_config.cut_recovery_grace())
-        if not self._question_barge_resume_still_owed(qnum):
+        just after the barge still wins the race and binds.
+
+        BARGE-RESILIENCE-001 P2 (R3) — barge-to-ask ordering. A barge that is
+        a QUESTION to the host ("wait, what are the rules?") leaves the read
+        owed AND makes her speak an answer. The resume must land AFTER that
+        answer, not race it: while she is on the air (host_speaking) the
+        resume DEFERS one grace and re-checks, so it picks up the read only
+        once she has finished replying. Bounded so the watchdog never leaks."""
+        for _ in range(_BARGE_RESUME_MAX_DEFERRALS):
+            await asyncio.sleep(lily_config.cut_recovery_grace())
+            if not self._question_barge_resume_still_owed(qnum):
+                return
+            # R3: she is answering the interjected question right now — the
+            # pending read resumes after her reply, never over it.
+            if getattr(self.sk, "host_speaking", False):
+                continue
+            logger.warning(
+                "LILY_BARGE | QUESTION_RESUME_FALLBACK | session=%s q=%d — "
+                "barge utterance never reached adjudication; resuming the read "
+                "so the question cannot end half-aired (C3d)",
+                self.sk.session_id, qnum,
+            )
+            self.mcq_barge_resume(time.time())
             return
-        logger.warning(
-            "LILY_BARGE | QUESTION_RESUME_FALLBACK | session=%s q=%d — barge "
-            "utterance never reached adjudication; resuming the read so the "
-            "question cannot end half-aired (C3d)",
-            self.sk.session_id, qnum,
-        )
-        self.mcq_barge_resume(time.time())
 
     def _maybe_resume_mcq_read(
         self, seg: dict, *, now: float | None = None

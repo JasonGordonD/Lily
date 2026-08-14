@@ -1881,6 +1881,13 @@ class LilyScorekeeper:
         # a DEFINED outcome, recorded here so it can be announced and
         # audited instead of silently lost.
         self.late_answers: list[dict] = []
+        # BARGE-RESILIENCE-001 P0-4: every answer utterance CAPTURED as a
+        # candidate, keyed by the question index it arrived in — the
+        # denominator reconcile_attempts_scored checks against the answers
+        # actually adjudicated, so a captured-but-dropped answer (the 12:28
+        # Q3 PRE_WINDOW_REPLAY + LATE_WITHIN_GRACE "prostate" 0-score class)
+        # is flagged in the session it happens in rather than lost.
+        self._captured_answer_utterances: dict = {}
 
         # Prior-state inputs (WO-ADDRESSEE-H1 Task 2). host_speaking is SET
         # by the agent layer on the framework's agent-state transitions
@@ -3268,6 +3275,7 @@ class LilyScorekeeper:
                 "attempts": [attempt_entry],
             }
             result["candidate_recorded"] = True
+            self._note_captured_answer(uid)
             self._note_addressee_confidence(segment_conf)
             if player:
                 self.players[player]["answers_attempted"] += 1
@@ -3319,11 +3327,64 @@ class LilyScorekeeper:
                 }
             )
             result["candidate_recorded"] = True
+            self._note_captured_answer(uid)
             self._note_addressee_confidence(segment_conf)
             logger.info(
                 "LILY_STATE | ANSWER_REVISED | session=%s q=%d key=%s t=%.3f text=%r",
                 self.session_id, self.question_number, key, seg_start, clean[:80],
             )
+
+    def _note_captured_answer(self, uid: Optional[str]) -> None:
+        """BARGE-RESILIENCE-001 P0-4: record one captured answer utterance
+        under the question index it arrived in (window binding), so
+        reconcile_attempts_scored can prove nothing captured was dropped
+        before it was adjudicated."""
+        if not uid:
+            return
+        qidx = self.answer_window_question_index
+        if qidx is None:
+            qidx = self.question_number
+        self._captured_answer_utterances.setdefault(qidx, set()).add(uid)
+
+    def reconcile_attempts_scored(self, question_index: Optional[int]) -> list:
+        """BARGE-RESILIENCE-001 P0-4: every answer utterance CAPTURED for
+        `question_index` must still be present as an adjudicable candidate at
+        the reveal (adjudication scores every candidate it holds). A captured
+        utterance that has vanished — replaced, buffered-but-never-replayed,
+        dropped on a clipped/late-grace timing — is a scored-0 miss; return
+        the unscored utterance ids (empty = clean) and log any drift loudly.
+
+        Read AFTER the candidate loop, before candidates are reset, so the
+        present-candidate set is the set adjudication actually ruled on."""
+        captured = self._captured_answer_utterances.get(question_index) or set()
+        if not captured:
+            return []
+        adjudicated = set()
+        for cand in self.answer_candidates.values():
+            if cand.get("window_question_index") != question_index:
+                continue
+            if cand.get("utterance_id"):
+                adjudicated.add(cand["utterance_id"])
+            for attempt in cand.get("attempts", []):
+                if attempt.get("utterance_id"):
+                    adjudicated.add(attempt["utterance_id"])
+        unscored = sorted(captured - adjudicated)
+        if unscored:
+            logger.error(
+                "LILY_ANSWER | RECONCILE_UNSCORED | session=%s q=%s "
+                "captured=%d adjudicated=%d unscored=%s — an answer was "
+                "captured for this question but never reached adjudication "
+                "(BARGE-RESILIENCE-001 P0-4)",
+                self.session_id, question_index, len(captured),
+                len(adjudicated), unscored,
+            )
+        else:
+            logger.info(
+                "LILY_ANSWER | RECONCILE_OK | session=%s q=%s attempts=%d "
+                "— every captured answer was adjudicated",
+                self.session_id, question_index, len(captured),
+            )
+        return unscored
 
     # -- game flow ---------------------------------------------------------
 

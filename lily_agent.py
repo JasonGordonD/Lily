@@ -662,6 +662,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._answer_receipt_aired = None
         self._answer_receipts_fired = None
         self._answer_receipts_qnum = None
+        # BARGE-RESILIENCE-001 P1: the durable "result for qN stated on air"
+        # fact, stamped at FIRST airing by ANY producer (organic reveal or the
+        # keyed verdict SAY) — bound at AIRING, not at playout confirm, so a
+        # barge that cancels the turn before it confirms can no longer defeat
+        # the anti-double guards. Cleared at the next non-steal window open.
+        self._result_aired = None
         self._answered_questions = set()
         self._awaiting_address_since = 0.0
         self._bed_handle = None
@@ -4554,6 +4560,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._steal_window = steal
         # M4: the window opening IS the stem's completion — terminal.
         if not steal:
+            # BARGE-RESILIENCE-001 P1: a fresh (non-steal) window means the
+            # table is answering a NEW question — the previous question's
+            # result-aired fact is stale and must no longer gate anything or
+            # suppress an organic turn. A steal window rides the same
+            # question, so it never clears.
+            self.clear_result_aired()
             self.mark_stem_completed(self.sk.question_number)
             # HOTFIX-005 X3: the window opens exactly when the delivery
             # turn's playout completes — so THIS is the durable "delivery
@@ -5364,6 +5376,20 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             ).items():
                 self._apply_addressee_label(key, label, source)
 
+            # BARGE-RESILIENCE-001 P0-4: reconciliation belt — every answer
+            # utterance captured for this question must have reached this
+            # ruling. Candidates are not yet reset here (close_answer_window
+            # keeps them, N3), so this reads the exact set adjudication ruled
+            # on. Log-only; the scored candidates above are the source of
+            # truth, this makes any silent drop loud in its own session.
+            try:
+                self.sk.reconcile_attempts_scored(bound_question_index)
+            except Exception:
+                logger.exception(
+                    "LILY_ANSWER | RECONCILE_FAILED | session=%s q=%s",
+                    self.sk.session_id, bound_question_index,
+                )
+
             missed = winner_candidate is None
             # ── N8: REVEAL STATE, READ BEFORE THE STEAL BRANCH ────────────
             # Live, back to back:
@@ -5566,6 +5592,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             ):
                 return
 
+            # BARGE-RESILIENCE-001 P1(a): default so the flourish gate below
+            # can read it in every branch (the resumed_complete path never
+            # reaches the reveal else-branch that computes it).
+            result_preaired = False
             if resumed_complete:
                 # Nothing to narrate and nothing to journal: reveal and
                 # verdict already sit on the journal with the verdict
@@ -5611,12 +5641,26 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 verdict_spoken_organically = self._verdict_already_spoken(
                     question, winner_candidate
                 )
-                if verdict_spoken_organically:
+                # BARGE-RESILIENCE-001 P1(a): the durable belt for the
+                # confirm-blind guards. _verdict_already_spoken reads
+                # _last_assistant_text (bound at CONFIRM); a barge cancels the
+                # reveal turn before it confirms, so that read misses and the
+                # keyed SAY below fires as a SECOND statement of the result
+                # (transcript 216). result_aired_for is stamped at AIRING, so it
+                # survives the barge and gates the keyed SAY here.
+                result_preaired = (
+                    not verdict_spoken_organically
+                    and self.result_aired_for(verdict_qnum) is not None
+                )
+                if verdict_spoken_organically or result_preaired:
                     if self.say_registry.claim(verdict_key):
                         self.say_registry.confirm(verdict_key)
                     logger.info(
-                        "LILY_REVEAL | ORGANIC_PREEMPTED | session=%s q=%d — "
-                        "verdict already spoken in her last turn",
+                        "LILY_REVEAL | %s | session=%s q=%d — "
+                        "the result is already on the air; the keyed verdict "
+                        "SAY is suppressed so it is stated exactly once",
+                        "ORGANIC_PREEMPTED" if verdict_spoken_organically
+                        else "RESULT_PREAIRED_GATED",
                         self.sk.session_id, verdict_qnum,
                     )
                     # N12: the transition's ONE narration is the turn that
@@ -5626,10 +5670,15 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                         transition_qnum, "verdict", owner=transition_owner,
                         detail={
                             "key": verdict_key,
-                            "narration": getattr(
-                                self, "_last_assistant_text", ""
+                            "narration": (
+                                self.result_aired_for(verdict_qnum)
+                                if result_preaired
+                                else getattr(self, "_last_assistant_text", "")
                             ) or "",
-                            "source": "organic",
+                            "source": (
+                                "result_preaired" if result_preaired
+                                else "organic"
+                            ),
                         },
                     )
                 reveal_payload = {
@@ -5681,7 +5730,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 # the committed score reaches the glass before the verdict
                 # speaks) but before all remaining bookkeeping — the budget is
                 # commit → dispatch within ~1.5s, logged for telemetry.
-                if not verdict_spoken_organically:
+                if not verdict_spoken_organically and not result_preaired:
                     answer_text = str(question.get("canonical_answer", ""))
                     # RULINGS-001 R1: ratified verdict-beat register anchor —
                     # verdict word first, then at most one short flourish.
@@ -5872,7 +5921,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 flourish_key, act = (
                     f"round_{revealed_round}_scores", "reveal_scores"
                 )
-            elif verdict_spoken_organically:
+            elif verdict_spoken_organically or result_preaired:
+                # BARGE-RESILIENCE-001 P1(a): the result already aired (organic
+                # reveal or a barge-cut turn that reached the air) — no
+                # standings flourish that could restate it for a mid-round
+                # question, exactly as the organic-preempt case.
                 act = None
             if act is not None:
                 # REFACTOR W2a: the flourish is a DETERMINISTIC standings /
@@ -9242,6 +9295,14 @@ class LilyAgent(Agent):
         # and strict delivery substitution. Playout completion consumes it for
         # both RTC and durable transcripts.
         self._game.note_post_tts_text(turn.speech_id, full)
+
+        # BARGE-RESILIENCE-001 P1: stamp the "result stated on air" fact at the
+        # airing itself — this is the ONE point every producer of the result
+        # word passes through (organic reveal or keyed verdict SAY), and it is
+        # BEFORE the frames yield, so a barge that cancels the turn mid-playout
+        # cannot defeat the anti-double gate the way it defeats the confirm-time
+        # guards.
+        self._game.stamp_result_aired_from_turn(full)
 
         async def _replay():
             yield full
