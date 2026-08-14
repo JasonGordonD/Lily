@@ -1180,6 +1180,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # vocal context until a current voiceprint overlaps.
         self.device_candidate_group_id: str | None = None
         self.device_candidate_source: str | None = None
+        # RECONCILE-001 (d): the stable device key carried in dispatch/
+        # participant token metadata (the browser's localStorage group id),
+        # remembered even when its memory is empty so session-end voiceprint
+        # enrollment can key to it instead of minting an ephemeral fragment.
+        self._carried_device_group_id: str | None = None
         self.device_identity_verified = False
         self.device_identity_rejected = False
         self._device_candidate_memory: dict | None = None
@@ -9757,6 +9762,12 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.room.on("participant_connected", _on_participant_connected)
 
+    # RECONCILE-001 (d): remember the stable device key even when its memory
+    # is empty (stage_device_candidate drops empty candidates), so session-end
+    # voiceprint enrollment keys to the durable device group rather than the
+    # ephemeral room name.
+    game._carried_device_group_id = device_candidate_group_id or None
+
     if device_candidate_group_id:
         staged = await game.stage_device_candidate(
             device_candidate_group_id, resolved_group_source
@@ -10636,7 +10647,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 # fire-and-forget) so the shutdown gate can't tear the
                 # process down mid-write; failures log LILY_ENROLL | FAILED.
                 await lily_persistence.lily_enroll_voiceprints(
-                    stt, supabase, lambda: game.group_id, scorekeeper,
+                    stt, supabase, game._effective_enroll_group_id, scorekeeper,
                     trigger="session_close",
                 )
                 # Durable voice-identity enrollment (device-independent

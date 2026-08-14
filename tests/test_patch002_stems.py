@@ -10,14 +10,30 @@ No new mechanism — the PATCH-001 T1/T4 verdict claim key already makes a
 committed verdict air once; this locks that verdict acts carry the key.
 """
 
+import asyncio
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_say_gate
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
+
+
+@pytest.fixture(autouse=True)
+def _consume_fire_and_forget(monkeypatch):
+    """note_playout_started fire-and-forgets publish_metadata via
+    asyncio.ensure_future; these fixtures run synchronously with no event
+    loop, so consume the coroutine here rather than leak it unawaited (same
+    ensure_future seam test_bargein_is_normal patches)."""
+    def _consume(coro, *a, **k):
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        return None
+    monkeypatch.setattr(asyncio, "ensure_future", _consume)
 
 
 def _make_game():

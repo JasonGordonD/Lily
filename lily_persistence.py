@@ -1922,6 +1922,422 @@ async def lily_rekey_group(
 
 
 # ---------------------------------------------------------------------------
+# Group reconciliation — auto-merge of fragmented returning-player identity
+# groups (WO-PRMPT-LILY-GROUP-RECONCILE-001)
+#
+# A returning player who is not recognized mints a NEW group_id and enrolls
+# fresh voiceprints; production shows one INDIVIDUAL fragmented across dozens
+# of groups. lily_merge_groups folds every row carrying a duplicate group_id
+# onto a canonical group_id so the fragments become one identity again.
+#
+# INDIVIDUAL-LEVEL contract: the caller's SAFETY BAR decides WHICH groups are
+# the same individual (voice link, same device key, or a single-player group
+# with a matching sole name AND a matcher-confirmed voice match). This
+# function only executes a merge it is handed — it never decides identity on
+# name alone. See lily_reconcile_safety_bar / lily_find_name_fragments.
+#
+# RE-KEY ONLY — rows are moved, never dropped, EXCEPT where a unique/primary
+# key forbids two rows coexisting under the canonical id. On such a collision
+# the newest row is kept and the superseded row's FULL content is recorded in
+# the merge audit (no memory is lost — the payload survives in the audit
+# record) before the loser is removed. lily_voice_identity uses RETIRE, never
+# delete (migration 021 philosophy), so its collisions drop nothing at all.
+#
+# Table inventory (schemas verified against migrations/, 2026-08-14):
+#   Re-key by group_id, no uniqueness on group_id (plain UPDATE):
+#     lily_sessions(group_id; PK session_id)      migration 001
+#     lily_memories(group_id; UNIQUE session_id)  migration 003
+#     lily_group_facts(group_id)                  migration 001
+#     lily_asked_history(group_id)                migration 010 (optional)
+#   Re-key by group_id WITH a uniqueness collision to resolve:
+#     lily_speaker_voiceprints  UNIQUE(group_id, speaker_label)  001
+#     lily_group_prefs          PRIMARY KEY(group_id)            013 (optional)
+#     lily_voice_identity       UNIQUE(group_id, model_tag)      021 (optional)
+#   NOT re-keyed — session-keyed rows with NO group_id column. They are
+#   re-parented transitively when lily_sessions.group_id moves (the read
+#   paths reach them via lily_sessions.session_id, e.g.
+#   lily_forget_group_data._session_ids and the transcript loaders), so their
+#   historical session_id is RETAINED — re-keying is both impossible (no
+#   group_id column) and unnecessary:
+#     lily_transcripts, lily_answers, lily_addressee_log,
+#     lily_acoustic_trajectories, lily_session_reports, lily_image_attempts
+# ---------------------------------------------------------------------------
+
+# Plain group_id re-key (no uniqueness on group_id → blind UPDATE is safe).
+# (table, optional) — optional tables tolerate an absent-table error.
+MERGE_PLAIN_REKEY_TABLES = (
+    ("lily_sessions", False),
+    ("lily_memories", False),
+    ("lily_group_facts", False),
+    ("lily_asked_history", True),
+)
+
+# Session-keyed tables retained on their historical session ids (re-parented
+# transitively via lily_sessions.group_id). Recorded in the audit for honesty.
+MERGE_SESSION_KEYED_RETAINED = (
+    "lily_transcripts",
+    "lily_answers",
+    "lily_addressee_log",
+    "lily_acoustic_trajectories",
+    "lily_session_reports",
+    "lily_image_attempts",
+)
+
+
+async def lily_merge_groups(
+    supabase: SupabaseClient,
+    canonical_group_id: str,
+    duplicate_group_ids,
+    *,
+    reason: str,
+) -> dict:
+    """Fold every fragment in ``duplicate_group_ids`` INTO ``canonical_group_id``
+    by re-keying its rows. RE-KEY ONLY; unique-key collisions keep the newest
+    row and log the superseded content in the audit. No DDL. Idempotent — a
+    fragment already keyed to canonical is a no-op sweep.
+
+    The caller owns the identity decision (safety bar). This executes a merge
+    it is handed; it does not resolve WHO the same individual is.
+
+    Returns {ok, canonical_group_id, reason, merges: [audit, ...]} with one
+    structured audit record per duplicate:
+      {reason, canonical_group_id, duplicate_group_id, ts, rekeyed {table: n},
+       collisions {table: [superseded_row, ...]}, session_keyed_retained [..],
+       skipped [table], failed {table: reason}, ok}
+    ``ok`` is True only when every duplicate merged with no failures."""
+    result = {
+        "ok": False,
+        "canonical_group_id": canonical_group_id,
+        "reason": reason,
+        "merges": [],
+    }
+    if supabase is None or not canonical_group_id:
+        result["error"] = "no supabase client or empty canonical group id"
+        return result
+
+    dups = [
+        str(d) for d in (duplicate_group_ids or [])
+        if d and str(d) != str(canonical_group_id)
+    ]
+    for dup in dict.fromkeys(dups):  # dedupe, preserve order
+        audit = await _lily_merge_one_group(
+            supabase, canonical_group_id, dup, reason
+        )
+        result["merges"].append(audit)
+
+    result["ok"] = bool(result["merges"]) and all(
+        m.get("ok") for m in result["merges"]
+    )
+    return result
+
+
+async def _lily_merge_one_group(
+    supabase: SupabaseClient,
+    canonical: str,
+    dup: str,
+    reason: str,
+) -> dict:
+    """Merge a single fragment into canonical. See lily_merge_groups."""
+    audit = {
+        "reason": reason,
+        "canonical_group_id": canonical,
+        "duplicate_group_id": dup,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "rekeyed": {},
+        "collisions": {},
+        "session_keyed_retained": list(MERGE_SESSION_KEYED_RETAINED),
+        "skipped": [],
+        "failed": {},
+        "ok": False,
+    }
+
+    # --- Plain group_id re-keys (no uniqueness collision) ------------------
+    for table, optional in MERGE_PLAIN_REKEY_TABLES:
+        try:
+            res = await asyncio.to_thread(
+                lambda table=table: supabase.table(table)
+                .update({"group_id": canonical})
+                .eq("group_id", dup)
+                .execute()
+            )
+            audit["rekeyed"][table] = len(getattr(res, "data", None) or [])
+        except Exception as e:
+            msg = str(e)
+            if optional and lily_forget.lily_is_absent_table_error(msg):
+                audit["skipped"].append(table)
+            else:
+                audit["failed"][table] = f"{type(e).__name__}: {msg[:200]}"
+
+    # --- Collision-aware re-keys ------------------------------------------
+    # Voiceprints: reuse the battle-tested (group_id, speaker_label) merge
+    # helper (union of speaker_identifiers into the survivor, provisional row
+    # removed) so identifier data is never lost. Count moved rows before/after.
+    try:
+        pre = await asyncio.to_thread(
+            lambda: supabase.table("lily_speaker_voiceprints")
+            .select("id", count="exact").eq("group_id", dup).limit(1).execute()
+        )
+        pre_n = getattr(pre, "count", None) or 0
+        if pre_n:
+            await lily_rekey_speaker_voiceprints(supabase, dup, canonical, dup)
+            post = await asyncio.to_thread(
+                lambda: supabase.table("lily_speaker_voiceprints")
+                .select("id", count="exact").eq("group_id", dup).limit(1)
+                .execute()
+            )
+            post_n = getattr(post, "count", None) or 0
+            audit["rekeyed"]["lily_speaker_voiceprints"] = pre_n - post_n
+    except Exception as e:
+        audit["failed"]["lily_speaker_voiceprints"] = (
+            f"{type(e).__name__}: {str(e)[:200]}"
+        )
+
+    await _lily_merge_group_prefs(supabase, canonical, dup, audit)
+    await _lily_merge_voice_identity(supabase, canonical, dup, audit)
+
+    audit["ok"] = not audit["failed"]
+    logger.info(
+        "LILY_MERGE_GROUPS | reason=%s canonical=%s duplicate=%s ok=%s "
+        "rekeyed=%s collisions=%s skipped=%s failed=%s",
+        reason, canonical, dup, audit["ok"],
+        json.dumps(audit["rekeyed"]),
+        json.dumps({k: len(v) for k, v in audit["collisions"].items()}) or "-",
+        ",".join(audit["skipped"]) or "-",
+        json.dumps(audit["failed"]) if audit["failed"] else "-",
+    )
+    return audit
+
+
+async def _lily_merge_group_prefs(
+    supabase: SupabaseClient, canonical: str, dup: str, audit: dict
+) -> None:
+    """Move the fragment's prefs row onto canonical. PK is group_id, so a
+    collision merges the two opaque dicts (newest row wins key conflicts) and
+    records the superseded fragment row in the audit before removing it."""
+    try:
+        dres = await asyncio.to_thread(
+            lambda: supabase.table("lily_group_prefs")
+            .select("group_id, prefs, updated_at")
+            .eq("group_id", dup).limit(1).execute()
+        )
+    except Exception as e:
+        msg = str(e)
+        if lily_forget.lily_is_absent_table_error(msg):
+            audit["skipped"].append("lily_group_prefs")
+        else:
+            audit["failed"]["lily_group_prefs"] = f"{type(e).__name__}: {msg[:200]}"
+        return
+    drows = dres.data or []
+    if not drows:
+        return  # nothing under the fragment
+    drow = drows[0]
+    dprefs = drow.get("prefs") if isinstance(drow.get("prefs"), dict) else {}
+    try:
+        cres = await asyncio.to_thread(
+            lambda: supabase.table("lily_group_prefs")
+            .select("group_id, prefs, updated_at")
+            .eq("group_id", canonical).limit(1).execute()
+        )
+        crows = cres.data or []
+        if not crows:
+            # No canonical row — plain re-key.
+            res = await asyncio.to_thread(
+                lambda: supabase.table("lily_group_prefs")
+                .update({"group_id": canonical}).eq("group_id", dup).execute()
+            )
+            audit["rekeyed"]["lily_group_prefs"] = len(
+                getattr(res, "data", None) or []
+            )
+            return
+        crow = crows[0]
+        cprefs = crow.get("prefs") if isinstance(crow.get("prefs"), dict) else {}
+        # Newest row wins key conflicts; the union keeps every distinct key.
+        if str(drow.get("updated_at") or "") > str(crow.get("updated_at") or ""):
+            merged = {**cprefs, **dprefs}
+        else:
+            merged = {**dprefs, **cprefs}
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_group_prefs").upsert({
+                "group_id": canonical,
+                "prefs": merged,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }, on_conflict="group_id").execute()
+        )
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_group_prefs")
+            .delete().eq("group_id", dup).execute()
+        )
+        audit["collisions"].setdefault("lily_group_prefs", []).append(drow)
+    except Exception as e:
+        audit["failed"]["lily_group_prefs"] = f"{type(e).__name__}: {str(e)[:200]}"
+
+
+async def _lily_merge_voice_identity(
+    supabase: SupabaseClient, canonical: str, dup: str, audit: dict
+) -> None:
+    """Move the fragment's active centroids onto canonical. UNIQUE is
+    (group_id, model_tag). Centroids are NEVER averaged across groups (unsafe);
+    on a same-tag collision the NEWEST is kept under canonical and the older is
+    RETIRED (status='retired', never deleted — migration 021's forget-arm
+    philosophy) and recorded in the audit."""
+    try:
+        dres = await asyncio.to_thread(
+            lambda: supabase.table(VOICE_IDENTITY_TABLE)
+            .select("id, group_id, model_tag, updated_at, status")
+            .eq("group_id", dup).eq("status", "active").execute()
+        )
+    except Exception as e:
+        msg = str(e)
+        if lily_forget.lily_is_absent_table_error(msg):
+            audit["skipped"].append(VOICE_IDENTITY_TABLE)
+        else:
+            audit["failed"][VOICE_IDENTITY_TABLE] = f"{type(e).__name__}: {msg[:200]}"
+        return
+    drows = [r for r in (dres.data or []) if isinstance(r, dict)]
+    if not drows:
+        return
+    moved = 0
+    try:
+        for drow in drows:
+            tag = drow.get("model_tag")
+            cres = await asyncio.to_thread(
+                lambda tag=tag: supabase.table(VOICE_IDENTITY_TABLE)
+                .select("id, updated_at").eq("group_id", canonical)
+                .eq("model_tag", tag).eq("status", "active").limit(1).execute()
+            )
+            crows = [r for r in (cres.data or []) if isinstance(r, dict)]
+            if not crows:
+                # No canonical centroid for this space — plain re-key.
+                await asyncio.to_thread(
+                    lambda drow=drow: supabase.table(VOICE_IDENTITY_TABLE)
+                    .update({"group_id": canonical}).eq("id", drow["id"]).execute()
+                )
+                moved += 1
+                continue
+            crow = crows[0]
+            now = datetime.now(timezone.utc).isoformat()
+            if str(drow.get("updated_at") or "") > str(crow.get("updated_at") or ""):
+                # Fragment centroid is newer: retire canonical's older, keep
+                # the fragment's under canonical.
+                await asyncio.to_thread(
+                    lambda crow=crow, now=now: supabase.table(VOICE_IDENTITY_TABLE)
+                    .update({"status": "retired", "retired_at": now})
+                    .eq("id", crow["id"]).execute()
+                )
+                await asyncio.to_thread(
+                    lambda drow=drow: supabase.table(VOICE_IDENTITY_TABLE)
+                    .update({"group_id": canonical}).eq("id", drow["id"]).execute()
+                )
+                audit["collisions"].setdefault(VOICE_IDENTITY_TABLE, []).append(crow)
+                moved += 1
+            else:
+                # Canonical centroid is newer/equal: retire the fragment's.
+                await asyncio.to_thread(
+                    lambda drow=drow, now=now: supabase.table(VOICE_IDENTITY_TABLE)
+                    .update({"status": "retired", "retired_at": now})
+                    .eq("id", drow["id"]).execute()
+                )
+                audit["collisions"].setdefault(VOICE_IDENTITY_TABLE, []).append(drow)
+        if moved:
+            audit["rekeyed"][VOICE_IDENTITY_TABLE] = moved
+    except Exception as e:
+        audit["failed"][VOICE_IDENTITY_TABLE] = f"{type(e).__name__}: {str(e)[:200]}"
+
+
+def lily_reconcile_safety_bar(
+    canonical_group_id: str,
+    fragment,
+    *,
+    voice_linked: bool = False,
+    same_device_key: bool = False,
+) -> bool:
+    """Individual-level auto-merge gate. A fragment may merge into canonical
+    only when the SAME INDIVIDUAL is proven — never on a shared first name.
+
+    ``fragment`` is a dict describing the candidate group:
+      {group_id, player_names: [..], voice_match: bool}
+
+    Auto-merge is allowed when ANY holds:
+      - voice_linked: a matcher-confirmed voice match links the groups;
+      - same_device_key: the groups share a stable device key;
+      - the fragment is a SINGLE-player group whose sole name matches AND its
+        stored voice was matcher-confirmed (fragment['voice_match']).
+    Name overlap alone is NEVER enough — that is a MERGE_CANDIDATE, not a
+    merge (people share first names; a multi-player group is a different
+    collection from an individual)."""
+    if not fragment or fragment.get("group_id") == canonical_group_id:
+        return False
+    if voice_linked or same_device_key:
+        return True
+    names = [str(n).strip() for n in (fragment.get("player_names") or []) if str(n).strip()]
+    single_player = len({n.casefold() for n in names}) == 1
+    return bool(single_player and fragment.get("voice_match"))
+
+
+async def lily_find_name_fragments(
+    supabase: SupabaseClient,
+    canonical_group_id: str,
+    player_name: str,
+) -> list:
+    """Candidate SINGLE-player fragment groups that share ``player_name`` as
+    their sole roster name, for the reconciler's individual-level sweep and
+    the consolidation script. Reads lily_memories (player_names) — the same
+    index the NAME-STATED door uses. Returns
+    [{group_id, player_names, played_at, memory_richness}], most-recent first,
+    EXCLUDING canonical. Multi-name groups are dropped here (a group is a
+    different collection from an individual). Voice confirmation is applied by
+    the caller's safety bar — this only narrows by name+arity."""
+    name = str(player_name or "").strip()
+    if supabase is None or not name:
+        return []
+    seen: dict = {}
+    try:
+        for variant in dict.fromkeys(
+            (name, name.lower(), name.capitalize(), name.title())
+        ):
+            rows = await asyncio.to_thread(
+                lambda v=variant: supabase.table("lily_memories")
+                .select("group_id, player_names, played_at, question_count")
+                .contains("player_names", [v])
+                .order("played_at", desc=True)
+                .limit(50)
+                .execute()
+            )
+            for row in rows.data or []:
+                gid = row.get("group_id")
+                if not gid or gid == canonical_group_id:
+                    continue
+                names = [
+                    str(n).strip() for n in (row.get("player_names") or [])
+                    if str(n).strip()
+                ]
+                # Individual-level: a fragment is a SINGLE-player group whose
+                # sole name is this name. Skip multi-player collections.
+                if len({n.casefold() for n in names}) != 1:
+                    continue
+                if names[0].casefold() != name.casefold():
+                    continue
+                richness = int(row.get("question_count") or 0)
+                prev = seen.get(gid)
+                if prev is None:
+                    seen[gid] = {
+                        "group_id": gid,
+                        "player_names": names,
+                        "played_at": row.get("played_at"),
+                        "memory_richness": richness,
+                    }
+                else:
+                    prev["memory_richness"] = prev["memory_richness"] + richness
+    except Exception as e:
+        logger.warning(
+            "LILY_MERGE_GROUPS | FRAGMENT_SCAN_FAILED | name=%s error=%s",
+            name, e,
+        )
+        return []
+    return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
 # The right to be forgotten (WO-LILY-FORGETME-001 Task 1)
 # ---------------------------------------------------------------------------
 
