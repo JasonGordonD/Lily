@@ -5,6 +5,39 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — WO-LILY-LLM-USAGE-PERSISTENCE: durable per-call LLM usage
+
+Closes an observability gap surfaced by the 2026-08-14 lobby dead-air
+diagnosis: Lily emitted rich per-call `LLMMetrics` (ttft, tokens, empty-STOP)
+to logs only, so "was a generation even attempted, and how long did it take?"
+was unanswerable from the database after a session.
+
+1. **migrations/026_lily_llm_usage.sql (new).** Table `lily_llm_usage`
+   (`session_id, utterance_id, phase, model, purpose, ttft_ms, total_ms,
+   prompt_tokens, completion_tokens, finish_reason, empty_stop, created_at`),
+   indexes on `session_id`, `created_at`, and a partial index on `empty_stop`
+   for dead-air forensics. Service-role only (RLS enabled, no client policy) —
+   token accounting is never anon-readable. `utterance_id` holds the per-call
+   `speech_id`. **Migration is a FILE only; not applied to the database here.**
+2. **lily_persistence.py.** Added `lily_write_llm_usage(supabase, row)` —
+   fire-and-forget, fail-open (swallows PGRST205 when 026 is unapplied and any
+   client error; scheduled without await so the cross-region round trip never
+   touches the hot path).
+3. **lily_metrics.py.** `LilyMetricsCollector` gains `set_usage_sink()` and
+   `note_finish_state()`; `collect_llm_call` (the single per-call choke point)
+   emits one row per call to the sink, consuming any stashed empty-STOP finish
+   verdict for that `speech_id`. All inside the existing fail-open fold.
+4. **lily_agent.py.** Entrypoint stores the collector on `game._session_metrics`
+   and installs the sink (enriches with `session_id`/`phase`/`model`/`purpose`,
+   fires the fail-open write). `llm_node`'s empty-STOP guard stamps
+   `note_finish_state(speech_id, "stop_empty", True)` at the `EMPTY_STOP_FAILED`
+   fail-closed site so the dead-air empty-STOP lands in the row.
+5. **tests/test_llm_usage_persistence.py (new).** Sink field mapping,
+   empty-STOP finish flow + single-consume, no-sink / raising-sink fail-open,
+   and the writer's no-op on a missing client / raising client. Full suite green.
+
+No prompt or model changes.
+
 ## 2026-08-14 — WO-PRMPT-LILY-GEMINI-EXCISION-001: dead google-genai reasoning lane removed
 
 Follow-up to REFACTOR-001 (which deleted the Gemini image path). The reasoning

@@ -87,6 +87,36 @@ class LilyMetricsCollector:
         # calls grouped by speech_id — >1 means tool follow-ups / regens
         # serialized inside one turn. Bounded ring of recent speech ids.
         self._llm_calls_by_speech = {}  # insertion-ordered; oldest evicted
+        # WO-LILY-LLM-USAGE-PERSISTENCE: durable per-call usage sink and the
+        # empty-STOP finish states llm_node's guard stashes by speech_id.
+        # collect_llm_call consumes the state so ONE write per call carries
+        # the finish verdict. None sink -> persistence off (tests, no db).
+        self._usage_sink = None
+        self._finish_states = {}  # speech_id -> (finish_reason, empty_stop)
+
+    def set_usage_sink(self, sink) -> None:
+        """Install the durable per-call usage sink: a callable taking one
+        fields dict (utterance_id, ttft_ms, total_ms, prompt_tokens,
+        completion_tokens, finish_reason, empty_stop). Set once from the
+        entrypoint with the supabase + session context in scope; the sink
+        enriches with session_id/phase/model/purpose and schedules the
+        fire-and-forget write. None disables persistence."""
+        self._usage_sink = sink
+
+    def note_finish_state(self, speech_id, finish_reason, empty_stop) -> None:
+        """Stash a call's finish verdict for the next collect_llm_call fold
+        of the same speech_id — llm_node's empty-STOP guard is the only
+        caller today (empty_stop=True, finish_reason='stop_empty'). Bounded
+        ring; an unconsumed state evicts oldest. Defensive: never raises."""
+        if not speech_id:
+            return
+        try:
+            states = self._finish_states
+            states[speech_id] = (finish_reason, bool(empty_stop))
+            while len(states) > 200:
+                states.pop(next(iter(states)))
+        except Exception as e:
+            logger.warning("LILY_METRICS | FINISH_STATE_SKIPPED | %s", e)
 
     def collect_turn(self, report) -> None:
         """Fold one ChatMessage.metrics (a MetricsReport dict; total=False so
@@ -184,6 +214,29 @@ class LilyMetricsCollector:
                 _ms(ttft) if isinstance(ttft, (int, float)) else "-",
                 prompt, cached, hit, completion, bool(g("cancelled")),
             )
+            # WO-LILY-LLM-USAGE-PERSISTENCE: one durable row per call. The
+            # finish verdict (empty-STOP) rides the state stashed by
+            # llm_node's guard for this speech_id; default is a plain finish.
+            # Inside this try, so a sink raise is fail-open like the fold.
+            if self._usage_sink is not None:
+                finish_reason, empty_stop = self._finish_states.pop(
+                    speech, (None, False)
+                )
+                duration = g("duration")
+                self._usage_sink({
+                    "utterance_id": speech,
+                    "ttft_ms": (
+                        _ms(ttft) if isinstance(ttft, (int, float)) else None
+                    ),
+                    "total_ms": (
+                        _ms(duration)
+                        if isinstance(duration, (int, float)) else None
+                    ),
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                    "finish_reason": finish_reason,
+                    "empty_stop": empty_stop,
+                })
         except Exception as e:
             logger.warning("LILY_METRICS | LLM_CALL_SKIPPED | %s", e)
 

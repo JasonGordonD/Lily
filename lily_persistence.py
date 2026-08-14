@@ -626,6 +626,30 @@ async def lily_log_addressee(
             return None
 
 
+async def lily_write_llm_usage(
+    supabase: SupabaseClient,
+    row: dict,
+) -> None:
+    """Fire-and-forget insert into lily_llm_usage (migration 026). One row
+    per vocal LLM call: token / latency accounting plus the empty-STOP finish
+    flag the 2026-08-14 dead-air diagnosis needed and could not read from the
+    database (usage lived in logs only).
+
+    FAIL-OPEN by contract — a usage-write failure, including PGRST205 when
+    migration 026 is not yet applied in an environment, is swallowed to debug
+    and never surfaces into the live session or the hot path. The caller
+    schedules this without awaiting, so the cross-region round trip never
+    blocks the audio pipeline."""
+    if supabase is None or not row:
+        return
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("lily_llm_usage").insert(row).execute()
+        )
+    except Exception as e:
+        logger.debug("lily_write_llm_usage error: %s", e)
+
+
 async def lily_update_addressee_label(
     supabase: SupabaseClient,
     row_id: int,
