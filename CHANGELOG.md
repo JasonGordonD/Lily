@@ -5,6 +5,17 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — Opener orienting beat: one question, "or"-joined (operator directive)
+
+Live pattern: "Who's at the mic tonight, and what should I call you?" —
+two stacked questions that sound like she's asking twice. The greeting
+instruction only said "ask who's at the mic tonight"; the model improvised
+the second ask on with "and". Both `greeting_instructions()` PART TWO
+branches now say a name ask may only be FOLDED INTO the same single
+question joined with "or" ("who's at the mic tonight — or, what should I
+call you?"), wording freely improvised, never a second stacked question.
+Pinned by `tests/test_greeting_single_question.py` (2 tests).
+
 ## 2026-08-14 — WO-LILY-UI-SYNC-TYPEWRITER-001: type the question in sync with Lily's voice (word-level)
 
 The board pasted the whole question at playout start and ran a cosmetic

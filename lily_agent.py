@@ -2542,7 +2542,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             parts.append(
                 "PART TWO — the DEVICE looks familiar, but no current voice "
                 "has been verified. Say only that the device looks familiar "
-                "and ask who is playing tonight. Do NOT say welcome back, "
+                "and ask who is playing tonight — ONE question only; if you "
+                "want a name, join it into that same question with 'or', "
+                "never as a second stacked question. Do NOT say welcome back, "
                 "do NOT call anyone a returner, and do NOT mention prior "
                 "names, winners, counts, dates, preferences, or facts. "
                 "Different people may share a device; voice verification "
@@ -2551,10 +2553,15 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         else:
             parts.append(
                 "PART TWO — one light orienting beat: ask who's at the mic "
-                "tonight, then STOP and let them speak. Do NOT recite names, "
-                "winners, counts, dates, or history, and do NOT announce "
-                "whether it's their first time — no voice has been matched "
-                "present yet, so there is no one to name."
+                "tonight, then STOP and let them speak. If you also want a "
+                "name, fold it into that SAME single question joined with "
+                "'or' — 'who's at the mic tonight — or, what should I call "
+                "you?' — improvise the wording freely, but never stack two "
+                "separate questions ('...tonight? And what should I call "
+                "you?' is two asks; one question mark total). Do NOT recite "
+                "names, winners, counts, dates, or history, and do NOT "
+                "announce whether it's their first time — no voice has been "
+                "matched present yet, so there is no one to name."
             )
         # Deferred rich beats — recognition / walkthrough / claimed-returner /
         # prefs / what's-new — are NOT part of the cold opener. This block is
