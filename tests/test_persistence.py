@@ -445,3 +445,78 @@ def test_init_session_still_fails_fast_when_db_is_down(monkeypatch):
     with _pytest.raises(RuntimeError):
         _lp.lily_init_session(client, "room-x", "grp-x")
     assert client._table.calls == 3
+
+
+# --- Checkpoint snapshot-shape round-trip (WO-LILY-HOTFIX-CHECKPOINT-MODE) ---
+# Regression guard: lily_checkpoint() subscripts specific keys off
+# scorekeeper.snapshot(). When 2b3e005 dropped "mode" from the snapshot,
+# every checkpoint raised KeyError('mode') into the broad except and all
+# durable state was silently lost. This drives a REAL LilyScorekeeper
+# through lily_checkpoint() against the capturing fake and asserts the row
+# lands with every subscripted key populated — so any future snapshot-shape
+# change that drops a key checkpoint reads fails here instead of in prod.
+
+# Keys lily_checkpoint() reads by DIRECT subscript off the snapshot. If the
+# checkpoint code starts reading a new snapshot key by subscript, add it here.
+_CHECKPOINT_REQUIRED_SNAPSHOT_KEYS = ("phase", "round", "question_number")
+
+
+def _run_checkpoint(scorekeeper):
+    from lily_scorekeeper import LilyScorekeeper  # local: heavy import
+
+    assert isinstance(scorekeeper, LilyScorekeeper)
+    db = _SupabaseDB()
+    errors = []
+    orig = _lp.logger.error
+    _lp.logger.error = lambda *a, **k: errors.append((a, k))
+    try:
+        asyncio.run(_lp.lily_checkpoint(db, scorekeeper))
+    finally:
+        _lp.logger.error = orig
+    return db, errors
+
+
+def _make_scorekeeper():
+    from lily_scorekeeper import LilyScorekeeper
+
+    sk = LilyScorekeeper(session_id="test-checkpoint-room")
+    sk.phase = "round"
+    sk.round = 2
+    sk.question_number = 5
+    sk.players["Sarah"] = {"score": 3}
+    return sk
+
+
+def test_checkpoint_requires_every_subscripted_snapshot_key():
+    # Structural guard: every key checkpoint reads by subscript must exist
+    # in the live snapshot. This is the assertion that would have caught the
+    # deletion of "mode" before it shipped.
+    snap = _make_scorekeeper().snapshot()
+    missing = [k for k in _CHECKPOINT_REQUIRED_SNAPSHOT_KEYS if k not in snap]
+    assert not missing, (
+        "lily_checkpoint() subscripts snapshot keys that no longer exist: "
+        f"{missing}. Either restore them to LilyScorekeeper.snapshot() or "
+        "switch the checkpoint reads to a constant / .get() default."
+    )
+
+
+def test_checkpoint_round_trip_writes_populated_row():
+    sk = _make_scorekeeper()
+    db, errors = _run_checkpoint(sk)
+
+    assert errors == [], f"lily_checkpoint logged an error: {errors}"
+
+    rows = db.tables.get("lily_sessions", [])
+    assert len(rows) == 1, "checkpoint did not upsert exactly one session row"
+    row = rows[0]
+
+    assert row["session_id"] == "test-checkpoint-room"
+    assert row["phase"] == "round"
+    assert row["round"] == 2
+    assert row["question_number"] == 5
+    # mode column stays populated (schema still requires it); checkpoint
+    # writes the constant, matching the init/upsert convention.
+    assert row["mode"] == "adult"
+    # scorekeeper_state carries the full snapshot for rehydrate.
+    assert row["scorekeeper_state"] == sk.snapshot()
+    assert "updated_at" in row

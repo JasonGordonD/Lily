@@ -5,6 +5,43 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-14 — WO-LILY-HOTFIX-CHECKPOINT-MODE: checkpoint KeyError('mode') silently voiding all durable session state (P0)
+
+Live P0 from a call audit on session `lily-6A32BD-741b9b66` (served on 2b3e005).
+REFACTOR-001 (2b3e005) deleted the top-level `"mode"` key from
+`LilyScorekeeper.snapshot()`, but `lily_checkpoint()` still read `snap["mode"]`
+by direct subscript. Every checkpoint — score change, 60s heartbeat, key event
+— raised `KeyError('mode')` into the broad `except`, surfacing only as
+`lily_checkpoint error: 'mode'` (fired 10x in one session). CONSEQUENCE: the
+upsert never ran, so on every session since the 12:06Z deploy
+`lily_sessions.metadata={}`, `scorekeeper_state={}`, `final_standings=null`,
+phase frozen at `lobby`, `session_metrics` empty, and `session_report` stuck
+pending — all durable state lost.
+
+1. **lily_persistence.py:167.** `"mode": snap["mode"]` → `"mode": "adult"` —
+   the constant, matching the convention the same deploy already uses at the
+   `lily_init_session` upsert (~line 101). The column still exists in the
+   schema; dropping it is a separate migration.
+2. **Sweep for siblings.** Diffed the current `snapshot()` key set against
+   every snapshot consumer. `"mode"` was the ONLY dangling direct subscript.
+   `"mode_changes"` (also deleted by 2b3e005) is read nowhere. The other
+   subscripts at 166/168/169 (`phase`/`round`/`question_number`) all still
+   exist in the snapshot; the agent rehydrate path
+   (`lily_agent.py:9446`) and `LilyScorekeeper.rehydrate()` use `.get()`
+   throughout and were never at risk.
+3. **Regression guard (tests/test_persistence.py).**
+   `test_checkpoint_requires_every_subscripted_snapshot_key` asserts every key
+   `lily_checkpoint()` reads by subscript still exists in the live snapshot —
+   this is the assertion that would have caught the deletion before it shipped.
+   `test_checkpoint_round_trip_writes_populated_row` drives a real
+   `LilyScorekeeper` through `lily_checkpoint()` against the capturing fake and
+   asserts no error is logged and the upserted row lands with `mode="adult"`,
+   populated `phase`/`round`/`question_number`, and a full `scorekeeper_state`.
+4. **Traceback on the swallowed error.** `lily_checkpoint`'s `except` now logs
+   `exc_info=True` — the missing traceback is exactly how this hid.
+
+Full suite: **2540 passed** (2538 baseline + 2 new tests).
+
 ## 2026-08-14 — WO-PRMPT-LILY-GEMINI-EXCISION-001: dead google-genai reasoning lane removed
 
 Follow-up to REFACTOR-001 (which deleted the Gemini image path). The reasoning

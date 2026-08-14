@@ -164,7 +164,7 @@ async def lily_checkpoint(
         payload = {
             "session_id": scorekeeper.session_id,
             "phase": snap["phase"],
-            "mode": snap["mode"],
+            "mode": "adult",
             "round": snap["round"],
             "question_number": snap["question_number"],
             "scorekeeper_state": snap,
@@ -185,7 +185,7 @@ async def lily_checkpoint(
             timeout=15.0,
         )
     except Exception as e:
-        logger.error("lily_checkpoint error: %s", e)
+        logger.error("lily_checkpoint error: %s", e, exc_info=True)
 
 
 async def lily_set_training_optin(
