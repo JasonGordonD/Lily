@@ -1,0 +1,62 @@
+# live_20260814_1751_hostloop.txt — WO-LILY-AIRGATE-001 evidence transcript
+# Live call 2026-08-14 17:51 EDT (host-loop airing failures).
+#
+# PROVENANCE (S13, stated honestly): the original session recording was not
+# available in the repository or the investigation workspace at fix time.
+# This file is a RECONSTRUCTION of the call's defect beats, assembled from
+# the read-only investigation's root-cause notes (timings, utterances and
+# orderings as recorded there). It is committed as the WO's acceptance
+# fixture so the four defect classes it captures stay pinned to the tests
+# that close them; if the original recording surfaces, commit it alongside
+# under its own name — do not overwrite this one.
+#
+# Defect classes reconstructed below:
+#   [A] triple verdict airing (enqueue-only gating; keyed-sheet narration
+#       exemption; stamp race between organic tts and adjudicate journal)
+#   [B] stale conversational ack colliding with a newer answer; command
+#       utterance answered by TWO reply lanes (code ack + organic)
+#   [C] floor line fired over the player's answer (floor_line_owed read
+#       host_speaking only, never _user_speaking)
+#   [D] STOP salvo ignored 7-17s (finals-only consult; "stop stop stop"
+#       never finalizes) + resume watchdog re-offering the read every
+#       cut_recovery_grace()=3.5s + double stop acknowledgment
+#
+# Format: MM:SS  SPEAKER  utterance / [event]
+
+# --- [A] the triple verdict -------------------------------------------------
+17:51:04  LILY   Correct — the 1930s! That one goes to Rami.
+17:51:05  [barge-in: S1 talks over the reveal; turn cancelled before CONFIRM]
+17:51:07  LILY   Correct — the 1930s! Point to Rami.
+17:51:08  [queued keyed verdict sheet q_N_reveal airs: second statement]
+17:51:12  LILY   So that's the 1930s, Rami's point — where were we...
+17:51:12  [organic wrap re-announces the same ruling: third statement]
+
+# --- [B] stale ack + double reply -------------------------------------------
+17:52:30  S1     I don't want a timer.
+17:52:31  [code ack dispatched: gated_say(None, "pacing_set", ...)]
+17:52:33  LILY   Relaxed it is — no clock from here.
+17:52:35  LILY   You got it — I've switched off the timer, we'll take it easy.
+17:52:35  [organic reply doubles the ack: TWO replies to one utterance]
+17:53:01  S2     Is it Buenos Aires?
+17:53:02  LILY   Slower it is.
+17:53:02  [stale pace ack from an earlier utterance airs OVER the answer]
+
+# --- [C] floor line over the player's answer --------------------------------
+17:54:18  S1     Okay so the answer is—
+17:54:19  LILY   I'm here — the floor's yours.
+17:54:19  [floor line fired mid-utterance: floor_line_owed never read
+#          _user_speaking, only host_speaking]
+
+# --- [D] the STOP salvo -----------------------------------------------------
+17:55:40  S1     Stop. Stop stop stop. Lily, stop—
+17:55:40  [no final commits: continuous speech holds endpointing open]
+17:55:43  LILY   [re-offers the question read: _question_barge_resume_watch,
+#                 deferring only on host_speaking]
+17:55:47  LILY   [re-offers the read again — 3.5s grace loop]
+17:55:51  S1     STOP.
+17:55:53  [final commits at last; maybe_route_stop fires 7-13s after the
+#          first spoken stop]
+17:55:53  LILY   Stopped. Say the word when you're ready.
+17:55:55  LILY   Okay, okay — stopping now, say when.
+17:55:55  [organic second acknowledgment: the hold binds only gated_say
+#          lanes, so the LLM reply doubled the ack]

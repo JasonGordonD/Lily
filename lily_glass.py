@@ -614,6 +614,12 @@ class LilyGlassMixin:
         unchanged."""
         ts = segment_ts if segment_ts is not None else time.time()
 
+        # AIRGATE-001 D1b: one committed final — advance the supersession
+        # clock BEFORE any command handling, so an ack dispatched inside
+        # THIS event snapshots a sequence that already contains its own
+        # trigger, and only a LATER final can supersede it.
+        self.note_user_final()
+
         # PATCH-002 A5/T12 — STOP primitive, at the very top so it bypasses
         # the LLM and can never be answered by a re-aired question. The
         # consult (roster read → detect → route into the hold) lives in
@@ -918,6 +924,9 @@ class LilyGlassMixin:
                             if target == "relaxed"
                             else "the standard answer clock is back on"
                         )
+                        # AIRGATE-001 D4: the code ack owns this "yes" —
+                        # one utterance, one reply.
+                        self.mark_deterministic_reply(text)
                         self.gated_say(
                             None,
                             "pacing_set",
@@ -932,6 +941,7 @@ class LilyGlassMixin:
                     kept = self.sk.pacing
                     self._pending_pacing = None
                     self._pending_pacing_requester = None
+                    self.mark_deterministic_reply(text)  # AIRGATE-001 D4
                     self.gated_say(
                         None,
                         "pacing_kept",
@@ -959,6 +969,9 @@ class LilyGlassMixin:
                         "LILY_FORGET | CONFIRMED | session=%s by=%s",
                         self.sk.session_id, speaker_key,
                     )
+                    # AIRGATE-001 D4: the forget flow's own beat answers
+                    # this confirmation — one utterance, one reply.
+                    self.mark_deterministic_reply(text)
                     asyncio.ensure_future(
                         self._forget_confirmed(source="voice_confirm")
                     )
@@ -966,6 +979,7 @@ class LilyGlassMixin:
                 if verdict == "no":
                     self.forget_state = "declined"
                     self.forget_spoken_confirmed = False
+                    self.mark_deterministic_reply(text)  # AIRGATE-001 D4
                     logger.info(
                         "LILY_FORGET | DECLINED | session=%s by=%s",
                         self.sk.session_id, speaker_key,
@@ -983,6 +997,9 @@ class LilyGlassMixin:
                     return
 
         if command == "forget_me":
+            # AIRGATE-001 D4: the forget flow's confirmation ask is the one
+            # reply this utterance gets.
+            self.mark_deterministic_reply(text)
             self._on_forget_requested(player or speaker_label)
             return
         if command in ("pacing_relaxed", "pacing_timed"):
@@ -1016,6 +1033,7 @@ class LilyGlassMixin:
                     provenance = (
                         f"has {stated} pacing on file as its usual from before"
                     )
+                self.mark_deterministic_reply(text)  # AIRGATE-001 D4
                 self.gated_say(
                     None,
                     "pacing_confirm",
@@ -1031,6 +1049,10 @@ class LilyGlassMixin:
             self._pending_pacing = None
             self._pending_pacing_requester = None
             if self.set_pacing(pacing, source="voice_command"):
+                # AIRGATE-001 D4: the pacing_set code ack owns this
+                # utterance ("I don't want a timer" got TWO replies live —
+                # this ack AND an organic one; one utterance, one reply).
+                self.mark_deterministic_reply(text)
                 if pacing == "relaxed":
                     note = (
                         "answer windows now run about twice as long. Keep "
@@ -1076,6 +1098,9 @@ class LilyGlassMixin:
         if pace_request and pace_request != self.sk.delivery_pace:
             self.set_delivery_pace(pace_request)
             self.publish_attributes_nowait()
+            # AIRGATE-001 D4: the pace ack (either branch below) owns this
+            # utterance — no organic double.
+            self.mark_deterministic_reply(text)
             if pace_request == "slow":
                 self.gated_say(
                     None, "pace_ack",
@@ -1115,11 +1140,16 @@ class LilyGlassMixin:
                 # A down lane never flips to a false "ON" — the honest,
                 # specific unavailability line names the real cause (P4
                 # grounding) and media_mode stays voice_only.
+                # AIRGATE-001 D4: whichever branch try_activate_pictures
+                # takes (ON confirmation or the honest unavailability line),
+                # the code ack owns this utterance.
+                self.mark_deterministic_reply(text)
                 self.try_activate_pictures(source="voice_command")
             else:
                 self.sk.set_media_mode(media_choice)
                 self._pending_picture_on_offer = False
                 self.publish_attributes_nowait()
+                self.mark_deterministic_reply(text)  # AIRGATE-001 D4
                 self.gated_say(
                     None, "media_mode",
                     "The table asked for voice only. Pictures are OFF — "

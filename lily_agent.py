@@ -688,6 +688,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._composite_flight_state = None
         self._confirmed_name_evidence = {}
         self._contest_note = None
+        # AIRGATE-001 D1b: freshness context per KEYLESS conversational
+        # dispatch (speech_id -> {act, final_seq, at}); consumed by the
+        # playout-time freshness gate. Bounded (see _DISPATCH_META_CAP).
+        self._conversational_dispatch_meta = {}
         self._custom_round_refused = []
         self._custom_round_registered = {}
         self._cut_recovery_armed_at = 0.0
@@ -699,6 +703,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._delivery_speech_acts = {}
         self._delivery_stop_sticky = False
         self._deterministic_reply_texts = []
+        # AIRGATE-001 D2: which act each dispatched handle performs
+        # (speech_id -> act), so a deliberate barge can tell an obligation
+        # ack from a flushable queued dispatch. Bounded map.
+        self._dispatched_act_by_speech = {}
         self._device_candidate_memory = None
         self._device_verify_attempts = 0
         self._device_verify_task = None
@@ -737,6 +745,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._identity_required_before_start = False
         self._intake_last_segment = None
         self._intake_overlap_noted_at = 0.0
+        # AIRGATE-001 D3: debounce for the interim-transcript STOP consult
+        # (a growing interim must not re-run the brake every frame).
+        self._interim_stop_routed_at = 0.0
         self._last_armed_speech_ratio = 0.0
         self._last_assistant_turn = ('', '')
         self._last_bind_at = None
@@ -808,6 +819,16 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._undelivered_ticks = 0
         self._user_speaking = False
         self._user_speech_ended_at = None
+        # AIRGATE-001 D2: per-content-key USER-CUT counter (say-registry key
+        # -> deliberate VAD-positive cuts), written at the barge
+        # classification; caps the verdict re-air at one per key.
+        self._user_cut_counts = {}
+        # AIRGATE-001 D1b: monotone committed-final sequence — the
+        # supersession clock the freshness gate compares dispatch snapshots
+        # against.
+        self._user_final_seq = 0
+        # AIRGATE-001 D2: verdict re-airs already spent, per key.
+        self._verdict_reair_counts = {}
         self._vocal_depth_unshared = False
         self._voice_embedder_warming = False
         self._voice_identity_attempted = False
@@ -3864,6 +3885,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             (self._delivery_speech_acts or {}).pop(
                 speech_id, None
             )
+            # AIRGATE-001: this handle's dispatch metadata is spent.
+            (self._dispatched_act_by_speech or {}).pop(speech_id, None)
+            (self._conversational_dispatch_meta or {}).pop(speech_id, None)
         # HOSTLOOP-001 C5: this turn's playout is over however it ended, so
         # the host-composite lane is free. Released BEFORE the recovery
         # branches below, which dispatch composites of their own (the C8
@@ -3922,6 +3946,19 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 interrupted and not failed
                 and self.cut_was_deliberate_barge_in()
             )
+            # AIRGATE-001 D2: the per-content-key USER-CUT counter, written
+            # at the one place the cut cause is decided. VAD-positive branch
+            # ONLY (Y7's slow-STT corner): the counter caps re-airs, so it
+            # must count a human voice at the cut, never a transcript that
+            # committed late.
+            if barge_in and released and self.cut_had_vad_evidence():
+                self.note_user_cut_keys(released)
+            # AIRGATE-001 D2: a deliberate barge also flushes QUEUED
+            # non-obligation dispatches — the human took the floor; a stack
+            # of stale composites must not play out over them. A flushed
+            # question read re-arms expect_delivery inside the flush (C3d).
+            if barge_in and interrupted:
+                self.flush_queued_dispatches_on_barge(cut_speech_id=speech_id)
             # Regeneration gate (WS-3): the act just cut/suppressed will
             # re-dispatch — arm the gate so the retry is spoken fresh, not
             # replayed. An interrupted turn partially aired (a re-air is
@@ -7483,6 +7520,66 @@ class AirDupGuard(SpeechTransform):
         return turn
 
 
+class ResultAiredGate(SpeechTransform):
+    """WO-LILY-AIRGATE-001 D1a — THE dequeue-time ALREADY-AIRED gate, at the
+    END of the pipeline (the funnel every producer passes: keyed sheets,
+    C8 re-airs, watchdog re-dispatches, organic replies, direct_say lines —
+    AgentSession.say routes through tts_node, verified at direct_say). A
+    turn narrating a result whose airing was already stamped by a DIFFERENT
+    speech_id is suppressed HERE, at yield — closing the keyed-sheet
+    narration exemption (register_transition_narration always binds a turn
+    that holds the verdict key) without touching a legitimate first
+    narration. Suppression runs adjudicate-style journal/confirm accounting
+    inside the decision, so N+1 releases and nothing wedges into silence;
+    flag-neutral (runs before either tts synthesis branch)."""
+
+    name = "result_aired_gate"
+
+    def apply(self, turn):
+        # getattr: fixture fakes predate the gate (same guard idiom as
+        # _lily_schedule_floor_if_owed).
+        decide = getattr(turn.game, "result_narration_already_aired", None)
+        if not callable(decide):
+            return turn
+        outcome = decide(turn.text, speech_id=turn.speech_id)
+        if outcome == "suppress":
+            turn.mark_suppressed()
+            return Silence("result_already_aired")
+        return turn
+
+
+class FreshnessGate(SpeechTransform):
+    """WO-LILY-AIRGATE-001 D1b — FRESHNESS/SUPERSESSION at yield for
+    conversational code-acks (pacing/media/forget acks, the floor line, the
+    cut recovery). Each carries its triggering user-final sequence from
+    dispatch; a newer committed user final, or age over the module budget,
+    means the room has moved on and the ack would collide with live speech
+    (the 17:51 stale-reply collisions). Never a bare drop: tts_node's
+    terminal-suppression path runs the floor-owed accounting for every
+    Silence this returns."""
+
+    name = "freshness_gate"
+
+    def apply(self, turn):
+        decide = getattr(turn.game, "conversational_turn_superseded", None)
+        if not callable(decide):
+            return turn  # fixture fakes predate the gate
+        reason = decide(turn.speech_id)
+        if reason:
+            logger.warning(
+                "LILY_SAY_SUPPRESSED | reason=stale_reply_%s | session=%s "
+                "speech=%s text=%r — conversational ack out-dated at yield "
+                "(AIRGATE-001 D1b)",
+                reason, turn.game.sk.session_id, turn.speech_id,
+                turn.text[:80],
+            )
+            turn.mark_suppressed()
+            if turn.speech_id:
+                turn.game.say_registry.release_owner(turn.speech_id)
+            return Silence("stale_reply_%s" % reason)
+        return turn
+
+
 class PunctuationFlush(SpeechTransform):
     """MANDATORY punctuation-flush guard (Lovebirds fix): LilyTTS is
     streaming=False, wrapped in StreamAdapter gated by blingfire sentence
@@ -7515,6 +7612,11 @@ SAY_PIPELINE = [
     UnownedKickoffSuppress(),
     TransitionNarration(),
     AirDupGuard(),
+    # WO-LILY-AIRGATE-001: the dequeue-time airing gate — the LAST content
+    # decision before the frames yield, so enqueue-time staleness can no
+    # longer reach the air (triple verdicts, ack/answer collisions).
+    ResultAiredGate(),
+    FreshnessGate(),
     PunctuationFlush(),
 ]
 
@@ -8800,13 +8902,29 @@ class LilyAgent(Agent):
             and callable(candidate_check)
             and candidate_check(message_text)
         )
-        if event_owned or prehook_owned or candidate_owned:
+        # AIRGATE-001 D4 — ONE utterance, ONE reply: a STOP or hold-request
+        # utterance is answered by its deterministic code-ack lane
+        # (handle_stop_primitive / handle_hold_request, both idempotent and
+        # both marking the turn at dispatch); the organic lane must never
+        # double that ack (the 17:51 double stop-ack: the hold binds only
+        # gated_say lanes, and BackHoldNarration suppresses nothing). The
+        # detection here is the StopResponse-equivalent for the ordering
+        # where this hook runs before the transcript-layer mark lands.
+        command_check = getattr(self._game, "stop_or_hold_owns_turn", None)
+        command_owned = bool(
+            not event_owned
+            and not prehook_owned
+            and not candidate_owned
+            and callable(command_check)
+            and command_check(message_text)
+        )
+        if event_owned or prehook_owned or candidate_owned or command_owned:
             logger.info(
                 "LILY_REPLY | ORGANIC_SUPPRESSED | session=%s "
                 "reason=deterministic_game_reply event_owned=%s "
-                "prehook_owned=%s candidate_owned=%s",
+                "prehook_owned=%s candidate_owned=%s command_owned=%s",
                 self._game.sk.session_id, event_owned, prehook_owned,
-                candidate_owned,
+                candidate_owned, command_owned,
             )
             raise StopResponse()
         # VIDEOIN-001: if the camera lane is open and a frame is buffered,
@@ -9368,8 +9486,9 @@ class LilyAgent(Agent):
         # word passes through (organic reveal or keyed verdict SAY), and it is
         # BEFORE the frames yield, so a barge that cancels the turn mid-playout
         # cannot defeat the anti-double gate the way it defeats the confirm-time
-        # guards.
-        self._game.stamp_result_aired_from_turn(full)
+        # guards. AIRGATE-001: the stamping speech_id rides the record so the
+        # ResultAiredGate can tell this airing from a later duplicate.
+        self._game.stamp_result_aired_from_turn(full, speech_id=turn.speech_id)
 
         async def _replay():
             yield full
@@ -10484,6 +10603,17 @@ async def entrypoint(ctx: JobContext) -> None:
         if not text:
             return
         if not ev.is_final:
+            # AIRGATE-001 D3 — STOP off the finals-only path. The 17:51
+            # call: "stop stop stop…" never finalized (continuous speech
+            # holds endpointing open, max_delay 6s), so maybe_route_stop —
+            # which consumes FINALS only — sat deaf for 7-17s while the
+            # resume watchdog kept re-offering the read. The framework DOES
+            # surface interims here (this early-return was the proof), so
+            # the chosen design is the WO's option (a): run the same
+            # deterministic detector against the interim text and route a
+            # hit straight into the idempotent brake. Everything else about
+            # interims is unchanged: partials display, finals score.
+            game.route_stop_from_interim(text)
             return  # partials display, finals score — never the reverse
         # Glass transcript (2026-08-09): forward the final to the panel —
         # text_output=False silenced the framework's own forwarding.

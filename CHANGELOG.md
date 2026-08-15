@@ -5,6 +5,102 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-15 — WO-LILY-AIRGATE-001: the dequeue-time airing gate
+
+Live call 2026-08-14 17:51 EDT (fixture
+`tests/fixtures/live_20260814_1751_hostloop.txt`, sha256
+`0dacdacb44f9b0…164b207`, RECONSTRUCTED from the investigation's incident
+notes — the original recording was not in the repo; S13 provenance stated
+in the file header): triple verdict airings, stale acks colliding with
+answers, a floor line over the player's voice, STOP ignored 7-17s plus a
+double acknowledgment. Root cause (read-only investigation, verified in
+situ): the pipeline decided "should this air?" at ENQUEUE only —
+`_result_aired` (stamped at airing) had **no reader in the playout path**,
+keyed sheets were structurally exempt from the one playout gate
+(`register_transition_narration` always binds a turn holding the verdict
+key), the stamp raced adjudicate's journal to a no-op, the C8 re-air /
+stale-claim watchdog / barge-resume watch never consulted the fact, "stop
+stop stop…" never finalized so the finals-only STOP consult sat deaf, and
+no command path marked turn ownership so the organic lane doubled every
+code ack.
+
+**D1 — ONE dequeue-time airing gate** at the end of `SAY_PIPELINE`
+(`ResultAiredGate` + `FreshnessGate`, before `PunctuationFlush` — inside
+tts_node, before the frames yield on EITHER synthesis branch, so the gate
+is `LILY_VOICE_SYNCED_TRANSCRIPT`-neutral).
+  (a) ALREADY-AIRED (`result_narration_already_aired`,
+  lily_speech_delivery): a turn narrating a result whose
+  `result_aired_for(qnum)` was stamped by a DIFFERENT speech_id is
+  suppressed at yield — keyed sheets confirm their claim and (re)bind the
+  journal narration to the words the room actually heard
+  (`_confirm_verdict_key_as_aired`, adjudicate's RESULT_PREAIRED
+  semantics), so N+1 releases and no suppression can wedge into silence;
+  keyless re-narrations keep N12's conversation outs (next_delivery
+  journaled / 30s window). Stamp carries `speech_id`
+  (`note_result_aired`); STAMP RACE closed —
+  `_resolve_result_narration` falls back to the live question's
+  canonical answer when adjudicate has not journaled yet, so stamping
+  keys off the airing's own content, never off journal ordering.
+  (b) FRESHNESS/SUPERSESSION: keyless conversational acks
+  (pacing/media/forget/pace acks, floor, cut recovery) snapshot the
+  committed-final sequence at dispatch (`note_user_final` at the top of
+  `on_transcript_event`; `_note_conversational_dispatch` in `gated_say`);
+  a newer committed final, or age past the module's one
+  too-late-to-air deadline (12s, the stale-claim constant), suppresses at
+  yield with the existing terminal-suppression floor-owed accounting.
+  `stop_ack`/`hold_ack`/`answer_receipt` are exempt (the required
+  response to their own state).
+
+**D2 — USER-CUT discipline.** Per-content-key user-cut counter
+(`note_user_cut_keys`) written at the `on_agent_speech_finished` barge
+classification, VAD-positive branch only (`cut_had_vad_evidence` — the
+committed-turn proxy is excluded per Y7's slow-STT corner).
+`reair_cut_verdict` consults it: max ONE re-air per key
+(`_verdict_reair_counts`), and NEVER once `result_aired_for` is stamped —
+every refusal confirms the key (accounting, never a wedge, never a bare
+drop). `_stale_claim_watch` and `_question_barge_resume_watch` now defer
+on `_user_speaking` AND `_hold_active`, and consult `result_aired_for`
+before re-issuing (the watchdog confirms a pre-aired verdict claim
+instead of re-dispatching; `_question_barge_resume_still_owed` reads the
+fact — an aired result is a resolved question). A deliberate barge
+flushes QUEUED non-obligation handles
+(`flush_queued_dispatches_on_barge`, riding the STOP primitive's
+`cancel_speech` machinery): stop/hold acks and keyed game obligations
+survive; a flushed question read releases its claim and re-arms
+`expect_delivery` (C3d never-half-aired holds).
+
+**D3 — STOP off the finals-only path.** ARCHAEOLOGY DECIDED: the
+framework DOES surface interims (`user_input_transcribed` with
+`is_final=False` reached `_on_transcribed` and was dropped), so the
+chosen design is the WO's option (a) — `route_stop_from_interim`
+(lily_floor) runs `lily_detect_stop` against interim text and routes a
+hit into `handle_stop_primitive`, whose `already_acked` idempotency makes
+early provisional firing safe (2s debounce keeps the halt machinery from
+re-running per frame). The VAD-layer N-barges-in-M-seconds fallback was
+NOT needed and was not built. STOP only — hold-equivalents ("wait") are
+answer vocabulary mid-utterance and stay finals-only.
+
+**D4 — ONE utterance, ONE reply.** Every code-ack lane marks turn
+ownership: `handle_stop_primitive` / `handle_hold_request` and the glass
+command acks (pacing_set/kept/confirm, pace_ack, media_mode +
+try_activate_pictures, forget request/confirm/decline) call
+`mark_deterministic_reply(text)` at dispatch; `on_user_turn_completed`
+additionally owns stop/hold turns directly (`stop_or_hold_owns_turn` →
+StopResponse) so the ordering race cannot double the ack. Broader command
+classes keep the dispatch-time mark only — their handlers have no-reply
+branches, and a blanket StopResponse would trade a double ack for dead
+air. `floor_line_owed` gains the `_user_speaking` read (the floor answers
+silence; the room's voice is not silence).
+
+GUARDRAIL held throughout: every suppression runs accounting
+(claim-confirm + journal rebind, floor-owed scheduling, suppressed-id
+bookkeeping) — no bare drops, no new silence wedges. No STT/TTS/vendor/
+model config changes. Failing-first: 20 of the 22 new tests fail on the
+pre-fix source (`tests/test_airgate_001.py` + the D1a/(i) additions in
+`tests/test_barge_resilience_001.py`); suite green at baseline+22 = 2669
+on python3.11 and the 3.13 venv. `test_say_pipeline.py`'s pinned stage
+order updated deliberately for the two new terminal stages.
+
 ## 2026-08-14 — WO-LILY-ANTIREPEAT-PROTOCOL-001: one continuous take + the recognition_aired backstop
 
 Four live instances of one defect class today — content aired twice through

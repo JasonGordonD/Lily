@@ -372,6 +372,12 @@ class LilyFloorMixin:
             return False
         if getattr(self.sk, "host_speaking", False):
             return False
+        # AIRGATE-001 D4: the floor line answers SILENCE. While the player
+        # is mid-utterance (VAD-positive) the air is not silent — the 17:51
+        # floor line fired straight over the player's answer because this
+        # read checked only her own audio, never the room's.
+        if getattr(self, "_user_speaking", False):
+            return False
         if getattr(self, "_floor_fired_for_ts", 0.0) == since:
             return False
         return True
@@ -534,6 +540,79 @@ class LilyFloorMixin:
             return True
         return False
 
+    # AIRGATE-001 D3: how long one interim-routed stop suppresses re-routing
+    # from the still-growing interim of the same utterance. The brake itself
+    # is idempotent (already_acked); this only keeps the heavy halt work
+    # (cancel loop, claim release, freeze) from re-running every frame.
+    _INTERIM_STOP_DEBOUNCE_SECONDS = 2.0
+
+    def route_stop_from_interim(self, text: str) -> bool:
+        """AIRGATE-001 D3 — the STOP consult on INTERIM transcripts.
+
+        The 17:51 call: "stop stop stop…" held endpointing open, no final
+        landed for 7-17s, and maybe_route_stop consumes FINALS only — so
+        the brake sat armed and untouched while the room shouted the word.
+        Archaeology decided the design: the framework surfaces interims
+        (user_input_transcribed with is_final=False reaches _on_transcribed
+        and was dropped on the floor), so option (a) applies — the SAME
+        deterministic detector runs against the interim text, and a hit
+        routes straight into handle_stop_primitive, whose already_acked
+        idempotency makes early provisional firing safe (the eventual final
+        re-enters the brake and reasserts silently). The VAD-layer
+        N-barges-in-M-seconds fallback was not needed.
+
+        STOP ONLY, deliberately: the hold-equivalents ("wait", "hold on")
+        are answer vocabulary mid-utterance ("wait, is it Saturn?!") and
+        their utterance-shaped consult stays finals-only. Debounced so a
+        growing interim cannot re-run the halt machinery every frame."""
+        if not text:
+            return False
+        now = time.monotonic()
+        if (
+            now - getattr(self, "_interim_stop_routed_at", 0.0)
+            < self._INTERIM_STOP_DEBOUNCE_SECONDS
+        ):
+            return False
+        try:
+            solo = self.sk.roster_size() <= 1
+        except Exception:
+            solo = False
+        if not lily_scorekeeper.lily_detect_stop(text, solo=solo):
+            return False
+        self._interim_stop_routed_at = now
+        logger.warning(
+            "LILY_STOP | INTERIM_ROUTED | session=%s text=%r — stop detected "
+            "on an interim transcript; braking without waiting for the final "
+            "(AIRGATE-001 D3)",
+            self.sk.session_id, (text or "")[:60],
+        )
+        self.handle_stop_primitive(text)
+        return True
+
+    def stop_or_hold_owns_turn(self, text: str) -> bool:
+        """AIRGATE-001 D4 — does the deterministic stop/hold lane own this
+        finalized user turn? Read by on_user_turn_completed (the
+        StopResponse-equivalent) so the organic lane can never double the
+        one code ack, whichever of the two event paths runs first. Scoped
+        to the two commands whose ack lane ALWAYS answers (both handlers
+        are idempotent and ack exactly once); broader command classes keep
+        the dispatch-time mark instead, because their handlers have
+        no-reply branches and a blanket StopResponse there would trade a
+        double ack for dead air — the one failure mode worse than either."""
+        if not text:
+            return False
+        try:
+            solo = self.sk.roster_size() <= 1
+        except Exception:
+            solo = False
+        try:
+            return bool(
+                lily_scorekeeper.lily_detect_stop(text, solo=solo)
+                or lily_scorekeeper.lily_detect_hold_request(text)
+            )
+        except Exception:
+            return False
+
     def handle_hold_request(self, source_text: str) -> None:
         """C13: a spoken hold-equivalent binds within one utterance —
         interrupt anything airing, enter the hold (every dispatch lane
@@ -542,6 +621,10 @@ class LilyFloorMixin:
         release, no content retirement — the table asked for a beat, not
         a brake."""
         already_held = self._hold_active
+        # AIRGATE-001 D4: the code-ack lane owns this utterance — mark it so
+        # the organic lane cannot double the acknowledgment (one utterance,
+        # one reply), whichever event path runs first.
+        self.mark_deterministic_reply(source_text)
         logger.warning(
             "LILY_HOLD | REQUESTED | session=%s text=%r already_held=%s — "
             "player hold-equivalent; yielding within this utterance (C13)",
@@ -589,6 +672,10 @@ class LilyFloorMixin:
             self._hold_active
             and self._hold_reason == "narrated_stop"
         )
+        # AIRGATE-001 D4: the stop lane owns this utterance — even a
+        # reasserted stop (already_acked) is answered by the STOPPED state,
+        # never by an organic second acknowledgment.
+        self.mark_deterministic_reply(source_text)
         logger.warning(
             "LILY_STOP | PRIMITIVE | session=%s text=%r — halting playout, "
             "cancelling dispatches, entering hold sticky=%s already_acked=%s",

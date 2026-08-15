@@ -246,3 +246,109 @@ def test_d4_cut_verdict_reair_stamps_the_fact_and_gates_the_next_beat():
     game.stamp_result_aired_from_turn(reair_line)
     assert game.result_aired_for(1) is not None
 
+
+# -- WO-LILY-AIRGATE-001 (i): the DEQUEUE-time gate ---------------------------
+#
+# Live 2026-08-14 17:51 (fixture live_20260814_1751_hostloop.txt): the same
+# ruling aired repeatedly because every airing decision was made at ENQUEUE
+# and the one playout gate (register_transition_narration) structurally
+# exempts KEYED sheets — a queued verdict sheet holding q_N_reveal always
+# binds as "the narration" and airs, even after a different speech already
+# put the result on the air. The ResultAiredGate closes that at yield.
+
+
+def _pipeline_agent():
+    """The two agent attrs the say pipeline's regen/empty stages touch."""
+    agent = type("_PipelineAgent", (), {})()
+    agent._reair_regen_pending = False
+    agent._empty_retry_pending = False
+    return agent
+
+
+def test_i_queued_keyed_sheet_suppressed_at_yield_after_stamp_by_other_speech():
+    from lily_agent import Silence, SpeechTurn, run_say_pipeline
+    import lily_say_gate
+
+    game = _make_game()
+    owner = _open_reveal_transition(game, 1, "the 1930s")
+    game.journal_transition(
+        1, "verdict", owner=owner,
+        detail={"key": "q_1_reveal", "narration": None,
+                "source": "adjudicate_verdict"},
+    )
+    # The queued keyed sheet was dispatched (claim taken by speech_B)...
+    assert game.say_registry.claim("q_1_reveal", owner="speech_B")
+    # ...but before it reaches the synthesizer, a DIFFERENT speech (the
+    # organic reveal, speech_A) airs the result and stamps at ITS airing:
+    game.stamp_result_aired_from_turn(
+        "It's the 1930s — point to Rami.", speech_id="speech_A"
+    )
+    sheet_text = "Correct — the 1930s! That one goes to Rami."
+    turn = SpeechTurn(
+        text=sheet_text, raw=sheet_text, game=game,
+        agent=_pipeline_agent(), speech_id="speech_B",
+    )
+    outcome = run_say_pipeline(turn)
+    # Suppressed AT YIELD — the keyed-sheet exemption is closed:
+    assert isinstance(outcome, Silence)
+    assert outcome.reason == "result_already_aired"
+    # ...WITH adjudicate-style bookkeeping, never a silence wedge: the claim
+    # CONFIRMS (so _transition_holds_next_delivery releases N+1)...
+    assert (
+        game.say_registry.state("q_1_reveal") == lily_say_gate.CLAIM_CONFIRMED
+    )
+    assert game._transition_holds_next_delivery("test") is False
+    # ...and the journal's narration names the words the room actually
+    # heard, not the suppressed copy:
+    entry = game._transition_entry(1, "verdict")
+    assert entry["detail"]["narration"] == "It's the 1930s — point to Rami."
+    # The suppressed handle is recorded so it is never journaled as said:
+    assert "speech_B" in game._suppressed_speech_ids
+
+
+def test_i_first_narration_still_airs_and_own_stamp_never_self_gates():
+    from lily_agent import Silence, SpeechTurn, run_say_pipeline
+
+    game = _make_game()
+    owner = _open_reveal_transition(game, 1, "the 1930s")
+    game.journal_transition(
+        1, "verdict", owner=owner,
+        detail={"key": "q_1_reveal", "narration": None,
+                "source": "adjudicate_verdict"},
+    )
+    assert game.say_registry.claim("q_1_reveal", owner="speech_A")
+    text = "Correct — the 1930s! That one goes to Rami."
+    turn = SpeechTurn(
+        text=text, raw=text, game=game,
+        agent=_pipeline_agent(), speech_id="speech_A",
+    )
+    # No stamp yet: the first narration passes the gate untouched.
+    assert not isinstance(run_say_pipeline(turn), Silence)
+    # tts_node stamps at the airing itself, under THIS speech id...
+    game.stamp_result_aired_from_turn(turn.text, speech_id="speech_A")
+    assert game.result_aired_for(1) is not None
+    # ...and the stamping airing re-entering the gate is never self-gated.
+    turn2 = SpeechTurn(
+        text=text, raw=text, game=game,
+        agent=_pipeline_agent(), speech_id="speech_A",
+    )
+    assert game.result_narration_already_aired(
+        turn2.text, speech_id="speech_A"
+    ) is None
+
+
+def test_stamp_race_closed_organic_narration_stamps_before_adjudicate_journals():
+    # AIRGATE-001 D1 stamp-race fix: the organic tts run used to race
+    # adjudicate's journal — no open transition/journaled reveal meant NO
+    # stamp, so both the organic reveal and the keyed sheet passed every
+    # gate. The stamp now resolves off the airing's own content (the live
+    # question's canonical answer) when the journal has nothing to say.
+    game = _make_game()
+    _arm_question(game, FEMUR_QUESTION)
+    qnum = game.sk.question_number
+    assert game._open_transition_qnum is None  # adjudicate has NOT journaled
+    game.stamp_result_aired_from_turn(
+        "Correct — the femur! That's Rami's point.", speech_id="speech_A"
+    )
+    assert game.result_aired_for(qnum) is not None
+
