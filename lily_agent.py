@@ -1367,30 +1367,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         ]
 
     def _surface_names(self) -> dict[str, str]:
-        """HOTFIX-010 V5 fix-loop: the one naming authority for every name
-        SURFACE — symmetry with the spoken authority lines, which recite
-        real_player_names() only. A placeholder anchor is keyed by its raw
-        diarizer label ("UU"/"S1"); that label is an attribution anchor, NOT
-        an identity, so it must never be aired or persisted as a player name.
-        This maps each roster key to the name it may surface as: real names
-        pass through; placeholders become a neutral non-identity marker. Shared
-        by every surface that would otherwise leak the raw label — the frontend
-        scoreboard and finale/comeback/standings (via _players_payload) AND the
-        per-player block persisted in game_stats (build_game_stats) — so the
-        two persistence legs stay consistent (same placeholder → same marker,
-        both iterate self.sk.players in insertion order). Scores/streak/leader
-        stay keyed on the raw dict key; only the surfaced name is neutralized.
-        A real name later migrates the placeholder's history via bind_speaker,
-        after which the entry is real and surfaces as itself."""
-        names: dict[str, str] = {}
-        seq = 0
-        for key, s in self.sk.players.items():
-            if s.get("placeholder"):
-                seq += 1
-                names[key] = "Player" if seq == 1 else f"Player {seq}"
-            else:
-                names[key] = key
-        return names
+        """The one naming authority for every name SURFACE. The
+        implementation moved to lily_scorekeeper.lily_surface_names
+        (WO-LILY-ROSTER-TRUTH-001) so roster mutations can name a corrected
+        seat's previous surface in the rename/unbind beats they emit; the
+        full contract lives on that function. This delegate keeps every
+        existing agent-side surface (scoreboard payload, finale/comeback,
+        game_stats persistence) on the same authority."""
+        return lily_scorekeeper.lily_surface_names(self.sk.players)
 
 
     def settle_context_nowait(self) -> None:
@@ -2363,16 +2347,26 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 ",".join(sorted(pending)) or "none",
             )
 
-    def note_lobby_setup_intents(self, text: str) -> dict:
+    def note_lobby_setup_intents(
+        self, text: str, speaker_label: str | None = None
+    ) -> dict:
         """Parse and merge every setup intent before any kickoff dispatch.
 
         Deterministic jobs commit here when safe. Adult/voice/heat stay
         pending until their tools actually mutate state. P0-3 owns broader
         consent semantics; age mention is enough to hold start fail-closed.
+        `speaker_label` is the segment's diarization label — the solo
+        assertion (D2b, WO-LILY-ROSTER-TRUTH-001) clamps the roster TO that
+        voice, so arity truth needs to know who asserted it.
         """
         intents = lily_scorekeeper.lily_parse_lobby_setup_intents(text)
         if getattr(self, "game_started", False):
             return intents
+        if intents.get("solo"):
+            # Lobby-only by placement (post-start returns above): a solo
+            # assertion is table-arity setup, and a mid-game "Han Solo"
+            # answer must never reach the clamp.
+            self.apply_solo_assertion(speaker_label)
         requested = self._setup_requested
         pending = self._setup_pending
         if requested is None:
@@ -6097,13 +6091,35 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         through untouched and get applied by their own features
         post-merge. A pacing already chosen out loud this session wrote
         itself into the prefs dict, so this read is always the latest
-        word."""
+        word.
+
+        DEFECT 4 (WO-LILY-ROSTER-TRUTH-001, live 13:47): self.prefs stays
+        empty until the device candidate PROMOTES, so a returning table's
+        stored relaxed pacing was unreachable at Q1 and the timer bar
+        aired against their standing choice. Fallback: WEAKLY apply the
+        pacing key from the STAGED (unverified) device-candidate prefs.
+        Identity boundary (HOTFIX-010 / W1c rules): ONLY the pacing key —
+        never names, memory, or history from an unverified candidate — and
+        the weak apply writes NOTHING back to self.prefs (persisting a
+        candidate's pref under the current group id would launder it), and
+        never sets the this-session provenance flag. A pacing spoken this
+        session lives in self.prefs and always wins; a later candidate
+        rejection costs at most one un-timed round, which is the cheap
+        side of the mistake (a timer aired against a stored choice is the
+        live defect; a missing timer against no choice is a shrug)."""
         pacing = (self.prefs or {}).get("pacing")
+        source = "the usual"
+        if pacing not in ("timed", "relaxed"):
+            staged = getattr(self, "_device_candidate_prefs", None) or {}
+            staged_pacing = staged.get("pacing")
+            if staged_pacing in ("timed", "relaxed"):
+                pacing = staged_pacing
+                source = "staged device candidate (weak, pacing only)"
         if pacing in ("timed", "relaxed") and pacing != self.sk.pacing:
             self.sk.set_pacing(pacing)
             logger.info(
-                "LILY_PREFS | APPLIED | session=%s pacing=%s (the usual, "
-                "at game start)", self.sk.session_id, pacing,
+                "LILY_PREFS | APPLIED | session=%s pacing=%s (%s, "
+                "at game start)", self.sk.session_id, pacing, source,
             )
 
     def _maybe_retry_enrollment(self, player: str | None) -> None:
@@ -6670,6 +6686,62 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
 
     # -- binding side-effects --------------------------------------------------------
 
+    def publish_roster_events(self) -> None:
+        """WO-LILY-ROSTER-TRUTH-001 (D3): drain the scorekeeper's roster
+        mutations into glass beats. A migration/rename/adoption airs as a
+        `rename` beat (old SURFACED name -> new name, so the glass can
+        retire "Player 2" the moment "Rami" adopts the seat); a solo-clamp
+        retire airs as `unbind`. Plain binds and placeholder mints ride the
+        payload + player_bind beat and emit nothing here. Beats only
+        ANIMATE and correct: the `players` attribute payload (stamped with
+        roster_gen) is the single roster-truth wire — the UI derives chips
+        from it alone, so a beat can never add a chip or an alternative
+        spelling."""
+        drain = getattr(self.sk, "drain_roster_events", None)
+        if not callable(drain):
+            return  # fixture fakes predating the roster wire
+        for event in drain():
+            kind = event.get("kind")
+            gen = event.get("gen")
+            if kind in ("migrate", "rename", "adopt"):
+                old = event.get("old_surfaced") or event.get("old_key")
+                new = event.get("new")
+                if not old or not new or old == new:
+                    continue  # nothing surfaced changed — payload covers it
+                self.send_event_nowait(
+                    "rename",
+                    {
+                        "old_name": old,
+                        "new_name": new,
+                        "speaker_label": event.get("label"),
+                        "roster_gen": gen,
+                    },
+                )
+            elif kind == "retire":
+                self.send_event_nowait(
+                    "unbind",
+                    {
+                        "name": event.get("old_surfaced")
+                        or event.get("old_key"),
+                        "speaker_label": event.get("label"),
+                        "roster_gen": gen,
+                    },
+                )
+
+    def apply_solo_assertion(self, speaker_label: str | None) -> list[str]:
+        """DEFECT 2b (WO-LILY-ROSTER-TRUTH-001): a lobby solo assertion
+        clamps the roster to the asserting voice — phantom placeholder
+        seats retire, their unbind beats air, and the corrected payload
+        republishes in the same seam update."""
+        clamp = getattr(self.sk, "clamp_roster_solo", None)
+        if not callable(clamp):
+            return []
+        retired = clamp(speaker_label)
+        if retired:
+            self.publish_roster_events()
+            self.publish_attributes_nowait()
+        return retired
+
     def on_speaker_bound(self, speaker_label: str, player_name: str) -> str:
         """Post-bind side effects: pending open-floor award, max_speakers
         bump, bind event, attribute publish."""
@@ -6736,14 +6808,22 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # (contract note said `bind`; the canonical prmpt_ui parser accepts
         # chip_bind/name_chip/player_bind — drift recorded for Rami).
         # Contract-spelled fields ride along for any contract-faithful client.
+        # WO-LILY-ROSTER-TRUTH-001 (D3): the beat references roster_gen and
+        # only ANIMATES — the `players` attribute payload is the single
+        # roster-truth wire; the glass derives chips from it alone.
         self.send_event_nowait(
             "player_bind",
             {
                 "player": {"name": player_name},
                 "name": player_name,
                 "speaker_label": speaker_label,
+                "roster_gen": getattr(self.sk, "roster_gen", 0),
             },
         )
+        # D3: corrections reach the glass — any migration/adoption/retire
+        # this bind produced airs as rename/unbind beats, in gen order,
+        # before the payload republish below.
+        self.publish_roster_events()
         self.publish_attributes_nowait()
         # Safety-net auto-start: if the lobby has settled into a real table
         # (>=2 speakers bound, next question is prefetched, lobby grace
@@ -7709,6 +7789,30 @@ class LilyAgent(Agent):
         if holder is not None:
             self._game._migrate_agent_name_refs(holder, name)
         note = self._game.on_speaker_bound(label, name)
+        # S2 — receipts never lie (WO-LILY-ROSTER-TRUTH-001): the live
+        # 13:47 bind reported success while the seat kept placeholder:True,
+        # so every downstream surface anonymized "Rami" to "Player 2" and
+        # the model had a clean receipt to argue from. Verify the COMMITTED
+        # seat; a degraded seat gets a degraded receipt.
+        seat = self._game.sk.players.get(name)
+        if (
+            seat is None
+            or seat.get("placeholder")
+            or seat.get("speaker_label") != label
+        ):
+            logger.error(
+                "LILY_BIND | RECEIPT_DEGRADED | session=%s label=%s name=%s "
+                "seat=%s", self._game.sk.session_id, label, name,
+                {k: seat.get(k) for k in ("placeholder", "speaker_label")}
+                if seat else None,
+            )
+            return (
+                f"DEGRADED bind: voice {label} was recorded for {name}, but "
+                "the roster seat did not commit cleanly — the scoreboard "
+                "may still show a neutral placeholder for them. Do not "
+                "claim the board shows their name; if the table says the "
+                "screen is wrong, believe them."
+            )
         return f"Bound: voice {label} is {name}.{snap_note}{note}"
 
     @function_tool()
@@ -8765,9 +8869,19 @@ class LilyAgent(Agent):
         if getattr(game, "_identity_required_before_start", False):
             game._identity_ask_spent = True
             if game.sk.roster_size(include_placeholder=False) < 1:
-                game.sk.ensure_present_placeholder(
-                    game.sk.present_placeholder_label()
-                )
+                # DEFECT 2a (WO-LILY-ROSTER-TRUTH-001): this hook runs
+                # ~0.5ms after end-of-turn, but diarization labels land
+                # ~1.3s later — present_placeholder_label() returns None
+                # until a segment is actually sighted, and minting DEFERS
+                # to a later turn rather than fabricating the "UU" seat
+                # that became the live phantom (13:47, lily-359C62).
+                label = game.sk.present_placeholder_label()
+                if label is not None and game.sk.ensure_present_placeholder(
+                    label
+                ):
+                    # The seat exists — the glass sees it in the same
+                    # publish that carries the bumped roster_gen.
+                    game.publish_attributes_nowait()
         consume_reply = getattr(self._game, "consume_deterministic_reply", None)
         message_text = _message_text(new_message)
         event_owned = (

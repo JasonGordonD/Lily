@@ -452,6 +452,74 @@ _ADULT_HEAT_SUGGESTIVE_RE = _re.compile(
 )
 
 
+# DEFECT 2b (WO-LILY-ROSTER-TRUTH-001, live 13:47 2026-08-15): the solo
+# assertion. "Just me. Myself and I." carried table-arity truth and no
+# lobby parser consumed it — the roster kept a phantom placeholder and the
+# glass showed three chips at a one-man table. Deterministic, normalized
+# like every other lobby detector. "just me and X" / "only me and X" are
+# NOT solo (the lookahead), and "solo" the word is only consumed in the
+# lobby (pre-start), so a mid-game "Han Solo" answer never reaches it.
+_SOLO_ASSERTION_RE = _re.compile(
+    r"\b(?:"
+    r"just me(?!\s+and\b)"
+    r"|only me(?!\s+and\b)"
+    r"|me myself and i"
+    r"|myself and i"
+    r"|by myself"
+    r"|(?:i m|i am|im) (?:playing )?(?:alone|solo)"
+    r"|playing (?:alone|solo)"
+    r"|no ?body else|no one else"
+    r"|going solo"
+    r"|solo (?:table|game|night|round|player|tonight|today)"
+    r")\b"
+)
+
+# A bare "solo" (whole utterance) is an arity answer to "who's playing?";
+# the word inside a longer sentence is too ambiguous to clamp on.
+_SOLO_BARE_RE = _re.compile(r"^(?:it s |its )?solo$")
+
+
+def lily_detect_solo_assertion(text: str) -> bool:
+    """True when the utterance asserts a one-person table."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    return bool(
+        _SOLO_ASSERTION_RE.search(normalized)
+        or _SOLO_BARE_RE.match(normalized)
+    )
+
+
+def lily_surface_names(players: dict) -> dict[str, str]:
+    """HOTFIX-010 V5 fix-loop (authority moved from lily_agent by
+    WO-LILY-ROSTER-TRUTH-001): the one naming authority for every name
+    SURFACE — symmetry with the spoken authority lines, which recite
+    real_player_names() only. A placeholder anchor is keyed by its raw
+    diarizer label ("UU"/"S1"); that label is an attribution anchor, NOT
+    an identity, so it must never be aired or persisted as a player name.
+    This maps each roster key to the name it may surface as: real names
+    pass through; placeholders become a neutral non-identity marker.
+    Shared by every surface that would otherwise leak the raw label — the
+    frontend scoreboard and finale/comeback/standings (via
+    _players_payload), the per-player block persisted in game_stats
+    (build_game_stats), AND the roster-mutation events that name a
+    corrected seat's previous surface — so all legs stay consistent (same
+    placeholder → same marker, all iterate the players dict in insertion
+    order). Scores/streak/leader stay keyed on the raw dict key; only the
+    surfaced name is neutralized. A real name later migrates or adopts
+    the placeholder's history via bind_speaker, after which the entry is
+    real and surfaces as itself."""
+    names: dict[str, str] = {}
+    seq = 0
+    for key, s in players.items():
+        if s.get("placeholder"):
+            seq += 1
+            names[key] = "Player" if seq == 1 else f"Player {seq}"
+        else:
+            names[key] = key
+    return names
+
+
 def lily_parse_lobby_setup_intents(text: str) -> dict:
     """Return every setup/start intent in one user final.
 
@@ -469,6 +537,7 @@ def lily_parse_lobby_setup_intents(text: str) -> dict:
             "heat": None,
             "age_mentioned": False,
             "age_consent": False,
+            "solo": False,
         }
     heat = None
     if _ADULT_HEAT_MIX_RE.search(normalized):
@@ -491,6 +560,13 @@ def lily_parse_lobby_setup_intents(text: str) -> dict:
         # Presence is ordering evidence only; P0-3 owns consent semantics.
         "age_mentioned": bool(_SETUP_AGE_MENTION_RE.search(normalized)),
         "age_consent": lily_detect_age_consent(text),
+        # DEFECT 2b (WO-LILY-ROSTER-TRUTH-001): table-arity assertion —
+        # "just me" clamps the roster to the asserting voice (the agent's
+        # apply_solo_assertion consumes this with the segment's label).
+        "solo": bool(
+            _SOLO_ASSERTION_RE.search(normalized)
+            or _SOLO_BARE_RE.match(normalized)
+        ),
     }
 
 # Bare affirmatives — must NOT start the game after an A-or-B offer
@@ -1942,6 +2018,24 @@ class LilyScorekeeper:
         # Log-only unrostered speaker sightings
         self.unrostered_labels: dict[str, int] = {}
 
+        # WO-LILY-ROSTER-TRUTH-001: the roster-truth wire. Every roster
+        # mutation that changes what the glass may show (bind, migration,
+        # placeholder mint/adopt/retire) bumps roster_gen — the monotonic
+        # generation the `players` attribute payload publishes — and, when
+        # the mutation corrects or retires a surfaced name, appends a
+        # structured event here for the agent to drain into rename/unbind
+        # beats (S1: this sensor's consumer is publish_roster_events; the
+        # consequence is the glass correcting itself instead of unioning
+        # stale spellings into phantom chips).
+        self.roster_gen: int = 0
+        self.roster_events: list[dict] = []
+        # Solo-assertion latch (live 13:47 2026-08-15, lily-359C62): once a
+        # voice asserts the table is solo ("just me", "myself and I"), the
+        # asserting voice's diarization label is latched here; placeholder
+        # seats keyed to OTHER labels are retired and refused. Cleared by a
+        # real bind on a different label (multiplayer stays intact).
+        self.solo_voice_label: Optional[str] = None
+
         # WS-8 ghost-label posture: rolling (t, normalized_text, player) of
         # bound-player finals, pruned to the ghost-fold window. An unbound
         # single-utterance label duplicating one of these is a diarizer echo
@@ -1954,6 +2048,30 @@ class LilyScorekeeper:
         self.quarantined_segments: list[dict] = []
 
     # -- roster ------------------------------------------------------------
+
+    def surface_names(self) -> dict[str, str]:
+        """The one naming authority for every name SURFACE (moved here from
+        lily_agent._surface_names by WO-LILY-ROSTER-TRUTH-001 so roster
+        mutations can name their own before/after surfaces). See
+        lily_surface_names for the contract."""
+        return lily_surface_names(self.players)
+
+    def _roster_mutation(self, kind: str, **fields) -> dict:
+        """Record one roster mutation: bump the monotonic roster_gen and
+        append a structured event for the agent to drain into glass beats
+        (rename/unbind). Kinds: bind, mint, adopt, migrate, rename,
+        retire. The gen rides the `players` attribute payload and every
+        roster beat, so the glass can order beats against payloads."""
+        self.roster_gen += 1
+        event = {"kind": kind, "gen": self.roster_gen, **fields}
+        self.roster_events.append(event)
+        return event
+
+    def drain_roster_events(self) -> list[dict]:
+        """Hand the pending roster mutations to the publisher exactly once
+        (publish_roster_events in lily_agent is the sole consumer)."""
+        events, self.roster_events = self.roster_events, []
+        return events
 
     def bind_speaker(
         self,
@@ -1983,6 +2101,23 @@ class LilyScorekeeper:
         back to release semantics (logged RENAME_REFUSED).
         """
         name = player_name.strip()
+        # WO-LILY-ROSTER-TRUTH-001: surfaced names BEFORE this mutation, so
+        # a migration/adoption can tell the glass what the corrected seat
+        # used to display ("Player 2" -> "Rami"), and the solo latch clears
+        # when a second voice genuinely binds.
+        surfaced_before = self.surface_names()
+        if (
+            self.solo_voice_label
+            and speaker_label != self.solo_voice_label
+            and not self.players.get(name, {}).get("placeholder")
+        ):
+            logger.info(
+                "LILY_STATE | SOLO_LATCH_CLEARED | session=%s label=%s "
+                "name=%s (a bind on a different voice outranks the solo "
+                "assertion)", self.session_id, speaker_label, name,
+            )
+            self.solo_voice_label = None
+        migrated_this_bind = False
         # If this label was bound to someone else, release it there —
         # or migrate the identity when this is a same-voice correction.
         for other_name, state in list(self.players.items()):
@@ -2004,6 +2139,16 @@ class LilyScorekeeper:
                         migrated.pop("placeholder", None)
                         migrated["speaker_label"] = None
                         self.players[name] = migrated
+                    migrated_this_bind = True
+                    self._roster_mutation(
+                        "migrate",
+                        old_key=other_name,
+                        old_surfaced=surfaced_before.get(
+                            other_name, other_name
+                        ),
+                        new=name,
+                        label=speaker_label,
+                    )
                     logger.info(
                         "LILY_STATE | PLACEHOLDER_NAMED | session=%s label=%s "
                         "placeholder=%s name=%s",
@@ -2026,6 +2171,16 @@ class LilyScorekeeper:
                         if entry.get("player") == other_name:
                             entry["player"] = name
                     self.players[name] = migrated
+                    migrated_this_bind = True
+                    self._roster_mutation(
+                        "rename",
+                        old_key=other_name,
+                        old_surfaced=surfaced_before.get(
+                            other_name, other_name
+                        ),
+                        new=name,
+                        label=speaker_label,
+                    )
                     logger.info(
                         "LILY_STATE | PLAYER_RENAMED | session=%s label=%s "
                         "from=%s to=%s",
@@ -2050,6 +2205,35 @@ class LilyScorekeeper:
             "lobby_fact": None,
             "lifeline_available": True,
         })
+        if player.pop("placeholder", None):
+            # DEFECT 1, WO-LILY-ROSTER-TRUTH-001 (live 13:47 2026-08-15,
+            # lily-359C62 — DB row players.Rami placeholder:true with 39s
+            # of talk time): ANY bind landing on a placeholder seat is a
+            # migration, including the SAME-KEY adoption the loop above
+            # can never see (a placeholder keyed by a name-shaped
+            # diarization label, then bound to that very name — the
+            # other_name != name guard skips it, and setdefault returned
+            # this seat with the flag intact). The seat is now a named
+            # player; downstream surfaces (_surface_names /
+            # real_player_names / final_standings) must stop anonymizing
+            # it. History already lives on this key, so nothing migrates
+            # — only the flag retires.
+            self._roster_mutation(
+                "adopt",
+                old_key=name,
+                old_surfaced=surfaced_before.get(name, name),
+                new=name,
+                label=speaker_label,
+            )
+            logger.info(
+                "LILY_STATE | PLACEHOLDER_ADOPTED | session=%s label=%s "
+                "name=%s (same-key bind cleared the placeholder flag)",
+                self.session_id, speaker_label, name,
+            )
+        elif name not in surfaced_before and not migrated_this_bind:
+            # A brand-new seat: gen bump only — the player_bind beat and
+            # the payload republish carry it to the glass.
+            self._roster_mutation("bind", new=name, label=speaker_label)
         player["speaker_label"] = speaker_label
         if speaker_id:
             player["speaker_id"] = speaker_id
@@ -2081,8 +2265,27 @@ class LilyScorekeeper:
         history through bind_speaker. Idempotent: a real name already on the
         table, or this label already bound (named or placeholder), is a
         no-op. Returns the placeholder key, or None when nothing was
-        created."""
-        label = (speaker_label or "").strip() or "UU"
+        created.
+
+        DEFECT 2, WO-LILY-ROSTER-TRUTH-001 (live 13:47 2026-08-15): a
+        placeholder may only be keyed to an OBSERVED diarization label —
+        never the hardcoded "UU" default off an empty sightings map (the
+        placeholder hook fires ~0.5ms after end-of-turn; diarization labels
+        land ~1.3s later, so the first hook minted a phantom "UU" seat and
+        the next turn minted a SECOND seat off the by-then-observed label).
+        An empty label defers minting to a later turn; a second concurrent
+        placeholder is refused outright (one unnamed present voice gets one
+        seat); a latched solo assertion refuses labels other than the
+        asserting voice's."""
+        label = (speaker_label or "").strip()
+        if not label:
+            logger.info(
+                "LILY_STATE | PLACEHOLDER_DEFERRED | session=%s — no "
+                "diarization label observed yet; minting waits for a "
+                "sighted segment (never the 'UU' default)",
+                self.session_id,
+            )
+            return None
         for state in self.players.values():
             if state.get("speaker_label") == label:
                 return None
@@ -2091,6 +2294,21 @@ class LilyScorekeeper:
             # its own attribution and names itself opportunistically.
             return None
         if label in self.players:
+            return None
+        if self.has_active_placeholder():
+            logger.info(
+                "LILY_STATE | PLACEHOLDER_REFUSED | session=%s label=%s "
+                "reason=one_placeholder_max (the present unnamed voice "
+                "already holds a seat; a second sighting is diarizer "
+                "churn, not a new player)", self.session_id, label,
+            )
+            return None
+        if self.solo_voice_label and label != self.solo_voice_label:
+            logger.info(
+                "LILY_STATE | PLACEHOLDER_REFUSED | session=%s label=%s "
+                "reason=solo_asserted latched=%s",
+                self.session_id, label, self.solo_voice_label,
+            )
             return None
         self.players[label] = {
             "speaker_label": label,
@@ -2106,6 +2324,7 @@ class LilyScorekeeper:
             "lifeline_available": True,
             "placeholder": True,
         }
+        self._roster_mutation("mint", new=label, label=label)
         logger.info(
             "LILY_STATE | PLACEHOLDER_STOOD_UP | session=%s label=%s",
             self.session_id, label,
@@ -2123,12 +2342,64 @@ class LilyScorekeeper:
             n for n, s in self.players.items() if not s.get("placeholder")
         ]
 
-    def present_placeholder_label(self) -> str:
-        """The present unnamed voice's label — the most-observed unrostered
-        label, else a stable anonymous anchor."""
+    def present_placeholder_label(self) -> Optional[str]:
+        """The present unnamed voice's OBSERVED label — the most-observed
+        unrostered label. None when no diarized segment has been sighted
+        yet: DEFECT 2 (WO-LILY-ROSTER-TRUTH-001) was this method inventing
+        the "UU" anchor off an empty sightings map, minting a seat for a
+        voice nobody had observed. Callers defer minting until a segment
+        lands (~1.3s after the turn hook)."""
         if self.unrostered_labels:
             return max(self.unrostered_labels.items(), key=lambda kv: kv[1])[0]
-        return "UU"
+        return None
+
+    def clamp_roster_solo(self, speaker_label: Optional[str]) -> list[str]:
+        """DEFECT 2b (WO-LILY-ROSTER-TRUTH-001): a solo assertion ("Just
+        me. Myself and I." — live 13:47, answered by a three-chip lobby)
+        clamps the roster to the speaking voice. The asserting voice's
+        label is latched (future placeholder mints for other labels are
+        refused) and every PLACEHOLDER seat keyed to a different label is
+        retired, its retirement drained to the glass as an unbind beat.
+        Named seats are never retired here — a joking "just me" at a real
+        table costs nothing, and multiplayer binding stays intact. Without
+        a diarization label for the asserting voice nothing is retired
+        (we cannot tell the speaker's own placeholder from a phantom).
+        Returns the retired seat keys."""
+        label = (speaker_label or "").strip().strip("[]")
+        if not label:
+            logger.info(
+                "LILY_STATE | SOLO_ASSERTED | session=%s label=none — no "
+                "diarization label for the asserting voice; nothing "
+                "retired", self.session_id,
+            )
+            return []
+        self.solo_voice_label = label
+        surfaced = self.surface_names()
+        retired: list[str] = []
+        for name, state in list(self.players.items()):
+            if not state.get("placeholder"):
+                continue
+            if (state.get("speaker_label") or "") == label or name == label:
+                continue
+            self.players.pop(name)
+            self._roster_mutation(
+                "retire",
+                old_key=name,
+                old_surfaced=surfaced.get(name, name),
+                label=state.get("speaker_label"),
+            )
+            retired.append(name)
+            logger.info(
+                "LILY_STATE | SOLO_CLAMP_RETIRED | session=%s seat=%s "
+                "seat_label=%s solo_label=%s",
+                self.session_id, name, state.get("speaker_label"), label,
+            )
+        logger.info(
+            "LILY_STATE | SOLO_ASSERTED | session=%s label=%s retired=%d "
+            "roster=%d", self.session_id, label, len(retired),
+            self.roster_size(),
+        )
+        return retired
 
     # -- attribution -------------------------------------------------------
 

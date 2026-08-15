@@ -57,6 +57,8 @@ def test_be8d8b_final_parses_all_setup_intents():
         "heat": "mix",
         "age_mentioned": True,
         "age_consent": True,
+        # WO-LILY-ROSTER-TRUTH-001 (D2b): table-arity assertion key.
+        "solo": False,
     }
 
 

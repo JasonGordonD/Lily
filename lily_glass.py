@@ -184,6 +184,12 @@ class LilyGlassMixin:
                 # sticky, deterministic, default voice_only.
                 "media_mode": self.sk.media_mode,
                 "players": json.dumps(self._players_payload()),
+                # WO-LILY-ROSTER-TRUTH-001 (D3): the roster generation this
+                # payload was built from — monotonic, bumped on every roster
+                # mutation. The `players` payload above is the SINGLE
+                # roster-truth wire; beats reference this gen and only
+                # animate. Clients predating the key ignore it.
+                "roster_gen": str(getattr(self.sk, "roster_gen", 0)),
                 "answer_window": json.dumps(window),
                 # SEAM ADDITION (WS-6, WO-LILY-OMNIBUS-003): supply
                 # readiness. "false" only in the live supply-stall state
@@ -737,7 +743,9 @@ class LilyGlassMixin:
         # P0-2: non-exclusive setup parse BEFORE any start dispatch. The
         # scorekeeper result is command-or-media for scoring, but setup must
         # retain voice + adult + pictures + consent + play from one final.
-        setup_intents = self.note_lobby_setup_intents(text)
+        setup_intents = self.note_lobby_setup_intents(
+            text, speaker_label=speaker_label
+        )
 
         # WO-2: if her last turn was an A-or-B offer, a bare yes must not
         # open round one — lock kickoff until explicit start language.

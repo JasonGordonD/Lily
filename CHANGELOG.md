@@ -5,6 +5,97 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-15 — WO-LILY-ROSTER-TRUTH-001: the roster tells one truth on every surface
+
+Live 13:47 EDT (lily-359C62-5613a25a), root-caused with DB proof: the
+session persisted `players.Rami` with `placeholder:true` (39.48s talk time,
+1 answer attempted), a phantom `"UU"` seat, and
+`final_standings ["Player","Player 2"]` — a one-man table shown as three
+chips, then told "you don't have my name anymore" was wrong. Four defects,
+one theme: the roster said different things on different wires.
+
+**D1 (P0) — placeholder flag survived a same-key bind.**
+`bind_speaker`'s migration loop requires `other_name != name`, so binding
+"Rami" onto a placeholder already KEYED "Rami" (a name-shaped biometric
+diarization label) fell to `setdefault` and never cleared the flag —
+`_surface_names` anonymized the seat forever, `real_player_names()==[]`
+poisoned every consumer. FIX: any bind landing on a placeholder seat is a
+migration — the `setdefault` exit now pops the flag (same-key ADOPTION,
+`PLACEHOLDER_ADOPTED`) and emits a rename mutation naming the seat's
+previous surface ("Player" → "Rami"). All bind/migration exits audited for
+flag consistency; the bind TOOL now verifies the COMMITTED seat and returns
+a `DEGRADED bind:` receipt if the seat didn't commit clean (S2 — the live
+receipt claimed success over a degraded seat).
+
+**D2 (P0) — phantom seat minting; no solo arity.**
+(a) The turn-hook fires ~0.5ms after end-of-turn; diarization labels land
+~1.3s later. `present_placeholder_label()` invented the hardcoded `"UU"`
+anchor off an EMPTY sightings map — a seat minted for a voice nobody
+observed. It now returns `None` until a label is sighted and minting
+DEFERS (`PLACEHOLDER_DEFERRED`); an observed `"UU"` sighting stays legal.
+(b) One placeholder max: a second concurrent placeholder is refused
+(`PLACEHOLDER_REFUSED`, one unnamed present voice = one seat), and a
+placeholder keyed to a label that later binds is the SAME seat (D1's
+adoption + the existing migration).
+(c) Solo-assertion detector (`lily_detect_solo_assertion`, `solo` key in
+`lily_parse_lobby_setup_intents`): "just me" / "only me" / "myself and I" /
+"by myself" / "solo" clamps the roster to the asserting voice —
+`clamp_roster_solo` latches `solo_voice_label`, retires placeholder seats
+on OTHER labels (unbind beats air), refuses future phantom mints; named
+seats are never retired and a real bind on a different voice clears the
+latch (multiplayer intact). Consumed lobby-only at the transcript seam
+(`note_lobby_setup_intents(text, speaker_label=…)`).
+
+**D3 (P1) — dual-channel name split.**
+The `players` attribute payload said "Player 2" while the `player_bind`
+beat said "Rami"; the UI unioned both into three chips, and the agent never
+emitted the rename/unbind events the UI already shipped consumers for. FIX:
+the payload is the SINGLE roster-truth wire — verbatim names plus a
+monotonic `roster_gen` attribute (bumped by every roster mutation in the
+new `_roster_mutation` chokepoint). Beats reference the gen and only
+ANIMATE; `publish_roster_events` (drains `drain_roster_events`) airs every
+migration/rename/adoption as a `rename` beat (old SURFACED name → new) and
+every solo-clamp retire as `unbind`, before the payload republish in the
+same seam update. `_surface_names`' authority moved to
+`lily_scorekeeper.lily_surface_names` so mutations can name a corrected
+seat's previous surface. prmpt_ui counterpart (branch `fix/wo4-roster-ui`):
+chips derive from the payload ONLY; beats never add chips or spellings;
+backward-compatible with payloads lacking `roster_gen`.
+
+**D4 (P1) — stored pacing unreachable pre-promotion.**
+`apply_prefs_at_game_start` read only `self.prefs`, which stays empty while
+device-candidate prefs sit STAGED — the table's stored relaxed pacing never
+reached Q1 and a timer aired against their standing choice ("I play
+relaxed… I should not have a timer on my screen"). FIX: weakly apply the
+`pacing` key from `_device_candidate_prefs` when `self.prefs` has none.
+Identity boundary (HOTFIX-010 / W1c rules) holds: ONLY pacing — never
+names/memory/history from an unverified candidate — no write-back into
+`self.prefs`, no this-session provenance flag; a session-spoken pacing
+always wins.
+
+- Tests: **new `tests/test_roster_truth_wo1.py`** (23 tests: same-key
+  adoption, deferred/one-max minting, solo detector + clamp +
+  agent-through unbind publish, beat/payload parity, honest degraded
+  receipt, staged-pacing weak apply + identity boundary, live-fixture
+  replay). Failing-first verified against the unpatched tree: (i)
+  placeholder survives same-key bind, (ii) "UU"+second-seat double mint,
+  (iii) no solo intent, (iv) payload "Player" vs beat "Rami", (v) staged
+  relaxed → Q1 still timed. One existing exact-dict assertion updated for
+  the new `solo` key (`test_multi_intent_setup_p0`). Suite 2670 green on
+  python3.11 and 3.13.
+- Fixture (S13): `tests/fixtures/live_20260815_1347_roster.txt` — verbatim
+  transcript of the 13:47 call (lily_transcripts rows 4136-4158), sha256
+  `361c853bf3e0b3530722195d750a7e920622572db6ef2ae68cdc43e1756948cf`.
+- Files: `lily_scorekeeper.py` (roster_gen/roster_events chokepoint,
+  bind_speaker adoption + mutation events, ensure_present_placeholder
+  defer/one-max/solo guards, present_placeholder_label → Optional,
+  clamp_roster_solo, lily_detect_solo_assertion, lily_surface_names,
+  `solo` intent key), `lily_agent.py` (_surface_names delegate,
+  publish_roster_events, apply_solo_assertion, gen-stamped player_bind
+  beat, deferred placeholder hook, weak pacing apply, S2 bind receipt),
+  `lily_glass.py` (`roster_gen` attribute; speaker_label into
+  note_lobby_setup_intents).
+
 ## 2026-08-14 — WO-LILY-ANTIREPEAT-PROTOCOL-001: one continuous take + the recognition_aired backstop
 
 Four live instances of one defect class today — content aired twice through
