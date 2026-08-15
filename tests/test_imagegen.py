@@ -261,6 +261,130 @@ def test_generation_routes_to_grok_in_adult_mode(monkeypatch):
     assert model == "grok-imagine-image-2.0"
 
 
+# ---------------------------------------------------------------------------
+# WO-FLEET-IMAGE-QLOW-FALLBACK-001: quality=low on the 2.0 POST + one-shot
+# fallback to the classic model on timeout/5xx.
+# ---------------------------------------------------------------------------
+
+def test_grok2_post_carries_quality_low(monkeypatch):
+    seen = {}
+
+    async def fake_post(prompt, *, model, quality, api_key):
+        seen.update(model=model, quality=quality)
+        return b"png", "image/png", model
+
+    monkeypatch.setattr(lily_imagegen.lily_config, "xai_api_key", lambda: "k")
+    monkeypatch.setattr(lily_imagegen, "_post_xai_image", fake_post)
+    _, _, served = run(lily_imagegen._generate_image_bytes_xai("p"))
+    assert seen["model"] == "grok-imagine-image-2.0"
+    assert seen["quality"] == "low"
+    assert served == "grok-imagine-image-2.0"
+
+
+def test_quality_env_override_medium(monkeypatch):
+    seen = {}
+
+    async def fake_post(prompt, *, model, quality, api_key):
+        seen["quality"] = quality
+        return b"png", "image/png", model
+
+    monkeypatch.setenv("LILY_IMAGE_QUALITY", "medium")
+    monkeypatch.setattr(lily_imagegen.lily_config, "xai_api_key", lambda: "k")
+    monkeypatch.setattr(lily_imagegen, "_post_xai_image", fake_post)
+    run(lily_imagegen._generate_image_bytes_xai("p"))
+    assert seen["quality"] == "medium"
+
+
+def test_non_grok2_model_sends_no_quality(monkeypatch):
+    seen = {}
+
+    async def fake_post(prompt, *, model, quality, api_key):
+        seen["quality"] = quality
+        return b"png", "image/png", model
+
+    monkeypatch.setattr(lily_imagegen.lily_config, "xai_api_key", lambda: "k")
+    monkeypatch.setattr(lily_imagegen, "_post_xai_image", fake_post)
+    run(lily_imagegen._generate_image_bytes_xai(
+        "p", model="grok-imagine-image-quality"
+    ))
+    assert seen["quality"] is None
+
+
+def test_timeout_falls_back_to_classic_model(monkeypatch):
+    calls = []
+
+    async def fake_post(prompt, *, model, quality, api_key):
+        calls.append({"model": model, "quality": quality})
+        if len(calls) == 1:
+            raise asyncio.TimeoutError()
+        return b"png", "image/png", model
+
+    monkeypatch.setattr(lily_imagegen.lily_config, "xai_api_key", lambda: "k")
+    monkeypatch.setattr(lily_imagegen, "_post_xai_image", fake_post)
+    _, _, served = run(lily_imagegen._generate_image_bytes_xai("p"))
+    assert len(calls) == 2  # one retry, exactly once
+    assert calls[0]["model"] == "grok-imagine-image-2.0"
+    assert calls[0]["quality"] == "low"
+    assert calls[1]["model"] == "grok-imagine-image-quality"
+    assert calls[1]["quality"] is None
+    assert served == "grok-imagine-image-quality"
+
+
+def test_5xx_falls_back_to_classic_model(monkeypatch):
+    calls = []
+
+    async def fake_post(prompt, *, model, quality, api_key):
+        calls.append(model)
+        if len(calls) == 1:
+            raise lily_imagegen._XaiServerError("xAI image HTTP 503: down")
+        return b"png", "image/png", model
+
+    monkeypatch.setattr(lily_imagegen.lily_config, "xai_api_key", lambda: "k")
+    monkeypatch.setattr(lily_imagegen, "_post_xai_image", fake_post)
+    _, _, served = run(lily_imagegen._generate_image_bytes_xai("p"))
+    assert calls == ["grok-imagine-image-2.0", "grok-imagine-image-quality"]
+    assert served == "grok-imagine-image-quality"
+
+
+def test_4xx_does_not_fall_back(monkeypatch):
+    calls = []
+
+    async def fake_post(prompt, *, model, quality, api_key):
+        calls.append(model)
+        raise RuntimeError("xAI image HTTP 422: rejected by content moderation")
+
+    monkeypatch.setattr(lily_imagegen.lily_config, "xai_api_key", lambda: "k")
+    monkeypatch.setattr(lily_imagegen, "_post_xai_image", fake_post)
+    try:
+        run(lily_imagegen._generate_image_bytes_xai("p"))
+        assert False, "expected the 4xx to propagate"
+    except RuntimeError as e:
+        assert "422" in str(e)
+    assert calls == ["grok-imagine-image-2.0"]  # no retry on a 4xx
+
+
+def test_served_model_threads_to_roi_license_note(monkeypatch):
+    # When the fallback leg served, the 'real or imagined' note must name the
+    # model that actually rendered, not the deck default.
+    lily_imagegen._SESSION_IMAGE_MODEL.clear()
+
+    async def fake_gen_q_image(supabase, *, session_id, question_id, **kw):
+        lily_imagegen._remember_session_image_model(
+            (session_id, question_id), "grok-imagine-image-quality"
+        )
+        return "https://cdn.example/lily-images/generated/fb.png"
+
+    monkeypatch.setattr(
+        lily_imagegen, "lily_generate_question_image", fake_gen_q_image
+    )
+    q = run(lily_imagegen.lily_build_real_or_imagined_question(
+        object(), index=1, session_id="room-1"
+    ))
+    assert "grok-imagine-image-quality" in q["image_license_note"]
+    assert "grok-imagine-image-2.0" not in q["image_license_note"]
+    lily_imagegen._SESSION_IMAGE_MODEL.clear()
+
+
 def test_adult_style_intensity_and_content_brief():
     sug = lily_imagegen.lily_adult_style("scene", intensity="suggestive")
     exp = lily_imagegen.lily_adult_style("scene", intensity="explicit")

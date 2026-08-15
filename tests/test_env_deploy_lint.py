@@ -169,6 +169,9 @@ LILY_LOCAL_ONLY_ENV = {
     # (grok-imagine-image-2.0); the xAI credential it uses (XAI_API_KEY) is
     # already forwarded.
     "LILY_ADULT_IMAGEGEN_MODEL",
+    # Grok Imagine 2.0 quality tier — ships on its in-code default ("low"),
+    # env-overridable low|medium on the box; no credential of its own.
+    "LILY_IMAGE_QUALITY",
     "LILY_VOICE_1",
 }
 
