@@ -91,7 +91,7 @@ class FakeProvider:
                 "xAI image HTTP 400: Generated image rejected by content "
                 "moderation"
             )
-        return b"\x89PNG-fake-bytes", "image/jpeg", "grok-imagine-image"
+        return b"\x89PNG-fake-bytes", "image/jpeg", "grok-imagine-image-2.0"
 
     async def upload(self, data, mime, partition):
         return f"{partition}/{self.calls:04d}.jpg"

@@ -337,12 +337,12 @@ def adult_reasoning_effort(override: Optional[str] = None) -> Optional[str]:
 
 def adult_imagegen_model() -> str:
     """Image model for the ADULT deck. Gemini refuses adult content, so the
-    adult picture path routes to xAI Grok Imagine (grok-imagine-image, via
+    adult picture path routes to xAI Grok Imagine (grok-imagine-image-2.0, via
     xai_api_key()). Live-verified: POST /v1/images/generations returns a
     url. Adult picture-trivia is LIVE upstream
     (lily_reasoning.prefetch_picture_question threads mode='adult' to the
     picture builders); this pin routes those generated images to Grok."""
-    return _get("LILY_ADULT_IMAGEGEN_MODEL", "grok-imagine-image")
+    return _get("LILY_ADULT_IMAGEGEN_MODEL", "grok-imagine-image-2.0")
 
 
 # ---------------------------------------------------------------------------

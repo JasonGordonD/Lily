@@ -5,7 +5,7 @@ Operator-directed swaps (override the fleet no-model-pin rule for these):
   - brain (vocal) -> grok-4.5 through the xAI/OpenAI-compatible plugin.
   - standard-deck image gen -> gemini-3.1-flash-lite-image (Nano Banana 2
     Lite); live-verified via generate_content.
-  - adult-deck image gen -> xAI grok-imagine-image (Gemini refuses adult).
+  - adult-deck image gen -> xAI grok-imagine-image-2.0 (Gemini refuses adult).
   - thinking_level: HIGH for content generation + adjudication (never low),
     LOW for reflexive banter, ESCALATE to HIGH on complex user turns.
 
@@ -103,7 +103,7 @@ def test_standard_imagegen_is_nano_banana_2_lite():
 
 
 def test_adult_imagegen_routes_to_grok():
-    assert lily_config.adult_imagegen_model() == "grok-imagine-image"
+    assert lily_config.adult_imagegen_model() == "grok-imagine-image-2.0"
 
 
 def test_image_and_brain_pins_are_separate_constants():
@@ -218,7 +218,7 @@ def test_adult_mode_routes_image_gen_to_xai(monkeypatch):
 
     async def _fake_xai(prompt, *, model=None):
         called["xai"] = (prompt, model)
-        return (b"xai-bytes", "image/jpeg", "grok-imagine-image")
+        return (b"xai-bytes", "image/jpeg", "grok-imagine-image-2.0")
 
     monkeypatch.setattr(lily_imagegen, "_generate_image_bytes_xai", _fake_xai)
     data, mime, mdl = asyncio.new_event_loop().run_until_complete(
@@ -228,5 +228,5 @@ def test_adult_mode_routes_image_gen_to_xai(monkeypatch):
     # scene with the register-tagged art direction — the routing is what
     # this test pins, so assert the base prompt rides through, not equality.
     assert called["xai"][0].startswith("a scene")
-    assert mdl == "grok-imagine-image"
+    assert mdl == "grok-imagine-image-2.0"
     assert data == b"xai-bytes"

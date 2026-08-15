@@ -183,7 +183,7 @@ class FakeSupabase:
             row.setdefault("cost_usd", 0)
         if table == "lily_picture_arsenal":
             row.setdefault("status", "ready")
-            row.setdefault("generation_model", "grok-imagine-image")
+            row.setdefault("generation_model", "grok-imagine-image-2.0")
 
     def enforce_constraints(self, table, row):
         """The two uniqueness guarantees the arsenal design depends on."""
@@ -218,7 +218,7 @@ def seed_entry(db, partition, **overrides):
         "canonical_answer": overrides.pop("canonical_answer", "a teapot"),
         "acceptable_answers": ["a teapot", "teapot"],
         "generation_prompt": "a teapot on a table",
-        "generation_model": "grok-imagine-image",
+        "generation_model": "grok-imagine-image-2.0",
         "image_storage_path": f"{partition}/abc123.jpg",
         "image_source": "generated",
         "status": "ready",

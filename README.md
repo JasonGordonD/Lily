@@ -820,7 +820,7 @@ Every model ID below was verified live on the funded keys before wiring.
   verdicts; dedicated image models still render pixels.
 - **Post-session assessment:** `grok-4.5` `high`, offline only; report fill
   and reconciliation never add latency to a live room.
-- **Image gen — single deck (xAI Grok Imagine):** `grok-imagine-image`
+- **Image gen — single deck (xAI Grok Imagine):** `grok-imagine-image-2.0`
   (`lily_config.adult_imagegen_model`) via `_generate_image_bytes_xai`. All
   generated images — general and adult — route through Grok Imagine; the legacy
   standard-deck path was removed. `lily_generate_image_bytes` runs every
@@ -830,6 +830,10 @@ Every model ID below was verified live on the funded keys before wiring.
   on `media_mode` only, and `prefetch_picture_question` threads `mode='adult'`
   through `lily_build_real_or_imagined_question` so its GENERATED branch routes
   to Grok. The web-sourced (real-entity / real-photo) branches are unchanged.
+  The generation pin moved to `grok-imagine-image-2.0` under the fleet-wide
+  WO-FLEET-GROK-IMAGINE-2-SWAP-001 (pure model-id swap; single-model deck, no
+  tiering or new params). `image_license_note` names the resolved model at
+  runtime, so it now reads `grok-imagine-image-2.0`.
 
 ## Both-sides record, continuous recognition, variety (WO-LILY-RECOGNITION-VARIETY-001)
 
@@ -2714,7 +2718,7 @@ generated** — a plausible-but-wrong landmark is a lie on the screen.
 `lily_imagegen.py` is a native lift of the maya_jrvs image stack onto Lily's
 xAI Grok Imagine infra (all generated images route through
 `_generate_image_bytes_xai` / `lily_config.adult_imagegen_model`,
-`grok-imagine-image`):
+`grok-imagine-image-2.0`):
 
 - **background-task pattern** — generation runs at prefetch time only, never
   inside a live turn;

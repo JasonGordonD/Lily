@@ -258,7 +258,7 @@ def test_generation_routes_to_grok_in_adult_mode(monkeypatch):
     assert "comic-book" in calls["xai"]["prompt"]
     assert "SUGGESTIVE" in calls["xai"]["prompt"]
     assert model == lily_imagegen.lily_config.adult_imagegen_model()
-    assert model == "grok-imagine-image"
+    assert model == "grok-imagine-image-2.0"
 
 
 def test_adult_style_intensity_and_content_brief():
@@ -295,7 +295,7 @@ def test_real_or_imagined_generated_names_grok(monkeypatch):
     assert lily_imagegen.lily_config.adult_imagegen_model() in q[
         "image_license_note"
     ]
-    assert "grok-imagine-image" in q["image_license_note"]
+    assert "grok-imagine-image-2.0" in q["image_license_note"]
 
 
 def test_real_or_imagined_failure_is_text_only_fallback(monkeypatch):
