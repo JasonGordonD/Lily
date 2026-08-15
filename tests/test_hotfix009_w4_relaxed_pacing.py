@@ -396,7 +396,12 @@ def test_timed_late_gate_unchanged():
 # ===========================================================================
 
 
-def test_relaxed_solo_wrong_answer_adjudicates_without_any_clock():
+def test_relaxed_solo_wrong_answer_adjudicates_without_any_clock(monkeypatch):
+    # WO-LILY-BIND-DISPUTE-001 D3: roster-complete now opens a settle
+    # window before committing. This test pins the DEGENERATE case
+    # (settle=0 -> the pre-WO immediate close); the settle behavior itself
+    # is pinned in test_bind_dispute_p0.py.
+    monkeypatch.setenv("LILY_RELAXED_SETTLE_SECONDS", "0")
     game = _make_game()
     now = _arm_q2(game, ghost_roster=False)
     game.sk.set_pacing("relaxed")
@@ -425,10 +430,12 @@ def test_relaxed_solo_wrong_answer_adjudicates_without_any_clock():
     assert game._steal_window is False
 
 
-def test_relaxed_multiplayer_waits_for_the_roster():
+def test_relaxed_multiplayer_waits_for_the_roster(monkeypatch):
     """Two ROSTERED players, one answer in: the untimed beat stays open
     (no clock may close it) until the second player answers; then it
-    adjudicates."""
+    adjudicates. (settle=0: the D3 degenerate case — see
+    test_bind_dispute_p0.py for the settle window itself.)"""
+    monkeypatch.setenv("LILY_RELAXED_SETTLE_SECONDS", "0")
     game = _make_game()
     now = _arm_q2(game, ghost_roster=False)
     game.sk.bind_speaker("S2", "Maria")

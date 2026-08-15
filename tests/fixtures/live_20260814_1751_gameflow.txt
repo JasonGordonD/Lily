@@ -1,0 +1,55 @@
+# WO-LILY-BIND-DISPUTE-001 fixture — live call 2026-08-14 17:51 EDT
+# session lily-FD3994-358c0ac8 (created 2026-08-14 21:50:58 UTC)
+# Source: lily_transcripts, ordered by created_at (UTC). Solo table,
+# relaxed requested at q1 ("I don't want a timer"). The two P0 moments:
+#   q3 21:53:54  "The. State." (Tier-1 sim 0.769) -> BAND_CLARIFY fired
+#                the "answer, or thinking out loud?" check (correct path).
+#   q4 21:54:43  "What's he. Face. Uh." (sim 0.182 vs Oscar Wilde) ->
+#                BAND_REJECT, NO check, HARD-BOUND ("Locked in-"), burned
+#                the question over the player's live binding denial.
+# The protest lines at 21:54:50 / 21:54:54 are the 08-14 half of the four
+# live protest lines lily_detect_verdict_contest must catch verbatim.
+
+21:51:15 LILY [session_greet]: [soft] Hi, I’m Lily — I host trivia, and I’ve got the slightly-too-into-it energy for it. [pause] Who’s at the mic tonight, or what should I call you?
+21:51:22 S1: Hey, Lily. How are you? Uh, this is Rami. How are you doing tonight?
+21:51:38 LILY: [soft] Rami — glad you’re here. I’m doing great, ready to make some trouble with this table. Is it just you tonight, or is someone else hiding behind the mic?
+21:51:42 Rami: Just me, myself, and I.
+21:51:58 LILY: [soft] Just you — perfect. This table’s all yours tonight. What’s one fun fact about you I can tease you with later?
+21:52:05 Rami: I ain't telling you. If you're a good host, you'll find stuff out on your own.
+21:52:18 LILY: [soft] Fair enough. A good host earns the material — I’ll work for it. Want a quick spin on how we can play, or are we diving straight in?
+21:52:21 Rami: Let's do it to it. Let's go.
+21:52:40 LILY [q_1_delivery]: [soft] Alright Rami — round one, academic lane, jacket off. Famous for writing a letter advising young men to take older mistresses, who was this kite-flying American founding father? [pause].
+21:52:43 Rami: Benjamin. Franklin. Benjamin. Franklin.
+21:52:43 LILY: I'm here — the floor's yours. …[cut off]
+21:52:45 LILY: Correct!
+21:52:45 Rami: And I was.
+21:52:47 LILY: It's Benjamin Franklin — point to Rami. …[cut off]
+21:52:50 Rami: I don't want a timer.
+21:52:50 LILY [q_1_reveal]: Correct, Rami — Benjamin Franklin.
+21:52:54 LILY: On the board: Rami at one.
+21:53:09 LILY [q_2_delivery]: [soft] Relaxed it is — no clock breathing down your neck. Famous for attributing human neuroses to repressed sexual desire, who was this cocaine-loving Austrian psychoanalyst? [pause].
+21:53:10 Rami: Sigmund Freud.
+21:53:10 LILY: I'll keep it relaxed — no timer on this table. …[cut off]
+21:53:16 Rami: Sigmund Freud.
+21:53:37 LILY: [excited] Sigmund Freud — that’s the man. [pause] Rami, you’re on a two-point streak and sitting pretty at two. Give me a breath for the next one.
+21:53:40 LILY [q_2_reveal]: It's Sigmund Freud — point to Rami.
+21:53:51 LILY [q_3_delivery]: Often referred to colloquially as the male G-spot, what is this walnut-sized reproductive gland?
+21:53:54 Rami: The. State.
+21:53:58 LILY: Rami — answer, or thinking out loud? …[cut off]
+21:54:02 Rami: I said the. State in five times.
+21:54:23 LILY: [soft] Rami — you had it. Prostate. That’s your point. I heard “the state” and checked instead of locking it. Next one’s loading. You keep rolling. On the board: Rami at three, streak of three.
+21:54:27 LILY [q_3_reveal]: It's Prostate — point to Rami.
+21:54:38 LILY [q_4_delivery]: Imprisoned in 1895 for gross indecency with men, who was this celebrated Irish playwright?
+21:54:43 Rami: What's he. Face. Uh.
+21:54:47 LILY: Locked in—. …[cut off]
+21:54:50 Rami: I know he. What do you mean, locked in? I didn't say anything.
+21:54:50 LILY: It was Oscar Wilde — no point this time. …[cut off]
+21:54:54 Rami: I did not say a word. I was still thinking.
+21:54:54 LILY: [soft] Rami’s holding three. Next one. …[cut off]
+21:54:57 LILY [q_4_reveal]: Nobody had it — Oscar Wilde.
+21:55:07 Rami: Stop stop stop stop stop stop stop stop stop stop stop stop.
+21:55:07 LILY: [soft] Fresh one. Which infamous Roman emperor once appointed his favorite horse a consul? [pause]. …[cut off]
+21:55:14 LILY: Stopped. Say the word when you're ready. …[cut off]
+21:55:17 Rami: The barge in! I've been saying stop for literally 17 seconds. What the fuck is wrong with you?
+21:55:17 LILY: [soft] Stopped. Say the word when you want to keep going. …[cut off]
+21:55:26 LILY: [soft] Stopped. I’m right here when you want to keep going — your call.

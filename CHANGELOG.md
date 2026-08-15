@@ -5,6 +5,97 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-15 — WO-LILY-BIND-DISPUTE-001: committed answer shape, the dispute-hold, the solo-relaxed settle window, and the lobby-settle start gate
+
+Two live calls reproduced the same P0s (2026-08-14 17:51 EDT
+lily-FD3994-358c0ac8; 2026-08-15 13:47 EDT lily-359C62-5613a25a). Both
+transcripts committed as fixtures (S13):
+`tests/fixtures/live_20260814_1751_gameflow.txt`
+(sha256 9f3bf862697a09435f3f1d384b812ff1afbc2f93fd18c30e27455caaa19ee2d5) and
+`tests/fixtures/live_20260815_1347_gameflow.txt`
+(sha256 265ee0726446a8ea645fac132c3523abab1252e2d788e2e146bfb291ae6d9177).
+
+**D1 — INVERTED SCRUTINY.** The "answer, or thinking out loud?" clarify fired
+ONLY on similarity to the correct answer (BAND_CLARIFY): "The. State." (0.769)
+got the check while "What's he. Face. Uh." (0.143 — BAND_REJECT) HARD-BOUND
+("Locked in—") and burned the Oscar Wilde question over a live denial. This
+was the HOSTLOOP-001 declared-open fragment/completeness clause, now built:
+`lily_evaluation.lily_uncommitted_answer_shape` (pure) classifies wh-search /
+disfluency-tail / fragment-tail utterances; `_maybe_fire_clarify` routes a
+BAND_REJECT + shape utterance into the SAME pending-clarify machinery and
+WITHDRAWS the bind (new `LilyScorekeeper.withdraw_candidate` — unwinds the
+candidate, the P0-4 reconcile entries, and the attempt counter);
+`_receipt_yields_to_clarify` stands the receipt down on the same read
+(`_tier1_question` now stamps `attempt_text` on its verdict for that).
+Answer similarity stays the accept path; SHAPE is the reject-side sensor
+only — committed wrong answers ("Paris.", "how many states") bind exactly
+as before, and the mid-band path is byte-identical.
+
+**D2 — THE DISPUTE CONCEPT.** All four live protest lines returned False
+from `lily_detect_verdict_contest`; `progression_paused_reason` had no
+dispute state; ANY playout start credited the address debt; ANY confirmed
+turn cleared `_contest_note`. Now: (a) `_VERDICT_CONTEST_RE` widened with a
+BINDING-DENIAL class ("I didn't say anything", "that wasn't my answer",
+"I was still thinking" — "still" required so hedged answers never trip it,
+"I never answered", "what do you mean locked in") and a PREMATURE-
+ADJUDICATION class ("we're still preparing", "still talking", "why …
+went/jumped to … questions", "should not have a timer") — all four live
+lines detected verbatim from the fixtures. (b) A DISPUTE-HOLD
+(`lily_floor`): a protest-shaped final within
+`LILY_VERDICT_DISPUTE_WINDOW_SECONDS` (12) of a verdict/receipt airing (or
+during a live settle window) arms it via `note_protest_final` on the
+classify_addressee seam; `progression_paused_reason` -> `dispute_hold`, so
+`dispatch_armed_question` / `_advance_after_breath` hold N+1. Released ONLY
+by a turn POST-DATING the protest confirming on air — `instructed_reply` /
+`direct_say` stamp per-speech dispatch times (`_note_speech_dispatch`), the
+`on_agent_speech_finished` contest-note clear and the
+`note_playout_started` address-debt credit are both post-dating-gated
+(unknown stamps fail open = pre-WO behavior) — or by the
+`LILY_DISPUTE_HOLD_TIMEOUT_SECONDS` (45) hard release: no silence wedge.
+
+**D3 — SOLO-RELAXED SETTLE WINDOW.** Roster-complete adjudicated in the
+SAME TICK as the bind (both burns: Oscar Wilde 08-14, Aphrodite 08-15 —
+meta-complaints bound and burned the question pre-protest).
+`_maybe_close_relaxed_beat` now opens a settle window
+(`LILY_RELAXED_SETTLE_SECONDS`, 6; 0 = pre-WO immediate close): the bound
+answer stays revisable/disputable, and the close requires an affirmative
+floor-clear (VAD-quiet the settle span + no pending clarify + no
+dispute-hold), every arm self-releasing. A binding-denial protest during
+settle WITHDRAWS the bind — the beat re-opens instead of burning. Relaxed
+pacing also scales the PACING-001 inter-question breath
+(×`LILY_RELAXED_BREATH_MULTIPLIER`, 3) and requires the same affirmative
+floor-clear (VAD-quiet + no address debt + no dispute-hold, bounded poll)
+before N+1. TIMED tables never read any of it — latency pinned by test.
+
+**ADDENDUM — THE 08-15 FALSE START + LOBBY-SETTLE GATE.** Round one started
+UNPROMPTED at 17:48:46: the per-final auto-start net
+(`_maybe_auto_start_after_lobby`) fired off the joke-resolution final —
+roster read 2 with BOTH rows placeholders (one hearable human), the
+quiet read ≈28s was the player waiting out an unanswered "Why are these
+three players here?" (the `_last_user_turn_at` stamp also lags the
+triggering final), and NO start path required player intent. New gate,
+consulted by every start path (`start_gate_blocked_reason`): (a) a
+DETERMINISTIC player start-intent fact (`note_player_start_intent` — set by
+the spoken detector via `note_user_start_intent`, the UI/rpc source, or the
+setup parser's start flag; NEVER model judgment — `lily_begin_round`
+verifies the fact and refuses with a steering reply) AND (b) a settled
+lobby (`lobby_unsettled_reason`: no in-flight bind inside the intake settle
+window, no unresolved address/clarify, dispute-hold clear). A start request
+while unsettled gets one deterministic line ("One sec — locking the table
+first.") and a bounded watcher dispatches it when settled. Game-lifecycle
+reset paths untouched (WO-5 owns restart).
+
+- New config (all local-only, in-code defaults):
+  `LILY_VERDICT_DISPUTE_WINDOW_SECONDS`, `LILY_DISPUTE_HOLD_TIMEOUT_SECONDS`,
+  `LILY_RELAXED_SETTLE_SECONDS`, `LILY_RELAXED_BREATH_MULTIPLIER`.
+- Tests: `tests/test_bind_dispute_p0.py` (20),
+  `tests/test_lobby_settle_gate.py` (11) — failing-first: 26/31 red on the
+  pre-WO tree (the 5 green are deliberate invariance pins). Contract
+  updates: W4's roster-close tests pin the settle=0 degenerate case;
+  tool/host_tool start tests record the now-required intent fact;
+  `test_auto_start_fires_once_intake_settles` records it too. Full suite
+  green on 3.11 AND 3.13: 2678 (baseline 2647).
+
 ## 2026-08-14 — WO-LILY-ANTIREPEAT-PROTOCOL-001: one continuous take + the recognition_aired backstop
 
 Four live instances of one defect class today — content aired twice through

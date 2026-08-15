@@ -970,6 +970,31 @@ _VERDICT_CONTEST_RE = _re.compile(
     r"|we (?:had )?agreed (?:on |to )?(?:no timer|relaxed)"
     r"|you (?:put|threw|tossed|dinged) (?:me )?(?:on )?(?:a |the )?(?:timer|clock)"
     r"|(?:keep|keeping|held|holding|hold) (?:my|me) (?:score|point)"
+    # WO-LILY-BIND-DISPUTE-001 D2a — BINDING DENIAL: the player disputes
+    # that they ANSWERED at all. Live lily-FD3994 (2026-08-14 21:54), both
+    # lines returned False here and the protest never registered:
+    #   "I know he. What do you mean, locked in? I didn't say anything."
+    #   "I did not say a word. I was still thinking."
+    # ("still" is required on the thinking arm so a hedged live answer —
+    # "I'm thinking Aphrodite" — never reads as a contest.)
+    r"|i (?:didn t|did not|never) (?:say|said) (?:anything|a word|a thing|that)"
+    r"|(?:that|it) (?:wasn t|was not|isn t|is not) (?:my|an) answer"
+    r"|i (?:was|am|m) still thinking"
+    r"|i (?:never|didn t|did not|haven t|have not) answer(?:ed)?\b"
+    r"|what do you mean,? locked in"
+    r"|i (?:didn t|did not|never) lock(?:ed)? (?:that|it|anything) in"
+    # D2a — PREMATURE ADJUDICATION protest: the ruling machinery ran while
+    # the table says it was never in play. Live lily-359C62 (2026-08-15
+    # 17:49), both lines returned False here while the Aphrodite question
+    # bound his complaint and burned:
+    #   "...I should not have a timer on my screen. And I don't know why
+    #    we are went to the questions when we're still preparing things."
+    #   "...I'm fucking still talking. We're still preparing things. I
+    #    don't know why you fucking jumped into, like, the questions yet..."
+    r"|(?:we|i) (?:a?re? |am |m )?still preparing"
+    r"|i m (?:\w+ )?still talking"
+    r"|(?:why|how come)[a-z0-9 ]*?(?:went|jump(?:ed)?) (?:in)?to[a-z0-9 ]*?questions"
+    r"|(?:should not|shouldn t) have a timer"
     r")\b"
 )
 
@@ -3385,6 +3410,44 @@ class LilyScorekeeper:
                 self.session_id, question_index, len(captured),
             )
         return unscored
+
+    def withdraw_candidate(self, key: str, *, reason: str) -> Optional[dict]:
+        """WO-LILY-BIND-DISPUTE-001 D1: un-bind one answer candidate — the
+        reject-side shape routing demoted the bind to a pending clarify
+        ("What's he. Face. Uh." must never stand as somebody's locked
+        answer), or a binding-denial protest disowned it during the
+        solo-relaxed settle window.
+
+        Everything the record path stamped is unwound: the candidate slot
+        (so the relaxed roster-complete read re-opens and the player's next
+        final re-records fresh), the P0-4 reconciliation entries for its
+        utterances (a withdrawn utterance is not a silent drop — it is
+        logged here, loudly), and the rostered attempt counter. Returns the
+        withdrawn candidate, or None when the key held nothing."""
+        cand = self.answer_candidates.pop(key, None)
+        if cand is None:
+            return None
+        qidx = cand.get("window_question_index")
+        if qidx is None:
+            qidx = self.question_number
+        uids = {cand.get("utterance_id")}
+        for attempt in cand.get("attempts") or []:
+            uids.add(attempt.get("utterance_id"))
+        captured = self._captured_answer_utterances.get(qidx)
+        if captured:
+            captured -= {u for u in uids if u}
+        player = cand.get("player")
+        state = self.players.get(player) if player else None
+        if state and state.get("answers_attempted", 0) > 0:
+            state["answers_attempted"] -= 1
+        logger.warning(
+            "LILY_STATE | ANSWER_WITHDRAWN | session=%s q=%s key=%s "
+            "reason=%s text=%r — the bind is undone; the player's next "
+            "final records fresh (WO-LILY-BIND-DISPUTE-001)",
+            self.session_id, qidx, key, reason,
+            str(cand.get("text") or "")[:80],
+        )
+        return cand
 
     # -- game flow ---------------------------------------------------------
 

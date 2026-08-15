@@ -303,11 +303,15 @@ def test_auto_start_fires_once_intake_settles():
     # Names stopped landing AND the lobby went quiet: the settle window
     # elapsed, the quiet-after-last-user-turn gate is satisfied, and the
     # next per-segment auto-start check starts the game.
+    # WO-LILY-BIND-DISPUTE-001 addendum: the net additionally verifies a
+    # deterministic player start-intent fact (live lily-359C62 started with
+    # no start phrase anywhere in the session) — the table asked earlier.
     game = _make_game(game_started=False)
     _stub_start_dependencies(game)
     game.sk.bind_speaker("Rami", "Rami")
     game.sk.bind_speaker("S1", "Chris")
     game.next_question = dict(GHOST_Q1)
+    game.note_player_start_intent(source="voice_command", text="let's play")
     game._last_bind_at = time.time() - (
         lily_config.intake_settle_seconds() + 5.0
     )

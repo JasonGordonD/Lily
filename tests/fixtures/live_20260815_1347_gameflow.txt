@@ -1,0 +1,42 @@
+# WO-LILY-BIND-DISPUTE-001 fixture — live call 2026-08-15 13:47 EDT
+# session lily-359C62-5613a25a (created 2026-08-15 17:47:08 UTC)
+# Source: lily_transcripts, ordered by created_at (UTC). Solo table (the
+# roster carried TWO placeholder rows — "Rami" + ghost "UU" — one hearable
+# human; lily_sessions.scorekeeper_state confirms placeholder:true on both).
+# The P0 moments:
+#   17:48:46  FALSE START — the auto-start net fired off the
+#             joke-resolution final: NO start phrase exists anywhere in
+#             this session (llm_usage shows the start turn generating at
+#             17:49:03 already in phase=question).
+#   17:49:14  q1 (Aphrodite) delivered fused into a conversational turn;
+#             window 17:49:14.959–17:49:29.964 (timed — his standing
+#             relaxed pref hadn't applied).
+#   17:49:27  his protest bound as his ANSWER; the beat adjudicated and
+#             burned ("Nobody landed it — it was Aphrodite", 17:49:41)
+#             while he was saying the table was never in play.
+# The protest lines at 17:49:27 / 17:49:47 are the 08-15 half of the four
+# live protest lines lily_detect_verdict_contest must catch verbatim.
+
+17:47:31 LILY [session_greet]: [soft] Hi, I’m Lily — I host trivia, and I love this job a little too much. [pause] This device looks familiar… who’s playing tonight, and what should I call you?
+17:47:37 Rami: Hey there, Lily, how are you? This is Rami. Nice to be back again.
+17:47:58 LILY: [soft] Hey Rami — I’m great, thanks. Glad you’re here. Just you at the table tonight, or is somebody else joining?
+17:48:02 Rami: Just me. Myself and I.
+17:48:16 Rami: What is this?
+17:48:16 LILY: [soft] Solo table it is, then — just you and the mic. Rami, while we settle in: give me one fun fact about you. Anything I can give you a hard time about later. …[cut off]
+17:48:18 Rami: Why are these three players here?
+17:48:46 Rami: Yes. I made, I made, I made a joke. I said me, myself and I.
+17:48:46 LILY: [soft] On my side I’ve got two seats filled — you, Rami, and one more I only have as U U, no real name yet. I can’t see your screen, so if it’s showing three, that’s ahead of what I’ve got here. [pause] Is someone else actually at the table with you, or is it still just you? …[cut off]
+17:48:51 Rami: Oh, boy.
+17:49:14 Rami: Yeah. But then but then, but then you have. You don't have my name anymore.
+17:49:14 LILY: [laughs softly] Me, myself, and I — okay, Rami, you got me. The joke landed. [pause] Round one’s live, academic lane. Here we go. In classical Greek myth, sea foam gave rise to which goddess of love? [pause]. …[cut off]
+17:49:27 Rami: And I play relaxed, so I don't I should not have a timer on my screen. And I don't know why we are went to the questions when we're still preparing things.
+17:49:41 LILY: Nobody landed it — it was Aphrodite. …[cut off]
+17:49:47 Rami: Yes. Did you hear? Hey, I'm fucking talking to you. I'm fucking still talking. We're still preparing things. I don't know why you fucking jumped into, like, the questions yet. And my name is still not there.
+17:49:47 LILY: [soft] You’re right on both counts, Rami. Relaxed is locked in now — no timer pressure from me. And yeah, we jumped the gun into questions while you were still settling. That’s on my side; we’re in it now, so I’ll keep the tempo easy. [pause] Next one, still academic, jacket off. …[cut off]
+17:49:53 Rami: Hey, are you fucking deaf? Are you fucking deaf?
+17:49:53 LILY: Boasting over eight thousand nerve endings and an internal structure resembling a wishbone, what is this highly sensitive female organ? …[cut off]
+17:49:56 LILY: Nobody had it — Aphrodite.
+17:49:59 Rami: Are you? Hey, are you retarded?
+17:49:59 LILY: [soft] You’re right — I jumped us in while you were still settling, and that was on me. I’m here. I’m listening. No next question until you say you want to keep going. Your name is Rami on my roster; if the screen isn’t showing it, that’s out of step with what I’ve got, and I can’t fix the display from here. Whenever you’re ready — your call. …[cut off]
+17:50:02 LILY: I'm here — the floor's yours.
+17:50:28 LILY: [soft] I hear you. I’m listening. You’re mad I jumped the gun into questions while you were still settling, and that’s on me. I’m not going to push another question or a score right now. When you want to keep going — or fix the name thing first — just say the word. I’m here.

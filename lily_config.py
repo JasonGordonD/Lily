@@ -458,6 +458,46 @@ def inter_question_breath_seconds() -> float:
     return _get_float("LILY_INTER_QUESTION_BREATH_SECONDS", 0.8)
 
 
+def relaxed_breath_multiplier() -> float:
+    """WO-LILY-BIND-DISPUTE-001 D3: relaxed pacing scales the PACING-001
+    inter-question breath by this factor (relaxed breath =
+    inter_question_breath_seconds() × this). Timed pacing never reads it —
+    its breath (and therefore its latency) is byte-identical to PACING-001.
+    1.0 restores the shared breath on relaxed tables."""
+    return _get_float("LILY_RELAXED_BREATH_MULTIPLIER", 3.0)
+
+
+def relaxed_settle_seconds() -> float:
+    """WO-LILY-BIND-DISPUTE-001 D3: the solo-relaxed SETTLE WINDOW (M).
+    When the roster completes on a relaxed table the beat no longer
+    adjudicates in the same tick — the bound answer stays revisable and
+    disputable for M seconds, and the close additionally requires an
+    affirmative floor-clear (VAD-quiet, no pending clarify, no
+    dispute-hold). Both live burns (Oscar Wilde 08-14, Aphrodite 08-15)
+    were verdicts committed before the player's protest could land. The
+    same M is the VAD-quiet requirement of the relaxed floor-clear read.
+    0 disables (roster-complete adjudicates immediately — the pre-WO
+    HOTFIX-009 W4 behavior). Timed windows never read this."""
+    return _get_float("LILY_RELAXED_SETTLE_SECONDS", 6.0)
+
+
+def verdict_dispute_window_seconds() -> float:
+    """WO-LILY-BIND-DISPUTE-001 D2: a protest-shaped final landing within
+    this many seconds of a verdict/receipt airing (or during a live
+    solo-relaxed settle window) arms the dispute-hold. Outside the window
+    a contest still gets its X12 one-shot re-check; only the progression
+    hold is time-anchored."""
+    return _get_float("LILY_VERDICT_DISPUTE_WINDOW_SECONDS", 12.0)
+
+
+def dispute_hold_timeout_seconds() -> float:
+    """WO-LILY-BIND-DISPUTE-001 D2 guardrail: the dispute-hold's hard
+    release. A hold with no release path is a silence wedge; if no
+    post-protest turn confirms on air inside this budget the hold
+    self-releases and the normal progression ladder resumes."""
+    return _get_float("LILY_DISPUTE_HOLD_TIMEOUT_SECONDS", 45.0)
+
+
 def mc_answer_aborts_read() -> bool:
     """WS-5 (WO-LILY-OMNIBUS-003): a final landing DURING an in-flight
     multiple-choice options read that Tier-1-matches a read option (or the

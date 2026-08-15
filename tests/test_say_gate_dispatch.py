@@ -205,6 +205,9 @@ def test_start_game_host_tool_dispatches_no_speech():
     # post-tool turn is the sole deliverer — start_game must not race it
     # with an instructed reply.
     game = _make_game()
+    # WO-LILY-BIND-DISPUTE-001 addendum: host_tool starts require the
+    # detector-set start-intent fact.
+    game.note_player_start_intent(source="voice_command", text="let's play")
     _start_game(game, "host_tool")
     assert game.game_started is True
     assert game.session.instructions == []
@@ -230,6 +233,9 @@ def test_begin_round_result_carries_question_payload():
     agent = LilyAgent.__new__(LilyAgent)
     game = _make_game()
     agent._game = game
+    # WO-LILY-BIND-DISPUTE-001 addendum: the tool verifies a detector-set
+    # start-intent fact before it may start the game.
+    game.note_player_start_intent(source="voice_command", text="let's play")
 
     async def _fake_start(source: str) -> None:
         game.game_started = True
@@ -252,6 +258,7 @@ def test_begin_round_result_honest_when_question_not_landed():
     agent = LilyAgent.__new__(LilyAgent)
     game = _make_game()
     agent._game = game
+    game.note_player_start_intent(source="voice_command", text="let's play")
 
     async def _fake_start(source: str) -> None:
         game.game_started = True

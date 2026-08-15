@@ -661,6 +661,9 @@ def test_start_game_applies_the_usual():
     game.arm_next_question = lambda: True
     game.fire_enrollment = lambda trigger: None
     game._enroll_started = False
+    # WO-LILY-BIND-DISPUTE-001 addendum: a host_tool start must verify a
+    # detector-set start-intent fact — the table asked to play.
+    game.note_player_start_intent(source="voice_command", text="let's play")
     asyncio.run(game.start_game("host_tool"))
     assert game.sk.pacing == "relaxed"
 
