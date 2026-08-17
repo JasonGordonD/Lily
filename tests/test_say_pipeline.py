@@ -224,6 +224,10 @@ def test_pipeline_stage_order_is_fixed():
         "unowned_kickoff_suppress",
         "transition_narration",
         "air_dup_guard",
+        # WO-LILY-AIRGATE-001: the dequeue-time airing gate — the last
+        # content decision before the frames yield.
+        "result_aired_gate",
+        "freshness_gate",
         "punctuation_flush",
     ]
 
