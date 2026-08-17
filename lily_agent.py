@@ -633,6 +633,17 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     # _init_all_game_state).
     _recognition_aired: dict | None = None
     _greet_carried_recognition: bool = False
+    # WO-LILY-RECOG-DELIVERY-001: the per-turn context marker (one increment
+    # per real generation snapshot), the name-door entry mark, the carried-
+    # recognition confirm watch, the promotion-owed CLASS 7 exemption, and
+    # the identity-promotion telemetry lane (class defaults for __new__
+    # harnesses; full contract comments in _init_all_game_state and
+    # lily_identity.py).
+    _ctx_snapshot_seq: int = 0
+    _name_door_entry_seq: int | None = None
+    _name_door_watch: dict | None = None
+    _late_recognition_promotion_owed: bool = False
+    _identity_promotion_events: list | None = None
     # CLASS 7 (LIVEFIRE-001) 7a: latched True when start_game commits. After
     # the round has started, recognition speech ("welcome back, want relaxed
     # pacing?") is FORBIDDEN — the live beat aired as act=game_start and stole
@@ -782,6 +793,29 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # once a night. Replaces _recognized_at_greet, an inert kill-switch
         # that was initialized and never set.
         self._recognition_aired = None
+        # WO-LILY-RECOG-DELIVERY-001: the recognition-delivery race state.
+        # _ctx_snapshot_seq — the per-turn context marker: incremented once
+        # per real generation snapshot (llm_node's include_volatile
+        # injection), so "was memory_block set before that turn's context
+        # snapshot" is a mechanical comparison, never an assumption.
+        # _name_door_entry_seq — the counter as of the stated-name door
+        # opening; the promotion tail compares against it.
+        # _name_door_watch — the carried-recognition confirm watch
+        # ({source, group_id, armed_at_seq, inflight_seq, event}): armed
+        # when a turn now in flight carries the just-promoted memory block;
+        # its playout CONFIRM stamps recognition_aired (greet-leg
+        # discipline), a cut re-arms the beat.
+        # _late_recognition_promotion_owed — the CLASS 7 exemption: a
+        # promotion-carried welcome-back that never aired is OWED and may
+        # deliver compactly at a between-questions seam after game start.
+        # _identity_promotion_events — S1/S16 telemetry, persisted via
+        # lily_sessions.metadata.identity_promotions at both existing
+        # metadata write sites.
+        self._ctx_snapshot_seq = 0
+        self._name_door_entry_seq = None
+        self._name_door_watch = None
+        self._late_recognition_promotion_owed = False
+        self._identity_promotion_events = None
         self._recognition_dispute = False
         self._recognition_dispute_why_answered = False
         self._recognition_why_note = None
@@ -3872,6 +3906,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self.clear_composite_flight(speech_id)
         spoken_text = self.consume_post_tts_text(speech_id, spoken_text)
         if interrupted or suppressed:
+            # WO-LILY-RECOG-DELIVERY-001: a cut/suppressed playout can never
+            # stamp recognition — if a carried-recognition watch was riding
+            # this flight, resolve_recognition_carry re-arms the beat as
+            # OWED (the seam delivers it), instead of the airing being lost.
+            self.resolve_recognition_carry(confirmed=False)
             released = (
                 self.say_registry.release_owner(speech_id)
                 if speech_id
@@ -4106,6 +4145,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         ):
             self._greet_carried_recognition = False
             self.note_recognition_aired("greet")
+        # WO-LILY-RECOG-DELIVERY-001: the carried-recognition confirm — the
+        # organic turn answering the name utterance (or the game-start
+        # ride-along) that was composed WITH the just-promoted memory block
+        # has genuinely played out, so recognition is on air NOW; a
+        # memory-blind turn finishing first re-arms the beat instead. This
+        # is the greet-leg discipline extended to the promotion lanes: the
+        # stamp lands at CONFIRM, never at the promotion tail.
+        self.resolve_recognition_carry(confirmed=True)
         if self._pending_reveal_event is not None:
             # Reveal speech finished without a speaking-start hook having
             # fired the packet (safety net) — emit now so the UI never hangs.
@@ -6223,6 +6270,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             "the round's category and ask it now; if it does not, "
             "banter for a beat — it is on its way."
         )
+        ride_along_carries_recognition = False
         if self.memory_block:
             # Live lily-639007 (2026-08-12): the late-recognition beat
             # welcomed the table back at 13:56:33 and this composite
@@ -6242,6 +6290,15 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     " The [RETURNING TABLE] context shows this table has "
                     "played with you before — one quick welcome-back beat, "
                     "then into the game."
+                )
+                # WO-LILY-RECOG-DELIVERY-001: this composite is now the
+                # recognition carrier (the game-start ride-along). Latched
+                # AFTER the dispatch below is accepted — its playout
+                # CONFIRM stamps recognition_aired; a cut kickoff re-arms
+                # the owed beat for the between-questions seam instead of
+                # losing the welcome-back.
+                ride_along_carries_recognition = (
+                    self.recognition_aired() is None
                 )
             # Task 4 disclosure ride-along: covers memory that resolved
             # AFTER the greeting (mid-lobby group-id upgrade) — the
@@ -6263,9 +6320,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # one is already armed, the kickoff turn IS its delivery.
         if self.armed_question is not None:
             self.expect_delivery()
-        self.gated_say(
+        dispatched = self.gated_say(
             None, "game_start", instructions, source=f"start_{source}"
         )
+        if dispatched and ride_along_carries_recognition:
+            self.note_game_start_carries_recognition()
 
     def questions_asked_count(self) -> int:
         """CLASS 3 (LIVEFIRE-001): the count of questions actually DELIVERED
@@ -8580,6 +8639,18 @@ class LilyAgent(Agent):
         state block replace-then-append — all keyed on the same dedupe
         markers (_ADULT_LAYER_MARKER, MEMORY_BLOCK_MARKER,
         _STATE_BLOCK_MARKER)."""
+        if include_volatile:
+            # WO-LILY-RECOG-DELIVERY-001: include_volatile=True is called
+            # exactly once per REAL generation (llm_node, on the
+            # per-generation context copy) — this IS the turn's context
+            # snapshot, so it is the per-turn marker the recognition-carry
+            # decision reads: "was memory_block set before this turn's
+            # context snapshot" becomes a counter comparison. getattr: the
+            # context-block fixtures drive fake games that predate the
+            # marker.
+            note = getattr(self._game, "note_generation_snapshot", None)
+            if note is not None:
+                note()
         items = _chat_items(chat_ctx)
         # BEHIND the agent's own instructions, never in front of them. Both
         # blocks used to insert(0, ...), which puts them ahead of the
@@ -10822,6 +10893,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     "question_timeline": getattr(
                         scorekeeper, "question_timeline", {}
                     ),
+                    # WO-LILY-RECOG-DELIVERY-001 (S1/S16): identity-promotion
+                    # events — source, group, ts, short-circuit decision,
+                    # carried-memory verdict — so promotion timing never has
+                    # to be reconstructed from prompt-token deltas again.
+                    "identity_promotions": getattr(
+                        game, "_identity_promotion_events", None
+                    ) or [],
                     # Voice-ID closure: outcome + timing persist so a slow
                     # or missed recognition explains itself from the DB row.
                     "voice_identity": {
@@ -11264,6 +11342,12 @@ async def entrypoint(ctx: JobContext) -> None:
             "question_timeline": getattr(
                 scorekeeper, "question_timeline", {}
             ),
+            # WO-LILY-RECOG-DELIVERY-001 (S1/S16): identity-promotion events
+            # ride the heartbeat too, so a live "did the promotion land and
+            # what did it decide" is a mid-call SQL query.
+            "identity_promotions": getattr(
+                game, "_identity_promotion_events", None
+            ) or [],
             "voice_identity": {
                 "outcome": getattr(game, "_voice_id_outcome", None)
                 or ("never_ran" if not getattr(

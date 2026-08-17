@@ -5,6 +5,92 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-17 — WO-LILY-RECOG-DELIVERY-001: un-lie the name-door stamp; a slow door still delivers
+
+ANTIREPEAT-PROTOCOL-001 (bfadc42, yesterday) fixed the 11:31 double
+welcome-back by stamping `note_recognition_aired("name_door_organic")` at
+both name-door promotion tails — "the organic turn carries the memory by
+construction". Live 2026-08-14 17:51 EDT (lily-FD3994-358c0ac8, fixture
+committed as `tests/fixtures/live_20260814_1751_recognition.txt`, sha256
+`390a217d…85ca4`) proved the construction false: the door is a
+fire-and-forget task spawned at bind whose sequential Supabase awaits
+completed ~80s AFTER the organic reply to "this is Rami" aired memory-blind
+(lily_llm_usage: reply generated at 13.4k prompt tokens 21:51:25-27, aired
+21:51:38; the ~437-token [RETURNING TABLE] block first appears 21:52:51).
+The stamp was a receipt that lied (S2); `maybe_fire_late_recognition`
+hard-returns on the fact — every stated-name returner recognized through
+the only functioning door (ECAPA no-matching, device cold) got PERMANENT
+zero recognition. Independently, the CLASS 7 `game_start_committed` forbid
+retired the beat outright once the round started, so a slow door could not
+deliver even when armed.
+
+1. **The stamp is un-lied — mechanical carried/uncarried verdict.** The
+   per-turn context marker `note_generation_snapshot()` (called from the
+   `include_volatile` injection in `_apply_context_blocks` — exactly once
+   per real generation snapshot) makes "was memory_block set before that
+   turn's context snapshot" a counter comparison. The door stamps the
+   counter at entry (`_name_door_entry_seq`); the promotion tails call
+   `_name_door_promotion_tail` instead of stamping: CARRIED (no snapshot
+   since door entry — the organic reply will pick up the block) arms a
+   confirm watch (`_name_door_watch`) and the fact stamps on that turn's
+   speech-finished CONFIRM via `resolve_recognition_carry` (the greet-leg
+   discipline extended; a cut or memory-blind playout re-arms the beat);
+   UNCARRIED (the 17:51 case) leaves the beat ARMED so
+   `maybe_fire_late_recognition` delivers at the next seam. While the
+   watch is armed the beat is blocked (`recognition_carry_inflight`), so
+   the 11:31 double stays dead in both directions.
+2. **A slow door still delivers (CLASS 7 exemption).** A PROMOTION-OWED
+   beat (`_late_recognition_promotion_owed`) is deferred past
+   `game_start_committed` instead of retired, and airs ONE compact
+   welcome-back at the between-questions seam (`flush_late_recognition_
+   at_seam`, already wired at the transition-complete hook) — no refresher
+   offer, no prefs ask, straight back into the game. The forbid stays
+   absolute for every non-owed lane (livefire CLASS 7 pins unchanged).
+   The game-start ride-along composite is now a recognition CARRIER under
+   the same confirm discipline (`note_game_start_carries_recognition`,
+   latched only when its dispatch is accepted): its confirm stamps
+   `game_start_ride_along`; a cut kickoff re-arms the owed beat.
+3. **Rails name what's owed (prompt).** `<continuity>` rail 1 now states:
+   the rail forbids RE-AIRS only — content never yet aired this session (a
+   recognition, a result, an owed answer) is OWED, not banned; a first
+   welcome-back after a cold greeting is a delivery, never a repeat.
+   Static text; prompt prefix stays byte-stable (precall cache +
+   prompt-structure suites green).
+4. **Telemetry (S1/S16, small).** The 17:51 investigation had to
+   reconstruct promotion timing from prompt-token deltas. Identity-
+   promotion events ({source, group_id, ts, short_circuit_decision,
+   carried_memory[, confirmed_at]}) now record in
+   `_record_identity_promotion` (deduped across the double tail) and
+   persist through the EXISTING `lily_sessions.metadata` lane at both
+   write sites (session close + 60s heartbeat) as
+   `metadata.identity_promotions` — no new table, no new writer path
+   (same lane as C14b's question_timeline).
+5. **Latent NameError on the promotion path fixed.** The W3 Cut 3 mixin
+   extraction (2ed76cb) moved `upgrade_group_id` into `lily_identity.py`
+   without `lily_bank` (module-level NameError at the asked-history
+   reload — fatal to any real promotion that re-keys, killing the
+   fire-and-forget door task) or `SpeakerIdentifier`/
+   `lily_stt_focus_kwargs` (NameError swallowed by the known_speakers
+   try/except — the refresh silently failed on every live upgrade since
+   08-12). `import lily_bank` added; the agent-module names import
+   lazily at call time (top-level would cycle).
+
+Tests: `tests/test_recog_delivery_race.py` (15) — THE RACE FIXTURE the
+original work lacked: fake Supabase delays the group lookup until after
+the organic reply's context snapshot; end-to-end through the real
+door/stage/promote/upgrade path, the returner must still HEAR
+recognition-bearing content. Failing-first on bfadc42: 13/15 fail, the
+race test failing precisely on "the returner heard ZERO
+recognition-bearing content — the 17:51 total recognition blackout".
+`test_antirepeat_protocol.py` updated to the confirm discipline (still 16
+tests, the 11:31 no-double repro stays green); CLASS 7, no-regreet,
+name-door, context-block, precall-cache and prompt-structure suites
+untouched and green. Full suite 2662 on python3.11 and venv313.
+Deliberately NOT attempted (per WO): ECAPA/group-consolidation (separate
+P1); parallelizing the name-door's sequential Supabase awaits (omission —
+the door is still ~15 sequential round-trips; the fix makes a slow door
+deliver honestly rather than making the door fast).
+
 ## 2026-08-14 — WO-LILY-ANTIREPEAT-PROTOCOL-001: one continuous take + the recognition_aired backstop
 
 Four live instances of one defect class today — content aired twice through

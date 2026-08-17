@@ -13,6 +13,7 @@ import re
 import time
 import uuid
 
+import lily_bank
 import lily_config
 import lily_evaluation
 import lily_forget
@@ -75,11 +76,25 @@ _NAME_DOOR_AMBIGUOUS_CEILING = 12
 class LilyIdentityMixin:
     def late_recognition_blocked_reason(self) -> str | None:
         """Return the live beat that makes recognition speech unsafe."""
+        # WO-LILY-RECOG-DELIVERY-001: a carried-recognition confirm watch is
+        # armed — a turn composed WITH the memory block is in flight and
+        # will stamp on its playout confirm. The beat holds so the two
+        # lanes can never stack (the 11:31 double, kept dead); a cut
+        # flight re-arms the beat via resolve_recognition_carry.
+        if self._name_door_watch is not None:
+            return "recognition_carry_inflight"
         # CLASS 7 (LIVEFIRE-001) 7a: once the round has started, recognition
         # speech is forbidden outright — it belongs to the greeting/intake
         # window, never inside or after game start. The live beat aired as
         # act=game_start and suppressed q_1's kickoff.
-        if self._game_start_committed:
+        # WO-LILY-RECOG-DELIVERY-001 exemption: a PROMOTION-OWED beat (a
+        # slow name-door landing after start — 17:51 — or a cut carrying
+        # turn) is deferred to a between-questions seam instead, where it
+        # airs ONE compact welcome-back; the forbid stays absolute for
+        # every other lane.
+        if self._game_start_committed and not (
+            self._late_recognition_promotion_owed
+        ):
             return "game_start_committed"
         if self.sk.answer_window_open:
             return "answer_window_open"
@@ -185,6 +200,43 @@ class LilyIdentityMixin:
         # roster injection: name a person ONLY from the present-voice source
         # (sk.players, read from the ROSTER field in the state block), never
         # from memory.
+        if self._game_start_committed:
+            # WO-LILY-RECOG-DELIVERY-001: the promotion-owed beat delivering
+            # BETWEEN QUESTIONS (the CLASS 7 exemption) is ONE compact beat
+            # — no refresher offer, no prefs question, no what's-new: the
+            # game is running and the seam is borrowed, not owned.
+            ack = (
+                "Recognition landed LATE, mid-game: the [RETURNING TABLE] "
+                "block now confirms this is a TABLE you have played with "
+                "before. That is a match on the TABLE, not proof of who is "
+                "on the mic right now. Between questions, ONE compact "
+                "welcome-back beat — own the late catch lightly ('took me a "
+                "second'). Name a person ONLY when THEIR voice is matched "
+                "present this session (the ROSTER field is the sole naming "
+                "authority) or they have stated their name tonight; if no "
+                "voice is matched present, name no one — just welcome the "
+                "table back. Do NOT re-introduce yourself, do NOT repeat "
+                "any line of your opener, do NOT offer a refresher or ask "
+                "about preferences, and do NOT ask a question of your own — "
+                "one warm beat, then hand straight back to the game."
+            )
+            present = ",".join(
+                list(getattr(self.sk, "players", []) or [])
+            ) or "-"
+            logger.info(
+                "LILY_MEMORY | LATE_RECOGNITION | session=%s group=%s "
+                "present=%s (compact, between questions — promotion-owed)",
+                self.sk.session_id, getattr(self, "group_id", None), present,
+            )
+            dispatched = self.gated_say(
+                None, "late_recognition", ack, source="late_recognition"
+            )
+            if not dispatched:
+                self._late_recognition_fired = False
+                self._late_recognition_pending = True
+            else:
+                self.note_recognition_aired("late_recognition_beat")
+            return dispatched
         ack = (
             "Recognition just landed MID-SESSION: the [RETURNING TABLE] "
             "block now confirms this is a TABLE you have played with before. "
@@ -277,6 +329,10 @@ class LilyIdentityMixin:
         }
         self._late_recognition_fired = True
         self._late_recognition_pending = False
+        # WO-LILY-RECOG-DELIVERY-001: the owed marker and any pending
+        # confirm watch are settled by the airing — recognition is paid.
+        self._late_recognition_promotion_owed = False
+        self._name_door_watch = None
         logger.info(
             "LILY_MEMORY | RECOGNITION_AIRED | session=%s source=%s — "
             "recognition is on air; every other recognition lane is retired "
@@ -287,6 +343,230 @@ class LilyIdentityMixin:
     def recognition_aired(self) -> dict | None:
         """The recognition-aired record ({source, text, at}), or None."""
         return self._recognition_aired
+
+    # -- WO-LILY-RECOG-DELIVERY-001: un-lie the name-door stamp --------------
+    #
+    # bfadc42 stamped note_recognition_aired("name_door_organic") at both
+    # promotion tails UNCONDITIONALLY — "the organic turn carries the memory
+    # by construction". Live 2026-08-14 17:51 (lily-FD3994-358c0ac8) proved
+    # the construction false: the name-door promotion is a fire-and-forget
+    # task whose sequential Supabase awaits completed ~80s AFTER the organic
+    # reply to "this is Rami" aired memory-blind (lily_llm_usage: the reply's
+    # generation ran at 13.4k prompt tokens at 21:51:25; the ~437-token
+    # [RETURNING TABLE] block first appears at 21:52:51). The stamp was a
+    # receipt that lied (S2), and maybe_fire_late_recognition hard-returns on
+    # it — every stated-name returner on a cold device got PERMANENT zero
+    # recognition.
+    #
+    # The mechanical truth signal: _apply_context_blocks injects the memory
+    # block into every per-generation context copy, so "did the organic turn
+    # carry the memory" == "was memory_block set before that turn's context
+    # snapshot". note_generation_snapshot (called from the include_volatile
+    # injection in llm_node's path — one call per real generation) is the
+    # per-turn marker; the door stamps the counter at entry, and the tail
+    # compares:
+    #   * no generation snapshot since door entry  -> the organic reply's
+    #     snapshot is still AHEAD and will include the just-set memory_block
+    #     -> CARRIED. Do not stamp yet: arm a confirm watch and stamp on
+    #     that turn's speech-finished CONFIRM (the greet-leg discipline) —
+    #     a cut turn re-arms the beat instead of burning recognition.
+    #   * a generation snapshot already happened since door entry (17:51)
+    #     -> the reply aired memory-blind -> UNCARRIED. Leave the beat ARMED
+    #     (owed) so maybe_fire_late_recognition delivers at the next seam —
+    #     including BETWEEN QUESTIONS after game start (the promotion-owed
+    #     exemption from the CLASS 7 forbid).
+
+    def note_generation_snapshot(self) -> int:
+        """The per-turn context marker: one call per real generation, at the
+        moment the per-generation context copy is finalized (llm_node's
+        include_volatile _apply_context_blocks). Returns the new sequence.
+        If a carried-recognition watch is armed and the memory block is now
+        in context, this generation is the one carrying the recognition —
+        mark it so its playout CONFIRM can stamp."""
+        self._ctx_snapshot_seq += 1
+        watch = self._name_door_watch
+        if (
+            watch is not None
+            and watch.get("inflight_seq") is None
+            and self.memory_block
+        ):
+            watch["inflight_seq"] = self._ctx_snapshot_seq
+            logger.info(
+                "LILY_MEMORY | RECOGNITION_CARRY_INFLIGHT | session=%s "
+                "source=%s seq=%d — a generation snapshotted WITH the "
+                "memory block; its playout confirm stamps recognition_aired",
+                getattr(self.sk, "session_id", "?"),
+                watch.get("source"), self._ctx_snapshot_seq,
+            )
+        return self._ctx_snapshot_seq
+
+    def _record_identity_promotion(
+        self, source: str, group_id, *, decision: str, carried_memory
+    ) -> dict:
+        """S1/S16 telemetry: identity-promotion events persist in
+        lily_sessions.metadata.identity_promotions (both existing metadata
+        write sites — session end + the 60s heartbeat), so promotion timing
+        and the short-circuit decision are a SQL query, never a
+        reconstruction from prompt-token deltas. Idempotent per
+        (source, group_id): the double promotion tail (_promote awaits
+        upgrade_group_id first) records once."""
+        events = self._identity_promotion_events
+        if events is None:
+            events = self._identity_promotion_events = []
+        for ev in events:
+            if ev.get("source") == source and ev.get("group_id") == group_id:
+                return ev
+        ev = {
+            "source": source,
+            "group_id": group_id,
+            "ts": round(time.time(), 3),
+            "short_circuit_decision": decision,
+            "carried_memory": carried_memory,
+        }
+        events.append(ev)
+        logger.info(
+            "LILY_MEMORY | IDENTITY_PROMOTION | session=%s source=%s "
+            "group=%s decision=%s carried_memory=%s",
+            getattr(self.sk, "session_id", "?"), source, group_id,
+            decision, carried_memory,
+        )
+        return ev
+
+    def _name_door_promotion_tail(self, source: str, group_id) -> None:
+        """The name-door promotion tail decision (replaces bfadc42's
+        unconditional stamp). Runs at BOTH tails; the first decides."""
+        if self._recognition_aired is not None:
+            return  # recognition already on air — nothing owed
+        if self._name_door_watch is not None:
+            return  # the upgrade tail (awaited first) already decided
+        if self._late_recognition_promotion_owed and (
+            self._late_recognition_pending
+        ):
+            return  # already decided: uncarried, beat armed
+        entry = self._name_door_entry_seq
+        carried = entry is None or self._ctx_snapshot_seq <= entry
+        event = self._record_identity_promotion(
+            source, group_id,
+            decision="carried_pending_confirm" if carried else "beat_armed",
+            carried_memory=carried,
+        )
+        if carried:
+            # The organic reply's context snapshot is still ahead — it WILL
+            # pick up the just-set memory block. Not stamped here: the stamp
+            # lands on that turn's speech-finished CONFIRM
+            # (resolve_recognition_carry), the greet-leg discipline. While
+            # the watch is armed the late beat holds (blocked reason), so
+            # the 11:31 double stays dead in both directions.
+            self._name_door_watch = {
+                "source": "name_door_organic",
+                "group_id": group_id,
+                "armed_at_seq": self._ctx_snapshot_seq,
+                "inflight_seq": None,
+                "event": event,
+            }
+            self._late_recognition_pending = False
+            logger.info(
+                "LILY_MEMORY | LATE_RECOGNITION_SHORT_CIRCUIT | session=%s "
+                "trigger=%s group=%s — the organic turn carries the "
+                "recognition; stamped on its playout CONFIRM, not here",
+                getattr(self.sk, "session_id", "?"), source, group_id,
+            )
+        else:
+            # THE 17:51 CASE: a generation already snapshotted since the
+            # door opened — the organic reply aired memory-blind. The
+            # welcome-back is OWED: arm the beat and mark it
+            # promotion-carried so the CLASS 7 game-start forbid defers it
+            # to a between-questions seam instead of retiring it.
+            self._late_recognition_promotion_owed = True
+            self._late_recognition_fired = False
+            self._late_recognition_pending = True
+            logger.warning(
+                "LILY_MEMORY | NAME_DOOR_UNCARRIED | session=%s trigger=%s "
+                "group=%s entry_seq=%s now_seq=%d — the organic reply aired "
+                "memory-blind (slow promotion); the welcome-back beat is "
+                "ARMED, never stamped as aired",
+                getattr(self.sk, "session_id", "?"), source, group_id,
+                entry, self._ctx_snapshot_seq,
+            )
+            self.maybe_fire_late_recognition()
+
+    def resolve_recognition_carry(self, *, confirmed: bool) -> None:
+        """A speech playout ended — resolve the carried-recognition watch.
+        Called from on_agent_speech_finished on BOTH exits (confirm and
+        interrupted/suppressed).
+
+        CONFIRMED and a memory-carrying generation was marked in flight:
+        the room heard a turn composed WITH the [RETURNING TABLE] block —
+        stamp recognition_aired (the watch's source names the lane).
+
+        Anything else — the carrying turn was cut, or a memory-BLIND turn
+        finished first (a validated preemptive reply that snapshotted
+        before the promotion landed and aired without the block) —
+        recognition never reached the air: re-arm the beat as OWED.
+        Known approximation, accepted and bounded: the finishing speech is
+        identified by ordering, not by id (llm_node has no speech id at
+        snapshot time). A different speech interleaving between the arm and
+        the carrying turn can mis-resolve one way or the other; every
+        mis-resolution degrades to the late beat delivering (or the
+        antirepeat fact suppressing a second airing), never to a silent
+        blackout."""
+        watch = self._name_door_watch
+        if watch is None:
+            return
+        if self._recognition_aired is not None:
+            self._name_door_watch = None
+            return
+        event = watch.get("event")
+        if confirmed and watch.get("inflight_seq") is not None:
+            self._name_door_watch = None
+            if event is not None:
+                event["short_circuit_decision"] = "organic_confirmed"
+                event["carried_memory"] = True
+                event["confirmed_at"] = round(time.time(), 3)
+            self.note_recognition_aired(
+                watch.get("source") or "name_door_organic"
+            )
+            return
+        self._name_door_watch = None
+        self._late_recognition_promotion_owed = True
+        self._late_recognition_fired = False
+        self._late_recognition_pending = True
+        if event is not None:
+            event["short_circuit_decision"] = "beat_armed_after_flight"
+            event["carried_memory"] = False
+        logger.info(
+            "LILY_MEMORY | RECOGNITION_CARRY_UNRESOLVED | session=%s "
+            "source=%s confirmed=%s inflight=%s — the carrying turn never "
+            "played out with the memory block; the beat is re-armed as owed",
+            getattr(self.sk, "session_id", "?"), watch.get("source"),
+            confirmed, watch.get("inflight_seq") is not None,
+        )
+
+    def note_game_start_carries_recognition(self) -> None:
+        """The game-start composite composed the one welcome-back ride-along
+        beat (start_game's memory branch) and its dispatch was accepted.
+        Same confirm discipline as the organic lane: the kickoff turn's
+        snapshot carries the memory block, so its playout CONFIRM stamps —
+        a cut kickoff re-arms the beat instead of losing recognition."""
+        if self._recognition_aired is not None:
+            return
+        if self._name_door_watch is not None:
+            return  # an organic carry is already pending confirm
+        self._late_recognition_pending = False
+        self._late_recognition_fired = False
+        self._name_door_watch = {
+            "source": "game_start_ride_along",
+            "group_id": self.group_id,
+            "armed_at_seq": self._ctx_snapshot_seq,
+            "inflight_seq": None,
+            "event": None,
+        }
+        logger.info(
+            "LILY_MEMORY | GAME_START_CARRIES_RECOGNITION | session=%s — "
+            "the kickoff composite carries the welcome-back; stamped on its "
+            "playout CONFIRM",
+            getattr(self.sk, "session_id", "?"),
+        )
 
     def _apply_stored_pacing(self) -> None:
         """Apply the group's stored 'usual' pacing when it differs from the
@@ -535,25 +815,25 @@ class LilyIdentityMixin:
         # beat never costs the table its saved 'usual'.
         self._apply_stored_pacing()
         if trigger in _NAME_DOOR_TRIGGERS and self.memory_block:
-            # Name-door short-circuit (ANTIREPEAT-PROTOCOL-001): the organic
-            # reply answering the name utterance carries the just-promoted
-            # memory block by construction — firing the late beat too was
-            # the 2026-08-14 11:31 double welcome-back (same content, two
-            # lanes, ten seconds apart). Stamp the durable fact and retire
-            # the beat instead of dispatching it. The prefs offer needs no
-            # beat either: the memory block's "usual:" line plus the system
-            # prompt's standing instruction carry it.
-            self.note_recognition_aired("name_door_organic")
-            logger.info(
-                "LILY_MEMORY | LATE_RECOGNITION_SHORT_CIRCUIT | session=%s "
-                "trigger=%s group=%s — the organic turn carries the "
-                "recognition; the late beat is retired",
-                getattr(self.sk, "session_id", "?"), trigger, candidate,
-            )
+            # Name-door tail (WO-LILY-RECOG-DELIVERY-001, un-lying
+            # ANTIREPEAT-PROTOCOL-001's stamp): the organic reply answering
+            # the name utterance carries the just-promoted memory block ONLY
+            # when its context snapshot came after the promotion — a slow
+            # promotion (17:51, ~80s of Supabase awaits) aired it
+            # memory-blind. The tail now decides mechanically: carried →
+            # stamp on that turn's playout CONFIRM; uncarried → the beat
+            # stays ARMED and delivers at the next seam. The prefs offer
+            # still needs no beat: the memory block's "usual:" line plus the
+            # system prompt's standing instruction carry it.
+            self._name_door_promotion_tail(trigger, candidate)
         else:
             # Task 1 (RECOGNITION-VARIETY): a voiceprint verification landing
             # after the greeting is the same late-recognition moment as a
             # name-hash upgrade — same acknowledgment beat, same one-shot.
+            self._record_identity_promotion(
+                trigger, candidate,
+                decision="late_beat_path", carried_memory=None,
+            )
             self.maybe_fire_late_recognition()
         logger.info(
             "LILY_MEMORY | DEVICE_CANDIDATE_VERIFIED | trigger=%s group=%s "
@@ -1458,6 +1738,18 @@ class LilyIdentityMixin:
         # list at stream start, so this primarily protects reconnect paths.
         if self.stt is not None:
             try:
+                # Lazy import (WO-LILY-RECOG-DELIVERY-001): the W3 Cut 3
+                # mixin extraction moved this method here WITHOUT its
+                # lily_agent-module names — SpeakerIdentifier and
+                # lily_stt_focus_kwargs resolved fine in lily_agent.py and
+                # NameError'd here, silently downgraded to the except below
+                # ("known_speakers refresh failed") on every live upgrade.
+                # Imported at call time because lily_agent imports this
+                # module at its own top (a top-level import is a cycle).
+                from lily_agent import (  # noqa: PLC0415
+                    SpeakerIdentifier,
+                    lily_stt_focus_kwargs,
+                )
                 known_rows = await lily_persistence.lily_load_voiceprints(
                     self.supabase, new_group_id
                 )
@@ -1545,21 +1837,20 @@ class LilyIdentityMixin:
         # trigger-independent (the stored prefs were just reconciled above).
         self._apply_stored_pacing()
         if source in _NAME_DOOR_TRIGGERS and self.memory_block:
-            # Name-door short-circuit, upgrade-tail leg: a name-door
-            # promotion awaits THIS upgrade before its own tail runs, so
-            # without the guard here the beat fired from inside the upgrade
-            # — same 11:31 double, one call frame earlier. The organic turn
-            # answering the name utterance carries the memory.
-            self.note_recognition_aired("name_door_organic")
-            logger.info(
-                "LILY_MEMORY | LATE_RECOGNITION_SHORT_CIRCUIT | session=%s "
-                "trigger=%s group=%s — the organic turn carries the "
-                "recognition; the late beat is retired (upgrade tail)",
-                getattr(self.sk, "session_id", "?"), source, new_group_id,
-            )
+            # Name-door tail, upgrade leg (WO-LILY-RECOG-DELIVERY-001): a
+            # name-door promotion awaits THIS upgrade before its own tail
+            # runs, so the guard here keeps the beat from firing from inside
+            # the upgrade — same 11:31 double, one call frame earlier. The
+            # carried/uncarried decision (stamp on confirm vs. beat stays
+            # armed) is the shared helper's; the promote tail then no-ops.
+            self._name_door_promotion_tail(source, new_group_id)
         else:
             # Task 1: recognition that arrives AFTER the door becomes a
             # recovery moment, not a silent nothing.
+            self._record_identity_promotion(
+                source, new_group_id,
+                decision="late_beat_path", carried_memory=None,
+            )
             self.maybe_fire_late_recognition()
         self.fire_enrollment("group_id_upgrade")
 
@@ -1595,6 +1886,14 @@ class LilyIdentityMixin:
         # stronger — this door has nothing to add.
         if self.memory_block or getattr(self, "device_identity_verified", False):
             return False
+        # WO-LILY-RECOG-DELIVERY-001: stamp where the generation counter
+        # stood when the door opened. The promotion tail compares against
+        # this to decide whether the organic reply's context snapshot
+        # already happened (uncarried — the 17:51 memory-blind reply) or is
+        # still ahead (carried). Stamped here, before the first await, so
+        # the door task's own Supabase latency is exactly what the
+        # comparison measures.
+        self._name_door_entry_seq = self._ctx_snapshot_seq
         if getattr(self, "device_candidate_group_id", None):
             # 2026-08-09 amnesia fix: a STAGED device candidate used to slam
             # this door shut unconditionally — promotion then waited on
