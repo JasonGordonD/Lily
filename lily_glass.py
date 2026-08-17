@@ -636,6 +636,12 @@ class LilyGlassMixin:
         if (
             self.game_delivery_stopped()
             and lily_scorekeeper.lily_detect_resume_game(text)
+            # WO-LILY-RESTART-001: "start over"/"start again" also live in
+            # the resume intent set — the RESTART reading wins (checked
+            # first), so a stopped table asking for a fresh game gets the
+            # deterministic restart confirm, never a silent resume of the
+            # game they just disowned.
+            and not lily_scorekeeper.lily_detect_restart_game(text)
         ):
             self.resume_game_delivery(reason="spoken_resume")
         # PATCH-002 A4 — any user final RELEASES the hold (they've spoken;
@@ -904,6 +910,22 @@ class LilyGlassMixin:
                 self.sk.session_id, player, str(text)[:120],
             )
 
+        # WO-LILY-RESTART-001: a pending restart confirm resolves
+        # DETERMINISTICALLY on the next parseable final from a player —
+        # yes executes the reset, no drops it (and the intent fact with
+        # it), anything ambiguous stays pending and does nothing
+        # destructive. Runs before command dispatch (the forget-flow
+        # pattern) so "yes" resolves the confirm rather than reading as
+        # anything else; a re-stated restart command falls through to the
+        # command branch, where request_restart reads it as the
+        # affirmative.
+        if (
+            self._pending_restart_confirm is not None
+            and command != "restart_game"
+        ):
+            if self.resolve_restart_confirm(text, player or speaker_label):
+                return
+
         # W3 confirmation beat resolution: a pacing change was held because
         # it contradicted a stated preference. The requester's next
         # parseable yes applies it, a no keeps the current pacing, anything
@@ -1081,6 +1103,21 @@ class LilyGlassMixin:
             return
         if command == "skip":
             asyncio.ensure_future(self.skip_question(source="voice"))
+            return
+        if command == "restart_game":
+            # WO-LILY-RESTART-001: the deterministic restart lane — record
+            # the intent FACT (the tool verifies this same fact, never
+            # model judgment), then converge on request_restart: a table
+            # with something to lose gets the ONE deterministic confirm,
+            # a bare lobby resets immediately. The code ack (confirm line
+            # or done line) owns this utterance (AIRGATE-001 D4).
+            self.mark_deterministic_reply(text)
+            self.note_player_restart_intent(source="voice_command", text=text)
+            self.request_restart(
+                source="voice_command",
+                requester=player or speaker_label,
+                text=text,
+            )
             return
         if command == "start_game":
             # Spoken start path — the deterministic pipeline must engage

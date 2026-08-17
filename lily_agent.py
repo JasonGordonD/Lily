@@ -644,6 +644,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     _name_door_watch: dict | None = None
     _late_recognition_promotion_owed: bool = False
     _identity_promotion_events: list | None = None
+    # WO-LILY-RESTART-001 (class defaults for __new__ harnesses; full
+    # contract comments in _init_all_game_state and lily_floor.py): the
+    # deterministic restart-intent fact, the pending confirm, and the
+    # restart telemetry lane.
+    _player_restart_intent: dict | None = None
+    _pending_restart_confirm: dict | None = None
+    _game_restart_events: list | None = None
     # CLASS 7 (LIVEFIRE-001) 7a: latched True when start_game commits. After
     # the round has started, recognition speech ("welcome back, want relaxed
     # pacing?") is FORBIDDEN — the live beat aired as act=game_start and stole
@@ -796,6 +803,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._pending_start_task = None
         self._player_start_intent = None
         self._start_hold_said = False
+        # WO-LILY-RESTART-001: the deterministic player restart-intent
+        # fact, the one pending confirm ("Restart from scratch — scores
+        # gone. Sure?"), and the session's restart telemetry events
+        # (persisted via lily_sessions.metadata.game_restarts at both
+        # existing metadata write sites, the identity_promotions lane).
+        self._player_restart_intent = None
+        self._pending_restart_confirm = None
+        self._game_restart_events = None
         self._phase_hold = None
         self._playout_started_ids = set()
         self._post_tts_text_by_speech_id = {}
@@ -3643,6 +3658,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     # blocked until the hold releases.
     _HOLD_EXEMPT_SOURCES = frozenset({
         "stop_primitive", "hold_ack", "hold_release",
+        # WO-LILY-RESTART-001: the restart lane is player-commanded speech
+        # in the stop/hold-ack family — the confirm, the decline ack and
+        # the reset ack must never deadlock behind the very hold the table
+        # is restarting its way out of. (On the spoken path the user final
+        # already released the A4 hold; this covers the tool path and any
+        # hold entered between the final and the dispatch.)
+        "restart_request", "game_restart", "restart_declined",
     })
 
     # PATCH-003 P8: game-lane acts — deliveries, verdicts, reveals, the
@@ -8619,6 +8641,62 @@ class LilyAgent(Agent):
         )
 
     @function_tool()
+    async def lily_restart_game(self, context: RunContext) -> str:
+        """Restart the game from scratch after the table asks for it
+        ("restart the game", "start over", "new game"). Scores and round
+        progress are wiped; the roster and everything you know about the
+        people are kept. Call this only after a player actually said a
+        restart phrase — the spoken detector records that fact and this
+        tool verifies it; your own judgment cannot substitute. A live game
+        with anything on the board asks the table one confirm first and
+        proceeds only on their yes. No-op guidance is returned in every
+        refused case."""
+        g = self._game
+        # WO-LILY-RESTART-001: the tool VERIFIES the detector-set fact —
+        # the WO-3 start-gate discipline. Model judgment alone can never
+        # wipe a scoreboard.
+        if not g.restart_intent_present():
+            if not g.game_started and not getattr(
+                g, "_game_start_committed", False
+            ):
+                return (
+                    "NOT RESTARTED (already_lobby) — there is no game "
+                    "running and no player has asked for a restart. If the "
+                    "table wants to begin, that is a START: wait for "
+                    "explicit start language and call lily_begin_round."
+                )
+            return (
+                "NOT RESTARTED (no_restart_intent) — no player has "
+                "actually asked to restart: frustration, a bad round, or "
+                "your own judgment is not authorization. If they want a "
+                "fresh game, they'll say so ('restart the game', 'start "
+                "over', 'new game') — the detector records it and this "
+                "tool will pass."
+            )
+        if getattr(g, "_pending_restart_confirm", None) is not None:
+            return (
+                "NOT RESTARTED (confirm_pending) — the deterministic "
+                "confirm ('Restart from scratch — scores gone. Sure?') is "
+                "already out. Say nothing more about it; their next yes or "
+                "no settles it in code."
+            )
+        outcome = g.request_restart(source="host_tool")
+        if outcome == "confirm_armed":
+            return (
+                "NOT RESTARTED (confirm_required) — there's a live game "
+                "with something on the board, so the one deterministic "
+                "confirm just aired. Do not restate it; their next yes or "
+                "no settles it in code."
+            )
+        return (
+            "RESTARTED — clean slate: scores and round progress cleared, "
+            "back to the lobby. The roster and your memory of the table "
+            "are KEPT — do not re-introduce yourself or re-welcome anyone. "
+            "Starting again requires fresh start language from a player "
+            "(then lily_begin_round); do not announce a question now."
+        )
+
+    @function_tool()
     async def lily_award_bonus(
         self, context: RunContext, player_name: str, reason: str
     ) -> str:
@@ -11510,6 +11588,12 @@ async def entrypoint(ctx: JobContext) -> None:
                     "identity_promotions": getattr(
                         game, "_identity_promotion_events", None
                     ) or [],
+                    # WO-LILY-RESTART-001: restarts on the record — each
+                    # entry carries the dead game's scores/round/timeline,
+                    # so the session row shows game 1 ended by restart.
+                    "game_restarts": getattr(
+                        game, "_game_restart_events", None
+                    ) or [],
                     # Voice-ID closure: outcome + timing persist so a slow
                     # or missed recognition explains itself from the DB row.
                     "voice_identity": {
@@ -11957,6 +12041,12 @@ async def entrypoint(ctx: JobContext) -> None:
             # what did it decide" is a mid-call SQL query.
             "identity_promotions": getattr(
                 game, "_identity_promotion_events", None
+            ) or [],
+            # WO-LILY-RESTART-001: restarts ride the heartbeat too, so
+            # "did the table restart and what did game 1 end at" is a
+            # live mid-call SQL query.
+            "game_restarts": getattr(
+                game, "_game_restart_events", None
             ) or [],
             "voice_identity": {
                 "outcome": getattr(game, "_voice_id_outcome", None)

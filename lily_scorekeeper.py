@@ -814,6 +814,84 @@ def lily_detect_resume_game(text: str) -> bool:
     )
 
 
+# RESTART (WO-LILY-RESTART-001) — the game-restart intent, deterministic.
+# Distinct from RESUME (continue a stopped game where it left off) and from
+# START (open round one from the lobby): a restart KILLS the live game —
+# scores gone, back to the lobby, roster and recognition kept. Because
+# "start over"/"start again" also live inside _RESUME_INTENT_RE, every
+# consult site checks RESTART FIRST (the more destructive reading is the
+# one that gets the deterministic confirm; a "no" costs one question, a
+# mis-resume silently buries the actual request).
+#
+# Phrases found ANYWHERE in the utterance — every one names the GAME (or an
+# unambiguous over/scratch/top anchor), so embedding is safe:
+_RESTART_GAME_RE = _re.compile(
+    r"\b(?:"
+    r"restart (?:the |this |our )?(?:whole )?(?:game|quiz|trivia|thing)"
+    r"|start (?:the |this )?(?:game|quiz|trivia) (?:over|again|from (?:scratch|the top))"
+    r"|start over"
+    r"|start again"
+    r"|start (?:completely )?(?:fresh|from scratch|from the top)"
+    r"|(?:start|play|begin) a (?:brand )?new (?:game|quiz|round of trivia)"
+    r"|new game"
+    r"|from the top"
+    r"|from scratch"
+    r"|do the whole (?:game|quiz|thing) (?:over|again)"
+    r"|wipe the (?:board|scores?) and start"
+    r")\b"
+)
+# The bare, utterance-shaped form: "Restart." IS the command when it is
+# essentially the whole utterance (the C7 bare-start discipline). A bare
+# "start"/"starts" is NOT a restart — that is the START intent (C7) and
+# stays with lily_is_bare_start_intent.
+_RESTART_BARE_RE = _re.compile(r"^(?:restart|restart it|redo it)$")
+_RESTART_FILLER_TOKENS = frozenset({
+    "ok", "okay", "yeah", "yes", "so", "alright", "right", "now", "lily",
+    "please", "then", "well", "just", "can", "we", "could", "us", "hey",
+    "uh", "um", "let", "s", "lets",
+})
+# Question-scoped, NOT game-scoped: "can we restart the question", "read
+# the question from the top" — a request about the CURRENT question must
+# never kill the game. Conservative: the word "question(s)" anywhere in the
+# utterance stands the game-restart detector down entirely (the cost of the
+# rare miss is the player restating without the word; the cost of firing is
+# a wrongly-threatened scoreboard).
+_RESTART_QUESTION_SCOPED_RE = _re.compile(r"\bquestions?\b")
+# Negation guard: "don't restart", "no need to start over", "we won't start
+# again" are the opposite request.
+_RESTART_NEGATION_RE = _re.compile(
+    r"\b(?:don t|dont|do not|never|won t|wont|will not|not|no need to|"
+    r"without having to|rather than)\b[a-z0-9\s]{0,24}?"
+    r"\b(?:restart|start|new game|redo|from the top|from scratch)\b"
+)
+
+
+def lily_detect_restart_game(text: str) -> bool:
+    """True when this utterance asks to RESTART the game from scratch
+    (WO-LILY-RESTART-001). Deterministic + punctuation-proof, in the same
+    command family as the stop/pacing detectors. Question-scoped requests
+    ("can we restart the question") and negations ("don't make us start
+    over") never fire; a bare "start" is the START intent, never a
+    restart. Detection only records intent — a live game still gets the
+    ONE deterministic confirm before anything is reset."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    if _RESTART_QUESTION_SCOPED_RE.search(normalized):
+        return False
+    if _RESTART_NEGATION_RE.search(normalized):
+        return False
+    if _RESTART_GAME_RE.search(normalized):
+        return True
+    tokens = normalized.split()
+    if not tokens or len(tokens) > 6:
+        return False
+    core = [t for t in tokens if t not in _RESTART_FILLER_TOKENS]
+    if not core:
+        return False
+    return bool(_RESTART_BARE_RE.fullmatch(" ".join(core)))
+
+
 # Hold-narration integrity (WO-LILY-HOTFIX-009 W8) — the stop-ack register
 # Lily speaks when she says she has halted: "Stopped. I'm listening.",
 # "Still stopped. You say when.", "Stopped until you say go." (all four
@@ -1103,7 +1181,10 @@ def lily_detect_control_command(text: str) -> Optional[str]:
     start_game, so "let's play relaxed" is a pacing choice, not a game
     start. "start the game" / "let's start" / "let's play" / "start round
     one" fire "start_game" (the agent layer ignores it once the game is
-    running).
+    running). "restart_game" (WO-LILY-RESTART-001: "restart the game" /
+    "start over" / "new game" / "from the top") is checked BEFORE
+    start_game because "start the game over" contains the start phrase —
+    the restart reading owns it; a bare "start" stays start_game.
     """
     normalized = _normalize_command_text(text)
     if not normalized:
@@ -1112,6 +1193,8 @@ def lily_detect_control_command(text: str) -> Optional[str]:
         return "back_to_normal"
     if _FORGET_RE.search(normalized) and not _FORGET_NEGATION_RE.search(normalized):
         return "forget_me"
+    if lily_detect_restart_game(normalized):
+        return "restart_game"
     pacing = lily_detect_pacing_choice(normalized)
     if pacing:
         return pacing
@@ -4239,6 +4322,76 @@ class LilyScorekeeper:
     def set_phase(self, phase: str) -> None:
         if phase in ("lobby", "round", "final", "wrapup"):
             self.phase = phase
+
+    def reset_for_restart(self) -> dict:
+        """WO-LILY-RESTART-001 — kill the live game, keep the people.
+
+        Clears every GAME surface (scores, streaks, ledger, round/question
+        cursors, answer window, candidates, timeline) and returns to the
+        lobby phase. The ROSTER IS KEPT: every seat survives with its
+        speaker_label / speaker_id / lobby_fact / placeholder status —
+        restarting the game is not forgetting the people. Table-level
+        sticky choices (pacing, media_mode, adult intensity, format
+        override) survive too: the table chose them, the game didn't.
+
+        Returns the dead game's summary ({question_number, round, scores,
+        question_timeline}) so the caller can persist "game 1 ended by
+        restart" through the lily_sessions.metadata lane — the record is
+        MOVED into that event, never bare-dropped. Bumps roster_gen (a
+        "restart" mutation the beat publisher deliberately ignores) so the
+        zero-score `players` payload republish is ordered after every
+        pre-restart payload."""
+        summary = {
+            "question_number": self.question_number,
+            "round": self.round,
+            "phase": self.phase,
+            "scores": {
+                name: int(state.get("score", 0))
+                for name, state in self.players.items()
+            },
+            "question_timeline": dict(
+                getattr(self, "question_timeline", None) or {}
+            ),
+        }
+        for state in self.players.values():
+            state["score"] = 0
+            state["streak"] = 0
+            state["answers_attempted"] = 0
+            state["answers_correct"] = 0
+            state["last_correct_category"] = None
+            state["questions_since_spoke"] = 0
+            state["lifeline_available"] = True
+        self.score_ledger = []
+        self.phase = "lobby"
+        self.round = 0
+        self.question_number = 0
+        self.round_format = "freeform"  # sticky override survives; the
+        self.category = None            # current round's format does not
+        self.current_question = None
+        self.current_answer = None
+        self.close_answer_window()
+        self.answer_candidates = {}
+        self.answer_window_question_id = None
+        self.answer_window_question_index = None
+        self.answer_window_registered = False
+        self._last_window_deadline = None
+        self.late_answers = []
+        self._captured_answer_utterances = {}
+        self.question_timeline = {}
+        self.overlap_flag = False
+        self._window_speaker_spans = {}
+        self._window_addressee_confidences = []
+        self._last_addressee_confidence = None
+        self.clear_status_notes()
+        self._roster_mutation("restart")
+        logger.warning(
+            "LILY_RESTART | SCOREKEEPER_RESET | session=%s dead_game=%s — "
+            "scores/round/window cleared, roster kept (%d seats)",
+            self.session_id,
+            {k: v for k, v in summary.items() if k != "question_timeline"},
+            len(self.players),
+        )
+        return summary
 
     def set_pacing(self, pacing: str) -> None:
         """Flip the sticky pacing flag (group prefs WO). Invalid values are

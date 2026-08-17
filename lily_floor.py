@@ -18,6 +18,7 @@ import lily_addressee
 import lily_addressee_classifier
 import lily_config
 import lily_evaluation
+import lily_forget
 import lily_nbest
 import lily_persistence
 import lily_say_gate
@@ -472,6 +473,382 @@ class LilyFloorMixin:
         if unsettled:
             return f"lobby_unsettled:{unsettled}"
         return None
+
+    # -- game restart (WO-LILY-RESTART-001) ---------------------------------
+    #
+    # OPERATOR DIRECTIVE: Lily must be able to RESTART the game on request.
+    # Same discipline as WO-3's start gate: the intent is a DETERMINISTIC
+    # detector fact (lily_detect_restart_game via the command lane, or the
+    # UI/rpc source) — the lily_restart_game tool VERIFIES the fact and can
+    # never restart on model judgment alone. A restart on a table with
+    # something to lose (any question dispatched or score > 0) asks ONE
+    # deterministic confirm and proceeds only on an affirmative final from
+    # a player; a bare-lobby restart has nothing to lose and skips the
+    # confirm. The reset kills the GAME and keeps the PEOPLE: roster,
+    # binds, recognition state and recognition_aired all survive — no
+    # re-welcome monologue — and WO-3's lobby-settle start gate re-arms, so
+    # beginning again takes a fresh start intent.
+
+    _RESTART_CONFIRM_LINE = "Restart from scratch — scores gone. Sure?"
+    _RESTART_DONE_LINE = (
+        "Done — clean slate. Same crew, zero-zero. Say start when you're "
+        "ready."
+    )
+    _RESTART_LOBBY_LINE = (
+        "Nothing on the board yet, so we're already fresh. Say start "
+        "whenever you're ready."
+    )
+    _RESTART_DECLINED_LINE = "Good — the game stands. Where were we?"
+
+    def note_player_restart_intent(
+        self, *, source: str, text: str = ""
+    ) -> None:
+        """Record the explicit restart-intent fact. Set ONLY by
+        deterministic channels: the spoken restart detector
+        (command == restart_game) or a UI/rpc control. Model judgment
+        never writes this — the tool path verifies it (the WO-3 start-gate
+        discipline)."""
+        if getattr(self, "_player_restart_intent", None) is None:
+            logger.info(
+                "LILY_RESTART | INTENT | session=%s source=%s text=%r",
+                getattr(self.sk, "session_id", "?"), source,
+                str(text)[:80],
+            )
+        self._player_restart_intent = {
+            "source": source,
+            "text": str(text or "")[:160],
+            "at": time.time(),
+        }
+
+    def restart_intent_present(self) -> bool:
+        """Has a player asked for a restart through a deterministic
+        channel, and is that ask still live (not yet executed or
+        declined)?"""
+        return getattr(self, "_player_restart_intent", None) is not None
+
+    def restart_requires_confirm(self) -> bool:
+        """True when the table has something to lose: a LIVE game (started,
+        not finished) with any question dispatched or any score on the
+        board. A bare lobby, and a game already at its finale, have
+        nothing worth a confirm."""
+        if not getattr(self, "game_started", False):
+            return False
+        if getattr(self, "game_over", False):
+            return False
+        sk = self.sk
+        if int(getattr(sk, "question_number", 0) or 0) > 0:
+            return True
+        if getattr(sk, "current_question", None) is not None:
+            return True
+        if self._active_delivery_qnum is not None:
+            return True
+        if self._pending_delivery_qnum is not None:
+            return True
+        try:
+            if any(
+                int(v) != 0 for v in (sk.ledger_scores() or {}).values()
+            ):
+                return True
+        except Exception:
+            pass
+        return any(
+            int(state.get("score", 0) or 0) != 0
+            for state in (getattr(sk, "players", None) or {}).values()
+        )
+
+    def request_restart(
+        self,
+        *,
+        source: str,
+        requester: str | None = None,
+        text: str = "",
+    ) -> str:
+        """The one restart entry every channel converges on. Returns the
+        outcome: "restarted" (nothing to lose — executed immediately),
+        "confirm_armed" (the ONE deterministic confirm is on the air),
+        or "confirm_pending" (already armed; a re-stated restart command
+        while the confirm is out reads as the affirmative and executes).
+
+        Legal during a hold, a dispute-hold and a sticky STOP by
+        construction: the confirm is a keyless conversational act (never a
+        game-lane payload, so game_payload_blocked/stop never suppress it)
+        and the user final that carried the restart request has already
+        released any A4 hold on the classify seam — restart intent during
+        a hold is how a stuck table gets out."""
+        if getattr(self, "_pending_restart_confirm", None) is not None:
+            # A re-stated restart command IS the affirmative — the table
+            # answered the confirm with the request itself.
+            logger.info(
+                "LILY_RESTART | RESTATED_WHILE_PENDING | session=%s — the "
+                "repeated restart command confirms",
+                self.sk.session_id,
+            )
+            self.execute_restart(source=f"{source}_restated", requester=requester)
+            return "restarted"
+        if not self.restart_requires_confirm():
+            self.execute_restart(source=source, requester=requester)
+            return "restarted"
+        self._pending_restart_confirm = {
+            "requester": requester,
+            "source": source,
+            "text": str(text or "")[:160],
+            "at": time.time(),
+        }
+        logger.warning(
+            "LILY_RESTART | CONFIRM_ARMED | session=%s requester=%s "
+            "source=%s — live game with stakes; ONE deterministic confirm, "
+            "reset only on an affirmative final from a player",
+            self.sk.session_id, requester, source,
+        )
+        self.gated_say(
+            None,
+            "restart_confirm",
+            "[deterministic restart confirm: scores would be lost]",
+            source="restart_request",
+            text=self._RESTART_CONFIRM_LINE,
+        )
+        return "confirm_armed"
+
+    def resolve_restart_confirm(
+        self, text: str, speaker: str | None
+    ) -> bool:
+        """Consume one finalized user segment against a pending restart
+        confirm. An affirmative from a PLAYER (any player — the table owns
+        its game) executes the restart; a no drops it (and clears the
+        intent fact, so the tool cannot later restart on the stale ask);
+        anything ambiguous does nothing destructive and stays pending.
+        Returns True when this turn was consumed by the confirm flow."""
+        if getattr(self, "_pending_restart_confirm", None) is None:
+            return False
+        verdict = lily_forget.lily_parse_forget_confirmation(text)
+        if verdict == "yes":
+            self.mark_deterministic_reply(text)
+            self.execute_restart(source="voice_confirm", requester=speaker)
+            return True
+        if verdict == "no":
+            self._pending_restart_confirm = None
+            self._player_restart_intent = None
+            self.mark_deterministic_reply(text)
+            logger.info(
+                "LILY_RESTART | DECLINED | session=%s by=%s",
+                self.sk.session_id, speaker,
+            )
+            self.gated_say(
+                None,
+                "restart_declined",
+                "[deterministic restart decline ack]",
+                source="restart_declined",
+                text=self._RESTART_DECLINED_LINE,
+            )
+            return True
+        return False
+
+    def execute_restart(
+        self, *, source: str, requester: str | None = None
+    ) -> dict:
+        """THE reset (WO-LILY-RESTART-001): kill the dead game cleanly,
+        keep the people, return to a lobby with the WO-3 start gate armed.
+
+        * Every WO-1 delivery obligation of the dead game is cancelled
+          WITH ACCOUNTING — in-flight speeches cancel_speech'd, pending
+          claims released, game-scoped claims purged (logged), watchdog
+          tasks cancelled — never bare-dropped, so no watchdog can re-air
+          a dead-game verdict.
+        * Scores / round / question state / journals cleared (scorekeeper
+          reset + the agent-side delivery/transition/receipt journals).
+        * Roster and identity/recognition state KEPT: players stay bound
+          and recognized, recognition_aired stays stamped (no re-welcome
+          monologue), memory/prefs untouched.
+        * The dead game's record is MOVED into the session telemetry lane
+          (lily_sessions.metadata.game_restarts, beside
+          identity_promotions) — game 1 ended by restart, on the record.
+        * UI: phase back to lobby + zero-score `players` payload with a
+          bumped roster_gen + blank room metadata, all through the
+          existing publish chokepoints.
+        """
+        # -- 0. the dead game's obligations: cancel with accounting --------
+        for speech_id in list(getattr(self, "_speech_handles", None) or {}):
+            self.cancel_speech(speech_id, reason="game_restart")
+        released = self.say_registry.release_pending()
+        if released:
+            logger.info(
+                "LILY_RESTART | CLAIMS_RELEASED | keys=%s",
+                ",".join(sorted(released)),
+            )
+        purge = getattr(self.say_registry, "purge_game_scoped", None)
+        purged = purge() if callable(purge) else {}
+        if purged.get("released") or purged.get("dropped_confirmed"):
+            logger.info(
+                "LILY_RESTART | GAME_CLAIMS_PURGED | released=%s "
+                "dropped_confirmed=%s",
+                ",".join(sorted(purged.get("released") or [])) or "-",
+                ",".join(sorted(purged.get("dropped_confirmed") or []))
+                or "-",
+            )
+        for task_attr in (
+            "_window_timer", "_prefetch_task", "_watchdog_task",
+            "_relaxed_settle_task", "_pending_start_task",
+            "_fusion_delivery_watchdog_task", "_supply_recovery_task",
+        ):
+            task = getattr(self, task_attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+            setattr(self, task_attr, None)
+        for judge_task in (getattr(self, "_spec_judge", None) or {}).values():
+            if judge_task is not None and not judge_task.done():
+                judge_task.cancel()
+        self._spec_judge = {}
+        if getattr(self, "_bed_handle", None) is not None:
+            try:
+                self._stop_bed()
+            except Exception:
+                self._bed_handle = None
+        cancel_cut = getattr(self, "cancel_cut_recovery", None)
+        if callable(cancel_cut):
+            try:
+                cancel_cut()
+            except Exception:
+                pass
+
+        # -- 1. scorekeeper: scores/round/window cleared, roster kept ------
+        summary = self.sk.reset_for_restart()
+
+        # -- 2. session telemetry: game N ended by restart -----------------
+        events = getattr(self, "_game_restart_events", None)
+        if events is None:
+            events = self._game_restart_events = []
+        events.append({
+            "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "source": source,
+            "requester": requester,
+            "dead_game": summary,
+        })
+
+        # -- 3. agent-side game state: journals, receipts, delivery marks --
+        self.game_started = False
+        self.game_over = False
+        self.finale_sent = False
+        self.prewager_standings = None
+        # CLASS 7's commit latch resets WITH the game: the lobby really is
+        # a lobby again (GameControl derives LOBBY). Recognition re-airs
+        # stay impossible anyway — recognition_aired keeps its stamp and
+        # _late_recognition_fired survives below.
+        self._game_start_committed = False
+        self.armed_question = None
+        self._transition_journal = {}
+        self._open_transition_qnum = None
+        self._answered_questions = set()
+        self._aired_stems = set()
+        self._delivered_to_playout = set()
+        self._judged_keys = set()
+        self._result_aired = None
+        self._answer_receipt_aired = None
+        self._answer_receipts_fired = None
+        self._answer_receipts_qnum = None
+        self._pending_reveal_event = None
+        self._pending_unbound_award = None
+        self._pending_delivery_qnum = None
+        self._active_delivery_qnum = None
+        self._active_delivery_started_at = None
+        self._active_delivery_ended_at = None
+        self._delivery_barge_cut_qnum = None
+        self._pending_delivery_resume = None
+        self._delivery_speech_acts = {}
+        self._mc_delivery_qnum = None
+        self._mc_delivery_started_at = None
+        self._mc_delivery_stem_words = 0
+        self._pre_window_segments = []
+        self._recent_finals = []
+        self._user_cut_counts = {}
+        self._verdict_reair_counts = {}
+        self._clarify_fired_questions = set()
+        self.pending_clarify = {}
+        self._glass_published_qnum = None
+        self._durable_asked_qnum = None
+        self._fusion_owed_delivery_qnum = None
+        self._fusion_delivery_deadline = None
+        self._composite_flight_state = None
+        self._steal_window = False
+        self.eliminated = []
+        self._armed_speech_misses = 0
+        self._undelivered_ticks = 0
+        self._undelivered_refires = 0
+        self._armed_limbo_ticks = 0
+        self._supply_stall_ticks = 0
+        self._prefetch_stall_ticks = 0
+        self._supply_silent_ticks = 0
+        self._supply_retry_attempts = 0
+        self._supply_exhausted_notified = False
+        self._phase_hold = None
+        # NOT cleared, deliberately: asked_history / _burned_question_* /
+        # _drawn_* / used_prompts (the no-repeat ledgers — a restarted
+        # table never re-hears game 1's questions), next_question and its
+        # reserve (supply is game-neutral; the fresh start arms from it),
+        # highlights / transcript_buffer / said-already ledgers (session
+        # record and anti-repeat), _session_clarify_count (per-session
+        # cap), and every identity/recognition/memory surface.
+
+        # -- 4. holds/disputes/stop: restart is its own release ------------
+        self._delivery_stop_sticky = False
+        self.release_hold(reason="game_restart")
+        self.release_dispute_hold(reason="game_restart")
+        self.release_question_pending(reason="game_restart")
+        self._awaiting_address_since = 0.0
+
+        # -- 5. the lobby-settle start gate re-arms (WO-3): a fresh start
+        # intent is required to begin again ---------------------------------
+        self._player_start_intent = None
+        self._setup_start_requested = False
+        self._start_hold_said = False
+        self._player_restart_intent = None
+        self._pending_restart_confirm = None
+
+        # -- 6. lobby posture: speculation back on, glass back to lobby ----
+        try:
+            self.set_game_live_preemptive(False)
+        except Exception:
+            pass
+        self._set_ui_phase("lobby")
+        publish_events = getattr(self, "publish_roster_events", None)
+        if callable(publish_events):
+            publish_events()  # drains the gen-bumping "restart" mutation
+        publish_nowait = getattr(self, "publish_attributes_nowait", None)
+        if callable(publish_nowait):
+            publish_nowait()
+        try:
+            publish_metadata = getattr(self, "publish_metadata", None)
+            if callable(publish_metadata):
+                asyncio.get_running_loop().create_task(publish_metadata(""))
+        except RuntimeError:
+            pass
+        try:
+            asyncio.get_running_loop()
+            self.start_prefetch()  # keep the lobby's supply warm
+        except RuntimeError:
+            pass  # unit context — the entrypoint loop owns prefetch live
+        except Exception:
+            pass
+        logger.warning(
+            "LILY_RESTART | EXECUTED | session=%s source=%s requester=%s "
+            "dead_game_q=%s roster=%d — back to lobby, start gate armed "
+            "(fresh start intent required)",
+            self.sk.session_id, source, requester,
+            summary.get("question_number"),
+            len(getattr(self.sk, "players", None) or {}),
+        )
+        self.gated_say(
+            None,
+            "restart_ack",
+            "[deterministic restart ack: clean slate, roster kept]",
+            source="game_restart",
+            text=(
+                self._RESTART_DONE_LINE
+                if summary.get("question_number")
+                or any((summary.get("scores") or {}).values())
+                else self._RESTART_LOBBY_LINE
+            ),
+        )
+        return summary
 
     def game_delivery_stopped(self) -> bool:
         """Persistent STOP latch; conversation may resume, game delivery may not."""

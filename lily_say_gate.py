@@ -900,3 +900,37 @@ class SpeechActRegistry:
             self._owners.pop(k, None)
             self._claimed_at.pop(k, None)
         return released
+
+    # WO-LILY-RESTART-001: keys that belong to ONE game, not the session.
+    # Question numbering restarts at 0 after a game restart, so a confirmed
+    # q_1_delivery from the dead game would physically silence the new
+    # game's first question if it survived. Session-scoped keys
+    # (session_greet / session_rejoin) are deliberately NOT matched — a
+    # restart never re-opens the greeting.
+    _GAME_SCOPED_KEY_RE = re.compile(
+        r"^(?:q_\d+_|round_\d+_|finale$|standings$|steal_)"
+    )
+
+    def purge_game_scoped(self) -> dict:
+        """Drop every game-scoped claim — pending AND confirmed — for a
+        game restart (WO-LILY-RESTART-001). The dead game's obligations are
+        cancelled WITH ACCOUNTING: the returned {released, dropped_confirmed}
+        lists are logged by the caller, pending owners were already
+        cancel_speech'd, and any in-flight _stale_claim_watch exits on the
+        state(key)-is-not-PENDING read — no watchdog can re-air a
+        dead-game verdict. Never touches session-scoped keys."""
+        released: list[str] = []
+        dropped_confirmed: list[str] = []
+        for key in list(self._acts):
+            if not self._GAME_SCOPED_KEY_RE.match(key):
+                continue
+            bucket = (
+                released
+                if self._acts[key] == CLAIM_PENDING
+                else dropped_confirmed
+            )
+            bucket.append(key)
+            self._acts.pop(key, None)
+            self._owners.pop(key, None)
+            self._claimed_at.pop(key, None)
+        return {"released": released, "dropped_confirmed": dropped_confirmed}

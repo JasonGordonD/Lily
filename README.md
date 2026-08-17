@@ -1022,6 +1022,13 @@ reads as success.
   `identity_unconfirmed`, `recognition_dispute`, `ambiguous_yes`,
   `user_speaking`, `setup_pending`, `intake_active`). A blocked start can
   never be narrated as a kickoff.
+- **`lily_restart_game`** (WO-LILY-RESTART-001) — same discriminator
+  discipline: `RESTARTED — …` only after `execute_restart` actually ran, else
+  `NOT RESTARTED (<reason>)` (`no_restart_intent` — the tool VERIFIES the
+  deterministic detector-set fact, model judgment can never wipe a scoreboard;
+  `confirm_required` / `confirm_pending` — the one deterministic confirm owns
+  the beat; `already_lobby`). The reset keeps roster + recognition, clears
+  scores/journals/claims, and re-arms the lobby-settle start gate.
 - **`lily_set_category`** — routes its confirmation through
   `lily_custom_round_line(result)`; an unregistered category returns the
   refusal, not a category announcement.

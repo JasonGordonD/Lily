@@ -46,7 +46,7 @@ from typing import Optional
 
 # Bumped whenever a player-facing feature lands. The delta a returning
 # table hears is every feature with `since` greater than their stamp.
-LILY_FEATURE_VERSION: int = 6
+LILY_FEATURE_VERSION: int = 7
 
 # The backfill (version 1) is the audited launch set; voice presets are
 # version 2 (Rami's direct change, 2026-07-31 — added at commit time per
@@ -199,6 +199,23 @@ LILY_CAPABILITIES: list = [
         ),
         "prompt_marker": "Any topic, on the fly",
         "askable": True,
+    },
+    {
+        "key": "restart_game",
+        "code_ref": "lily_floor:LilyFloorMixin.execute_restart",
+        "tools": ["lily_restart_game"],
+        "since": 7,
+        "description": (
+            "say 'restart the game' or 'start over' and she wipes the "
+            "scores and takes it from the top — she asks once first if a "
+            "game is live, and she still knows everyone"
+        ),
+        # A control command like skip/stop, reached by saying it — the
+        # deterministic detector owns it (WO-LILY-RESTART-001); it is not
+        # an options-block pitch, so no prompt marker (the bonus_points /
+        # verdict_correction pattern).
+        "prompt_marker": None,
+        "askable": False,
     },
     {
         "key": "image_ingestion",

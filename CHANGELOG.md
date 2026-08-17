@@ -5,6 +5,110 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-08-17 — WO-LILY-RESTART-001: restart the game on request — kill the game, keep the people
+
+Operator directive: Lily must be able to RESTART the game on request.
+Built on the WO-1..4 machinery (dequeue-time airgate accounting, the
+recognition_aired stamp, WO-3's detector-fact/lobby-settle start-gate
+discipline, WO-4's roster_gen wire) — not around it.
+
+1. **Deterministic restart detector, command lane.**
+   `lily_scorekeeper.lily_detect_restart_game` (same family as the
+   stop/pacing detectors): "restart the game" / "start over" / "start
+   again" / "new game" / "from the top" / "from scratch" fire, plus the
+   utterance-shaped bare "Restart." (the C7 bare-start discipline).
+   Question-scoped asks NEVER fire — the word "question(s)" anywhere
+   stands the detector down ("can we restart the question" is about the
+   question) — and negations ("don't make us start over") are guarded. A
+   bare "start" stays the START intent. `lily_detect_control_command`
+   returns `restart_game`, checked BEFORE `start_game` ("start the game
+   over" contains the start phrase; the restart reading owns it).
+   PRECEDENCE FIX: "start over"/"start again" also live in CLASS 5's
+   `_RESUME_INTENT_RE`, so pre-WO a STOPPED table saying "start over" was
+   silently RESUMED (`LILY_STOP | RESUMED | reason=spoken_resume`,
+   reproduced on the pre-WO tree) — the resume consult now stands down
+   when the restart detector fires; plain resumes ("keep going") are
+   pinned unchanged.
+2. **Confirm-gated, deterministically.** `request_restart` (lily_floor):
+   a table with something to lose (`restart_requires_confirm` — live
+   game with any question dispatched or any score on the board) gets ONE
+   deterministic confirm sheet ("Restart from scratch — scores gone.
+   Sure?") and the reset runs only on an affirmative final from a player
+   (`resolve_restart_confirm`, the forget-flow yes/no parser: no drops
+   the ask AND the intent fact; ambiguous stays pending, destroys
+   nothing; a re-stated restart command counts as the yes). A bare lobby
+   (or a finished game) has nothing to lose and skips the confirm. NO
+   DEADLOCK with WO-1/WO-3 holds: the restart acks join
+   `_HOLD_EXEMPT_SOURCES` (the stop/hold-ack family), so the confirm
+   airs through a live hold, and a restart is legal during a
+   dispute-hold and a sticky STOP — it is how a stuck table gets out.
+   The `lily_restart_game` TOOL verifies the detector-set fact
+   (`note_player_restart_intent` / `restart_intent_present` — the WO-3
+   start-gate discipline): model judgment alone can never wipe a
+   scoreboard; every refusal leads with its discriminator
+   (`no_restart_intent` / `confirm_required` / `confirm_pending` /
+   `already_lobby`).
+3. **The reset** (`execute_restart` + `LilyScorekeeper.reset_for_restart`):
+   scores/streaks/ledger, round/question cursors, answer window +
+   candidates, transition/receipt journals, delivery marks and the
+   clarify state all cleared; the ROSTER AND THE PEOPLE ARE KEPT — seats,
+   binds, labels, memory_block, prefs, and `recognition_aired` stays
+   stamped (no re-welcome monologue; `_game_start_committed` resets so
+   GameControl derives a true LOBBY). Every WO-1 obligation of the dead
+   game is cancelled WITH ACCOUNTING, never bare-dropped: in-flight
+   speeches `cancel_speech`'d, pending claims released (logged),
+   game-scoped claims purged via the new
+   `SpeechActRegistry.purge_game_scoped` (q_N/round_N/finale keys —
+   pending AND confirmed, since question numbering restarts and a
+   confirmed dead `q_1_delivery` would physically silence game 2's first
+   question; session keys survive), watchdog/settle/prefetch tasks
+   cancelled (`_stale_claim_watch` exits on the not-PENDING read — no
+   dead-game verdict can re-air). Back to the lobby with WO-3's
+   lobby-settle start gate ARMED: `_player_start_intent` and
+   `_setup_start_requested` clear, so beginning again requires a fresh
+   start intent. The no-repeat ledgers (asked_history, burned/drawn
+   sets), supply head/reserve, session anti-repeat ledgers and every
+   identity surface deliberately survive. Telemetry: each restart lands
+   in `lily_sessions.metadata.game_restarts` (both existing metadata
+   write sites — session close + 60s heartbeat, the identity_promotions
+   lane) carrying the dead game's scores/round/question_timeline — the
+   record MOVES into the event (the live timeline resets for game 2), so
+   the session row shows game 1 ended by restart.
+4. **UI: no prmpt_ui change needed — verified read-only.**
+   `prmpt_ui/src/components/lily/state.ts` +
+   `src/hooks/lily/use-lily-game-state.ts` are a pure per-key LWW
+   reducer over `phase` / `players` / `roster_gen` / room metadata: the
+   restart republishes `phase=lobby`, the zero-score `players` payload
+   under a bumped `roster_gen` (a "restart" roster mutation the beat
+   publisher deliberately ignores — gen bump only), and blank room
+   metadata through the existing chokepoints, which fully drives the
+   glass back to the lobby (the review history buffer keeps game 1's
+   snapshots — display-only by design). Manifest: `restart_game` entry
+   (since 7, non-askable like verdict_correction — a spoken control
+   command, not an options-block pitch); `LILY_FEATURE_VERSION` 6→7;
+   README names the tool.
+
+Tests: `tests/test_restart_wo5.py` (21) — detector positives/negatives
+("restart the game" yes; "can we restart the question" NO; "start" alone
+NO), command-lane routing, confirm gate on a live game (yes/no/ambiguous/
+re-stated), no-confirm bare lobby (and the setup parser's start flag
+cannot survive as phantom intent), reset keeps roster+recognition and
+clears scores/claims (session_greet claim survives), registry purge
+scoping, post-restart start requires fresh intent (auto-start net pinned
+dead), no dead-game re-airs (claims gone, barge-resume discharged,
+game-lane dispatch refused), in-flight dead speech cancelled, restart
+legal during hold+dispute and during sticky STOP (the silent-resume
+repro), plain resume invariance pin, all four tool branches, telemetry
+event content. Failing-first on 6347cde: import fails outright; with a
+one-line import shim 20/21 red (the 1 green is the detector-negatives
+invariance pin), and the isolated pre-WO repro shows "start over" under
+sticky STOP resuming the disowned game with scores intact. Full suite
+2766 (baseline 2745 + 21) green on python3.11 AND the 3.13 venv.
+Deliberately NOT attempted: a UI restart control (voice + tool are the
+channels; no `lily_control.restart` RPC), prompt options-block text (the
+detector owns the feature; prompt prefix untouched), and returning the
+armed-but-undelivered card to the supply head (it is dropped; burned
+cards stay burned — noted as an accepted small content cost).
 ## 2026-08-17 — WO-LILY-RECOG-DELIVERY-001: un-lie the name-door stamp; a slow door still delivers
 
 ANTIREPEAT-PROTOCOL-001 (bfadc42, yesterday) fixed the 11:31 double
