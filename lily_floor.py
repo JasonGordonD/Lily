@@ -197,6 +197,14 @@ class LilyFloorMixin:
             return "question_pending"
         if self._awaiting_address_since:
             return "address_unanswered"
+        if self.dispute_hold_active():
+            # WO-LILY-BIND-DISPUTE-001 D2b: a protest-shaped final landed
+            # right behind a verdict airing — the ruling is DISPUTED and a
+            # new question may not take the floor over the dispute. Released
+            # ONLY by a turn post-dating the protest confirming on air
+            # (on_agent_speech_finished) or the hard timeout inside
+            # dispute_hold_active (never a wedge).
+            return "dispute_hold"
         if getattr(self, "_user_speaking", False):
             # D-E (live lily-A9B757 2026-08-13, 04:40:17): a new question must
             # never take the floor while a human is mid-turn — after a timeout
@@ -255,6 +263,215 @@ class LilyFloorMixin:
             return False
         ref = now if now is not None else time.time()
         return (ref - self._hold_since) >= lily_config.hold_timeout_seconds()
+
+    # -- verdict dispute-hold (WO-LILY-BIND-DISPUTE-001 D2) -----------------
+    #
+    # The live gap, twice over: progression_paused_reason had NO dispute
+    # state. 08-14 (lily-FD3994) — "What do you mean, locked in? I didn't
+    # say anything." landed between the verdict commit and N+1, and the
+    # next question fired over the protest; 08-15 (lily-359C62) — the
+    # protest was answered in prose ("You're right on both counts") while
+    # the machinery delivered question two over it anyway. The hold arms on
+    # a protest-shaped FINAL within verdict_dispute_window_seconds of a
+    # verdict/receipt airing (or during a live solo-relaxed settle window),
+    # and releases ONLY when a turn POST-DATING the protest confirms on air
+    # — a pre-committed reveal line queued before the protest can no longer
+    # discharge it — or at the hard timeout (a hold must never be a wedge).
+
+    def dispute_hold_active(self, now: float | None = None) -> bool:
+        """True while a verdict dispute holds progression. Self-releasing:
+        past dispute_hold_timeout_seconds the hold reads False forever
+        (and logs the timeout release once)."""
+        since = getattr(self, "_dispute_hold_since", None)
+        if since is None:
+            return False
+        ref = now if now is not None else time.time()
+        if (ref - since) >= lily_config.dispute_hold_timeout_seconds():
+            self.release_dispute_hold(reason="timeout")
+            return False
+        return True
+
+    def release_dispute_hold(self, reason: str) -> bool:
+        """Lift the dispute-hold (post-protest turn confirmed on air, or
+        the timeout elapsed). Returns True if a hold was actually lifted."""
+        if getattr(self, "_dispute_hold_since", None) is None:
+            return False
+        self._dispute_hold_since = None
+        self._dispute_hold_reason = None
+        logger.info(
+            "LILY_DISPUTE | RELEASED | session=%s reason=%s",
+            self.sk.session_id, reason,
+        )
+        return True
+
+    def _verdict_recently_aired(self, now_mono: float) -> str | None:
+        """Why a protest right now is anchored to a ruling: a verdict
+        result or an instant receipt aired within the dispute window, or a
+        solo-relaxed settle window is live (the bind is by definition
+        fresh). None = no recent ruling to dispute."""
+        window = lily_config.verdict_dispute_window_seconds()
+        result = getattr(self, "_result_aired", None) or {}
+        at = result.get("at")
+        if at is not None and (now_mono - at) <= window:
+            return "result_aired"
+        receipt = getattr(self, "_answer_receipt_aired", None) or {}
+        at = receipt.get("at")
+        if at is not None and (now_mono - at) <= window:
+            return "receipt_aired"
+        if getattr(self, "_relaxed_settle_pending", None) is not None:
+            return "relaxed_settle"
+        return None
+
+    def note_protest_final(
+        self, text: str, player: str | None, segment_ts: float
+    ) -> None:
+        """Consume one finalized user segment for the dispute sensor. Runs
+        on the classify_addressee path (every final crosses it). A
+        protest-shaped final (lily_detect_verdict_contest — widened by this
+        WO with the binding-denial class) stamps the protest clock; within
+        the dispute window of a ruling airing it arms the hold, and during
+        a live solo-relaxed settle window a binding denial also WITHDRAWS
+        the disowned bind so the beat re-opens instead of burning."""
+        if not getattr(self, "game_started", False):
+            return
+        try:
+            if not lily_scorekeeper.lily_detect_verdict_contest(text):
+                return
+        except Exception:  # pragma: no cover — detector is pure/stdlib
+            return
+        now_wall = time.time()
+        self._last_protest_at = now_wall
+        self._last_protest_text = str(text or "")[:160]
+        anchor = self._verdict_recently_aired(time.monotonic())
+        if anchor is None:
+            logger.info(
+                "LILY_DISPUTE | PROTEST_UNANCHORED | session=%s player=%s "
+                "text=%r — protest shape heard but no ruling aired inside "
+                "the dispute window; X12 contest re-check still applies",
+                self.sk.session_id, player, str(text)[:80],
+            )
+            return
+        already = getattr(self, "_dispute_hold_since", None) is not None
+        self._dispute_hold_since = now_wall
+        self._dispute_hold_reason = anchor
+        if not already:
+            logger.warning(
+                "LILY_DISPUTE | ARMED | session=%s player=%s anchor=%s "
+                "text=%r — progression holds until a post-protest turn "
+                "confirms on air (WO-LILY-BIND-DISPUTE-001 D2)",
+                self.sk.session_id, player, anchor, str(text)[:80],
+            )
+        # D3: a protest against a bind still inside the solo-relaxed settle
+        # window disowns the bind itself — withdraw it so roster-complete
+        # re-opens and the question cannot burn on the protest.
+        settle_qnum = getattr(self, "_relaxed_settle_pending", None)
+        if (
+            settle_qnum is not None
+            and settle_qnum == self.sk.question_number
+            and player
+        ):
+            self.sk.withdraw_candidate(
+                player, reason="binding_denied_protest"
+            )
+
+    def _note_speech_dispatch(self, speech_id: str | None) -> None:
+        """Stamp the wall-clock dispatch time of one outbound speech.
+        Consumed by the post-dating reads below — a turn can only discharge
+        a protest/address debt that predates its own dispatch. Bounded."""
+        if not speech_id:
+            return
+        store = getattr(self, "_speech_dispatched_at", None)
+        if store is None:
+            store = self._speech_dispatched_at = {}
+        store[speech_id] = time.time()
+        if len(store) > 64:
+            for stale in sorted(store, key=store.get)[: len(store) - 64]:
+                store.pop(stale, None)
+
+    def speech_dispatch_postdates(
+        self, speech_id: str | None, since: float
+    ) -> bool:
+        """Was this speech dispatched AFTER `since` (wall clock)? Unknown
+        dispatch times FAIL OPEN (True — pre-WO behavior) so a harness or
+        exotic lane can never wedge a note/debt forever."""
+        if not since:
+            return True
+        stamp = (getattr(self, "_speech_dispatched_at", None) or {}).get(
+            speech_id
+        )
+        if stamp is None:
+            return True
+        return stamp >= since
+
+    # -- lobby-settle start gate (WO-LILY-BIND-DISPUTE-001 addendum) --------
+    #
+    # Live lily-359C62 (2026-08-15 17:48:46): round one started UNPROMPTED —
+    # the auto-start net fired off the joke-resolution final ("Yes. I made,
+    # I made, I made a joke...") because its roster read 2 (both rows
+    # PLACEHOLDERS — one hearable human), its quiet read ≈28s (the player
+    # waiting for an answer to "Why are these three players here?"), and
+    # NOTHING on any start path required a player to have expressed start
+    # intent. Round one may not dispatch unless (a) a player expressed
+    # start intent through a DETERMINISTIC channel and (b) the lobby is
+    # settled. The tool path verifies the same fact — model judgment alone
+    # can never start the game.
+
+    def note_player_start_intent(self, *, source: str, text: str = "") -> None:
+        """Record the explicit start-intent fact. Set ONLY by deterministic
+        channels: the spoken start detector (command == start_game), the UI
+        start control (rpc), or the multi-intent setup parser's start
+        (which start_intent_present reads directly). Model judgment never
+        writes this."""
+        if getattr(self, "_player_start_intent", None) is None:
+            logger.info(
+                "LILY_STATE | START_INTENT | session=%s source=%s text=%r",
+                getattr(self.sk, "session_id", "?"), source,
+                str(text)[:80],
+            )
+        self._player_start_intent = {
+            "source": source,
+            "text": str(text or "")[:160],
+            "at": time.time(),
+        }
+
+    def start_intent_present(self) -> bool:
+        """Has a player expressed start intent through a deterministic
+        channel this session? Reads the explicit fact and the multi-intent
+        setup parser's start flag (\"I want to play\" class)."""
+        if getattr(self, "_player_start_intent", None) is not None:
+            return True
+        return bool(getattr(self, "_setup_start_requested", False))
+
+    def lobby_unsettled_reason(self) -> str | None:
+        """Why the lobby is NOT settled enough for round one to dispatch.
+        Every arm is a self-clearing state (bind settle is time-based, the
+        address debt clears at a post-debt response playout, a pending
+        clarify resolves on the player's next final, the dispute-hold
+        self-releases) — so a deferred start can always fire later."""
+        if self.intake_roundrobin_active():
+            # In-flight name bind / roster mutation inside the settle
+            # window (intake_settle_seconds after the last bind).
+            return "intake_active"
+        if self._awaiting_address_since:
+            return "address_unanswered"
+        if self._question_pending:
+            return "question_pending"
+        if getattr(self, "pending_clarify", None):
+            return "pending_clarify"
+        if self.dispute_hold_active():
+            return "dispute_hold"
+        return None
+
+    def start_gate_blocked_reason(self) -> str | None:
+        """The addendum's two-part round-one gate, consulted by every start
+        path (voice/rpc paths note their own intent first; the tool and
+        auto-start paths must find the fact already recorded)."""
+        if not self.start_intent_present():
+            return "no_start_intent"
+        unsettled = self.lobby_unsettled_reason()
+        if unsettled:
+            return f"lobby_unsettled:{unsettled}"
+        return None
 
     def game_delivery_stopped(self) -> bool:
         """Persistent STOP latch; conversation may resume, game delivery may not."""
@@ -852,6 +1069,17 @@ class LilyFloorMixin:
             lily_addressee_classifier.CLASS_HOST_DIRECTED
         ):
             self._awaiting_address_since = time.time()
+        # WO-LILY-BIND-DISPUTE-001 D2: the dispute sensor rides the same
+        # every-final seam (this classifier runs on the production path for
+        # each finalized segment, ahead of the contest-note branch), so a
+        # protest-shaped final can arm the hold before any downstream
+        # dispatch reads progression_paused_reason.
+        try:
+            self.note_protest_final(
+                text, result.get("player"), segment_ts
+            )
+        except Exception:  # pragma: no cover — sensor must never take
+            logger.exception("LILY_DISPUTE | SENSOR_FAILED")  # the turn down
         logger.info(
             "LILY_ADDRESSEE | CLASSIFIED | session=%s %s",
             self.sk.session_id, judgment.log_json(),
@@ -1058,7 +1286,20 @@ class LilyFloorMixin:
         (lily_tier1_band == clarify) under the ACTIVE threshold. Bound:
         at most once per question, at most
         lily_config.clarify_max_per_session() per session; rostered
-        players only (the clarify addresses someone by name)."""
+        players only (the clarify addresses someone by name).
+
+        WO-LILY-BIND-DISPUTE-001 D1 — the REJECT side is no longer a free
+        pass to bind. An utterance in BAND_REJECT that has no committed
+        answer shape (lily_uncommitted_answer_shape: wh-search /
+        disfluency tail / fragment tail — the live "What's he. Face. Uh.",
+        sim 0.182, hard-bound while "The. State." at 0.769 got the check)
+        routes into the SAME pending-clarify machinery, and its bind is
+        WITHDRAWN so nothing downstream (the relaxed roster-complete
+        close, a window expiry) can adjudicate a fragment. Answer
+        similarity stays the accept path; shape is the reject-side
+        sensor only — a committed wrong answer ("Paris.", "how many
+        states") still lands BAND_REJECT with shape None and binds
+        exactly as before."""
         player = cand.get("player")
         if not player:
             return
@@ -1069,7 +1310,14 @@ class LilyFloorMixin:
             float(similarity), tier1_threshold,
             lily_config.tier1_clarify_margin(),
         )
-        if band != lily_evaluation.BAND_CLARIFY:
+        shape = None
+        if band == lily_evaluation.BAND_REJECT:
+            shape = lily_evaluation.lily_uncommitted_answer_shape(
+                str(cand.get("text") or "")
+            )
+            if shape is None:
+                return  # committed shape — the classification stands (B1)
+        elif band != lily_evaluation.BAND_CLARIFY:
             return
         if not hasattr(self, "_clarify_fired_questions"):
             self._clarify_fired_questions = set()
@@ -1091,13 +1339,22 @@ class LilyFloorMixin:
         self._clarify_fired_questions.add(qnum)
         self._session_clarify_count += 1
         logger.info(
-            "LILY_CLARIFY | BAND_TRIGGER | session=%s q=%d player=%s "
-            "similarity=%.3f threshold=%.3f prior=%s count=%d",
+            "LILY_CLARIFY | %s | session=%s q=%d player=%s "
+            "similarity=%.3f threshold=%.3f prior=%s shape=%s count=%d",
+            "SHAPE_TRIGGER" if shape else "BAND_TRIGGER",
             self.sk.session_id, qnum, player, similarity,
-            tier1_threshold, prior_state, self._session_clarify_count,
+            tier1_threshold, prior_state, shape or "-",
+            self._session_clarify_count,
         )
         if not self.mark_pending_clarify(player):
             return
+        if shape is not None:
+            # D1: the fragment must not stand as a bound answer while the
+            # clarify is out — withdraw AFTER mark_pending_clarify (which
+            # reads the candidate for the clarified-utterance corpus row).
+            self.sk.withdraw_candidate(
+                player, reason=f"uncommitted_shape:{shape}"
+            )
         self.gated_say(
             f"q_{qnum}_clarify",
             "clarify_question",

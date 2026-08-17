@@ -1332,13 +1332,34 @@ class LilySpeechDeliveryMixin:
             # A dispatch is only an intention. Clear at real playout so a
             # queued, wedged, or suppressed handle cannot hide the
             # ADDRESS_UNANSWERED signal.
-            self._awaiting_address_since = 0.0
-            self._address_unanswered_warned = False
-            logger.info(
-                "LILY_RESPONSIVENESS | RESPONSE_PLAYOUT | session=%s "
-                "speech_id=%s — direct-address latch cleared",
-                self.sk.session_id, speech_id,
-            )
+            #
+            # WO-LILY-BIND-DISPUTE-001 D2: ...and only a playout whose
+            # DISPATCH post-dates the debt can pay it. On the live 08-14
+            # call the protest's address debt was discharged by
+            # pre-committed reveal lines already in the queue — speech
+            # composed before the player ever spoke. A pre-debt dispatch
+            # airing now proves nothing about responsiveness; the latch
+            # stays armed for the reply that actually answers them.
+            # (Unknown dispatch times fail open — pre-WO behavior — and
+            # the stand-down path still releases a debt nothing can pay.)
+            if self.speech_dispatch_postdates(
+                speech_id, self._awaiting_address_since
+            ):
+                self._awaiting_address_since = 0.0
+                self._address_unanswered_warned = False
+                logger.info(
+                    "LILY_RESPONSIVENESS | RESPONSE_PLAYOUT | session=%s "
+                    "speech_id=%s — direct-address latch cleared",
+                    self.sk.session_id, speech_id,
+                )
+            else:
+                logger.info(
+                    "LILY_RESPONSIVENESS | PRE_DEBT_PLAYOUT | session=%s "
+                    "speech_id=%s — this speech was dispatched BEFORE the "
+                    "address landed; the latch stays armed for a real "
+                    "reply (WO-LILY-BIND-DISPUTE-001 D2)",
+                    self.sk.session_id, speech_id,
+                )
         # M4: if the speech now airing owns this question's delivery claim,
         # its STEM has reached the air — record it so an abandonment before
         # the window opens is flagged as cancelled, never a silent vanish.

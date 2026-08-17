@@ -103,6 +103,13 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_SUPPLY_FALLBACK_SECONDS",
     "LILY_UNDELIVERED_RECONCILE_SECONDS",
     "LILY_UNDELIVERED_REFIRE_QUIET_SECONDS",
+    # WO-LILY-BIND-DISPUTE-001 dispute/settle tunables — ship on in-code
+    # defaults (dispute window 12s, hold timeout 45s, relaxed settle 6s,
+    # relaxed breath ×3); tune via deploy.yml only if a room needs it.
+    "LILY_DISPUTE_HOLD_TIMEOUT_SECONDS",
+    "LILY_RELAXED_BREATH_MULTIPLIER",
+    "LILY_RELAXED_SETTLE_SECONDS",
+    "LILY_VERDICT_DISPUTE_WINDOW_SECONDS",
     # PATCH-002 A4 solo-vamping hold tunables — ship on in-code defaults.
     "LILY_HOLD_TIMEOUT_SECONDS",
     "LILY_PARAPHRASE_REPEAT_THRESHOLD",

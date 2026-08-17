@@ -1053,6 +1053,73 @@ def lily_meta_speech_utterance(text: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Committed-answer-shape floor (WO-LILY-BIND-DISPUTE-001 D1)
+#
+# The CHANGELOG-declared HOSTLOOP-001 gap ("a fragment/completeness rule
+# needs its own clause"), built. Live 2026-08-14 (lily-FD3994) q4:
+# "What's he. Face. Uh." (Tier-1 sim 0.182 vs Oscar Wilde — BAND_REJECT)
+# HARD-BOUND and burned the question, while "The. State." (0.769,
+# BAND_CLARIFY) got the "answer, or thinking out loud?" check. Scrutiny was
+# INVERTED: resembling the answer bought a clarify; resembling NOTHING
+# bought a lock. This sensor is the REJECT-SIDE half of the repair: answer
+# similarity stays the accept path, utterance SHAPE decides whether a
+# reject-band utterance may bind at all.
+#
+# Deliberately narrow — it gates FRAGMENTS, never confident wrong answers:
+#   * wh_search      — a wh-word reaching for a PRONOUN ("what's he",
+#                      "who was it"): retrieval struggle, not a claim.
+#                      "how many states" (the :1032 design intent) carries
+#                      no pronoun and stays adjudicable, as does any
+#                      wh-word aimed at content ("what is photosynthesis").
+#   * disfluency_tail — the utterance dies on a filler ("... Uh.").
+#   * fragment_tail  — the utterance dies on a function word ("It's the.")
+#                      — cut off mid-phrase, nothing was committed to.
+# "Paris.", "Saturn?", "Benjamin. Franklin." all return None: short is not
+# uncommitted. Pure and deterministic; callers consult it ONLY on
+# BAND_REJECT, so a real answer (accept/clarify band) never reaches it.
+# ---------------------------------------------------------------------------
+
+LILY_SHAPE_WH_SEARCH = "wh_search"
+LILY_SHAPE_DISFLUENCY_TAIL = "disfluency_tail"
+LILY_SHAPE_FRAGMENT_TAIL = "fragment_tail"
+
+_WH_SEARCH_RE = re.compile(
+    r"^(?:(?:oh|ah|ooh|hmm|hm|like|wait|uh|um|er|well|so)[,.!?\s]+)*"
+    r"(?:what|who|where|which|when|how)"
+    r"(?:'?s|s| is| was| are| were| did| do| does)?"
+    r"\s+(?:he|she|it|they|his|her|hers|him|them|its|their|that|this)\b"
+)
+_DISFLUENCY_TAIL_RE = re.compile(
+    r"(?:^|[\s,.;:!?])(?:uh|um|er|erm|uhh|umm|hmm|hm|eh)[\s.!?…]*$"
+)
+_FRAGMENT_TAIL_RE = re.compile(
+    r"\b(?:the|a|an|his|her|their|its|my|your|of|and|or|but|with|to|in|on"
+    r"|at|for|by|from)[\s.!?…]*$"
+)
+
+
+def lily_uncommitted_answer_shape(text: str) -> Optional[str]:
+    """The shape class of an utterance that carries NO COMMITTED ANSWER —
+    LILY_SHAPE_WH_SEARCH / LILY_SHAPE_DISFLUENCY_TAIL /
+    LILY_SHAPE_FRAGMENT_TAIL — or None when the utterance is shaped like a
+    committed answer (however wrong) and must stay bindable.
+
+    Reject-side sensor ONLY (D1): the caller applies it exclusively to
+    BAND_REJECT similarity, so it can demote a fragment to the clarify
+    path but can never eat a real answer that matched anything."""
+    normalized = _meta_normalize(text)
+    if not normalized:
+        return None
+    if _WH_SEARCH_RE.match(normalized):
+        return LILY_SHAPE_WH_SEARCH
+    if _DISFLUENCY_TAIL_RE.search(normalized):
+        return LILY_SHAPE_DISFLUENCY_TAIL
+    if _FRAGMENT_TAIL_RE.search(normalized):
+        return LILY_SHAPE_FRAGMENT_TAIL
+    return None
+
+
 _FORMAT_MARKER_RE = re.compile(r"\bmulti(?:ple)?\s*choices?\b|\bmcqs?\b")
 _FORMAT_REFUSAL_RE = re.compile(
     r"\b(?:no|not|dont|don|stop|quit|hate|without|instead|rather|skip|"

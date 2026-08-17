@@ -710,6 +710,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._device_candidate_memory = None
         self._device_verify_attempts = 0
         self._device_verify_task = None
+        # WO-LILY-BIND-DISPUTE-001 D2: the verdict dispute-hold ({since,
+        # reason} pattern split across two fields) and the protest clock it
+        # keys on. Armed by a protest-shaped final inside the dispute
+        # window of a ruling airing; released only by a post-protest turn
+        # confirming on air, or the hard timeout.
+        self._dispute_hold_since = None
+        self._dispute_hold_reason = None
         self._drawn_hashes = set()
         self._drawn_ids = set()
         self._durable_asked_qnum = None
@@ -751,6 +758,8 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._last_armed_speech_ratio = 0.0
         self._last_assistant_turn = ('', '')
         self._last_bind_at = None
+        self._last_protest_at = 0.0
+        self._last_protest_text = None
         self._last_spine_line = None
         self._last_user_turn_at = 0.0
         self._late_answer_note = None
@@ -770,6 +779,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._pending_or_choice_offer = False
         self._pending_pacing = None
         self._pending_picture_on_offer = False
+        # WO-LILY-BIND-DISPUTE-001 addendum: the deterministic player
+        # start-intent fact, the deferred-start watcher, and its one-line
+        # "locking the table" latch.
+        self._pending_start_task = None
+        self._player_start_intent = None
+        self._start_hold_said = False
         self._phase_hold = None
         self._playout_started_ids = set()
         self._post_tts_text_by_speech_id = {}
@@ -785,6 +800,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._reair_gate_armed = False
         self._reair_turn_pending = False
         self._recent_finals = []
+        # WO-LILY-BIND-DISPUTE-001 D3: the solo-relaxed settle window —
+        # the qnum whose roster-complete close is deliberately settling,
+        # and its watcher task (one per question).
+        self._relaxed_settle_pending = None
+        self._relaxed_settle_task = None
         # ANTIREPEAT-PROTOCOL-001: the durable "recognition stated on air"
         # fact ({source, text, at} or None) — the _result_aired pattern on
         # the recognition lane, stamped by whichever lane first carries the
@@ -801,6 +821,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._session_closed = False
         self._setup_pending = set()
         self._setup_requested = set()
+        self._speech_dispatched_at = {}
         self._speech_handles = {}
         self._stale_retry_counts = {}
         self._state_note = None
@@ -1578,7 +1599,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if self.agent is not None:
             self.agent.set_preemptive_generation(False)
             self._preemptive_paused = True
-        return self.session.generate_reply(instructions=instructions)
+        handle = self.session.generate_reply(instructions=instructions)
+        # WO-LILY-BIND-DISPUTE-001 D2: dispatch time rides the handle so
+        # the protest/debt discharge reads can tell a turn dispatched AFTER
+        # a protest from a pre-committed one merely airing after it.
+        self._note_speech_dispatch(getattr(handle, "id", None))
+        return handle
 
     def direct_say(self, text: str):
         """HOSTLOOP-001 C6 — the DETERMINISTIC speech lane, sibling of
@@ -1617,7 +1643,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self.agent.set_preemptive_generation(False)
             self._preemptive_paused = True
         try:
-            return say(text)
+            handle = say(text)
+            # D2: same dispatch stamp as instructed_reply — deterministic
+            # lines are exactly the pre-committed class the post-dating
+            # reads exist to discount.
+            self._note_speech_dispatch(getattr(handle, "id", None))
+            return handle
         except Exception as e:
             logger.warning("LILY_SAY | DIRECT_SAY_FAILED | %s", e)
             return None
@@ -2523,6 +2554,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self.clear_ambiguous_yes_block(reason="game_started")
             return
         if command == "start_game":
+            # WO-LILY-BIND-DISPUTE-001 addendum: the deterministic spoken
+            # start detector fired — record the start-intent FACT the
+            # tool/auto paths must verify (runs on every pre-start final,
+            # ahead of command dispatch).
+            self.note_player_start_intent(source="voice_command", text=text)
             self.clear_ambiguous_yes_block(reason="explicit_start_command")
             return
         if not self._pending_or_choice_offer:
@@ -4110,7 +4146,20 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # each serviced this turn — one-shot, consumed here. A fresh explain
         # or contest utterance next turn re-arms.
         self._explain_request_note = None
-        self._contest_note = None
+        # WO-LILY-BIND-DISPUTE-001 D2: no more BLIND clears. Only a turn
+        # dispatched AFTER the protest can have serviced the contest — a
+        # pre-committed reveal/verdict line queued before the protest and
+        # merely airing after it cleared the note on the live 08-14 call
+        # while the protest went unanswered. The same post-dating confirm
+        # is the dispute-hold's designed release.
+        if self.speech_dispatch_postdates(
+            speech_id, getattr(self, "_last_protest_at", 0.0)
+        ):
+            self._contest_note = None
+            # This branch only runs for a CONFIRMED playout (the
+            # interrupted/suppressed arm returned above), so a post-protest
+            # turn confirming on air is exactly this line.
+            self.release_dispute_hold(reason="post_protest_turn_confirmed")
         # HOTFIX-006 N9: the late-answer announcement rode this turn. Also
         # one-shot — the miss is stated once, warmly, and does not become a
         # thing she keeps bringing up.
@@ -4307,8 +4356,21 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         (byte-identical to the pre-PACING-001 seam); otherwise ensure_future a
         sleep-then-dispatch whose guards are re-read at fire time. The
         user-floor gate (progression_paused_reason -> user_speaking) still
-        holds N+1 longer if a human speaks into the breath."""
+        holds N+1 longer if a human speaks into the breath.
+
+        WO-LILY-BIND-DISPUTE-001 D3: RELAXED pacing scales the breath
+        (× relaxed_breath_multiplier) and replaces the instantaneous
+        VAD-edge read with an AFFIRMATIVE floor-clear — N+1 dispatches only
+        after the room has been VAD-quiet for relaxed_settle_seconds with
+        no address debt and no dispute-hold (live 08-15: question two fired
+        the beat after his unanswered protest). Every wait arm
+        self-releases and the poll is bounded, so the seam can never
+        wedge; TIMED pacing takes the exact pre-WO path — same breath,
+        same instantaneous read, latency pinned."""
         breath = lily_config.inter_question_breath_seconds()
+        relaxed = self.sk.pacing == "relaxed"
+        if relaxed and breath > 0:
+            breath *= lily_config.relaxed_breath_multiplier()
         if breath <= 0:
             return self.dispatch_armed_question(source=source)
         try:
@@ -4318,11 +4380,56 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         qnum = self.sk.question_number
         logger.info(
             "LILY_PACING | INTER_QUESTION_BREATH | session=%s q=%d breath=%.2fs "
-            "source=%s", self.sk.session_id, qnum, breath, source,
+            "pacing=%s source=%s",
+            self.sk.session_id, qnum, breath, self.sk.pacing, source,
         )
+
+        def _relaxed_floor_blocked() -> str | None:
+            """The affirmative floor-clear read (relaxed only): None =
+            clear to dispatch."""
+            if getattr(self, "_user_speaking", False):
+                return "user_speaking"
+            ended = getattr(self, "_user_speech_ended_at", None)
+            if ended and (
+                time.monotonic() - ended
+            ) < lily_config.relaxed_settle_seconds():
+                return "vad_recent"
+            if self._awaiting_address_since:
+                return "address_unanswered"
+            if self.dispute_hold_active():
+                return "dispute_hold"
+            return None
 
         async def _breathe() -> None:
             await asyncio.sleep(breath)
+            if relaxed:
+                # Bounded poll — the arms self-release (VAD falling edge +
+                # settle span, debt cleared at a post-debt response playout
+                # or its stand-down, dispute timeout); past the budget the
+                # dispatch attempt below runs and progression_paused_reason
+                # (which reads the same states) still governs it.
+                budget = max(
+                    lily_config.dispute_hold_timeout_seconds(),
+                    lily_config.relaxed_settle_seconds() * 4,
+                )
+                waited = 0.0
+                while waited < budget:
+                    if (
+                        getattr(self, "game_over", False)
+                        or self.sk.question_number != qnum
+                    ):
+                        return
+                    blocked = _relaxed_floor_blocked()
+                    if blocked is None:
+                        break
+                    logger.info(
+                        "LILY_PACING | RELAXED_FLOOR_WAIT | session=%s q=%d "
+                        "reason=%s — N+1 holds for an affirmative "
+                        "floor-clear (WO-LILY-BIND-DISPUTE-001 D3)",
+                        self.sk.session_id, qnum, blocked,
+                    )
+                    await asyncio.sleep(1.0)
+                    waited += 1.0
             if getattr(self, "game_over", False):
                 return
             if self.sk.question_number != qnum:
@@ -4735,12 +4842,122 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             return
         if not all(name in self.sk.answer_candidates for name in roster):
             return
+        # WO-LILY-BIND-DISPUTE-001 D3: roster-complete no longer commits in
+        # the SAME TICK. Both live burns (Oscar Wilde 08-14, Aphrodite
+        # 08-15) were verdicts committed before the player's protest could
+        # possibly land — the bind and the burn were one moment. On a
+        # relaxed table the bound answer now stays revisable/disputable for
+        # relaxed_settle_seconds, and the close requires an affirmative
+        # floor-clear: VAD-quiet, no pending clarify, no dispute-hold.
+        # Every wait condition self-releases (VAD falling edge, clarify
+        # resolution/terminal question, dispute timeout), so the settle
+        # loop can never become a silence wedge; a withdrawn bind
+        # (shape-clarify, binding-denial protest) empties the roster read
+        # and the watcher stands down until a fresh candidate re-completes
+        # it. settle<=0 or no running loop restores the pre-WO immediate
+        # close. Timed tables never reach this method (pacing guard above).
+        settle = lily_config.relaxed_settle_seconds()
+        qnum = self.sk.question_number
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if settle <= 0 or loop is None:
+            logger.info(
+                "LILY_WINDOW | RELAXED_BEAT_CLOSE | session=%s q=%d "
+                "roster=%d — every rostered player answered; adjudicating "
+                "with no clock",
+                self.sk.session_id, qnum, len(roster),
+            )
+            asyncio.ensure_future(self.adjudicate(steal_allowed=False))
+            return
+        task = self._relaxed_settle_task
+        if (
+            self._relaxed_settle_pending == qnum
+            and task is not None
+            and not task.done()
+        ):
+            return  # one settle watcher per question
+        self._relaxed_settle_pending = qnum
         logger.info(
-            "LILY_WINDOW | RELAXED_BEAT_CLOSE | session=%s q=%d roster=%d — "
-            "every rostered player answered; adjudicating with no clock",
-            self.sk.session_id, self.sk.question_number, len(roster),
+            "LILY_WINDOW | RELAXED_SETTLE_OPEN | session=%s q=%d roster=%d "
+            "settle=%.1fs — roster complete; the bound answer stays "
+            "revisable/disputable until the floor clears "
+            "(WO-LILY-BIND-DISPUTE-001 D3)",
+            self.sk.session_id, qnum, len(roster), settle,
         )
-        asyncio.ensure_future(self.adjudicate(steal_allowed=False))
+        self._relaxed_settle_task = asyncio.ensure_future(
+            self._relaxed_settle_then_close(qnum, settle)
+        )
+
+    def _relaxed_settle_floor_clear(self) -> str | None:
+        """Why the solo-relaxed close may NOT commit yet (None = clear):
+        VAD-quiet for the settle span, no pending clarify, no dispute-hold."""
+        if getattr(self, "_user_speaking", False):
+            return "user_speaking"
+        ended = getattr(self, "_user_speech_ended_at", None)
+        if ended and (
+            time.monotonic() - ended
+        ) < lily_config.relaxed_settle_seconds():
+            return "vad_recent"
+        if getattr(self, "pending_clarify", None):
+            return "pending_clarify"
+        if self.dispute_hold_active():
+            return "dispute_hold"
+        return None
+
+    async def _relaxed_settle_then_close(self, qnum: int, settle: float) -> None:
+        """The D3 settle watcher: wait the settle span, then close the beat
+        only on an affirmative floor-clear, re-polling while a self-
+        releasing condition blocks it. Stands down silently the moment the
+        beat is no longer this watcher's to close."""
+        poll = min(1.0, settle)
+        try:
+            await asyncio.sleep(settle)
+            while True:
+                if (
+                    getattr(self, "game_over", False)
+                    or self._delivery_stop_sticky
+                    or self.sk.question_number != qnum
+                    or not self.sk.answer_window_open
+                    or self._adjudicating
+                    or self.sk.pacing != "relaxed"
+                ):
+                    return
+                roster = self.sk.players
+                if not roster or not all(
+                    name in self.sk.answer_candidates for name in roster
+                ):
+                    # A bind was withdrawn (shape clarify / binding-denial
+                    # protest) — the beat re-opened; a fresh candidate will
+                    # arm a fresh watcher via _maybe_close_relaxed_beat.
+                    logger.info(
+                        "LILY_WINDOW | RELAXED_SETTLE_REOPENED | session=%s "
+                        "q=%d — a bind was withdrawn during the settle "
+                        "window; the beat waits for the roster again",
+                        self.sk.session_id, qnum,
+                    )
+                    return
+                blocked = self._relaxed_settle_floor_clear()
+                if blocked is None:
+                    break
+                logger.info(
+                    "LILY_WINDOW | RELAXED_SETTLE_WAIT | session=%s q=%d "
+                    "reason=%s — floor not clear; every arm self-releases",
+                    self.sk.session_id, qnum, blocked,
+                )
+                await asyncio.sleep(poll)
+            logger.info(
+                "LILY_WINDOW | RELAXED_BEAT_CLOSE | session=%s q=%d — "
+                "settle elapsed and the floor is clear; adjudicating "
+                "with no clock",
+                self.sk.session_id, qnum,
+            )
+            await self.adjudicate(steal_allowed=False)
+        finally:
+            if self._relaxed_settle_pending == qnum:
+                self._relaxed_settle_pending = None
+                self._relaxed_settle_task = None
 
     def _start_bed(self) -> None:
         path = lily_config.thinking_bed_path()
@@ -4805,7 +5022,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         nbest = self._nbest_lookup(key)
         hyps = (nbest or {}).get("hypotheses") or []
         if nbest is not None and len(hyps) > 1:
-            return lily_evaluation.lily_tier1_evaluate_nbest(
+            t1 = lily_evaluation.lily_tier1_evaluate_nbest(
                 text,
                 question,
                 hypotheses=hyps,
@@ -4813,9 +5030,15 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 dispersion_threshold=lily_config.nbest_dispersion_threshold(),
                 threshold=threshold,
             )
-        return lily_evaluation.lily_tier1_evaluate_question(
-            text, question, threshold=threshold
-        )
+        else:
+            t1 = lily_evaluation.lily_tier1_evaluate_question(
+                text, question, threshold=threshold
+            )
+        # WO-LILY-BIND-DISPUTE-001 D1: the evaluated utterance rides the
+        # verdict so band consumers (_receipt_yields_to_clarify) can apply
+        # the reject-side SHAPE sensor without a second plumbing path.
+        t1.setdefault("attempt_text", text)
+        return t1
 
 
 
@@ -4827,17 +5050,34 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         clarify question? True when this Tier-1 result sits in the middle
         BAND — the same read _maybe_fire_clarify makes, from the same values,
         so there is one band rule and not two. Fails OPEN (receipt speaks)
-        on anything unreadable: the receipt existing is the clause."""
+        on anything unreadable: the receipt existing is the clause.
+
+        WO-LILY-BIND-DISPUTE-001 D1: ALSO true for a reject-band utterance
+        with no committed answer shape — the same read the widened
+        _maybe_fire_clarify makes, so "Locked in—" can never air over the
+        clarify that routing is about to ask (live 08-14 q4: the receipt
+        locked "What's he. Face. Uh." on the air two seconds before the
+        player's denial)."""
         if t1.get("verdict") != "uncertain":
             return False
         similarity = t1.get("similarity")
         if not isinstance(similarity, (int, float)):
             return False
         try:
-            return lily_evaluation.lily_tier1_band(
+            band = lily_evaluation.lily_tier1_band(
                 float(similarity), tier1_threshold,
                 lily_config.tier1_clarify_margin(),
-            ) == lily_evaluation.BAND_CLARIFY
+            )
+            if band == lily_evaluation.BAND_CLARIFY:
+                return True
+            if band == lily_evaluation.BAND_REJECT:
+                return (
+                    lily_evaluation.lily_uncommitted_answer_shape(
+                        str(t1.get("attempt_text") or "")
+                    )
+                    is not None
+                )
+            return False
         except Exception:
             return False
 
@@ -6204,6 +6444,36 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     async def start_game(self, source: str) -> None:
         if self.game_started:
             return
+        # WO-LILY-BIND-DISPUTE-001 addendum — the lobby-settle start gate.
+        # A player-initiated source IS the intent (the voice source is only
+        # reachable from the deterministic detector; rpc is the UI start
+        # control); the tool and auto-start sources must find the fact
+        # already recorded. Live lily-359C62: round one started off the
+        # auto-start net with NO start intent anywhere in the session.
+        if source in ("voice", "rpc") or source.endswith("_settled"):
+            self.note_player_start_intent(source=source)
+        gate = self.start_gate_blocked_reason()
+        if gate == "no_start_intent":
+            logger.warning(
+                "LILY_STATE | START_DEFERRED | session=%s source=%s "
+                "reason=no_start_intent — no player has expressed start "
+                "intent through a deterministic channel; round one does "
+                "not dispatch on model judgment or lobby silence "
+                "(WO-LILY-BIND-DISPUTE-001 addendum)",
+                self.sk.session_id, source,
+            )
+            return
+        if gate is not None and gate.startswith("lobby_unsettled"):
+            # Start intent IS present — the table asked. One line, then the
+            # start dispatches itself when the lobby settles (every
+            # unsettled arm self-clears; the watcher is bounded).
+            logger.info(
+                "LILY_STATE | START_DEFERRED | session=%s source=%s "
+                "reason=%s — start request honored after settle",
+                self.sk.session_id, source, gate,
+            )
+            self._defer_start_until_settled(source)
+            return
         blocked = self.start_blocked_reason()
         if blocked:
             logger.info(
@@ -6318,6 +6588,56 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self.expect_delivery()
         self.gated_say(
             None, "game_start", instructions, source=f"start_{source}"
+        )
+
+    def _defer_start_until_settled(
+        self, source: str, say_line: bool = True
+    ) -> None:
+        """WO-LILY-BIND-DISPUTE-001 addendum: a start REQUEST arrived while
+        the lobby is unsettled (in-flight bind, unresolved address/clarify,
+        dispute-hold). One deterministic line acknowledges it (say_line
+        False when the caller's own reply carries the line — the tool
+        path), and a bounded watcher dispatches the start the moment the
+        lobby settles — every unsettled arm self-clears, and past the
+        budget the per-final auto-start net (which now verifies the same
+        intent fact) still owns recovery, so a deferred start can never
+        strand the table."""
+        if say_line and not getattr(self, "_start_hold_said", False):
+            self._start_hold_said = True
+            self.gated_say(
+                None,
+                "start_settle_hold",
+                "[deterministic start hold: locking the table first]",
+                source=f"start_hold_{source}",
+                text="One sec — locking the table first.",
+            )
+        task = getattr(self, "_pending_start_task", None)
+        if task is not None and not task.done():
+            return  # one watcher; the running one owns the dispatch
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # unit context — the caller drives start_game directly
+
+        async def _watch_settled_start() -> None:
+            for _ in range(120):  # bounded: ~2 minutes of 1s polls
+                await asyncio.sleep(1.0)
+                if self.game_started or getattr(self, "game_over", False):
+                    return
+                if self._delivery_stop_sticky:
+                    return  # STOP owns the lobby; resume owns the restart
+                if self.lobby_unsettled_reason() is None:
+                    await self.start_game(source=f"{source}_settled")
+                    return
+            logger.warning(
+                "LILY_STATE | START_SETTLE_EXHAUSTED | session=%s "
+                "source=%s — lobby never settled inside the watcher "
+                "budget; the per-final auto-start net owns recovery",
+                self.sk.session_id, source,
+            )
+
+        self._pending_start_task = asyncio.ensure_future(
+            _watch_settled_start()
         )
 
     def questions_asked_count(self) -> int:
@@ -6940,6 +7260,23 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         question has been prefetched, before the lobby grace period, or
         while the table is still mid-conversation."""
         if self.game_started or self.game_over:
+            return
+        # WO-LILY-BIND-DISPUTE-001 addendum — THE 08-15 FALSE START. This
+        # net fired at 17:48:46 (lily-359C62) with no start phrase anywhere
+        # in the session: its roster read 2 (BOTH rows placeholders — one
+        # hearable human), its quiet read ≈28s (the player waiting out
+        # Lily's unanswered "Why are these three players here?"), and no
+        # start path required player intent. The net now verifies the same
+        # deterministic start-intent fact and lobby-settle read every other
+        # start path does; it retries per final, so a deferred start fires
+        # the moment both hold.
+        gate = self.start_gate_blocked_reason()
+        if gate:
+            logger.info(
+                "LILY_STATE | START_DEFERRED | session=%s "
+                "source=auto_after_lobby reason=%s",
+                self.sk.session_id, gate,
+            )
             return
         blocked = self.start_blocked_reason()
         if blocked:
@@ -8127,6 +8464,35 @@ class LilyAgent(Agent):
         if self._game.intake_roundrobin_active():
             # WS-1: a bind just landed — the round-robin is still growing.
             return intake_hold
+        # WO-LILY-BIND-DISPUTE-001 addendum: the tool verifies the
+        # DETECTOR-SET start-intent fact — model judgment alone can never
+        # open Round One (live lily-359C62: round one started with no start
+        # phrase anywhere in the session). Checked after the specific
+        # blocked-reason steers above so their messages stay the sharper
+        # guidance when both apply.
+        gate = self._game.start_gate_blocked_reason()
+        if gate == "no_start_intent":
+            return (
+                "NOT STARTED (no_start_intent) — no player has actually "
+                "asked to start: laughter, banter, a resolved joke, or "
+                "general energy is not authorization, and your own "
+                "judgment cannot substitute for the detector. Ask one "
+                "clear question — ready to start? — and wait for explicit "
+                "start language ('let's play', 'start the game', 'start'); "
+                "the detector records it and this tool will pass."
+            )
+        if gate is not None and gate.startswith("lobby_unsettled"):
+            # Queue the settled dispatch; the tool reply below carries the
+            # one hold line, so the watcher stays silent (say_line=False).
+            self._game._defer_start_until_settled("host_tool", say_line=False)
+            return (
+                f"NOT STARTED ({gate}) — the table asked to start but the "
+                "lobby has not settled (a name bind, an unanswered player "
+                "question, a pending clarify, or a live dispute). Say one "
+                "short line that you're locking the table first — the "
+                "start is queued and dispatches itself the moment the "
+                "lobby settles; do NOT announce a category or question yet."
+            )
         await self._game.start_game(source="host_tool")
         if not self._game.game_started:
             blocked = self._game.start_blocked_reason()
