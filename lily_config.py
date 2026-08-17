@@ -337,12 +337,24 @@ def adult_reasoning_effort(override: Optional[str] = None) -> Optional[str]:
 
 def adult_imagegen_model() -> str:
     """Image model for the ADULT deck. Gemini refuses adult content, so the
-    adult picture path routes to xAI Grok Imagine (grok-imagine-image, via
+    adult picture path routes to xAI Grok Imagine (grok-imagine-image-2.0, via
     xai_api_key()). Live-verified: POST /v1/images/generations returns a
     url. Adult picture-trivia is LIVE upstream
     (lily_reasoning.prefetch_picture_question threads mode='adult' to the
     picture builders); this pin routes those generated images to Grok."""
-    return _get("LILY_ADULT_IMAGEGEN_MODEL", "grok-imagine-image")
+    return _get("LILY_ADULT_IMAGEGEN_MODEL", "grok-imagine-image-2.0")
+
+
+def image_quality() -> str:
+    """Quality tier for the Grok Imagine 2.0 images/generations POST.
+
+    grok-imagine-image-2.0 is a slow-by-design Quality Mode: default quality
+    renders in ~76s and often hangs; quality="low" holds it near ~17s. Sent
+    ONLY when the resolved model is grok-imagine-image-2.0. Env-overridable
+    LILY_IMAGE_QUALITY (low|medium); default low, and any other value floors
+    to low."""
+    q = _get("LILY_IMAGE_QUALITY", "low")
+    return q if q in ("low", "medium") else "low"
 
 
 # ---------------------------------------------------------------------------

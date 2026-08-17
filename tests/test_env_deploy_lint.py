@@ -173,9 +173,12 @@ LILY_LOCAL_ONLY_ENV = {
     # default ID, same pattern as Zuna's VOICE_NADIA).
     "LILY_IMAGEGEN_MODEL",
     # Adult-deck image model id — ships on its in-code default
-    # (grok-imagine-image); the xAI credential it uses (XAI_API_KEY) is
+    # (grok-imagine-image-2.0); the xAI credential it uses (XAI_API_KEY) is
     # already forwarded.
     "LILY_ADULT_IMAGEGEN_MODEL",
+    # Grok Imagine 2.0 quality tier — ships on its in-code default ("low"),
+    # env-overridable low|medium on the box; no credential of its own.
+    "LILY_IMAGE_QUALITY",
     "LILY_VOICE_1",
 }
 

@@ -41,8 +41,10 @@ generator this round needs, and it composes with I's real-photo sourcing;
 an emoji round would not exercise the donor stack at all.
 """
 
+import asyncio
 import base64
 import logging
+import time
 from typing import Final, Optional
 
 import aiohttp
@@ -72,6 +74,26 @@ def _remember_session_image(key: "tuple[str, str]", url: str) -> None:
         except StopIteration:
             pass
     _SESSION_IMAGE_MEMO[key] = url
+
+
+# WO-FLEET-IMAGE-QLOW-FALLBACK-001: served-model memo, parallel to the URL
+# memo. When the timeout/5xx fallback leg serves a different model than the
+# deck default, the slot's license note must name the model that ACTUALLY
+# rendered — not the config default. Keyed identically to _SESSION_IMAGE_MEMO,
+# same bound, read by lily_build_real_or_imagined_question when it labels the
+# generated leg.
+_SESSION_IMAGE_MODEL: "dict[tuple[str, str], str]" = {}
+
+
+def _remember_session_image_model(key: "tuple[str, str]", model: str) -> None:
+    if not model:
+        return
+    if len(_SESSION_IMAGE_MODEL) >= _SESSION_IMAGE_MEMO_CAP:
+        try:
+            del _SESSION_IMAGE_MODEL[next(iter(_SESSION_IMAGE_MODEL))]
+        except StopIteration:
+            pass
+    _SESSION_IMAGE_MODEL[key] = model
 
 
 # ---------------------------------------------------------------------------
@@ -279,20 +301,31 @@ def lily_adult_style(
 
 _XAI_IMAGES_URL: Final = f"{lily_config.xai_base_url()}/images/generations"
 
+# WO-FLEET-IMAGE-QLOW-FALLBACK-001: the Quality-Mode deck model and the
+# classic fast model. quality=low rides the 2.0 POST; on a timeout/5xx the
+# leg retries ONCE on the classic model, which takes no quality param and is
+# still live upstream.
+_GROK_IMAGINE_2_MODEL: Final = "grok-imagine-image-2.0"
+_GROK_IMAGINE_FALLBACK_MODEL: Final = "grok-imagine-image-quality"
 
-async def _generate_image_bytes_xai(
-    prompt: str, *, model: Optional[str] = None
+
+class _XaiServerError(RuntimeError):
+    """A 5xx from xAI images/generations — a transport-class failure the
+    one-shot fallback leg retries on the classic quality model. A 4xx
+    (including a moderation refusal) is a plain RuntimeError and does NOT
+    trigger the fallback: retrying a refusal on the old model only refuses
+    again and bills a second attempt."""
+
+
+async def _post_xai_image(
+    prompt: str, *, model: str, quality: Optional[str], api_key: str
 ) -> tuple[bytes, str, str]:
-    """ADULT-deck image generation via xAI Grok Imagine. Same contract as
-    the Gemini path: returns (image_bytes, mime, model), RAISES RuntimeError
-    with the provider's words on any failure. Gemini refuses adult content,
-    so the adult deck routes here. Live-verified: POST /v1/images/generations
-    returns data[0].url on imgen.x.ai."""
-    mdl = model or lily_config.adult_imagegen_model()
-    api_key = lily_config.xai_api_key()
-    if not api_key:
-        raise RuntimeError("adult image provider unconfigured (XAI_API_KEY)")
-    payload = {"model": mdl, "prompt": prompt, "n": 1}
+    """One POST + fetch to xAI images/generations. Returns (bytes, mime,
+    model). Raises _XaiServerError on 5xx, asyncio.TimeoutError on the total
+    timeout, RuntimeError with the provider's words on any other failure."""
+    payload = {"model": model, "prompt": prompt, "n": 1}
+    if quality is not None:
+        payload["quality"] = quality
     timeout = aiohttp.ClientTimeout(total=GENERATION_TIMEOUT_SECONDS)
     async with aiohttp.ClientSession(timeout=timeout) as http:
         async with http.post(
@@ -305,9 +338,10 @@ async def _generate_image_bytes_xai(
                 body = {"raw": await resp.text()}
             if resp.status < 200 or resp.status >= 300:
                 err = body.get("error") if isinstance(body, dict) else body
-                raise RuntimeError(
-                    f"xAI image HTTP {resp.status}: {str(err)[:300]}"
-                )
+                msg = f"xAI image HTTP {resp.status}: {str(err)[:300]}"
+                if resp.status >= 500:
+                    raise _XaiServerError(msg)
+                raise RuntimeError(msg)
         item = (body.get("data") or [{}])[0] if isinstance(body, dict) else {}
         b64 = item.get("b64_json")
         if b64:
@@ -327,11 +361,60 @@ async def _generate_image_bytes_xai(
                 )
     if not raw:
         raise RuntimeError("xAI image fetch returned empty body")
-    logger.info(
-        "LILY_IMAGEGEN | GENERATED | provider=xai model=%s bytes=%d",
-        mdl, len(raw),
+    return raw, mime, model
+
+
+async def _generate_image_bytes_xai(
+    prompt: str, *, model: Optional[str] = None
+) -> tuple[bytes, str, str]:
+    """ADULT-deck image generation via xAI Grok Imagine. Same contract as
+    the Gemini path: returns (image_bytes, mime, model), RAISES RuntimeError
+    with the provider's words on any failure. Gemini refuses adult content,
+    so the adult deck routes here. Live-verified: POST /v1/images/generations
+    returns data[0].url on imgen.x.ai.
+
+    grok-imagine-image-2.0 is a slow-by-design Quality Mode: the POST carries
+    quality=low (env LILY_IMAGE_QUALITY, low|medium) to hold the render near
+    ~17s. On a timeout or 5xx the leg retries ONCE on the classic
+    grok-imagine-image-quality model (no quality param) and returns THAT model
+    as the third element so provenance names the leg that actually served."""
+    mdl = model or lily_config.adult_imagegen_model()
+    api_key = lily_config.xai_api_key()
+    if not api_key:
+        raise RuntimeError("adult image provider unconfigured (XAI_API_KEY)")
+    quality = (
+        lily_config.image_quality()
+        if mdl == _GROK_IMAGINE_2_MODEL else None
     )
-    return raw, mime, mdl
+    started = time.monotonic()
+    try:
+        raw, mime, served = await _post_xai_image(
+            prompt, model=mdl, quality=quality, api_key=api_key
+        )
+    except (asyncio.TimeoutError, _XaiServerError) as e:
+        logger.info(
+            "LILY_IMAGEGEN | PRIMARY_FAILED | provider=xai model=%s "
+            "quality=%s elapsed_s=%.1f error_class=%s — retrying on %s",
+            mdl, quality, time.monotonic() - started, type(e).__name__,
+            _GROK_IMAGINE_FALLBACK_MODEL,
+        )
+        fb_started = time.monotonic()
+        raw, mime, served = await _post_xai_image(
+            prompt, model=_GROK_IMAGINE_FALLBACK_MODEL, quality=None,
+            api_key=api_key,
+        )
+        logger.info(
+            "LILY_IMAGEGEN | GENERATED | provider=xai model=%s quality=%s "
+            "elapsed_s=%.1f bytes=%d fallback=1",
+            served, None, time.monotonic() - fb_started, len(raw),
+        )
+        return raw, mime, served
+    logger.info(
+        "LILY_IMAGEGEN | GENERATED | provider=xai model=%s quality=%s "
+        "elapsed_s=%.1f bytes=%d fallback=0",
+        served, quality, time.monotonic() - started, len(raw),
+    )
+    return raw, mime, served
 
 
 def lily_is_content_rejection(err: object) -> bool:
@@ -484,6 +567,10 @@ async def lily_generate_question_image(
     # HOTFIX-005 X4: remember this slot's URL so a re-request within the
     # session re-serves it instead of paying a second generation.
     _remember_session_image(memo_key, url)
+    # WO-FLEET-IMAGE-QLOW-FALLBACK-001: remember the model that ACTUALLY
+    # served (may be the fallback leg, not the deck default) so the roi
+    # builder's license note names the true leg.
+    _remember_session_image_model(memo_key, mdl)
     return url
 
 
@@ -636,7 +723,13 @@ async def lily_build_real_or_imagined_question(
         )
         if url is None:
             return None  # error row already written; text-only fallback
-        gen_model = lily_config.adult_imagegen_model()
+        # Name the model that ACTUALLY served this slot — the fallback leg
+        # records it in the served-model memo; absent that (e.g. a bank-cache
+        # hit), the deck default is the honest best label.
+        gen_model = (
+            _SESSION_IMAGE_MODEL.get((session_id, qid))
+            or lily_config.adult_imagegen_model()
+        )
         return {
             "id": qid,
             "category": "real or imagined",
