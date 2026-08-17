@@ -101,36 +101,62 @@ def _late_beats(game):
     return [d for d in game.dispatches if d[1] == "late_recognition"]
 
 
+def _confirm(game, text, speech_id="s-organic", **kw):
+    """Drive the carrying turn's playout to its speech-finished exit
+    (WO-LILY-RECOG-DELIVERY-001: the stamp lands at CONFIRM, never at the
+    promotion tail — the 17:51 blackout was the tail stamping a turn that
+    aired memory-blind)."""
+    game._resume_preemptive = lambda: None
+    game._pending_reveal_event = None
+    game._state_note = None
+    game.on_agent_speech_finished(text, speech_id=speech_id, **kw)
+
+
 # -- the 11:31 double welcome-back: name-door short-circuit -------------------
 
 
 def test_1131_name_door_promotion_fires_no_late_beat():
     """The organic reply answering the name utterance carries the promoted
-    memory block by construction — firing the late beat too is the double."""
+    memory block (fast promotion: no generation snapshot since the door) —
+    firing the late beat too is the double. RECOG-DELIVERY-001: the fact
+    now stamps on that turn's playout CONFIRM, not at the tail."""
     game = _game()
     _stage(game, "grp_rami")
     asyncio.run(game._promote_device_candidate("name_stated", verified=False))
     assert game.memory_block  # promotion landed; the organic turn has it
     assert _late_beats(game) == []
+    # Carried: the confirm watch holds the beat; nothing stamped YET (the
+    # unverified tail stamp was the 17:51 blackout).
+    assert game.recognition_aired() is None
+    assert game._name_door_watch is not None
+    assert game.flush_late_recognition_at_seam() is False
+    assert _late_beats(game) == []
+    # The organic reply snapshots WITH the block and plays out in full.
+    game.note_generation_snapshot()
+    _confirm(game, "Rami! Eighteen games deep — welcome back.")
+    fact = game.recognition_aired()
+    assert fact is not None and fact["source"] == "name_door_organic"
     # Retired, not deferred — no seam flush may resurrect it.
     assert game._late_recognition_fired is True
     assert game._late_recognition_pending is False
-    fact = game.recognition_aired()
-    assert fact is not None and fact["source"] == "name_door_organic"
     assert game.flush_late_recognition_at_seam() is False
     assert _late_beats(game) == []
 
 
 def test_device_plus_name_promotion_short_circuits_too():
     """The device+name door is the same stated-name moment — same organic
-    turn in flight, same short-circuit."""
+    turn in flight, same confirm-gated short-circuit."""
     game = _game()
     _stage(game, "grp_rami")
     asyncio.run(
         game._promote_device_candidate("device_plus_name", verified=False)
     )
     assert _late_beats(game) == []
+    assert game.recognition_aired() is None  # confirm still owed
+    game.note_generation_snapshot()
+    _confirm(game, "Rami! Welcome back.")
     assert game.recognition_aired()["source"] == "name_door_organic"
+    assert _late_beats(game) == []
 
 
 def test_voice_identity_promotion_still_fires_the_beat_once():
@@ -196,13 +222,19 @@ def test_voice_match_after_name_door_airs_nothing():
     _stage(game, "grp_rami_frag1")
     asyncio.run(game._promote_device_candidate("name_stated", verified=False))
     assert _late_beats(game) == []
-    # The matcher converges on the same human's second group.
+    # The matcher converges on the same human's second group while the
+    # organic carry is still pending confirm — the beat holds.
     _stage(game, "grp_rami_frag2", prefs={"pacing": "relaxed"})
     asyncio.run(game._promote_device_candidate("voice_identity_match"))
     assert _late_beats(game) == []
     assert game.dispatches == []  # nothing else aired either
-    # The first stamp survives as the record of what the room heard.
+    # The organic turn confirms; its stamp is the record of what the room
+    # heard, and it retires every later lane.
+    game.note_generation_snapshot()
+    _confirm(game, "Rami! Welcome back.")
     assert game.recognition_aired()["source"] == "name_door_organic"
+    assert game.dispatches == []
+    assert game.flush_late_recognition_at_seam() is False
 
 
 # -- stored pacing survives the short-circuit ---------------------------------

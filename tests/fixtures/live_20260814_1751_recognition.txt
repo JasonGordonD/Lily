@@ -1,0 +1,80 @@
+WO-LILY-RECOG-DELIVERY-001 — live fixture (S13)
+session lily-FD3994-358c0ac8, 2026-08-14 17:51 EDT (21:51 UTC)
+Source: lily_transcripts + lily_llm_usage (PRMPT Supabase, queried 2026-08-15).
+The recognition-relevant slice of the total-recognition-blackout call: a
+six-plus-session regular states his name at 21:51:22; the reply airs
+memory-blind at 21:51:38; the name-door promotion's Supabase awaits complete
+~80s later (the ~437-token [RETURNING TABLE] block first appears in the
+prompt at 21:52:51); bfadc42's unconditional note_recognition_aired
+("name_door_organic") at the promotion tail had already stamped recognition
+as aired, so maybe_fire_late_recognition hard-returned for the rest of the
+session — the returner heard ZERO recognition-bearing content all night.
+
+== lily_transcripts (recognition-relevant rows, UTC) ==
+
+21:51:15  LILY  [session_greet]
+  [soft] Hi, I’m Lily — I host trivia, and I’ve got the slightly-too-into-it
+  energy for it.
+  [pause] Who’s at the mic tonight, or what should I call you?
+
+21:51:22  S1
+  Hey, Lily. How are you? Uh, this is Rami. How are you doing tonight?
+
+21:51:38  LILY   <-- the organic reply answering the name utterance.
+                     MEMORY-BLIND: no welcome-back, no history, treats a
+                     returning regular as a stranger.
+  [soft] Rami — glad you’re here. I’m doing great, ready to make some
+  trouble with this table.
+  Is it just you tonight, or is someone else hiding behind the mic?
+
+21:51:42  S1 (Rami)
+  Just me, myself, and I.
+
+21:51:58  LILY   <-- still nothing: asks a get-to-know-you question OF A
+                     PLAYER WITH ~18 GAMES ON FILE.
+  [soft] Just you — perfect. This table’s all yours tonight.
+  What’s one fun fact about you I can tease you with later?
+
+21:52:05  S1 (Rami)
+  I ain't telling you. If you're a good host, you'll find stuff out on
+  your own.
+
+21:52:18  LILY
+  [soft] Fair enough. A good host earns the material — I’ll work for it.
+  Want a quick spin on how we can play, or are we diving straight in?
+
+21:52:21  S1 (Rami)
+  Let's do it to it. Let's go.
+
+21:52:40  LILY  [q_1_delivery]   <-- game start commits HERE; from this
+                     moment CLASS 7 (lily_identity.py game_start_committed)
+                     forbade the late-recognition beat outright, so even an
+                     un-lied stamp could not have delivered.
+  [soft] Alright Rami — round one, academic lane, jacket off. ...
+
+(no recognition-bearing line appears anywhere later in the session)
+
+== lily_llm_usage (prompt-token deltas, UTC) ==
+
+21:51:25  prompt_tokens=13432   <-- the organic reply's generation window:
+21:51:27  prompt_tokens=13588       no [RETURNING TABLE] block in context.
+21:52:23  prompt_tokens=13829
+21:52:27  prompt_tokens=13975 / 13953
+21:52:51  prompt_tokens=14412   <-- +~437: the [RETURNING TABLE] block first
+                                    appears — the name-door promotion's
+                                    sequential Supabase awaits completed
+                                    ~89s after the name was stated and ~73s
+                                    after the reply aired memory-blind.
+
+== defect chain pinned by this fixture ==
+1. on_speaker_bound spawns maybe_recognize_by_stated_name fire-and-forget
+   ("recognition is never allowed to block the bind or the turn") — the
+   organic reply races it and wins by over a minute.
+2. bfadc42 (WO-LILY-ANTIREPEAT-PROTOCOL-001) stamped
+   note_recognition_aired("name_door_organic") unconditionally at both
+   promotion tails — a receipt that lied (S2): nothing had aired.
+3. maybe_fire_late_recognition hard-returns on the stamped fact —
+   recognition permanently retired.
+4. Independently: game start had committed before the promotion landed, so
+   the pre-existing CLASS 7 forbid retired the beat as well — a slow name
+   door could not deliver even when armed.
