@@ -12124,6 +12124,16 @@ if __name__ == "__main__":
         entrypoint_fnc=entrypoint,
         worker_type=WorkerType.ROOM,
         agent_name="Lily",  # dispatch name — must match livekit.toml exactly
+        # WO-FLEET-SHUTDOWN-GRACE-001: the bare AgentServer default is
+        # shutdown_process_timeout=10.0s, which SIGKILLs the process 10s into
+        # drain. Lily's own post-call persistence gate (_wait_for_persistence /
+        # add_shutdown_callback) is willing to wait shutdown_timeout_seconds()
+        # (default 30s) for voice-embedding + lily_persistence session/standings/
+        # prefs writes to signal shutdown_gate. With the bare 10s framework grace
+        # that 30s intent was truncated to 10s — an app gate LONGER than the
+        # process-kill deadline is the bug. Track the app gate + 30s margin so the
+        # framework grace always exceeds Lily's persistence budget.
+        shutdown_process_timeout=lily_config.shutdown_timeout_seconds() + 30.0,
         # Explicit memory settings (smoke-test item 0). Default limit is 0
         # (monitor DISABLED); a nonzero limit deliberately enables the job
         # memory monitor, which KILLS the job process on breach — the known
