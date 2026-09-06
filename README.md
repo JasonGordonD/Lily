@@ -503,7 +503,7 @@ No fixes under this clause; recommended as the next work order.
 |---|---|
 | Framework | `livekit-agents==1.6.8` (plugin family pinned to match; endpointing uses `TurnHandlingOptions.endpointing` with FIXED mode; the LiveKit Turn Detector default remains off) |
 | STT | Speechmatics — `en`, diarization, `model=ENHANCED`; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`): `speaker_sensitivity=0.35`, `prefer_current_speaker=True`, `max_speakers=7`, FIXED turn mode, `ignore_speakers=["__ASSISTANT__"]`, player-name vocab, and StartRecognition `get_speakers`/volume injection. `LilySpeechmaticsSTT` maps the 1.6.8 plugin onto the supported RT `model` property; deprecated `operating_point` never reaches the wire. |
-| Vocal LLM | `grok-4.5`; `low` routine effort, per-turn `medium` for dispute/ambiguity/multi-intent/meta; the adult prompt layer is always-on (content-mode gate removed, WO-PRMPT-LILY-REFACTOR-001) |
+| Vocal LLM | `grok-4.5`; `medium` effort for the vocal and adult vocal lanes (operator ruling 2026-09-06; per-turn escalation for dispute/ambiguity/multi-intent/meta stays); the adult prompt layer is always-on (content-mode gate removed, WO-PRMPT-LILY-REFACTOR-001) |
 | Question reasoning | `grok-4.5`; author/verify `medium` (operator ruling 2026-09-06 — at `high` every live authoring call hit the 20 s prefetch wall; do not restore `high`); never speaks or mutates state |
 | TTS | ElevenLabs v3 via `lily_tts.py` (`/v1/text-to-speech/{voice_id}/stream`; the dialogue endpoint stays off per fleet revert). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`) |
 | VAD | Silero — barge-in enabled; STT is never gated during TTS |
@@ -896,7 +896,8 @@ reach it.
 Every model ID below was verified live on the funded keys before wiring.
 
 - **Brain (vocal LLM):** `grok-4.5` for general and adult. Routine host
-  turns run `low`; complex turns temporarily use `medium`. Local `chat_ctx`
+  turns run `medium` on both the vocal and adult vocal lanes (operator
+  ruling 2026-09-06); complex turns still escalate per turn. Local `chat_ctx`
   and deterministic state remain authoritative. Every session sends an
   opaque, stable `x-grok-conv-id` so xAI routes its Chat Completions to the
   same prompt-cache server; cache misses remain behaviorally harmless.
@@ -921,7 +922,7 @@ Every model ID below was verified live on the funded keys before wiring.
   `LILY_REASONING | STREAM | purpose= model= ttft_ms= total_ms= chunks=
   chars= finish=` line and one `lily_llm_usage` row (ttft = first
   content token; `timeout` / `cancelled:chars=<n>` on the failure paths).
-- **Tier-2 judge:** `grok-4.5` `medium`, structured and 12s-bounded; it
+- **Tier-2 judge:** `grok-4.5` `high` (operator ruling 2026-09-06), structured and 12s-bounded; it
   proposes correctness only and never commits score.
 - **Vision / image correspondence:** `grok-4.5` handles player photo
   descriptions, web-image approval, arsenal correspondence and image-first

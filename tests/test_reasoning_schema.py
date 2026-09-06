@@ -113,7 +113,7 @@ def test_judge_uses_grok_model_effort_and_judge_budget():
     r = _reasoning_with_stub(seen, '{"verdict": "correct"}')
     _run(r.judge("system", "prompt"))
     assert seen["model"] == "grok-4.5"
-    assert seen["effort"] == "medium"
+    assert seen["effort"] == "high"
     assert seen["max_tokens"] == lily_config.judge_max_output_tokens()
 
 

@@ -53,7 +53,7 @@ def test_adult_model_pins_and_coercions(monkeypatch):
     # 2026-08-08 directive drops it again medium -> LOW after a starved
     # slot lost a direct address past the 3.0s budget. Thinking depth is
     # the cheapest thing to give back under contention.
-    assert lily_config.adult_vocal_effort() == "low"
+    assert lily_config.adult_vocal_effort() == "medium"
     assert lily_config.adult_reasoning_model() == "grok-4.5"
     assert lily_config.adult_reasoning_effort() == "medium"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "low")
@@ -61,7 +61,7 @@ def test_adult_model_pins_and_coercions(monkeypatch):
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "medium")
     assert lily_config.adult_vocal_effort() == "medium"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "garbage")
-    assert lily_config.adult_vocal_effort() == "low"
+    assert lily_config.adult_vocal_effort() == "medium"
     monkeypatch.setenv("LILY_ADULT_REASONING_EFFORT", "off")
     assert lily_config.adult_reasoning_effort() == "medium"
 

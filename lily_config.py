@@ -123,8 +123,11 @@ def vocal_model() -> str:
 
 
 def vocal_effort() -> str:
-    """Routine voice stays fast; llm_node escalates complex turns to medium."""
-    return "low"
+    """Grok reasoning effort for the front-facing VOCAL lane. Operator
+    ruling 2026-09-06 (17:0xZ): MEDIUM for both the vocal and the adult
+    vocal lane (reverses the 2026-08-08 low ruling). llm_node's per-turn
+    escalation for dispute/ambiguity/multi-intent/meta still applies."""
+    return "medium"
 
 
 def live_preemptive_enabled() -> bool:
@@ -225,7 +228,12 @@ def judge_model() -> str:
 
 
 def judge_effort() -> str:
-    return "medium"
+    """Tier-2 judge runs Grok 4.5 at HIGH effort (operator ruling
+    2026-09-06 16:5xZ: "the tier two judge can be grok 4.5 High"). The
+    12 s bound in lily_reasoning.judge() + the Tier-1 fallback still
+    protect the reveal path; watch lily_llm_usage purpose='judge'
+    ttft_ms after this change — at medium it was 3.2-3.5 s."""
+    return "high"
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +311,9 @@ def adult_vocal_effort() -> str:
     effort = (
         _get("LILY_ADULT_VOCAL_EFFORT", vocal_effort()) or ""
     ).lower()
-    return effort if effort in ("low", "medium", "high") else "low"
+    # Operator ruling 2026-09-06: medium for both vocal lanes; an invalid
+    # env value coerces to the vocal default, not to low.
+    return effort if effort in ("low", "medium", "high") else vocal_effort()
 
 
 def adult_vocal_read_timeout() -> float:
