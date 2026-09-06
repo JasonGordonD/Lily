@@ -216,6 +216,10 @@ def test_pipeline_stage_order_is_fixed():
         "on_screen_claim_rewrite",
         "dispute_sycophancy_rewrite",
         "yield_after_first_question",
+        # WO-LILY-ADDRESSED-001 (B9): the response-contract cap — after the
+        # yield clip (so a stacked-question clip never eats the offer),
+        # before the lints/regen (so they read the text that airs).
+        "addressed_cap",
         "repeat_lints",
         "regen_gate",
         "empty_candidate_retry",

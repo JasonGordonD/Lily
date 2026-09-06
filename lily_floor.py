@@ -202,6 +202,14 @@ class LilyFloorMixin:
             # game kept playing under a pending wipe). Self-releasing: the
             # confirm carries a TTL and every answer path clears it.
             return "restart_confirm_pending"
+        if self.addressed_active():
+            # WO-LILY-ADDRESSED-001 (B9): "Progression yields to the table."
+            # A player addressed her (FL-1 host_directed, not an answer
+            # candidate) — the game holds until the table gives it back.
+            # Below STOP and the explicit pause/hold (they win), above the
+            # transient reasons and B7's reply-owed latch. No timer lifts
+            # it: release_addressed on acceptance / answer / new address.
+            return "addressed"
         if self._question_pending:
             return "question_pending"
         if self._awaiting_address_since:
@@ -225,6 +233,14 @@ class LilyFloorMixin:
             return "user_speaking"
         if getattr(self.sk, "host_speaking", False):
             return "host_speaking"
+        # OPERATOR-MODS-001 B7 ("a question must not cut a pending answer
+        # to the player"): a reply to the human is in flight and has not
+        # reached the air (live 11:50:38Z: the next question fired between
+        # "Paused." and the answer to his question). Self-releasing — see
+        # lily_speech_delivery.reply_owed_reason.
+        owed = self.reply_owed_reason()
+        if owed:
+            return owed
         if self.pending_setup_jobs():
             return "setup_pending"
         return None
@@ -1162,7 +1178,20 @@ class LilyFloorMixin:
         on_agent_speech_finished BEFORE the act map is popped). For the
         restart confirm: a clean completion stamps `aired_at` — the
         moment from which a yes may be honored and the TTL runs; a lost
-        airing takes the suppression path."""
+        airing takes the suppression path.
+
+        OPERATOR-MODS-001 B7: every handle's end passes through here
+        (act None for an organic reply) — the reply-owed latch reads it."""
+        self.note_reply_owed_speech_end(
+            speech_id, interrupted=interrupted, suppressed=suppressed,
+            failed=failed,
+        )
+        # WO-LILY-ADDRESSED-001 (B9): the response to the table's address
+        # ended — OFFER_AIRED on a clean playout, RESPONSE_CUT otherwise.
+        self.note_addressed_speech_end(
+            speech_id, interrupted=interrupted, suppressed=suppressed,
+            failed=failed,
+        )
         if act != "restart_confirm":
             return
         pending = getattr(self, "_pending_restart_confirm", None)
@@ -1745,6 +1774,13 @@ class LilyFloorMixin:
             return False
         if act in self._GAME_LANE_ACTS:
             return False
+        if source == "silence_budget" and self.addressed_active():
+            # WO-LILY-ADDRESSED-001 (B9): under the addressed hold the
+            # pending question IS the offer; B8's silence line repeats it
+            # (the same standing question_reoffer enjoys) and its reply
+            # answers the table's unanswered final — neither is an
+            # unsolicited beat.
+            return False
         return True
 
     def _freeze_game_delivery_for_stop(self) -> None:
@@ -1842,6 +1878,16 @@ class LilyFloorMixin:
         if lily_scorekeeper.lily_detect_hold_request(text):
             self.handle_pause_request(text)
             return True
+        # WO-LILY-OPERATOR-MODS-001 B6: the operator CLAIM. Honored only
+        # when the identity gate already put the operator group on the mic
+        # by a VOICE door (handle_operator_claim decides and logs both
+        # ways). A bare claim is the whole reply (ack + hold, LLM bypassed);
+        # a claim carrying a question is acked and held but NOT swallowed —
+        # "answer the question asked" is the organic lane's, under the
+        # operator directive.
+        if lily_scorekeeper.lily_detect_operator_claim(text):
+            if self.handle_operator_claim(text):
+                return not lily_scorekeeper.lily_is_question_shaped(text)
         return False
 
     # AIRGATE-001 D3: how long one interim-routed stop suppresses re-routing
@@ -1914,9 +1960,605 @@ class LilyFloorMixin:
                 lily_scorekeeper.lily_detect_stop(text, solo=solo)
                 or lily_scorekeeper.lily_detect_pause_request(text)
                 or lily_scorekeeper.lily_detect_hold_request(text)
+                # B6: a bare operator claim from the confirmed operator is
+                # answered by its code ack alone (the same predicate
+                # maybe_route_stop returns True on).
+                or (
+                    lily_scorekeeper.lily_detect_operator_claim(text)
+                    and not lily_scorekeeper.lily_is_question_shaped(text)
+                    and self.operator_group_confirmed()
+                )
             )
         except Exception:
             return False
+
+    # -- WO-LILY-OPERATOR-MODS-001 B6: the operator claim -----------------------
+    #
+    # Operator text: "When the identified group is the architect/operator
+    # group (Rami), 'I am the operator' / 'pause the game' / meta questions
+    # are operator instructions: acknowledge as operator, answer the
+    # question asked, hold the game." "pause the game" already routes to the
+    # sticky pause (B2) for everyone; the claim and the meta question are
+    # what this adds, and BOTH read the identity gate first
+    # (lily_identity.operator_identity: a voice door on the operator group)
+    # — the transcript alone asserts nothing.
+
+    # OPERATOR-WORDING-PENDING: the spoken acknowledgment of the operator is
+    # a persona decision the spec does not supply. Shortest neutral line.
+    _OPERATOR_ACK_LINE = "Operator acknowledged — the game's held."
+
+    def _operator_directive(self, text: str) -> str:
+        ident = self.operator_identity()
+        return (
+            "OPERATOR INSTRUCTION (identity gate: door="
+            f"{ident.get('door')}, group={str(ident.get('group_id'))[:8]}): "
+            f"the confirmed operator just said {str(text or '')[:160]!r}. "
+            "Answer exactly what they asked, first and directly, as the "
+            "operator's question. The game is held; do not ask a trivia "
+            "question or move the round on until they say resume."
+        )
+
+    def handle_operator_claim(self, source_text: str) -> bool:
+        """The claim through the gate. Accepted (a voice door has the
+        operator group on the mic): ONE acknowledgment through gated_say
+        (text lane, hold-exempt source), the sticky pause on progression
+        ("hold the game"), and — when the claim carries a question — the
+        operator directive on the organic lane. Refused: logged with the
+        gate's reason; the pre-existing prompt rail ("a spoken claim is not
+        authenticated") answers. Returns True when accepted."""
+        ident = self.operator_identity()
+        if not ident.get("operator"):
+            self.note_operator_claim(accepted=False)
+            logger.warning(
+                "LILY_OPERATOR | CLAIM_REFUSED | session=%s reason=%s door=%s "
+                "group=%s text=%r — a spoken claim asserts nothing; only a "
+                "voice door on the operator group does (B6)",
+                self.sk.session_id, ident.get("reason"), ident.get("door"),
+                ident.get("group_id"), (source_text or "")[:60],
+            )
+            return False
+        question = lily_scorekeeper.lily_is_question_shaped(source_text)
+        already = self.pause_sticky()
+        self.note_operator_claim(accepted=True)
+        logger.warning(
+            "LILY_OPERATOR | CLAIM | accepted=True session=%s door=%s "
+            "group=%s membership=%s question=%s already_held=%s text=%r — "
+            "acknowledged as the operator; the game is held (B6)",
+            self.sk.session_id, ident.get("door"), ident.get("group_id"),
+            ident.get("membership"), question, already,
+            (source_text or "")[:60],
+        )
+        if not question:
+            # AIRGATE-001 D4: the code-ack lane owns a bare claim.
+            self.mark_deterministic_reply(source_text)
+        else:
+            self._explain_request_note = self._operator_directive(source_text)
+        self._pause_sticky = True
+        self.enter_hold(reason="operator_hold")
+        hold_clock = getattr(self, "hold_window_clock_for_pause", None)
+        if callable(hold_clock):
+            try:
+                hold_clock(reason="operator_hold")
+            except Exception:  # pragma: no cover
+                logger.exception("LILY_OPERATOR | CLOCK_HOLD_FAILED")
+        try:
+            self.sk.note_question_mark("paused_by", "operator")
+        except Exception:
+            pass
+        if not already:
+            self.gated_say(
+                None,
+                "operator_ack",
+                "",
+                source="hold_ack",  # hold-exempt, like the pause ack
+                text=self._OPERATOR_ACK_LINE,
+            )
+        return True
+
+    def note_operator_meta_question(self, text: str) -> bool:
+        """A question-shaped final from the confirmed operator that is not
+        an answer, a command or a game meta request: the organic lane
+        answers it AS the operator's question (the directive rides the X12
+        slot, one-shot). No pause by itself — B7's reply-owed latch holds
+        the next question until the answer airs. Returns True when armed."""
+        if not lily_scorekeeper.lily_is_question_shaped(text):
+            return False
+        if not self.operator_group_confirmed():
+            return False
+        self._explain_request_note = self._operator_directive(text)
+        logger.info(
+            "LILY_OPERATOR | META_QUESTION | session=%s text=%r — answered as "
+            "the operator's question; progression waits for the answer (B6)",
+            self.sk.session_id, (text or "")[:60],
+        )
+        return True
+
+    # -- WO-LILY-ADDRESSED-001 (B9): progression yields to the table ---------
+    #
+    # Operator text (the UNIVERSAL RULE), verbatim:
+    #   "Progression yields to the table. Whenever a player addresses her —
+    #   a question, a comment, a joke, a correction, a request, anything
+    #   directed at her rather than at the game — the game holds, she
+    #   responds in kind, and it resumes only when the table gives it back.
+    #   Answer-shaped utterances into an open window get scored. Everything
+    #   else gets a host."
+    #
+    # ONE hold (`addressed`), ONE trigger (FL-1 host_directed AND the
+    # segment did not become an answer candidate), one classifier for the
+    # RESPONSE CONTRACT (lily_scorekeeper.lily_classify_address), one exit
+    # (the table: takes the offer, lands an answer in an open window, or
+    # addresses her again — which restarts the cycle). No timer lifts it;
+    # STOP and the explicit pause still win (precedence in
+    # progression_paused_reason). The spoken offer is the operator's own
+    # sentence; everything else the response says is the organic lane's,
+    # under the contract line the state block carries (S8).
+
+    # The operator's words — the exit. Kept with the leading ellipsis: the
+    # hygiene cleaner and the leak filter both pass it through unchanged
+    # (verified), and the voice engine reads "…" as the beat it is.
+    _ADDRESSED_OFFER_LINE = "…anyway — ready for the next one?"
+    _ADDRESSED_OFFER_KEY = "ready for the next one"
+    # Body-sentence caps per contract (the offer is not counted). The
+    # question contracts get the operator's three; every other contract
+    # one-to-two; the game-meta contract (an explain / options / hint /
+    # repeat directive already owns the response) is never trimmed and
+    # never gets the offer — the question on the table is still live.
+    _ADDRESSED_CAPS = {
+        lily_scorekeeper.ADDRESS_QUESTION: 3,
+        lily_scorekeeper.ADDRESS_STRUCTURAL: 3,
+        lily_scorekeeper.ADDRESS_GAME_META: None,
+    }
+    _ADDRESSED_DEFAULT_CAP = 2
+    _ADDRESSED_CONTRACTS = {
+        lily_scorekeeper.ADDRESS_QUESTION: (
+            "a real answer — up to three sentences, enough to actually "
+            "explain, not enough to become a lecture"
+        ),
+        lily_scorekeeper.ADDRESS_STRUCTURAL: (
+            "a substantive answer about the part that is YOURS to steer, or "
+            "an honest referral to the operator and the builders for the "
+            "part that is not — never a restatement of the fault in fresh "
+            "words; up to three sentences"
+        ),
+        lily_scorekeeper.ADDRESS_CORRECTION: (
+            "own it in one line and FIX it if it is fixable, through the "
+            "reversal path: a name — lily_bind_speaker with the spelling "
+            "they gave; a ruling — lily_correct_verdict against the "
+            "committed record; a score — lily_award_bonus only on the "
+            "record's grounds; then confirm exactly what changed, or say "
+            "plainly what you cannot change; one or two sentences"
+        ),
+        lily_scorekeeper.ADDRESS_COMPLAINT: (
+            "a plain acknowledgment and the action you are taking — no "
+            "joke, no levity, no host sparkle; one or two sentences"
+        ),
+        lily_scorekeeper.ADDRESS_BANTER: (
+            "play — one beat, in character, one or two sentences"
+        ),
+        lily_scorekeeper.ADDRESS_REQUEST: (
+            "route it — the matching tool or mode change from WHAT THE "
+            "TABLE CAN ASK FOR — or refuse honestly in one line; a bare "
+            "'heard you' with nothing routed is not a response; one or two "
+            "sentences"
+        ),
+        lily_scorekeeper.ADDRESS_FLOOR_HOLD: (
+            "the table told you this is THEIR conversation: one short "
+            "acknowledgment that the floor is theirs — nothing scored, "
+            "nothing asked; one sentence"
+        ),
+        lily_scorekeeper.ADDRESS_GAME_META: (
+            "the explain / options / hint / repeat directive above IS the "
+            "response — the question on the table stays live, so no offer "
+            "line here"
+        ),
+        lily_scorekeeper.ADDRESS_OTHER: (
+            "acknowledge it, in kind, one or two sentences"
+        ),
+    }
+
+    def addressed_active(self) -> bool:
+        """True while the table's address holds progression (B9)."""
+        return getattr(self, "_addressed", None) is not None
+
+    def addressed_state(self) -> dict | None:
+        """A copy of the live hold's record (receipts, tests) or None."""
+        state = getattr(self, "_addressed", None)
+        return dict(state) if state is not None else None
+
+    def _addressed_exempt_reason(
+        self, result: dict, text: str, *, answered_her_question: bool
+    ) -> str | None:
+        """Why a host-directed, non-candidate final is NOT an address:
+        the deterministic lanes routed it (a command, a media choice, a
+        code-acked final — the routing IS the response), it answers a
+        question SHE asked, it is a backchannel / bare affirmative, or it
+        is itself an acceptance. None when it is an address."""
+        if result.get("control_command"):
+            return "control_command"
+        if result.get("media_choice"):
+            return "media_choice"
+        if answered_her_question:
+            return "answered_her_question"
+        try:
+            normalized = lily_evaluation.lily_normalize_answer(text or "")
+        except Exception:
+            normalized = ""
+        if normalized and normalized in (
+            getattr(self, "_deterministic_reply_texts", None) or []
+        ):
+            return "code_acked"
+        if normalized in lily_evaluation.LILY_BACKCHANNELS:
+            return "backchannel"
+        if lily_scorekeeper.lily_is_bare_affirmative(text):
+            return "bare_affirmative"
+        if lily_scorekeeper.lily_detect_addressed_acceptance(text):
+            return "acceptance"
+        if lily_scorekeeper.lily_detect_hold_request(text) or (
+            lily_scorekeeper.lily_detect_pause_request(text)
+        ):
+            return "pause_request"
+        return None
+
+    def note_addressed_final(
+        self,
+        result: dict,
+        text: str,
+        judgment,
+        *,
+        answered_her_question: bool = False,
+    ) -> bool:
+        """THE trigger (B9). Runs at the end of the transcript event, after
+        every deterministic lane has had its turn: a final FL-1 classified
+        host_directed that did not become an answer candidate, in a live
+        game, not routed by a code lane, is an ADDRESS — the game holds.
+        A second address while held restarts the cycle (release by
+        new_address, then hold again). Returns True when a hold was
+        entered."""
+        if not getattr(self, "game_started", False) or getattr(
+            self, "game_over", False
+        ):
+            return False
+        if judgment is None or judgment.classification != (
+            lily_addressee_classifier.CLASS_HOST_DIRECTED
+        ):
+            return False
+        if result.get("candidate_recorded"):
+            return False  # answer-shaped into the open window: scored
+        exempt = self._addressed_exempt_reason(
+            result, text, answered_her_question=answered_her_question
+        )
+        if exempt:
+            logger.info(
+                "LILY_ADDRESSED | NOT_HELD | session=%s reason=%s text=%r",
+                self.sk.session_id, exempt, (text or "")[:60],
+            )
+            return False
+        subtype = lily_scorekeeper.lily_classify_address(
+            text,
+            floor_hold=(getattr(judgment, "reason", None) == "floor-hold"),
+            multiple_choice=self.contest_multiple_choice_hint(),
+        )
+        if self.addressed_active():
+            # "If the table wants more, they ask" — the new address
+            # restarts the cycle.
+            self.release_addressed(by="new_address", dispatch=False)
+        self._hold_addressed(text, subtype, judgment, result)
+        return True
+
+    def _hold_addressed(
+        self, text: str, subtype: str, judgment, result: dict
+    ) -> None:
+        seq = int(getattr(self, "_addressed_seq", 0) or 0) + 1
+        self._addressed_seq = seq
+        window_open = bool(getattr(self.sk, "answer_window_open", False))
+        state = {
+            "seq": seq,
+            "text": str(text or "")[:160],
+            "subtype": subtype,
+            "since": time.time(),
+            "mono": time.monotonic(),
+            "qnum": int(getattr(self.sk, "question_number", 0) or 0),
+            "window_open": window_open,
+            "fl1_score": getattr(judgment, "score", None),
+            "fl1_reason": getattr(judgment, "reason", None),
+            "speech_id": None,
+            "responded": False,
+            "sentences": None,
+            "trimmed": False,
+            "offer_appended": False,
+            "offer_aired": False,
+            "offer_repeated": False,
+            "clock_held": False,
+        }
+        self._addressed = state
+        # The open window's clock is held exactly as B2's pause holds it —
+        # candidates kept, deadline lifted, remaining seconds remembered.
+        hold_clock = getattr(self, "hold_window_clock_for_pause", None)
+        if window_open and callable(hold_clock):
+            try:
+                state["clock_held"] = bool(hold_clock(reason="addressed"))
+            except Exception:  # pragma: no cover
+                logger.exception("LILY_ADDRESSED | CLOCK_HOLD_FAILED")
+        try:
+            self.sk.note_question_mark("addressed_by", subtype)
+        except Exception:
+            pass
+        logger.warning(
+            "LILY_ADDRESSED | HELD | session=%s q=%d seq=%d subtype=%s "
+            "fl1_score=%s fl1_reason=%s window_open=%s clock_held=%s "
+            "text=%r — progression yields to the table; released only by "
+            "the table (WO-LILY-ADDRESSED-001 B9)",
+            self.sk.session_id, state["qnum"], seq, subtype,
+            state["fl1_score"], state["fl1_reason"], window_open,
+            state["clock_held"], state["text"][:80],
+        )
+        self.note_airgate_event(
+            "addressed", stage="hold", qnum=state["qnum"],
+            detail={
+                "seq": seq, "utterance": state["text"][:120],
+                "subtype": subtype, "fl1_score": state["fl1_score"],
+                "fl1_reason": state["fl1_reason"],
+                "window_open": window_open,
+                "clock_held": state["clock_held"],
+            },
+        )
+
+    def maybe_release_addressed_on_final(
+        self, result: dict, text: str
+    ) -> str | None:
+        """The table's exits, read on every final BEFORE the pause branch
+        (so an "okay go" that lifts a pause lifts this first and the
+        pause's own resume can dispatch): an answer landing in the open
+        window, or the table taking the offer. Everything else keeps the
+        hold (a fresh address re-arms it at the end of the event). Returns
+        the release cause or None."""
+        if not self.addressed_active():
+            return None
+        if result.get("candidate_recorded"):
+            self.release_addressed(by="answer", text=None)
+            return "answer"
+        if (
+            lily_scorekeeper.lily_detect_addressed_acceptance(text)
+            and not lily_scorekeeper.lily_detect_restart_game(text)
+        ):
+            self.release_addressed(by="acceptance", text=text)
+            return "acceptance"
+        logger.info(
+            "LILY_ADDRESSED | STILL_HELD | session=%s seq=%s text=%r — a "
+            "final under the hold that neither answers nor accepts; the "
+            "game stays held until the table gives it back (B9)",
+            self.sk.session_id, (self._addressed or {}).get("seq"),
+            (text or "")[:60],
+        )
+        return None
+
+    def release_addressed(
+        self, by: str, *, text: str | None = None, dispatch: bool = True
+    ) -> bool:
+        """Lift the hold. `by` is the table's cause (answer | acceptance |
+        new_address | stop) — never a timer. Re-arms a held window clock;
+        on an acceptance, progression resumes from where the address
+        interrupted it (a cut read, else the armed question) unless a
+        pause or STOP owns that resume. Returns True if a hold lifted."""
+        state = getattr(self, "_addressed", None)
+        if state is None:
+            return False
+        self._addressed = None
+        held_ms = (time.monotonic() - float(state.get("mono") or 0.0)) * 1000
+        logger.warning(
+            "LILY_ADDRESSED | RELEASED | session=%s seq=%s by=%s subtype=%s "
+            "responded=%s sentences=%s offer_aired=%s held_ms=%.0f",
+            self.sk.session_id, state.get("seq"), by, state.get("subtype"),
+            state.get("responded"), state.get("sentences"),
+            state.get("offer_aired"), held_ms,
+        )
+        self.note_airgate_event(
+            "addressed", stage="release", qnum=state.get("qnum"),
+            speech_id=state.get("speech_id"),
+            detail={
+                "seq": state.get("seq"),
+                "utterance": str(state.get("text") or "")[:120],
+                "subtype": state.get("subtype"),
+                "sentences": state.get("sentences"),
+                "trimmed": bool(state.get("trimmed")),
+                "offer_aired": bool(state.get("offer_aired")),
+                "released_by": by, "held_ms": round(held_ms),
+            },
+        )
+        if state.get("clock_held"):
+            resume_clock = getattr(self, "resume_window_clock_after_pause", None)
+            if callable(resume_clock):
+                try:
+                    resume_clock(reason=f"addressed_release:{by}")
+                except Exception:  # pragma: no cover
+                    logger.exception("LILY_ADDRESSED | CLOCK_RESUME_FAILED")
+        if dispatch and by == "acceptance":
+            self._addressed_resume_progression(text)
+        return True
+
+    def _addressed_resume_progression(self, text: str | None) -> None:
+        """The table gave the game back: pick up exactly where the address
+        interrupted it. A pause or STOP still owns the resume (their own
+        release paths dispatch); a half-aired read resumes (C3c/C8); else
+        the armed question is delivered and that delivery is the reply to
+        the acceptance (marked, so the organic lane does not double it)."""
+        # The offer was a question SHE asked (PATCH-003 P6 latched it as
+        # pending); the acceptance is its answer — release the latch first,
+        # ahead of whichever dispatch follows (this one, or the pause's own
+        # resume when a pause owns it): question_pending sits above the
+        # dispatch in progression_paused_reason and would refuse it.
+        if getattr(self, "_question_pending", False):
+            self.release_question_pending(reason="addressed_accepted")
+        if self.game_delivery_stopped() or self.pause_sticky():
+            return
+        qnum = int(getattr(self.sk, "question_number", 0) or 0)
+        try:
+            read_owed = self._question_barge_resume_still_owed(qnum)
+        except Exception:
+            read_owed = False
+        if read_owed:
+            if self.mcq_barge_resume(time.time()) and text:
+                self.mark_deterministic_reply(text)
+            return
+        if (
+            getattr(self, "game_started", False)
+            and not getattr(self, "game_over", False)
+            and not getattr(self.sk, "answer_window_open", False)
+            and getattr(self, "armed_question", None) is not None
+        ):
+            if self.dispatch_armed_question(source="addressed_released") and text:
+                self.mark_deterministic_reply(text)
+
+    def addressed_directive(self) -> str | None:
+        """The state-block line (S8: the hold is legible at generation
+        time). Before the response: the contract. After it: the wait."""
+        state = getattr(self, "_addressed", None)
+        if state is None:
+            return None
+        subtype = state.get("subtype") or lily_scorekeeper.ADDRESS_OTHER
+        if state.get("responded"):
+            return (
+                f"ADDRESSED (held in code, subtype={subtype}, responded): "
+                "you have answered the table's address and offered the way "
+                "back. The game stays held until THEY take it — do not ask, "
+                "read or bridge into a trivia question, do not move the "
+                "round on; if they address you again, respond in kind."
+            )
+        contract = self._ADDRESSED_CONTRACTS.get(
+            subtype, self._ADDRESSED_CONTRACTS[lily_scorekeeper.ADDRESS_OTHER]
+        )
+        line = (
+            f"ADDRESSED (held in code, subtype={subtype}): the table just "
+            f"addressed you — {str(state.get('text') or '')[:160]!r}. "
+            "Progression yields to the table: the game is held until they "
+            "give it back — do not ask, read or bridge into a trivia "
+            "question, do not move the round on. Respond in kind: "
+            f"{contract}."
+        )
+        if subtype != lily_scorekeeper.ADDRESS_GAME_META:
+            line += (
+                " Then the exit, exactly: "
+                f"\"{self._ADDRESSED_OFFER_LINE}\" — the offer is the way "
+                "back; the table takes it, you never do."
+            )
+        return line
+
+    def addressed_cap_text(
+        self, text: str, speech_id: str | None
+    ) -> str | None:
+        """Say-pipeline hook (lily_agent.AddressedCap): the first ORGANIC
+        turn after the hold is the response — a handle no Lily lane
+        stamped (the code-ack lanes stamp _dispatched_act_by_speech inside
+        their own dispatch). Enforce the contract's cap and the offer
+        mechanically, logged, never silently. Returns the rewritten text,
+        or None when nothing applies / nothing changed."""
+        state = getattr(self, "_addressed", None)
+        if state is None or state.get("responded"):
+            return None
+        if not (text or "").strip():
+            return None
+        acts = getattr(self, "_dispatched_act_by_speech", None) or {}
+        if speech_id and speech_id in acts:
+            return None
+        subtype = state.get("subtype") or lily_scorekeeper.ADDRESS_OTHER
+        cap = self._ADDRESSED_CAPS.get(subtype, self._ADDRESSED_DEFAULT_CAP)
+        offer = (
+            None if subtype == lily_scorekeeper.ADDRESS_GAME_META
+            else self._ADDRESSED_OFFER_LINE
+        )
+        outcome = lily_say_gate.lily_cap_addressed_response(
+            text, cap=cap, offer=offer, offer_key=self._ADDRESSED_OFFER_KEY,
+        )
+        state["responded"] = True
+        state["speech_id"] = speech_id
+        state["sentences"] = outcome["sentences"]
+        state["trimmed"] = bool(outcome["trimmed"])
+        state["offer_appended"] = bool(outcome["offer_appended"])
+        if outcome["trimmed"]:
+            logger.warning(
+                "LILY_ADDRESSED | TRIMMED | session=%s seq=%s speech_id=%s "
+                "subtype=%s sentences=%d cap=%s — the response overran the "
+                "contract; cut to the cap plus the offer (B9)",
+                self.sk.session_id, state.get("seq"), speech_id, subtype,
+                outcome["sentences"], cap,
+            )
+        if outcome["offer_appended"]:
+            logger.warning(
+                "LILY_ADDRESSED | OFFER_APPENDED | session=%s seq=%s "
+                "speech_id=%s subtype=%s — the model left the exit off; the "
+                "operator's offer sentence is appended (B9)",
+                self.sk.session_id, state.get("seq"), speech_id, subtype,
+            )
+        logger.warning(
+            "LILY_ADDRESSED | RESPONDED | session=%s seq=%s speech_id=%s "
+            "subtype=%s sentences=%d cap=%s trimmed=%s offer=%s",
+            self.sk.session_id, state.get("seq"), speech_id, subtype,
+            outcome["sentences"], cap, outcome["trimmed"],
+            "none" if offer is None else (
+                "appended" if outcome["offer_appended"] else "present"
+            ),
+        )
+        return outcome["text"] if outcome["changed"] else None
+
+    def note_addressed_speech_end(
+        self,
+        speech_id: str | None,
+        *,
+        interrupted: bool = False,
+        suppressed: bool = False,
+        failed: bool = False,
+    ) -> None:
+        """Playout end of the response handle: a clean completion means the
+        offer reached the room (OFFER_AIRED — the exit is on the table); a
+        cut / suppressed / failed one did not (RESPONSE_CUT). The hold is
+        unchanged either way: only the table releases it."""
+        state = getattr(self, "_addressed", None)
+        if state is None or not speech_id:
+            return
+        if state.get("speech_id") != speech_id:
+            return
+        if interrupted or suppressed or failed:
+            logger.warning(
+                "LILY_ADDRESSED | RESPONSE_CUT | session=%s seq=%s speech_id=%s "
+                "interrupted=%s suppressed=%s failed=%s — the offer did not "
+                "reach the room; the hold stands (B9)",
+                self.sk.session_id, state.get("seq"), speech_id,
+                bool(interrupted), bool(suppressed), bool(failed),
+            )
+            return
+        subtype = state.get("subtype")
+        if subtype == lily_scorekeeper.ADDRESS_GAME_META:
+            logger.info(
+                "LILY_ADDRESSED | RESPONSE_AIRED | session=%s seq=%s "
+                "speech_id=%s subtype=%s — no offer under the game-meta "
+                "contract; the question stays live",
+                self.sk.session_id, state.get("seq"), speech_id, subtype,
+            )
+            return
+        state["offer_aired"] = True
+        logger.warning(
+            "LILY_ADDRESSED | OFFER_AIRED | session=%s seq=%s speech_id=%s "
+            "subtype=%s — the way back is offered; the table takes it (B9)",
+            self.sk.session_id, state.get("seq"), speech_id, subtype,
+        )
+
+    def addressed_offer_repeat_line(self) -> str | None:
+        """B9's whole escalation, riding W7's B8 silence budget: with the
+        offer aired and the table silent, the offer repeats ONCE per hold
+        (then B8 is back to its ordinary floor line). Returns the line to
+        air, or None."""
+        state = getattr(self, "_addressed", None)
+        if state is None or not state.get("offer_aired"):
+            return None
+        if state.get("offer_repeated"):
+            return None
+        state["offer_repeated"] = True
+        logger.warning(
+            "LILY_ADDRESSED | OFFER_REPEATED | session=%s seq=%s — the offer "
+            "repeats once on the silence; that is the whole escalation (B9)",
+            self.sk.session_id, state.get("seq"),
+        )
+        return self._ADDRESSED_OFFER_LINE
 
     def handle_hold_request(self, source_text: str) -> None:
         """C13: a spoken hold-equivalent binds within one utterance —
@@ -1990,6 +2632,10 @@ class LilyFloorMixin:
             self.sk.session_id, (source_text or "")[:60], already_stopped,
             already_acked,
         )
+        # WO-LILY-ADDRESSED-001 (B9): an explicit STOP wins over the
+        # addressed hold — the brake retires it (by=stop; the table braked,
+        # so it is still the table that released it).
+        self.release_addressed(by="stop", dispatch=False)
         # 1. Halt anything airing + cancel every tracked handle — EXCEPT
         # the brake's own acknowledgment (DELIVERY-TRUTH-001 A4). The
         # stop/hold ack is one of the tracked handles; the debounced

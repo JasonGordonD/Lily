@@ -595,6 +595,97 @@ def lily_floor_line(context: str, nonce: int) -> str:
     return lines[nonce % len(lines)]
 
 
+# WO-LILY-ADDRESSED-001 (B9): the response cap. A sentence ends at . ! ?
+# (plus closing quotes) followed by whitespace and a sentence opener — an
+# uppercase letter, digit, quote, bracket audio tag, <break/> tag or an
+# ellipsis — or at the end of the text. Decimals ("3.5"), a trailing "..."
+# beat inside a sentence ("Kinsey was... a biologist") and the common
+# spoken abbreviations never split. Paragraph breaks always split.
+_SENTENCE_END_RE = re.compile(
+    r"[.!?]+[\"'”’)\]]*(?=\s+(?=[\"'“‘(\[<…A-Z0-9])|\s*$)"
+)
+_SENTENCE_ABBREVIATIONS = frozenset({
+    "dr", "mr", "mrs", "ms", "st", "vs", "jr", "sr", "prof", "mt", "etc",
+    "e.g", "i.e",
+})
+
+
+def lily_split_sentences(text: str) -> list:
+    """Split spoken text into sentences (pure). Audio tags and <break/>
+    tags stay attached to the sentence they precede."""
+    out: list = []
+    for paragraph in re.split(r"\n\s*\n", text or ""):
+        start = 0
+        for match in _SENTENCE_END_RE.finditer(paragraph):
+            chunk = paragraph[start:match.end()]
+            if match.group(0).startswith("."):
+                word = re.search(r"([A-Za-z.]+)\.+[\"'”’)\]]*$", chunk)
+                if word and word.group(1).lower().rstrip(".") in (
+                    _SENTENCE_ABBREVIATIONS
+                ):
+                    continue
+            if chunk.strip():
+                out.append(chunk.strip())
+            start = match.end()
+        tail = paragraph[start:].strip()
+        if tail:
+            out.append(tail)
+    return out
+
+
+def lily_cap_addressed_response(
+    text: str,
+    *,
+    cap: Optional[int],
+    offer: Optional[str],
+    offer_key: str,
+) -> dict:
+    """Enforce one response contract mechanically (B9): at most `cap` body
+    sentences, then the offer sentence — appended when the model forgot
+    it, moved to the end when it sat elsewhere. `cap=None` never trims;
+    `offer=None` never appends (the game-meta contract). Returns
+    {text, sentences (body count BEFORE the trim), trimmed, offer_present,
+    offer_appended, changed}. Pure."""
+    sentences = lily_split_sentences(text)
+    key = (offer_key or "").strip().lower()
+    body = [
+        s for s in sentences
+        if not key or key not in re.sub(r"\s+", " ", s.lower())
+    ]
+    offer_present = bool(key) and len(body) != len(sentences)
+    trimmed = cap is not None and len(body) > cap
+    n_body = len(body)
+    if offer is None:
+        if not trimmed:
+            return {
+                "text": text, "sentences": n_body, "trimmed": False,
+                "offer_present": offer_present, "offer_appended": False,
+                "changed": False,
+            }
+        new_text = " ".join(body[:cap])
+        return {
+            "text": new_text, "sentences": n_body, "trimmed": True,
+            "offer_present": offer_present, "offer_appended": False,
+            "changed": new_text != text,
+        }
+    offer_last = bool(sentences) and (
+        key in re.sub(r"\s+", " ", sentences[-1].lower())
+    )
+    if not trimmed and offer_present and offer_last:
+        return {
+            "text": text, "sentences": n_body, "trimmed": False,
+            "offer_present": True, "offer_appended": False,
+            "changed": False,
+        }
+    kept = body[:cap] if trimmed else body
+    new_text = (" ".join(kept) + " " + offer).strip()
+    return {
+        "text": new_text, "sentences": n_body, "trimmed": trimmed,
+        "offer_present": offer_present, "offer_appended": not offer_present,
+        "changed": new_text != text,
+    }
+
+
 # False on-screen picture claims (WO-B4) — "look at the screen" / "picture
 # is up" only when lily_control.image_shown confirmed the armed URL.
 _FALSE_ON_SCREEN_RE = re.compile(

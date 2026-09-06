@@ -970,6 +970,64 @@ def lily_detect_pause_release(text: str) -> bool:
     return bool(_PAUSE_RELEASE_RE.fullmatch(" ".join(core)))
 
 
+# Operator B6 (WO-LILY-OPERATOR-MODS-001) — the operator CLAIM. Live
+# lily-D11A7E 11:51:06Z "I am the operator." was answered organically with
+# "I don't have a separate operator channel". Detection here is only ever
+# a TRIGGER: the claim binds NOTHING by itself — lily_identity's operator
+# gate (a VOICE door on the operator group) decides whether it is honored,
+# and lily_floor.handle_operator_claim logs the refusal when it is not.
+# "architect" rides beside "operator" (the prompt's own word for the same
+# person); a question ("am I the operator?") and a negation ("I'm not the
+# operator") never fire, nor does talk ABOUT the operator (logs, channel).
+_OPERATOR_CLAIM_RE = _re.compile(
+    r"\b(?:"
+    r"(?:i am|i m|im|this is|it s|its|that s|thats) (?:the |your )?"
+    r"(?:operator|architect)"
+    r"|(?:operator|architect) (?:here|speaking)"
+    r")\b"
+)
+_OPERATOR_CLAIM_NEGATION_RE = _re.compile(
+    r"\b(?:not|never|am i|is it|was i|isn t|ain t|if i|whether)\b"
+    r"[a-z0-9 ]{0,12}\b(?:operator|architect)\b"
+)
+
+
+def lily_detect_operator_claim(text: str) -> bool:
+    """True when the utterance CLAIMS to be the operator/architect ("I am
+    the operator", "this is the operator", "operator here", "I'm the
+    architect"). Deterministic; negation- and question-guarded. Never an
+    authority by itself — see lily_identity.operator_identity."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    if _OPERATOR_CLAIM_NEGATION_RE.search(normalized):
+        return False
+    return bool(_OPERATOR_CLAIM_RE.search(normalized))
+
+
+_QUESTION_LEAD_TOKENS = frozenset({
+    "why", "what", "how", "when", "where", "who", "which", "whose",
+    "are", "is", "am", "was", "were", "can", "could", "do", "does", "did",
+    "will", "would", "should", "have", "has", "may",
+})
+
+
+def lily_is_question_shaped(text: str) -> bool:
+    """True when the utterance asks something: a question mark in the raw
+    final, or an interrogative/auxiliary lead token after a leading
+    address ("Lily, why…"). Shape only — never a judgment of meaning."""
+    raw = text or ""
+    if "?" in raw:
+        return True
+    normalized = _normalize_command_text(raw)
+    tokens = normalized.split()
+    if tokens and tokens[0] in ("lily", "hey", "so", "okay", "ok", "uh", "um"):
+        tokens = tokens[1:]
+    while tokens and tokens[0] in ("lily", "uh", "um"):
+        tokens = tokens[1:]
+    return bool(tokens) and tokens[0] in _QUESTION_LEAD_TOKENS
+
+
 def lily_detect_resume_game(text: str) -> bool:
     """True for an explicit resume command after a sticky STOP. CLASS 5
     (LIVEFIRE-001): the intent is recognized ANYWHERE in the utterance
@@ -1374,6 +1432,251 @@ def lily_detect_meta_request(text: str) -> Optional[str]:
     if _META_REQUEST_REPEAT_RE.search(normalized):
         return "repeat"
     return None
+
+
+# ---------------------------------------------------------------------------
+# WO-LILY-ADDRESSED-001 (B9) — "Progression yields to the table."
+#
+# The HOLD is never triggered here. Its trigger is the addressee lane
+# (lily_addressee_classifier: FL-1 classifies the final host_directed) AND
+# the candidate path (the segment did not become an answer candidate) —
+# read by lily_floor.note_addressed_final. What lives here is the SUB-TYPE:
+# which response contract the organic lane answers under. One hold, one
+# trigger, several contracts; an utterance none of these recognise gets
+# the default contract (acknowledge, hold, offer). Pure, deterministic.
+#
+# Live rows this generalises (session lily-C47CD4 and the month's
+# transcripts): "Who's Alfred Kinsey?" (question), "Your name is spelled
+# wrong on the page" (correction), "Why are you so slow?" (complaint),
+# "I said diamond" (correction — the reversal path), "We're not talking to
+# you" (floor hold), "I hate that word, beat" (complaint).
+# ---------------------------------------------------------------------------
+
+ADDRESS_QUESTION = "question"
+ADDRESS_STRUCTURAL = "structural"
+ADDRESS_CORRECTION = "correction"
+ADDRESS_COMPLAINT = "complaint"
+ADDRESS_BANTER = "banter"
+ADDRESS_REQUEST = "request"
+ADDRESS_FLOOR_HOLD = "floor_hold"
+ADDRESS_GAME_META = "game_meta"
+ADDRESS_OTHER = "other"
+
+_ADDRESS_COMPLAINT_RE = _re.compile(
+    r"\b(?:"
+    r"(?:so|too|way too|really|very|extremely|kinda|kind of) "
+    r"(?:slow|loud|fast|quiet|annoying|confusing|long|late|much)"
+    r"|(?:not|un) ?fair"
+    r"|ridiculous|annoying|frustrat(?:ed|ing)|infuriating|useless"
+    r"|terrible|awful|stupid|dumb|garbage|broken"
+    r"|i (?:hate|can t stand|don t like|dislike) (?:that|this|it|the|when|"
+    r"how|your|you)"
+    r"|(?:you re|you are|your|she s|she is) (?:not listening|ignoring|"
+    r"not (?:even )?(?:listening|hearing)|talking over|cutting|"
+    r"interrupting|wrong again)"
+    r"|(?:stop|quit) (?:doing|interrupting|talking over|cutting|ignoring|"
+    r"repeating|jumping|skipping|asking|saying)"
+    r"|(?:cut|cutting|talk|talking|spoke|speaking) (?:me|us|him|her) off"
+    r"|(?:talked|talking|spoke|speaking) over (?:me|us|him|her)"
+    r"|what the (?:hell|heck|fuck)|wtf|(?:this|that) sucks|shut up"
+    r"|(?:you|she) (?:didn t|did not|never) (?:listen|hear|wait|answer|let)"
+    r")\b"
+)
+_ADDRESS_STRUCTURAL_RE = _re.compile(
+    r"\b(?:"
+    r"(?:why|how come|how) (?:do|did|are|is|would|could|can t|cannot|don t|"
+    r"does|were|was|will|won t|didn t|have|keep) (?:you|she)\b"
+    r"|why (?:you|she) (?:keep|always|never|just)"
+    r"|what (?:s|is) (?:wrong|going on|happening|up) with you"
+    r"|are you (?:broken|even listening|listening|ignoring|there|hearing|"
+    r"working|okay|ok|alright|still there)"
+    r"|(?:can|do) you (?:even )?(?:hear|understand) (?:me|us)"
+    r")\b"
+)
+_ADDRESS_CORRECTION_RE = _re.compile(
+    r"\b(?:"
+    # a name
+    r"name (?:is |s |was )?(?:spelled|spelt|pronounced|written|shown|"
+    r"showing|displayed) (?:wrong|incorrectly|wrongly)"
+    r"|(?:spelled|spelt|pronounced|wrote|written|typed) "
+    r"(?:it |my name |his name |her name |that )?wrong"
+    r"|(?:that s|thats|that is|it s|its|it is) not (?:my|his|her|the right|"
+    r"the correct) name"
+    r"|(?:you )?(?:got|have|had) (?:my|his|her|the) name wrong"
+    r"|wrong (?:name|spelling)"
+    r"|(?:it s|its|it is|that s|thats) spelled [a-z]+"
+    r"|my name is [a-z]+ not\b"
+    r"|call me [a-z]+ not\b"
+    # a score / the board
+    r"|(?:score|scores|board|points?|tally) (?:is|are|was|were) "
+    r"(?:wrong|off|behind|not right|incorrect)"
+    r"|(?:i|we|he|she|they) (?:should|shoulda|should ve|should have) "
+    r"(?:have |be |get |got |gotten )?(?:a |the |that |two |three |another )?"
+    r"points?"
+    r"|(?:that s|thats|that is) not (?:my|our|his|her|the right|the) "
+    r"(?:score|points?)"
+    r"|(?:you )?(?:gave|give|took|take|awarded|scored) (?:him|her|them|me|us) "
+    r"(?:my|the|his|her|our) points?"
+    # a ruling — a restated answer as a correction ("I said diamond")
+    r"|i (?:said|say|answered|meant|told you) [a-z]+"
+    r"|(?:that s|thats|that is|it s|its|it is) (?:wrong|not right|incorrect|"
+    r"not what i said)"
+    r"|you (?:misheard|mis heard|heard (?:me|that|it) wrong|"
+    r"got (?:me|that|it) wrong)"
+    # a rule
+    r"|(?:we|you) (?:agreed|said|promised|decided)\b"
+    r"|(?:that s|thats|that is) not (?:the|a|how the) rule"
+    r"|you (?:can t|cannot|are not allowed to|aren t allowed to) do that"
+    r")\b"
+)
+_ADDRESS_BANTER_RE = _re.compile(
+    r"\b(?:"
+    r"ha ?ha(?: ?ha)*|lol|lmao|rofl|just kidding|kidding|joking|jk"
+    r"|(?:you re|you are|she s) (?:funny|hilarious|cute|adorable|the best|"
+    r"great|awesome|amazing|sassy|savage)"
+    r"|(?:nice|good|great) one|well played|touche|burn"
+    r"|i love (?:you|it|that|this|her)|love (?:you|it|that)\b"
+    r"|(?:that s|thats|that is|that was) (?:funny|hilarious|great|awesome|"
+    r"amazing|gold|brilliant)"
+    r"|you (?:crack|kill) me"
+    r")\b"
+)
+_ADDRESS_REQUEST_SHAPE_RE = _re.compile(
+    r"(?:"
+    r"\b(?:can|could|would|will|may) (?:you|we|i|us|ya)\b"
+    r"|\bplease\b"
+    r"|\b(?:i|we) (?:want|need|would like|d like|wanna|wish)\b"
+    r"|\blet s\b|\blets\b"
+    r"|^(?:make|switch|change|show|use|turn|give|play|put|set|do|try|"
+    r"speak|talk|go|read|sing|be)\b"
+    r")"
+)
+_ADDRESS_REQUEST_OBJECT_RE = _re.compile(
+    r"\b(?:"
+    r"pictures?|images?|photos?|screen|voice|accent|british|american|"
+    r"pacing|timer|clock|slower|faster|louder|quieter|softer|volume|"
+    r"categor(?:y|ies)|topic|subject|round|mode|adult|spicy|"
+    r"multiple choice|options|choices|hint|music|language|spanish|french|"
+    r"easier|harder|difficulty|kids?|family|clean|swear|cursing|shorter|"
+    r"longer|quick(?:er)?"
+    r")\b"
+)
+_ADDRESS_QUESTION_MORE_RE = _re.compile(
+    r"\b(?:tell (?:me|us) (?:more|about)|more about|what else|"
+    r"go on about|say more)\b"
+)
+
+
+def lily_classify_address(
+    text: str,
+    *,
+    floor_hold: bool = False,
+    game_meta: bool = False,
+    multiple_choice: bool = False,
+) -> str:
+    """The response-contract sub-type of an utterance already known to be
+    addressed to the host (FL-1 host_directed, not an answer candidate).
+    `floor_hold` / `game_meta` let the caller pass facts it already holds
+    (FL-1's floor-hold reason, a routed explain/meta request); both are
+    also re-derived here so the classifier is complete on its own. Order
+    is precedence: floor hold, game meta, complaint, correction,
+    structural, request, banter, question, other."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return ADDRESS_OTHER
+    if not floor_hold:
+        try:
+            import lily_addressee_classifier as _fl1
+
+            floor_hold = _fl1.lily_floor_hold(text)
+        except Exception:  # pragma: no cover — FL-1 is stdlib-only
+            floor_hold = False
+    if floor_hold:
+        return ADDRESS_FLOOR_HOLD
+    if (
+        game_meta
+        or lily_detect_explain_request(text)
+        or lily_detect_meta_request(text) is not None
+    ):
+        return ADDRESS_GAME_META
+    if _ADDRESS_COMPLAINT_RE.search(normalized):
+        return ADDRESS_COMPLAINT
+    if _ADDRESS_CORRECTION_RE.search(normalized) or lily_detect_verdict_contest(
+        text, multiple_choice=multiple_choice
+    ):
+        return ADDRESS_CORRECTION
+    if _ADDRESS_STRUCTURAL_RE.search(normalized):
+        return ADDRESS_STRUCTURAL
+    if _ADDRESS_REQUEST_SHAPE_RE.search(normalized) and (
+        _ADDRESS_REQUEST_OBJECT_RE.search(normalized)
+    ):
+        return ADDRESS_REQUEST
+    if _ADDRESS_BANTER_RE.search(normalized):
+        return ADDRESS_BANTER
+    if lily_is_question_shaped(text) or _ADDRESS_QUESTION_MORE_RE.search(
+        normalized
+    ):
+        return ADDRESS_QUESTION
+    try:
+        if (
+            lily_evaluation.lily_meta_speech_utterance(text)
+            == lily_evaluation.LILY_META_INTERROGATIVE
+        ):
+            return ADDRESS_QUESTION
+    except Exception:  # pragma: no cover
+        pass
+    return ADDRESS_OTHER
+
+
+# The table taking the offer ("…anyway — ready for the next one?"): the B2
+# pause-release family, the bare affirmative set, and the one-breath
+# replies a table gives an offered next question. Utterance-shaped (≤ 6
+# tokens) so an ANSWER that happens to open with "yes" never releases the
+# hold — and callers consult the candidate path first regardless.
+_ADDRESSED_ACCEPT_RE = _re.compile(
+    r"^(?:"
+    r"next(?: one| question| q)?"
+    r"|hit me|bring it(?: on)?|fire away|go for it|do it|let s do it"
+    r"|let s hear it|shoot|keep (?:it|them|em) coming"
+    r"|(?:i m|we re|we are|i am) (?:ready|good|set|fine|all set)"
+    r"|(?:yes|yeah|yep|yup|sure|okay|ok|alright|fine|absolutely|definitely|"
+    r"please)(?: (?:next(?: one| question)?|ready|go(?: ahead| on)?|"
+    r"let s go|please|do it|hit me|sure))?"
+    r")$"
+)
+_ADDRESSED_ACCEPT_NEGATION_RE = _re.compile(
+    r"\b(?:not|don t|dont|no|nope|nah|wait|hold on|hang on|never)\b"
+)
+
+
+def lily_detect_addressed_acceptance(text: str) -> bool:
+    """True when the table takes the offer and gives the game back (B9):
+    the explicit resume family (lily_detect_pause_release), a bare
+    affirmative, or a short "next one" / "hit me" / "yeah, go". Negation-
+    guarded ("not yet", "no, wait")."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    if _ADDRESSED_ACCEPT_NEGATION_RE.search(normalized):
+        return False
+    if lily_detect_restart_game(text):
+        return False  # "start over" is the restart lane's, never an acceptance
+    if lily_detect_pause_release(text):
+        return True
+    if lily_is_bare_affirmative(text):
+        return True
+    tokens = normalized.split()
+    if not tokens or len(tokens) > 6:
+        return False
+    core = [t for t in tokens if t not in _PAUSE_RELEASE_FILLER]
+    if not core:
+        # Pure filler ("okay yeah", "alright then") accepts only when an
+        # affirmative token is among it — a bare "Lily" is an address.
+        return any(
+            t in ("ok", "okay", "alright", "yeah", "yes", "cool", "good")
+            for t in tokens
+        )
+    return bool(_ADDRESSED_ACCEPT_RE.fullmatch(" ".join(core)))
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,440 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — WO-LILY-ADDRESSED-001 (B9): progression yields to the table
+
+Operator text, VERBATIM. The UNIVERSAL RULE (the scope correction that
+replaced B9's own rail — "do not ship the shape; ship the class"):
+
+> Progression yields to the table. Whenever a player addresses her — a
+> question, a comment, a joke, a correction, a request, anything directed
+> at her rather than at the game — the game holds, she responds in kind,
+> and it resumes only when the table gives it back. Answer-shaped
+> utterances into an open window get scored. Everything else gets a host.
+
+And B9's original contract for the question case, verbatim (it survives
+as ONE of the response contracts and as the spoken exit for all of them):
+
+> A direct question to the host earns a real answer, and the game waits
+> for it. Up to three sentences — enough to actually explain who Kinsey
+> was, not enough to become a lecture. Once she's answered, she offers the
+> way back rather than seizing it: '…anyway — ready for the next one?' If
+> the table wants more, they ask, and she gives another three. The
+> question is the invitation; the offer is the exit.
+
+Branch `fix/w9-host-question` on 68cb13d (fix/w7-operator-mods — B9 rides
+W7's reply-owed latch and the B2/B6 hold primitives). Tests:
+`tests/test_addressed_hold_b9.py`, 73 tests, **73 red on 68cb13d** (73
+failed, 0 passed), 73 green after; full suite **3172** on python3.11 and
+the 3.13 venv (W7 baseline 3099 + 73); one existing pin updated
+(`tests/test_say_pipeline.py::test_pipeline_stage_order_is_fixed` learns
+the new stage — the pipeline order is the contract and this WO adds a
+stage to it deliberately). `python3 -W error -c "import lily_agent"`
+clean. `ruff --select F` on the touched files: 8 findings, all
+pre-existing on 68cb13d at the same sites (lily_agent.py:552-558 F401,
+:6659 F841; lily_scorekeeper.py:3609 F841), 0 new. No config default,
+model/effort, Speechmatics or RLS change; lily_reasoning.py and
+lily_evaluation.py untouched (main has moved under them). Files:
+lily_scorekeeper.py, lily_say_gate.py, lily_floor.py,
+lily_speech_delivery.py, lily_glass.py, lily_agent.py,
+prompts/lily_system.txt, README.md, docs/GUARD_MAP.md (mech. 63), this
+entry.
+
+**What the C47CD4 record shows.** 14:26:28Z "Who's Alfred Kingsley,
+anyways?" landed the instant the reveal finished; the spine had already
+dispatched Q3 (the organic reply to the question started OVER the player
+and was cut), and 24 s later the answer aired FUSED with "Next one." and
+the re-read. The operator's scope correction names the class this is one
+instance of: the name-spelling correction that got the name asked again,
+"I hate that word, beat" adapted to but read over, "Why are you so slow?"
+answered then read over, "That's unfair" / "I said diamond" with
+progression continuing, "We're not talking to you" scored anyway. Nothing
+in the spine treated "a person is talking to her" as a reason to wait.
+The steamroll had four independent producers on this build alone — the
+reveal-to-N+1 dispatch, the window-fallback nudge that fires from the
+speech-finished path, the supply auto-advance, the undelivered refire —
+and only one of them ever consulted `progression_paused_reason`.
+
+**One hold: `addressed`** (`lily_floor.addressed_active` /
+`addressed_state` / `note_addressed_final` / `_hold_addressed` /
+`maybe_release_addressed_on_final` / `release_addressed` /
+`_addressed_resume_progression` / `addressed_directive` /
+`addressed_cap_text` / `note_addressed_speech_end` /
+`addressed_offer_repeat_line`; `progression_paused_reason` gains
+`addressed`; `LilyGame._addressed` / `_addressed_seq`). Distinct from
+`hold` (pause / C13 / STOP) and `reply_owed`. PRECEDENCE, as the reason
+string reads it and as the release paths honour it: STOP (`game_stopped`)
+> explicit pause / hold (`hold`) > `addressed` > `reply_owed`. An explicit
+STOP retires the address (`RELEASED by=stop` inside
+`handle_stop_primitive`); an explicit pause outranks it and does not clear
+it (the pause's ack interrupts the answer; on "okay go" the acceptance
+lifts the address first — ahead of the pause branch — and the pause's own
+resume dispatches); B7's latch sits below it (a turn commit under the
+hold reads `addressed`, and the owed reply IS the response). While held:
+`dispatch_armed_question` refuses (existing `LILY_PROGRESSION | PAUSED`
+line, new reason); the `question_delivery` / `question_nudge` acts are
+refused at gated_say's `_PROGRESSION_ACTS` chokepoint whatever lane sent
+them (`LILY_PROGRESSION | DISPATCH_PAUSED … reason=addressed` — this is
+what stops the window-fallback nudge, found live in the fixture: it fires
+from `on_agent_speech_finished` and never read the progression reason);
+the C3c `_maybe_resume_mcq_read` and C3d `_question_barge_resume_watch`
+defer (`LILY_BARGE | QUESTION_RESUME_DEFERRED reason=addressed`); the idle
+watchdog halts on `progression_paused` (so the supply-stall rung and the
+"vamp honestly" status line never fire over it); an open window's clock
+is held EXACTLY as B2's pause holds it (`hold_window_clock_for_pause`
+reason=addressed — deadline lifted, candidates kept, remaining seconds
+remembered; re-armed at release). NO TIMER LIFTS IT. `hold_timed_out`
+does not apply (it is not `_hold_active`, so every gated_say lane still
+flows — she can talk; the game cannot move).
+
+**One trigger: FL-1.** `note_addressed_final` runs at the END of
+`lily_glass.on_transcript_event`, after every deterministic lane has had
+its turn, and holds when ALL of: (1) `last_addressee_judgment.
+classification == host_directed` — `lily_addressee_classifier` fused
+score ≥ `host_threshold` 0.60, or one of its hard rules (vocative name,
+floor-hold declaration, command shape, definitional answer match); (2)
+the segment did NOT become an answer candidate (`result["candidate_
+recorded"]` False — the existing answer-shape path: non-answer classes,
+MC letter parser, answer-surface override, all upstream); (3) a live game
+(`game_started and not game_over`); (4) no code lane routed it —
+`_addressed_exempt_reason`: a control command, a media choice, a
+code-acked final (`_deterministic_reply_texts`), a reply to a question
+SHE asked (`_question_pending` at the time of the final — except when
+that question is the offer itself, so the table addressing her again
+after the offer restarts the cycle), a backchannel
+(`LILY_BACKCHANNELS`), a bare affirmative, an acceptance, a pause/hold
+request (`LILY_ADDRESSED | NOT_HELD reason=…`). STATED HONESTLY: between
+questions with no name and no adjacency FL-1 reads side chatter (prior
+0.35 < 0.60) and nothing holds — the live Kinsey row is caught because it
+landed within FL-1's 4.0 s adjacency window of the reveal's end (0.35 +
+0.25 = 0.60); the same words 6 s later would not be. That is the
+classifier's threshold, not this WO's; widening FL-1 (e.g. a second-person
+interrogative as name-strength evidence) is a separate, operator-signed
+change to the corpus labels and is NOT made here. The explain-request
+detector is no longer any part of the trigger; it and the meta-request
+detector select the `game_meta` contract only.
+
+**One exit: the table.** `maybe_release_addressed_on_final` runs on every
+final BEFORE the pause branch: an answer landing in the open window
+(`RELEASED by=answer`), or the table taking the offer (`by=acceptance` —
+`lily_scorekeeper.lily_detect_addressed_acceptance`: the B2 pause-release
+family, the bare-affirmative set, plus the one-breath replies to an
+offered next question — "next one", "hit me", "bring it on", "yeah, go",
+"we're ready"; negation-guarded, restart-guarded, utterance-shaped). A
+new address while held is `RELEASED by=new_address` then `HELD` again
+(seq+1): "if the table wants more, they ask". On an acceptance,
+`_addressed_resume_progression` first releases P6's `_question_pending`
+(the offer was a question she asked; the acceptance is its answer — found
+in the fixture: the latch sat above the dispatch and refused it), yields
+to a pause/STOP if one owns the resume, else resumes exactly where the
+address interrupted: a half-aired read (`mcq_barge_resume`, C3c/C8), else
+the armed question (`dispatch_armed_question(source="addressed_released")`)
+— and that delivery is the reply to the acceptance
+(`mark_deterministic_reply`, so the organic lane does not double it).
+
+**Response contracts** (`lily_scorekeeper.lily_classify_address`, pure;
+the ONLY place the shapes differ): `question` (≤3 body sentences),
+`structural` (≤3; a real answer about what is hers to steer or an honest
+referral, never the fault restated — HOTFIX-010 V6), `correction` (≤2;
+own it, fix it on the reversal path — `lily_bind_speaker` /
+`lily_correct_verdict` / `lily_award_bonus`, the tools that exist —
+confirm), `complaint` (≤2; plain acknowledgment + action, no levity —
+canon H7.1), `banter` (≤2; one beat), `request` (≤2; route it or refuse
+honestly; "heard you" with nothing routed is unproducible — HOTFIX-004
+H6), `floor_hold` (≤2; the floor is theirs, nothing scored — FL-1's own
+floor-hold reason), `game_meta` (no cap, no offer: the existing X12 / W6
+explain / options / hint / repeat directive is the response and the
+question on the table stays live), `other` (≤2; acknowledge, hold, offer).
+Precedence in the classifier: floor hold, game meta, complaint,
+correction, structural, request, banter, question, other. THE DIRECTIVE
+THE LLM SEES (state block, StateView slot `addressed`, S8), e.g. for the
+live row:
+
+    ADDRESSED (held in code, subtype=question): the table just addressed
+    you — "Who's Alfred Kinsey, anyways?". Progression yields to the
+    table: the game is held until they give it back — do not ask, read
+    or bridge into a trivia question, do not move the round on. Respond
+    in kind: a real answer — up to three sentences, enough to actually
+    explain, not enough to become a lecture. Then the exit, exactly:
+    "…anyway — ready for the next one?" — the offer is the way back; the
+    table takes it, you never do.
+
+After the response airs the line becomes `ADDRESSED (held in code,
+subtype=…, responded): you have answered the table's address and offered
+the way back. The game stays held until THEY take it — …`.
+
+**The cap, mechanical** (`lily_agent.AddressedCap` in SAY_PIPELINE after
+`yield_after_first_question` and before `repeat_lints`, calling
+`addressed_cap_text`; `lily_say_gate.lily_split_sentences` /
+`lily_cap_addressed_response`, pure). The first ORGANIC turn after the
+hold — a handle no Lily lane stamped in `_dispatched_act_by_speech` — is
+the response: the body is cut to the contract's cap and closed with the
+operator's offer, appended when the model left it off, moved to the end
+when it sat elsewhere. Never silent: `LILY_ADDRESSED | TRIMMED |
+sentences=N cap=` and `OFFER_APPENDED`, then `RESPONDED | speech_id=
+subtype= sentences= cap= trimmed= offer=present|appended|none`. Placed
+after the yield clip so a stacked-question clip cannot eat the offer.
+The offer line is spoken WITH its leading ellipsis — the hygiene cleaner
+and the leak filter pass "…anyway — ready for the next one?" through
+unchanged (verified), and the voice engine reads "…" as the beat it is.
+
+**The whole escalation.** With the offer aired and the table silent, W7's
+B8 silence line IS the offer, once per hold (`OFFER_REPEATED`; the
+`silence_budget` source is exempt from P10's `question_pending` gate
+while held — the pending question is the offer); then B8 is back to its
+own rotated lines. No timer lifts the hold; a held game with a host who
+has offered the way back is the correct state (the P10 question-reoffer
+watchdog never reaches it — the tick halts on `progression_paused`).
+
+**Receipts (S1)**: `LILY_ADDRESSED | HELD | session= q= seq= subtype=
+fl1_score= fl1_reason= window_open= clock_held= text=` · `NOT_HELD |
+reason=` · `STILL_HELD` · `RESPONDED` · `TRIMMED` · `OFFER_APPENDED` ·
+`OFFER_AIRED | speech_id=` · `RESPONSE_CUT` · `RESPONSE_AIRED` (game_meta)
+· `OFFER_REPEATED` · `RELEASED | by=answer|acceptance|new_address|stop
+subtype= sentences= offer_aired= held_ms=`; `LILY_PROGRESSION | PAUSED …
+reason=addressed`, `DISPATCH_PAUSED … reason=addressed`, `WATCHDOG_PAUSED
+… reason=addressed`; `LILY_BARGE | QUESTION_RESUME_DEFERRED
+reason=addressed`; `lily_sessions.metadata.airgate_events[]`
+`{reason:"addressed", stage:"hold", detail:{seq, utterance, subtype,
+fl1_score, fl1_reason, window_open, clock_held}}` and `{…, stage:
+"release", detail:{seq, utterance, subtype, sentences, trimmed,
+offer_aired, released_by, held_ms}}` (the existing persisted lane, both
+write sites); `lily_question_timeline` mark `addressed_by=<subtype>`.
+Consumers: `dispatch_armed_question`, the gated_say chokepoint, the
+resume watch, the idle watchdog, B8, the state block, the operator's SQL
+(`select e from lily_sessions, jsonb_array_elements(metadata->'airgate_
+events') e where session_id='<id>' and e->>'reason'='addressed';`).
+
+**Prompt**: the existing "WHEN THE TABLE GOES META" rail (line 579, after
+the cached-prefix boundary) is amended in place — the UNIVERSAL RULE
+quoted verbatim, keyed on the `ADDRESSED` state-block line, the contracts
+in one breath each, B9's own sentences verbatim for the question case and
+the exit, and the explicit release of the "rules once / a fault is one
+sentence / momentum IS the pace" rails from the ANSWER the table asked
+for. No other rail touched.
+
+**Lines that need the operator's wording**: none new — the only spoken
+line this WO adds is the operator's own offer sentence. Two places the
+same sentence is reused where the operator may want another
+(`# OPERATOR-WORDING-PENDING` in spirit, flagged here rather than
+invented): the offer under a MID-WINDOW address (the honest exit there
+is "back to the question", not "the next one" — the same sentence airs
+today), and the non-question contracts (the doc says use the same
+sentence unless the operator gives another).
+
+**Deliberately NOT done**: widening FL-1 (above); a timer of any kind;
+fixing `mcq_barge_resume` consuming `_delivery_barge_cut_qnum` even when
+its dispatch is suppressed at the chokepoint (pre-existing — a stood-down
+resume loses the C3d arm; found while writing the cut-read fixture,
+docketed, not this WO's); the P9 address debt (`address_unanswered`) is
+untouched and still refuses progression on a response that never reached
+playout — the fixtures air the response first, as production does.
+
+## 2026-09-06 — WO-LILY-OPERATOR-MODS-001: operator B6 / B7 / B8 from live call lily-D11A7E-c46e33c3
+
+Operator text, VERBATIM (the spec is the operator's):
+
+> B6. Operator recognition. When the identified group is the architect/operator group (Rami), "I am the operator" / "pause the game" / meta questions are operator instructions: acknowledge as operator, answer the question asked, hold the game. Receipt: 11:50:49Z "I don't have a separate operator channel."
+>
+> B7. One speech at a time. A queued reply must not cut a question mid-delivery; a question must not cut a pending answer to the player. Receipt: six [cut off] utterances, pair at 11:50:42Z/11:50:49Z.
+>
+> B8. Silence budget. If no reply is dispatched within N seconds of a completed user turn (propose 4 s), emit a short in-character holding line, then the reply. Receipt: 49 s, 61 s, 45 s gaps.
+
+Branch `fix/w7-operator-mods` on a59d209 (integ/w6 after the composition
+review). Tests: `tests/test_operator_mods_b6_b8.py`, 35 tests, **35 red on
+a59d209** (35 failed, 0 passed), 35 green after; full suite **3099** on
+python3.11 and the 3.13 venv (baseline 3064 + 35). `python3 -W error -c
+"import lily_agent"` clean. `ruff --select F` on the touched files: 1
+finding, pre-existing on a59d209 (lily_scorekeeper.py:3609 F841), 0 new.
+No config default, model/effort, Speechmatics or RLS change. Files:
+lily_identity.py, lily_floor.py, lily_speech_delivery.py,
+lily_scorekeeper.py, lily_glass.py, lily_acts.py, prompts/lily_system.txt,
+docs/GUARD_MAP.md (mechs. 60-62), this entry. Nothing in lily_agent.py,
+lily_persistence.py, lily_config.py, lily_transition.py or deploy.yml.
+
+**What the D11A7E record actually shows (read before designing).** All
+six "[cut off]" LILY rows in lily_transcripts sit 15-36 ms after a Rami
+final (11:48:30.869/.884, 11:50:09.483/.519, 11:50:22.904/.917,
+11:50:42.669/.693, 11:51:06.369/.393, 11:52:20.863/.885): every cut is the
+framework's turn-commit interrupt (agent_activity._user_turn_completed_task
+→ `current_speech.interrupt()`, 1.6.10) on Lily speech that was already
+airing OVER the human — a reply or a narration started while he was
+mid-turn, and his commit killed it. The 11:50:42Z/11:50:49Z pair: "Paused."
+ended 11:50:37.9Z, the NEXT QUESTION dispatched right behind it while the
+answer to "are you really ignoring the operator?" was still in the LLM
+(question_timeline q3 window_opened 11:50:43.2Z), his "can you answer my
+fucking question" committed at 11:50:42.7Z and cut the read; the answer
+aired 11:50:49Z-11:51:06Z and was cut by "I am the operator." at
+11:51:06.4Z. The B8 gaps (11:48:55Z→11:50:09Z = 74 s; 11:49:09Z, 11:49:12Z,
+11:49:35Z all unanswered) were turns NO lane replied to (the prehook's
+StopResponse with no code ack behind it — W6's B4 finding), not slow
+replies. The session had no airgate_events lane yet (9cff7a9); the
+identity_promotions lane shows the operator's group recognized by
+`voiceprint_match` at 11:43:27Z — the fact B6 needed existed in state and
+reached neither the prompt nor any gate.
+
+**B6 — operator recognition on the identity doors, never the transcript**
+(`lily_identity.operator_identity` / `operator_group_confirmed` /
+`operator_status_line` / `operator_receipt` / `note_operator_claim`,
+`_OPERATOR_ASSERTING_SOURCES`, `operator_group_ids()`;
+`lily_scorekeeper.lily_detect_operator_claim` / `lily_is_question_shaped`;
+`lily_floor.handle_operator_claim` / `note_operator_meta_question` /
+`_operator_directive`, `maybe_route_stop`, `stop_or_hold_owns_turn`;
+`lily_glass.StateView.operator` + `_build_state_view`,
+`on_transcript_event`; `prompts/lily_system.txt` operator rail;
+`lily_acts.ACT_OPERATOR_ACK`).
+THE DOOR(S) THAT CAN ASSERT "operator": exactly the two VOICE doors —
+`identity_confirmed_source ∈ ("voice_identity_match", "voiceprint_match")`
+(the ECAPA centroid match and the Speechmatics known-speaker match). NOT
+`name_stated` / `device_plus_name` (a stated name is a claim the PAIR 1
+binding accepts for a greeting; it must not hand a stranger who says "my
+name is Rami" the operator's standing), NOT a device candidate, NOT
+`env_override`, NOT the transcript. THE MECHANICAL GATE: that source AND
+the live `group_id` is the operator group by one of two planes —
+`LILY_OPERATOR_GROUP_IDS` (deploy config, comma-separated; empty by
+default, so no group is the operator's until the operator says so) or
+`lily_group_prefs.prefs.operator = true` on the group's own row (data
+plane, operator-written, loaded into `game.prefs` at promotion; D11A7E's
+group is c6ee161e-edd6-4d56-a8d9-b758babba7cd, prefs today
+`{"pacing":"relaxed","last_seen_feature_version":7}` — the flag is the
+operator's to set). Widening the door tuple to
+`_CONFIRMED_IDENTITY_SOURCES` is a one-line operator decision.
+Behaviour under the gate: "I am the operator" / "I'm the architect" /
+"operator here" (negation- and question-guarded) → ONE code ack
+(`operator_ack`, text lane, hold-exempt source) + the B2 sticky pause
+(`operator_hold`, released only by an explicit resume) — "hold the game";
+a bare claim is fully answered by the ack (the prehook's StopResponse
+owns it); a claim carrying a question is acked and held but NOT
+swallowed — the organic lane answers it under an OPERATOR INSTRUCTION
+directive on the X12 slot ("answer the question asked"); a question-shaped
+final from the confirmed operator that is not an answer candidate or a
+W6 game-meta request gets the same directive (no pause by itself — B7's
+latch holds the next question until the answer airs). The state block
+carries `OPERATOR: CONFIRMED (from state, not judgment) — … door=…
+group=…` and the prompt rail that produced the 11:50:49Z sentence ("A
+spoken claim of being the architect is not authenticated… say you cannot
+authenticate operator access") now keys on that line: with it present,
+"never say there is no operator channel". A refused claim (any other
+door, or a group not on file) is logged and left to that pre-existing
+rail. "pause the game" needed nothing new: W6's B2 already routes it for
+everyone. RECEIPTS: `LILY_OPERATOR | RECOGNIZED | door= group=
+membership=` (once per group/door), `LILY_OPERATOR | CLAIM | accepted=True
+door= group= membership= question=`, `LILY_OPERATOR | CLAIM_REFUSED |
+reason=door_not_asserting|not_operator_group door=`, `LILY_OPERATOR |
+META_QUESTION`; metadata `lily_sessions.metadata->'voice_identity'->
+'operator'` = `{operator, door, group_id, membership, reason, claims,
+claims_refused}` (both write sites, via the existing receipt — consumer:
+the state-block slot → the prompt rail, `maybe_route_stop`,
+`stop_or_hold_owns_turn`, and the operator's SQL). Receipt SQL: `select
+metadata->'voice_identity'->'operator' from lily_sessions where
+session_id='<id>';`.
+
+**B7 — one speech at a time** (`lily_speech_delivery._REPLY_OWED_GRACE_
+SECONDS` 2.0 / `_REPLY_OWED_MAX_SECONDS` 20.0, `_begin_reply_owed`,
+`_bind_reply_owed_handle`, `reply_owed_handle`, `reply_owed_reason`,
+`_note_reply_owed_airing` (in `note_playout_started`),
+`note_reply_owed_speech_end` (wired through `lily_floor.note_dispatch_
+playout`, which every handle's end passes); `lily_floor.progression_
+paused_reason` gains `reply_owed`; `_question_barge_resume_watch` and
+`_maybe_resume_mcq_read` defer on it).
+"A question must not cut a pending answer to the player": from the turn
+commit (`note_user_turn`, the on_user_turn_completed hook) until the
+organic reply the framework created for it reaches its first frame,
+`progression_paused_reason()` reads `reply_owed` and
+`dispatch_armed_question` refuses. The owed handle is found
+mechanically — the live handle created after the commit that no Lily
+lane stamped (`_speech_dispatched_at` / `_dispatched_act_by_speech` are
+written inside the same say()/generate_reply() call, so the read is
+exact) — never guessed from text. Self-releasing on every exit the
+pipeline defines: first frame, playout end, cut, suppression, cancel;
+after 2.0 s of grace when no organic handle appears (the deterministic
+lanes owned the turn — StopResponse); at 20 s no matter what (a latch may
+never enforce silence). The held question is dispatched the moment the
+owed reply ENDS (`loop.call_soon`, or inline offline), never on the next
+10 s watchdog tick. "A queued reply must not cut a question mid-delivery":
+the cut itself is the framework's commit interrupt on the human's own
+barge and is NOT fought (an uninterruptible read would drop the human's
+turn — the A6 trade-off — and re-open the 11:59 wedge); what the mods
+guarantee is the ORDER on either side of it: the C3c/C8 resume of a cut
+read now defers while the reply the barge is owed is in flight (the
+transcript path stands down with `LILY_BARGE | QUESTION_RESUME_DEFERRED`,
+the C3d watch keeps deferring without burning its budget on the latch),
+so the read resumes after the answer, never ahead of it, and no question
+dispatch can jump in front of a pending reply. HOTFIX-BARGE-FLUSH-001's
+rising-edge rule is untouched (the latch never cancels anything; a
+dispatch created after the VAD rising edge stays owed). RECEIPTS:
+`LILY_PROGRESSION | PAUSED | … reason=reply_owed` (existing line, new
+reason), `LILY_REPLY | OWED_AIRED | turn= speech_id= waited_ms=`,
+`OWED_ENDED`, `OWED_CODE_OWNED` (debug), `OWED_TIMEOUT` (warning),
+`OWED_RELEASED_DISPATCH`, `LILY_BARGE | QUESTION_RESUME_DEFERRED`;
+consumer: `dispatch_armed_question` (refuses), the resume watch (defers),
+the release (dispatches). No new metadata key — the B7 proof on a live
+session is the absence of a `question_timeline[q].window_opened_at`
+inside a `LILY_REPLY | OWED_*` interval plus the `LILY_SAY |
+act=question_delivery | source=reply_owed_released` line.
+
+**B8 — the silence budget, 4 s** (`lily_speech_delivery._SILENCE_BUDGET_
+SECONDS` = 4.0, `_arm_silence_budget` (in `note_user_turn`),
+`_silence_budget_watch`, `silence_budget_state`, `silence_budget_fire`;
+`note_user_final(text)` now carries the final's text and arrival stamp;
+`lily_acts.ACT_SILENCE_BUDGET_REPLY`). Built ON NEVER-SILENT-001's floor
+(the same rotated `lily_say_gate.LILY_FLOOR_LINES` — existing
+operator-shipped wording, nothing new spoken — and the same
+`gated_say(act="floor", text=…)` lane), generalized from "a host-directed
+final on the 10 s watchdog tick past responsiveness_budget_seconds" to
+EVERY committed user turn on a precise timer armed at the commit. The
+operator's predicate is read literally: "no reply is DISPATCHED" = no
+Lily speech handle exists (pending or airing) since the final. Then the
+reply: `silence_budget_reply`, an instructed organic turn that names and
+answers the unanswered final. Constraints, all mechanical: through the
+say gate (every gated_say gate runs — a hold or a pending question
+suppresses it with the usual `LILY_SAY_SUPPRESSED` line); interruptible
+(act `floor` is not in `_UNINTERRUPTIBLE_ACK_ACTS`; the fake session
+records `allow_interruptions` unset); never while the human is speaking
+(`_user_speaking`) or any Lily speech is on the air (`host_speaking`) OR
+PENDING (`_speech_handles` non-empty — the framework's speech queue is
+strictly sequential, `_scheduling_task` pops one handle and awaits its
+whole generation+playout, so a line queued behind a pending reply would
+air AFTER it: the one thing worse than silence); never stacked (one per
+committed turn, and a new turn cannot fire while the previous line +
+reply are still pending); stands down under a hold/pause, a sticky STOP
+and an answer candidate in an open window (silence by design until the
+ruling). RECEIPTS: `LILY_SILENCE | BUDGET_FIRED | session= turn=
+waited_ms= budget_s=4.0 line= last_final=` and `LILY_SILENCE |
+BUDGET_STAND_DOWN | reason=already_fired|hold|user_speaking|host_speaking|
+reply_dispatched|answer_pending|game_stopped`; metadata:
+`airgate_events[] {reason:"silence_budget_fired", act:"floor",
+stage:"silence_budget", detail:{turn, waited_ms, budget_s, last_final}}`
+(persisted at both write sites through the existing lane). Receipt SQL:
+`select e from lily_sessions, jsonb_array_elements(metadata->'airgate_
+events') e where session_id='<id>' and e->>'reason'='silence_budget_
+fired';`. Consumer: the say gate (dispatch), the reply lane, the SQL.
+STATED LIMIT (honest): a reply that IS dispatched but takes longer than
+4 s to reach the air (D11A7E's e2e p50 was 9.2 s — the LLM composite
+buffered whole in tts_node before synthesis) gets NO holding line from
+B8, because inside LiveKit's sequential scheduler the only way to put
+audio ahead of a current-but-silent reply is inside that reply's own
+tts stream (lily_agent.tts_node, out of region and not a one-line seam)
+or by cancelling and regenerating it (a latency regression on every
+slow-but-alive reply). Docketed, not done.
+
+**Also**: `lily_glass.py` gains the missing `from typing import
+Optional` (the StateView dataclass used it under `from __future__
+import annotations` only). GUARD_MAP.md addendum: mechs. 60-62.
+
+**Lines that need the operator's wording** (`# OPERATOR-WORDING-PENDING`
+at the definition): `lily_floor.LilyFloorMixin._OPERATOR_ACK_LINE` =
+"Operator acknowledged — the game's held." (B6). The B8 holding line
+reuses the existing floor lines and needs none.
+
+**Deliberately NOT done**: fighting the framework's commit interrupt on
+a question read (see B7); a holding line for slow-but-dispatched replies
+(see B8 limit); widening the operator door to the name door (stated
+above as the operator's one-line call); a lily_config knob for the 4 s
+budget or the operator group ids' accessor (both live in-region as a
+module constant / `lily_identity.operator_group_ids()`; moving them is
+`lily_config.silence_budget_seconds()` / `operator_group_ids()` one-liners
+for the config owner); README "Integration status" (the integrator's).
 ## 2026-09-06 — HOTFIX-MC-LETTER-A-001: option A was unanswerable once the read had finished (live 13:27 UTC)
 
 Live receipt: session lily-BE84AA-11451c02 on a59d209, Q5 (four choices,

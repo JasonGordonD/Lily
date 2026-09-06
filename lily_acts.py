@@ -57,6 +57,10 @@ ACT_DISPUTE_TIMEOUT_ACK: Final[str] = "dispute_timeout_ack"
 ACT_START_SETTLE_OVERRIDE: Final[str] = "start_settle_override"
 # COMPOSITION-FOLLOWUP-001 B4: the choices-on-demand re-ask.
 ACT_QUESTION_REASK: Final[str] = "question_reask"
+# WO-LILY-OPERATOR-MODS-001 (B6 / B8): the operator acknowledgment and the
+# silence-budget reply lane (the holding line itself rides ACT_FLOOR).
+ACT_OPERATOR_ACK: Final[str] = "operator_ack"
+ACT_SILENCE_BUDGET_REPLY: Final[str] = "silence_budget_reply"
 
 # Identity / greeting lane.
 ACT_GREET: Final[str] = "greet"

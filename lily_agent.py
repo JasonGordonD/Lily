@@ -809,6 +809,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._drawn_ids = set()
         self._durable_asked_qnum = None
         self._explain_request_note = None
+        # WO-LILY-ADDRESSED-001 (B9): the addressed hold's record (None when
+        # progression is not held by the table's address) and its sequence.
+        self._addressed = None
+        self._addressed_seq = 0
         self._first_human_utterance_seen = False
         # WO-LILY-NEVER-SILENT-001: the anti-silence floor. `_floor_fired_for_ts`
         # pins the outstanding-address timestamp the floor last spoke for (one
@@ -1372,6 +1376,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # filtered, consumed at the turn's playout).
         self._explain_request_note: str | None = None
         self._contest_note: str | None = None
+        # WO-LILY-ADDRESSED-001 (B9): the addressed hold (see lily_floor).
+        self._addressed: dict | None = None
+        self._addressed_seq: int = 0
         # HOTFIX-006 N9: a correct answer that landed past the closed
         # window — announced once, with its reason, then consumed.
         self._late_answer_note: str | None = None
@@ -8190,6 +8197,28 @@ class YieldAfterFirstQuestion(SpeechTransform):
         return turn
 
 
+class AddressedCap(SpeechTransform):
+    """WO-LILY-ADDRESSED-001 (B9): the response contract, enforced. While
+    the table's address holds progression, the first organic turn is the
+    response — capped to its contract's body sentences and closed with the
+    operator's offer sentence (appended when the model left it off). Sits
+    AFTER the yield clip so a stacked-question clip never eats the offer,
+    and before the lints/regen so they read the text that will air. Every
+    rewrite is logged by the game hook (LILY_ADDRESSED | TRIMMED /
+    OFFER_APPENDED / RESPONDED) — never silent."""
+
+    name = "addressed_cap"
+
+    def apply(self, turn):
+        cap = getattr(turn.game, "addressed_cap_text", None)
+        if not callable(cap):
+            return turn
+        rewritten = cap(turn.text, getattr(turn, "speech_id", None))
+        if rewritten is not None:
+            turn.text = rewritten
+        return turn
+
+
 class RepeatLints(SpeechTransform):
     """LOG-ONLY telemetry lints (mirror / stacked-question / verbatim-repeat /
     semantic-paraphrase) over turns that actually PLAYED. Never mutates text —
@@ -8579,6 +8608,7 @@ SAY_PIPELINE = [
     OnScreenClaimRewrite(),
     DisputeSycophancyRewrite(),
     YieldAfterFirstQuestion(),
+    AddressedCap(),
     RepeatLints(),
     RegenGate(),
     EmptyCandidateRetry(),
