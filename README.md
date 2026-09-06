@@ -33,8 +33,12 @@ landed next (pause is a hard stop, MC letters bind while conversational
 speech never does, meta requests never bind, choices on demand, the 2.5 s
 endpointing cap with a per-turn EOT receipt, the operator's rail wording)
 with the composition reviewer's fixes applied — 3064 tests, 3.11 + 3.13.
-W7 (operator mods B6–B8) and refactor Stage 1b are in flight; the dated
-entries are at the top of [CHANGELOG.md](CHANGELOG.md).
+W7 (operator mods B6–B8) and refactor Stage 1b are in flight. The
+HOTFIX-TURN-STATE-001 follow-up isolates B8, B9, and P6 ownership: an
+addressed response cannot trigger the silence-budget reply or the generic
+question-pending latch, and round-one delivery is always rewritten to the
+deterministic question sheet. Dated entries are at the top of
+[CHANGELOG.md](CHANGELOG.md).
 Live-call receipts (build → session → row) are the acceptance for the
 live-found defects — see each CHANGELOG entry.
 
@@ -663,6 +667,12 @@ One hold, one trigger, one exit, several response contracts:
   one "okay go" lifts both. On an acceptance progression resumes exactly
   where the address interrupted it — a half-aired read, else the armed
   question — and that delivery is the reply to the acceptance.
+- **One wait owner**: the exact exit offer is owned only by `addressed`.
+  Its trailing question mark does not enter the generic P6
+  `question_pending` latch, and B8's four-second silence budget stands down
+  for the full addressed hold. Slow organic generation therefore cannot
+  dispatch a second response, and an aired offer is never mechanically
+  repeated by another watchdog.
 - **The contract** (`lily_scorekeeper.lily_classify_address`) only picks
   what the organic lane answers under; the state block carries it as an
   `ADDRESSED (held in code, subtype=…)` line: `question` — up to three
@@ -680,16 +690,15 @@ One hold, one trigger, one exit, several response contracts:
   exactly `…anyway — ready for the next one?`, appended when the model
   left it off. Every rewrite is logged (`LILY_ADDRESSED | TRIMMED` /
   `OFFER_APPENDED`), never silent.
-- **The whole escalation**: with the offer aired and the table silent,
-  B8's silence line is the offer, once per hold; then B8 is back to its
-  own lines. A held game with a host who has offered the way back is the
-  correct state.
+- **The whole escalation**: once the offer airs, Lily waits. A held game
+  with a host who has offered the way back is the correct state; only a
+  new player final can accept the offer or restart the addressed cycle.
 
 Receipts: `LILY_ADDRESSED | HELD | q= seq= subtype= fl1_score= fl1_reason=
 window_open= clock_held= text=` · `NOT_HELD | reason=` · `RESPONDED |
 speech_id= subtype= sentences= cap= trimmed= offer=` · `TRIMMED` ·
-`OFFER_APPENDED` · `OFFER_AIRED` · `RESPONSE_CUT` · `OFFER_REPEATED` ·
-`STILL_HELD` · `RELEASED | by=answer|acceptance|new_address|stop`;
+`OFFER_APPENDED` · `OFFER_AIRED` · `RESPONSE_CUT` · `STILL_HELD` ·
+`RELEASED | by=answer|acceptance|new_address|stop`;
 `LILY_PROGRESSION | PAUSED … reason=addressed` and `DISPATCH_PAUSED …
 reason=addressed`; `lily_sessions.metadata.airgate_events[]`
 `{reason:"addressed", stage:"hold"|"release", detail:{utterance, subtype,

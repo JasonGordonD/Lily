@@ -2199,6 +2199,18 @@ class LilyFloorMixin:
         """True while the table's address holds progression (B9)."""
         return getattr(self, "_addressed", None) is not None
 
+    def addressed_offer_in_turn(self, text: str) -> bool:
+        """True when a live addressed response carries B9's exit offer.
+
+        The offer is owned by the addressed hold itself. It must not also
+        enter the generic conversational ``question_pending`` state merely
+        because it ends in a question mark.
+        """
+        if not self.addressed_active():
+            return False
+        normalized = " ".join(str(text or "").lower().split())
+        return self._ADDRESSED_OFFER_KEY in normalized
+
     def addressed_state(self) -> dict | None:
         """A copy of the live hold's record (receipts, tests) or None."""
         state = getattr(self, "_addressed", None)

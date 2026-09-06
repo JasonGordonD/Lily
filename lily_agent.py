@@ -4459,14 +4459,19 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # engine windows) that ends on a question yields the floor: her
         # queued beats hold until the table answers or the timeout gives
         # one gentle re-offer. Released the instant a user final lands
-        # (on_transcript_event). game deliveries/verdicts/reveals are
-        # exempt — their own machinery governs them.
+        # (on_transcript_event). Game deliveries/verdicts/reveals and B9's
+        # addressed exit offer are exempt — their own machinery governs them.
         game_act = any(
             k in self._GAME_LANE_ACTS
             or k.endswith("_delivery") or k.endswith("_reveal")
             for k in (confirmed or [])
         )
-        if not game_act and lily_say_gate.lily_stacked_question_flag(spoken_text) >= 1:
+        addressed_offer = self.addressed_offer_in_turn(spoken_text)
+        if (
+            not game_act
+            and not addressed_offer
+            and lily_say_gate.lily_stacked_question_flag(spoken_text) >= 1
+        ):
             self.enter_question_pending(spoken_text)
         # Honesty assist (desync WO Sub-agent C): the state note serviced
         # the turn that just finished playing — one-shot, consumed here.
