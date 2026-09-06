@@ -380,6 +380,25 @@ def _chat_items(chat_ctx) -> list:
     return items
 
 
+def lily_event_arrival_ts(created, fallback=None) -> float:
+    """Wall-clock seconds for a framework event's `created_at`
+    (REFACTOR-STAGE-1B-001 P2-2). livekit-agents 1.6.10 stamps events with a
+    float epoch (voice/events.py: `created_at: float =
+    Field(default_factory=time.time)`); the previous `hasattr(created,
+    "timestamp")` test only matched a datetime, which never arrives, so the
+    arrival clock silently became handler time. Float/int pass through;
+    a datetime is still honoured; anything else is `fallback` or now."""
+    if isinstance(created, (int, float)) and not isinstance(created, bool):
+        return float(created)
+    ts = getattr(created, "timestamp", None)
+    if callable(ts):
+        try:
+            return float(ts())
+        except Exception:  # noqa: BLE001 — a broken clock degrades to now
+            pass
+    return float(fallback) if fallback is not None else time.time()
+
+
 def lily_spawn(coro, name: str, *, game=None):
     """Fire-and-forget with an exception observer (REFACTOR-STAGE-1B-001
     P1-5). `asyncio.ensure_future(coro)` alone leaves a raising game
@@ -11494,11 +11513,10 @@ def _on_transcribed_body(
     # Event arrival wall-clock (created_at) plus recovered STT
     # stream-relative timings from the n-best collector feed the
     # timestamp reconciler for "first answered first" ordering under
-    # jitter.
-    created = getattr(ev, "created_at", None)
-    arrival_ts = (
-        created.timestamp() if hasattr(created, "timestamp") else time.time()
-    )
+    # jitter. REFACTOR-STAGE-1B-001 P2-2: created_at is a float epoch at
+    # 1.6.10; the old `hasattr(created, "timestamp")` branch was never
+    # taken, so arrival_ts was handler time.
+    arrival_ts = lily_event_arrival_ts(getattr(ev, "created_at", None))
     # HOTFIX-006 N9: the utterance's OWN transcript id, when the event
     # carries one. Answer capture binds this — never "most recent",
     # never "first-seen fragment for that speaker" (the live q_1052 row
