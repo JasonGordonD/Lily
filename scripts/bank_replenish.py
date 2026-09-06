@@ -64,6 +64,31 @@ def _build_supabase():
     return create_client(url, key)
 
 
+def _bind_usage_context(supabase):
+    """Bind the durable LLM-usage lane for this process.
+
+    WITHOUT THIS the runner authors for free and reports it. Every call
+    through the streaming transport records its tokens via
+    lily_metrics.record_llm_call, which routes through the CURRENT
+    COLLECTOR — a module global bound by the agent's entrypoint. A CLI
+    process has no entrypoint, so nothing is bound, `record_llm_call`
+    returns False, no lily_llm_usage row is ever written, and every run
+    receipt says cost_tokens=0 on a run that plainly cost tokens. The one
+    number the operator needs to make the effort decision would have been
+    a constant zero on the only job that will actually be run.
+
+    session_id here is only the FALLBACK: each call passes
+    usage_session_id=<run id>, so a run's rows are attributable to it."""
+    import lily_metrics
+
+    collector = lily_metrics.LilyMetricsCollector()
+    collector.bind_usage_context(
+        supabase=supabase, session_id="bank_replenish", phase="offline",
+    )
+    lily_metrics.set_current_collector(collector)
+    return collector
+
+
 def _build_reasoning():
     """Constructed only when the run will actually author, so --status and
     --dry-run need no provider credential at all."""
@@ -113,8 +138,9 @@ async def _amain(args) -> int:
         print("every lane is above its watermark — nothing to do.")
         return 0
 
+    collector = _bind_usage_context(supabase)
     reasoning = _build_reasoning()
-    author = lily_bank_replenish.lily_live_author(reasoning)
+    author = lily_bank_replenish.lily_live_author(reasoning, supabase=supabase)
     verify = lily_bank_replenish.lily_live_verify(reasoning)
 
     results = []
@@ -141,6 +167,12 @@ async def _amain(args) -> int:
     print(_format_report(results))
     health = await lily_bank_replenish.lily_bank_health(supabase, lanes=lanes)
     print(lily_bank_replenish.lily_format_bank_health(health))
+    failures = collector.llm_usage_write_failures
+    if failures:
+        print(
+            f"  WARN {failures} usage row(s) failed to write — the cost "
+            "figures above understate this run."
+        )
     return 0 if all(r.get("status") == "completed" for r in results) else 1
 
 

@@ -263,15 +263,16 @@ def test_watermark_scales_with_configured_depth():
     assert bank.lily_bank_should_replenish(4, target=5, ratio=0.40) is False
 
 
-def test_watermark_also_fires_on_serves_this_session():
-    """The second limb: a caller that counts rows actually drawn from this
-    lane can cross the ratio while the standing depth still looks healthy."""
-    assert bank.lily_bank_should_replenish(
-        40, target=40, ratio=0.40, consumed=16
-    ) is True
-    assert bank.lily_bank_should_replenish(
-        40, target=40, ratio=0.40, consumed=15
-    ) is False
+def test_the_watermark_is_shortfall_only_and_says_so():
+    """The arsenal's serves-this-session limb is NOT implemented, because
+    a background process has no session's draw counts in front of it. The
+    limitation is stated in the docstring and there is no parameter for
+    it — a dead argument would read as a feature."""
+    import inspect
+
+    params = set(inspect.signature(bank.lily_bank_should_replenish).parameters)
+    assert "consumed" not in params
+    assert "shortfall" in (bank.lily_bank_should_replenish.__doc__ or "").lower()
 
 
 def test_watermark_reads_the_lane_and_emits_its_receipt(caplog):
@@ -551,7 +552,22 @@ def test_general_lane_rows_are_not_adult():
         {"prompt": "who sang this?", "canonical_answer": "someone"},
     )
     assert row["adult"] is False and row["mode"] == "general"
-    assert row["category"] == "pop culture"
+    # The BANK's spelling, not the rotation's — see LANE_BANK_CATEGORY.
+    assert row["category"] == "pop_culture"
+
+
+def test_difficulty_tier_is_clamped_to_the_live_check_constraint():
+    """The generation prompt says "tier N of 4"; the column allows 1..3.
+    An unclamped 4 is an INSERT the database refuses — a good question
+    lost as a mystery in the error count."""
+    # 0 and None are "the author said nothing" and take the tier-2 default;
+    # everything else is clamped into range.
+    for given, expected in ((0, 2), (None, 2), (1, 1), (3, 3), (4, 3), (99, 3)):
+        row = bank.lily_ready_row(
+            "general:academic",
+            {"prompt": "q?", "canonical_answer": "a", "difficulty_tier": given},
+        )
+        assert row["difficulty_tier"] == expected
 
 
 def test_insert_lands_one_ready_row_through_the_production_writer():
@@ -666,10 +682,11 @@ def test_the_run_receipt_carries_the_numbers_and_the_token_cost(caplog):
     run_id = _run(bank.lily_run_start(db, lane=lane, target=4))
     # The streaming transport's usage rows for this run (migrations
     # 026/027), tagged with the run id — this is where cost comes from.
-    for _ in range(2):
+    # Two author calls + two verify calls = four usage rows.
+    for _ in range(4):
         db.table(bank.USAGE_TABLE).insert(
-            {"session_id": run_id, "prompt_tokens": 900,
-             "completion_tokens": 350, "purpose": bank.USAGE_PURPOSE}
+            {"session_id": run_id, "prompt_tokens": 500,
+             "completion_tokens": 125, "purpose": bank.USAGE_PURPOSE}
         ).execute()
     author = make_author([q("first banked question?"), q("second banked one?")])
     with caplog.at_level(logging.INFO, logger="lily_bank_replenish"):
@@ -694,11 +711,15 @@ def test_start_and_done_receipts_are_emitted(caplog):
     db = FakeBankDB()
     lane = "general:academic"
     author = make_author([q("one more question?")])
+
+    async def _sleep(_s):
+        return None
+
     with caplog.at_level(logging.INFO, logger="lily_bank_replenish"):
         run_id = _run(bank.lily_run_start(db, lane=lane, target=2))
         _run(bank.lily_replenish_lane(
             db, lane=lane, author=author, verify=_always_verify,
-            target=2, max_new=1, run_id=run_id,
+            target=2, max_new=1, run_id=run_id, sleep=_sleep,
         ))
     assert any("REPLENISH_START" in m for m in caplog.messages)
     assert any("REPLENISH_DONE" in m for m in caplog.messages)
@@ -781,3 +802,240 @@ def test_health_reports_count_target_and_rejection_rate_per_lane():
     assert health["healthy"] is False
     readout = bank.lily_format_bank_health(health)
     assert "general:wordplay" in readout and "LOW" in readout
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (S2 GO-WITH-FIXES, 2026-09-06). Each of these was a way the
+# job would have looked like it worked while doing nothing, or doing the
+# wrong thing quietly — which is the failure mode a background job is most
+# prone to, because nobody is sitting in front of it.
+# ---------------------------------------------------------------------------
+
+
+def test_lane_categories_are_the_bank_s_spelling_not_the_rotation_s():
+    """P1-3. Measured live: the bank stores `lifestyle` and `pop_culture`;
+    the rotation calls those families `lifestyle-potpourri` and `pop
+    culture`. Reading the rotation's spelling would have counted ZERO rows
+    in two of six lanes, read them as fully consumed, and authored ~74
+    questions into category values nothing draws from."""
+    assert bank.lily_lane_bank_category("general:lifestyle-potpourri") == "lifestyle"
+    assert bank.lily_lane_bank_category("general:pop culture") == "pop_culture"
+    # Unaliased families are unchanged.
+    assert bank.lily_lane_bank_category("general:academic") == "academic"
+    assert bank.lily_lane_bank_category("adult:adult_kink") == "adult_kink"
+
+
+def test_a_lane_counts_every_spelling_it_covers():
+    """Live: 38 rows under `pop_culture` AND 6 under `pop culture`. Both
+    are in the lane; counting one of them understates its depth."""
+    lane = "general:pop culture"
+    assert bank.lily_lane_bank_categories(lane) == ("pop_culture", "pop culture")
+    db = FakeBankDB()
+    for i in range(3):
+        seed_bank_row(db, lane, f"underscore spelled {i}")
+    for i in range(2):
+        seed_bank_row(
+            db, lane, f"space spelled {i}", category="pop culture",
+        )
+    depth = _run(bank.lily_lane_depth(db, lane=lane))
+    assert depth["servable"] == 5
+
+
+def test_an_aliased_lane_lands_its_rows_where_the_draw_looks():
+    db = FakeBankDB()
+    _run(bank.lily_bank_insert_ready(
+        db, lane="general:lifestyle-potpourri",
+        question=q("what herb is in pesto?", "basil"),
+    ))
+    row = db.tables[bank.QUESTIONS_TABLE][0]
+    assert row["category"] == "lifestyle"
+    assert row["lane"] == "general:lifestyle-potpourri"
+    # And it counts toward the lane it was banked for.
+    depth = _run(bank.lily_lane_depth(db, lane="general:lifestyle-potpourri"))
+    assert depth["ready"] == 1
+
+
+def test_dedup_spans_both_spellings_of_a_lane():
+    db = FakeBankDB()
+    lane = "general:pop culture"
+    seed_bank_row(
+        db, lane, "Which band recorded the album Rumours?",
+        category="pop culture",
+    )
+    hit = _run(bank.lily_bank_find_duplicate(
+        db, lane=lane, question_text="which band recorded the album Rumours",
+    ))
+    assert hit and hit["match"] == "exact"
+
+
+def test_the_heartbeat_beats_on_an_all_rejection_run():
+    """P2-3. A run whose every candidate is rejected banks nothing. With
+    the heartbeat only on the insert path, a long all-rejection run goes
+    silent and the NEXT run reclaims it as dead while it is still working."""
+    db = FakeBankDB()
+    lane = "general:academic"
+    run_id = _run(bank.lily_run_start(db, lane=lane, target=5))
+    row = db.tables[bank.RUNS_TABLE][0]
+    row["heartbeat_at"] = "2020-01-01T00:00:00+00:00"
+
+    async def _reject(question, run_id=None):
+        return False, "no"
+
+    async def _sleep(_s):
+        return None
+
+    author = make_author([q("rejected one?"), q("rejected two?")])
+    summary = _run(bank.lily_replenish_lane(
+        db, lane=lane, author=author, verify=_reject,
+        target=5, max_new=2, run_id=run_id, sleep=_sleep,
+    ))
+    assert summary["accepted"] == 0 and summary["rejected_verify"] == 2
+    assert row["heartbeat_at"] == db.now, (
+        "an all-rejection run must still prove it is alive"
+    )
+
+
+def test_run_start_distinguishes_a_busy_lane_from_a_broken_table(caplog):
+    """P2-5. Reporting a missing table or an RLS refusal as 'a run is
+    already active' hides the day migration 029 was never applied behind a
+    reassuring INFO line."""
+    assert bank._is_duplicate_key_error(
+        Exception('duplicate key value violates unique constraint "x"')
+    ) is True
+    assert bank._is_duplicate_key_error(
+        Exception('relation "lily_bank_replenish_runs" does not exist')
+    ) is False
+
+    class _NoTable(FakeBankDB):
+        def enforce_constraints(self, table, row):
+            raise Exception('relation "lily_bank_replenish_runs" does not exist')
+
+    with caplog.at_level(logging.INFO, logger="lily_bank_replenish"):
+        assert _run(bank.lily_run_start(
+            _NoTable(), lane="general:academic", target=5
+        )) is None
+    assert any("reason=run_start" in m for m in caplog.messages)
+    assert not any("already_active" in m for m in caplog.messages)
+
+
+def test_cost_waits_for_a_usage_row_still_in_flight():
+    """P2-6. The transport writes its usage row fire-and-forget, so the
+    last call's row is typically NOT in the table when the run ends. A
+    straight SELECT under-counts — on a one-question run, by everything."""
+    db = FakeBankDB()
+    lane = "general:academic"
+    run_id = _run(bank.lily_run_start(db, lane=lane, target=3))
+    landed = {"n": 0}
+
+    async def _late_sleep(_seconds):
+        # Each poll, one more scheduled usage write lands — exactly the
+        # shape of a task queued on the loop behind the caller.
+        landed["n"] += 1
+        db.table(bank.USAGE_TABLE).insert(
+            {"session_id": run_id, "prompt_tokens": 600,
+             "completion_tokens": 200}
+        ).execute()
+
+    author = make_author([q("a question with a late receipt?")])
+    summary = _run(bank.lily_replenish_lane(
+        db, lane=lane, author=author, verify=_always_verify,
+        target=3, max_new=1, run_id=run_id, sleep=_late_sleep,
+    ))
+    assert summary["accepted"] == 1
+    assert summary["llm_calls_expected"] == 2  # one author + one verify
+    assert summary["cost_tokens"] == 1600, "both rows must be counted"
+    assert db.tables[bank.RUNS_TABLE][0]["cost_tokens"] == 1600
+
+
+def test_a_cost_read_that_never_settles_still_closes_the_run(caplog):
+    db = FakeBankDB()
+    lane = "general:academic"
+    run_id = _run(bank.lily_run_start(db, lane=lane, target=3))
+
+    async def _no_op_sleep(_seconds):
+        return None
+
+    author = make_author([q("a question whose receipt never lands?")])
+    with caplog.at_level(logging.INFO, logger="lily_bank_replenish"):
+        summary = _run(bank.lily_replenish_lane(
+            db, lane=lane, author=author, verify=_always_verify,
+            target=3, max_new=1, run_id=run_id, sleep=_no_op_sleep,
+        ))
+    assert summary["accepted"] == 1
+    assert summary["cost_tokens"] == 0
+    assert any("COST_PARTIAL" in m for m in caplog.messages)
+    assert db.tables[bank.RUNS_TABLE][0]["status"] == "completed"
+
+
+def test_the_live_author_steers_off_the_lane_s_existing_questions():
+    """P2-7. generate_question already takes an avoid-list; the A5 gate
+    rejects a near-duplicate AFTER paying for it, and this is the half
+    that stops one being written."""
+    db = FakeBankDB()
+    lane = "general:academic"
+    seed_bank_row(db, lane, "Which planet is known as the red planet?")
+    seed_bank_row(db, lane, "Who wrote the novel Beloved?")
+    seen = {}
+
+    class _FakeReasoning:
+        async def generate_question(
+            self, category, tier, avoid, *, effort=None, purpose=None,
+            usage_session_id=None, mode="adult",
+        ):
+            seen.update(
+                category=category, tier=tier, avoid=list(avoid),
+                effort=effort, purpose=purpose, run=usage_session_id, mode=mode,
+            )
+            return q("a genuinely new question?")
+
+    author = bank.lily_live_author(_FakeReasoning(), supabase=db)
+    result = _run(author(lane, "run-77"))
+    assert result is not None
+    assert "Which planet is known as the red planet?" in seen["avoid"]
+    assert "Who wrote the novel Beloved?" in seen["avoid"]
+    assert seen["purpose"] == bank.USAGE_PURPOSE
+    assert seen["run"] == "run-77"
+    assert 1 <= seen["tier"] <= 3
+    assert seen["effort"] == lily_config.bank_replenish_effort()
+
+
+def test_the_live_author_writes_in_the_lane_s_register():
+    """P1-3 second half. The generation prompt hardcoded 'Mode: adult';
+    stocking `academic` through it would have filled a general lane with
+    innuendo."""
+    seen = {}
+
+    class _FakeReasoning:
+        async def generate_question(
+            self, category, tier, avoid, *, effort=None, purpose=None,
+            usage_session_id=None, mode="adult",
+        ):
+            seen[category] = mode
+            return q("a question?")
+
+    author = bank.lily_live_author(_FakeReasoning(), supabase=None)
+    _run(author("general:academic"))
+    _run(author("adult:adult_kink"))
+    _run(author("general:pop culture"))
+    assert seen["academic"] == "general"
+    assert seen["adult_kink"] == "adult"
+    # And the category it asks for is the bank's spelling.
+    assert seen["pop_culture"] == "general"
+
+
+def test_the_generation_prompt_carries_the_register_it_is_given():
+    import lily_reasoning
+
+    general = lily_reasoning._GENERATION_PROMPT.format(
+        category="academic", difficulty_tier=2, avoid_block="- none",
+        mode_block=lily_reasoning._MODE_BLOCKS["general"],
+    )
+    adult = lily_reasoning._GENERATION_PROMPT.format(
+        category="academic", difficulty_tier=2, avoid_block="- none",
+        mode_block=lily_reasoning._MODE_BLOCKS["adult"],
+    )
+    assert "Mode: general" in general
+    assert "Mode: adult" not in general
+    assert "innuendo and wordplay" not in general
+    # The adult render is what the prompt has always said, unchanged.
+    assert "Mode: adult" in adult and "innuendo and wordplay" in adult

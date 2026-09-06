@@ -214,7 +214,7 @@ def test_every_lane_round_trips_through_its_id():
         assert deck in ("general", "adult")
         assert bank.lily_lane_id(deck, category) == lane
         fields = bank.lily_lane_row_fields(lane)
-        assert fields["category"] == category
+        assert fields["category"] == bank.lily_lane_bank_category(lane)
         assert fields["adult"] is (deck == "adult")
 
 
@@ -290,3 +290,124 @@ def test_session_metrics_carries_the_bank_replenish_block():
     assert meta["session_metrics"]["bank_replenish"] == {
         "runs": 0, "authored": 0, "accepted": 0, "rejected": 0, "dup": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: the shutdown callback's ARITY, and the runner's usage lane.
+# Both are "looks wired, does nothing" defects — the class a background job
+# is most prone to, because nobody is watching it work.
+# ---------------------------------------------------------------------------
+
+
+def _livekit_style_dispatch(callback, reason="user_initiated"):
+    """How livekit 1.6.10 invokes a shutdown callback: it inspects the
+    arity and hands a one-argument callable the shutdown REASON string.
+    A defaulted lambda (`lambda t=task:`) reads as arity 1 — the reason
+    lands in `t` and the real task is never touched."""
+    import inspect
+
+    if len(inspect.signature(callback).parameters) >= 1:
+        return callback(reason)
+    return callback()
+
+
+def test_the_shutdown_callback_takes_no_arguments():
+    """P1-1. Registered with arity 1, the framework passes the reason
+    string and the author task outlives its session, silently."""
+    import inspect
+
+    async def _never():
+        await asyncio.sleep(60)
+
+    async def _scenario():
+        task = asyncio.ensure_future(_never())
+        callback = bank.lily_shutdown_callback(task)
+        assert len(inspect.signature(callback).parameters) == 0, (
+            "livekit hands a 1-arg callback the shutdown reason"
+        )
+        await _livekit_style_dispatch(callback)
+        return task
+
+    task = asyncio.run(_scenario())
+    assert task.cancelled(), "the shutdown callback must actually stop the job"
+
+
+def test_the_entrypoint_registers_a_zero_arg_shutdown_callback():
+    """The call site, not just the helper: lily_agent must hand the
+    framework the factory's result, never a defaulted lambda."""
+    import inspect
+
+    import lily_agent
+
+    source = inspect.getsource(lily_agent.entrypoint)
+    assert "lily_bank_replenish.lily_shutdown_callback(" in source
+    assert "lambda t=_bank_author_task" not in source
+
+
+def _load_runner():
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "bank_replenish.py"
+    spec = importlib.util.spec_from_file_location("bank_replenish_runner", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_runner_binds_the_usage_lane_so_cost_is_not_always_zero():
+    """P1-2. lily_metrics.record_llm_call routes through a module-global
+    collector the agent's entrypoint binds. A CLI process has no
+    entrypoint: unbound, every call records nothing, no lily_llm_usage row
+    is written, and every runner receipt says cost_tokens=0 — on the only
+    job that will actually be run, and the one number the effort decision
+    needs."""
+    import lily_metrics
+
+    runner = _load_runner()
+    db = FakeBankDB()
+    previous = lily_metrics.current_collector()
+    try:
+        # Unbound: the transport's receipt goes nowhere.
+        lily_metrics.set_current_collector(None)
+        assert lily_metrics.record_llm_call(
+            purpose=bank.USAGE_PURPOSE, model="grok-4.5", effort="medium",
+            ttft_ms=17000.0, total_ms=18000.0, prompt_tokens=983,
+            completion_tokens=875, session_id="run-abc",
+        ) is False
+        assert db.tables.get(bank.USAGE_TABLE, []) == []
+
+        async def _scenario():
+            runner._bind_usage_context(db)
+            assert lily_metrics.record_llm_call(
+                purpose=bank.USAGE_PURPOSE, model="grok-4.5", effort="medium",
+                ttft_ms=17000.0, total_ms=18000.0, prompt_tokens=983,
+                completion_tokens=875, session_id="run-abc",
+            ) is True
+            # The write is scheduled on the loop, not awaited by the caller.
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if db.tables.get(bank.USAGE_TABLE):
+                    break
+            return await bank.lily_run_cost_tokens(db, run_id="run-abc")
+
+        cost = asyncio.run(_scenario())
+    finally:
+        lily_metrics.set_current_collector(previous)
+    assert db.tables[bank.USAGE_TABLE], "a usage row must land"
+    assert cost["cost_tokens"] == 1858
+    assert cost["calls"] == 1
+
+
+def test_the_runner_offers_exactly_the_module_s_lanes_and_binds_before_authoring():
+    """The runner's lane list is the module's, so the category alias and
+    the per-lane register ride into every out-of-session run too — and the
+    usage lane is bound BEFORE the first authoring call, or the run's own
+    receipt would miss its first rows."""
+    import inspect
+
+    runner = _load_runner()
+    parser_source = inspect.getsource(runner.main)
+    assert "choices=list(lily_bank_replenish.LANES)" in parser_source
+    body = inspect.getsource(runner._amain)
+    assert body.index("_bind_usage_context") < body.index("lily_live_author")
+    assert "supabase=supabase" in body

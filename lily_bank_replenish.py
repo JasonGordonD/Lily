@@ -103,13 +103,31 @@ DECK_ADULT = "adult"
 # _category_for_round actually serves from (lily_agent.py:3031-3044).
 # They are RESTATED here rather than imported because lily_agent imports
 # this module (the entrypoint hook), and importing it back would close a
-# cycle. tests/test_supply_001_s2_lanes.py asserts the two agree, so a
+# cycle. tests/test_supply_001_s2_offpath.py asserts the two agree, so a
 # family added to the rotation without a lane reads RED instead of
 # silently getting no supply.
 # ---------------------------------------------------------------------------
 
 GENERAL_FAMILIES = ("academic", "pop culture", "wordplay", "lifestyle-potpourri")
 ADULT_FAMILIES = ("adult_couples", "adult_kink")
+
+# THE ROTATION'S NAME FOR A FAMILY IS NOT ALWAYS THE BANK'S NAME FOR IT.
+# Measured 2026-09-06 (Supabase, project svqbfxdhpsmioaosuhkb, SELECT
+# distinct category from lily_questions): the bank stores `lifestyle` (40
+# active) and `pop_culture` (38 active); the rotation calls those families
+# `lifestyle-potpourri` and `pop culture`. Two of six lanes would therefore
+# have counted ZERO rows, read as fully consumed, and had ~74 questions
+# authored into category values nothing draws from — a full night's spend
+# banked where nobody can see it.
+#
+# The alias is applied in BOTH directions of the seam: the depth count and
+# the dedup read look under every spelling this lane covers, and the row
+# the author writes carries the BANK's spelling, so a replenished row lands
+# beside the rows it is topping up rather than founding a third spelling.
+LANE_BANK_CATEGORY = {
+    "pop culture": "pop_culture",
+    "lifestyle-potpourri": "lifestyle",
+}
 
 
 def lily_lane_id(deck: str, category: str) -> str:
@@ -143,6 +161,29 @@ def lily_lane_is_adult(lane: str) -> bool:
     return lily_parse_lane(lane)[0] == DECK_ADULT
 
 
+def lily_lane_bank_category(lane: str) -> str:
+    """The category value a row in this lane is WRITTEN with — the bank's
+    spelling, not the rotation's (see LANE_BANK_CATEGORY)."""
+    _, family = lily_parse_lane(lane)
+    if not family:
+        return ""
+    return LANE_BANK_CATEGORY.get(family, family)
+
+
+def lily_lane_bank_categories(lane: str) -> tuple:
+    """Every category spelling this lane COUNTS, bank spelling first.
+
+    Both are counted because both exist in the live table: 38 rows under
+    `pop_culture` and 6 under `pop culture`. Counting only one of them
+    would understate the lane's depth and author against a shortfall that
+    is not there."""
+    _, family = lily_parse_lane(lane)
+    if not family:
+        return ()
+    banked = LANE_BANK_CATEGORY.get(family, family)
+    return (banked,) if banked == family else (banked, family)
+
+
 def lily_lane_row_fields(lane: str) -> dict:
     """The (mode, adult, category) triple a row in this lane carries.
 
@@ -151,7 +192,10 @@ def lily_lane_row_fields(lane: str) -> dict:
     families are mode='adult' adult=true. lily_fetch_bank_question filters
     on `adult` and `category`, so those two are the load-bearing ones;
     `mode` rides along for the operator's SQL and for
-    lily_memory.lily_bank_mode_filter."""
+    lily_memory.lily_bank_mode_filter.
+
+    `category` is the BANK's spelling (lily_lane_bank_category), so a
+    replenished row lands where the draw looks."""
     deck, category = lily_parse_lane(lane)
     if not deck:
         return {}
@@ -159,7 +203,7 @@ def lily_lane_row_fields(lane: str) -> dict:
     return {
         "mode": DECK_ADULT if adult else DECK_GENERAL,
         "adult": adult,
-        "category": category,
+        "category": LANE_BANK_CATEGORY.get(category, category),
     }
 
 
@@ -185,32 +229,71 @@ async def lily_lane_depth(supabase, *, lane: str) -> dict:
     if supabase is None or not fields:
         out["read_failed"] = True
         return out
-    try:
-        rows = await asyncio.to_thread(
-            lambda: supabase.table(QUESTIONS_TABLE)
-            .select("id,status")
-            .eq("adult", fields["adult"])
-            .eq("category", fields["category"])
-            .limit(5000)
-            .execute()
-        )
-    except Exception as e:
-        logger.warning(
-            "LILY_BANK | DEPTH_FAILED | lane=%s error_class=%s error=%s",
-            lane, type(e).__name__, e,
-        )
-        out["read_failed"] = True
-        return out
-    for r in rows.data or []:
-        status = str((r or {}).get("status") or STATUS_ACTIVE)
-        if status == STATUS_READY:
-            out["ready"] += 1
-        elif status == STATUS_ACTIVE:
-            out["active"] += 1
-        elif status == "burned":
-            out["burned"] += 1
+    for category in lily_lane_bank_categories(lane):
+        try:
+            rows = await asyncio.to_thread(
+                lambda c=category: supabase.table(QUESTIONS_TABLE)
+                .select("id,status")
+                .eq("adult", fields["adult"])
+                .eq("category", c)
+                .limit(5000)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(
+                "LILY_BANK | DEPTH_FAILED | lane=%s category=%s error_class=%s "
+                "error=%s", lane, category, type(e).__name__, e,
+            )
+            out["read_failed"] = True
+            return out
+        for r in rows.data or []:
+            status = str((r or {}).get("status") or STATUS_ACTIVE)
+            if status == STATUS_READY:
+                out["ready"] += 1
+            elif status == STATUS_ACTIVE:
+                out["active"] += 1
+            elif status == "burned":
+                out["burned"] += 1
     out["servable"] = out["ready"] + out["active"]
     return out
+
+
+async def lily_lane_recent_questions(
+    supabase, *, lane: str, limit: int = 40
+) -> list:
+    """The lane's existing question texts, for the author's avoid-list.
+
+    generate_question already takes `avoid_questions` and steers away from
+    them (lily_reasoning.py:822, `avoid_block`). Passing the lane's own
+    rows is the cheap half of dedup: the A5 similarity gate REJECTS a
+    near-duplicate after paying for it, and this stops the author writing
+    one in the first place. Bounded and best-effort — an unreadable bank
+    means an unsteered author, never a failed run."""
+    fields = lily_lane_row_fields(lane)
+    if supabase is None or not fields:
+        return []
+    texts = []
+    for category in lily_lane_bank_categories(lane):
+        try:
+            rows = await asyncio.to_thread(
+                lambda c=category: supabase.table(QUESTIONS_TABLE)
+                .select("question")
+                .eq("adult", fields["adult"])
+                .eq("category", c)
+                .limit(limit)
+                .execute()
+            )
+        except Exception as e:
+            logger.info(
+                "LILY_BANK | AVOID_READ_SKIPPED | lane=%s error_class=%s "
+                "error=%s", lane, type(e).__name__, e,
+            )
+            continue
+        for r in rows.data or []:
+            text = str((r or {}).get("question") or "").strip()
+            if text:
+                texts.append(text)
+    return texts[:limit]
 
 
 def lily_bank_consumed_pct(servable: int, target: int) -> float:
@@ -228,24 +311,23 @@ def lily_bank_should_replenish(
     lane: Optional[str] = None,
     target: Optional[int] = None,
     ratio: Optional[float] = None,
-    consumed: Optional[int] = None,
 ) -> bool:
     """The watermark: fire when a lane is `ratio` CONSUMED — 40% by
-    default, the arsenal's own number, tracked per lane independently.
+    default, tracked per lane independently.
 
-    TWO ways to be 40% consumed, and they are the same two the arsenal
-    carries (lily_arsenal.lily_should_replenish), transposed:
+    SHORTFALL-ONLY, and that is a stated limitation rather than an
+    oversight. The arsenal's rule has two limbs: shortfall against target,
+    and serves-this-session. Only the first is implemented here, because
+    only the first is measurable from where this job stands: the
+    replenisher is a background process with no session's serving history
+    in front of it, and the out-of-session runner has no session at all.
+    A text bank is also consumed differently from a picture arsenal —
+    an asked question is burned or excluded per group, so consumption
+    shows up in the standing depth, which is exactly what this limb reads.
 
-      shortfall against target  (target - servable >= threshold)
-          the standing lane is short: rows burned, or the lane was never
-          stocked to depth. This is the limb the out-of-session runner and
-          the background sweep read, because neither has a session's
-          serving history in front of it.
-
-      serves this session        (consumed >= threshold)
-          the caller counted rows actually drawn from this lane and the
-          count crossed the ratio. Optional: `consumed=None` — the default
-          — evaluates the shortfall limb alone.
+    A parameter for the second limb would have been dead code, so there
+    is not one. Wiring it later means handing the sweep a per-lane draw
+    count from the game — one caller, one argument, when a caller exists.
 
     Threshold comes from lily_arsenal.lily_replenish_threshold, unchanged,
     so the two banks cannot drift apart on what "40% consumed" means."""
@@ -253,13 +335,11 @@ def lily_bank_should_replenish(
     tgt = max(1, tgt)
     r = lily_config.bank_replenish_ratio() if ratio is None else float(ratio)
     threshold = lily_arsenal.lily_replenish_threshold(tgt, r)
-    if consumed is not None and int(consumed) >= threshold:
-        return True
     return (tgt - max(0, int(servable or 0))) >= threshold
 
 
 async def lily_bank_watermark(
-    supabase, *, lane: str, target: Optional[int] = None, consumed: Optional[int] = None
+    supabase, *, lane: str, target: Optional[int] = None
 ) -> dict:
     """Read one lane's depth and decide. Emits the S1 receipt:
 
@@ -274,9 +354,7 @@ async def lily_bank_watermark(
     below = (
         False
         if depth.get("read_failed")
-        else lily_bank_should_replenish(
-            servable, lane=lane, target=tgt, consumed=consumed
-        )
+        else lily_bank_should_replenish(servable, lane=lane, target=tgt)
     )
     logger.info(
         "LILY_BANK | WATERMARK | lane=%s ready=%d target=%d consumed_pct=%.2f "
@@ -341,30 +419,35 @@ async def lily_bank_find_duplicate(
     if supabase is None or not text or not fields:
         return {"match": "unchecked", "reason": "no client or no lane"}
     r = lily_config.bank_replenish_dup_ratio() if ratio is None else float(ratio)
-    try:
-        rows = await asyncio.to_thread(
-            lambda: supabase.table(QUESTIONS_TABLE)
-            .select("id,question,category,status")
-            .eq("adult", fields["adult"])
-            .eq("category", fields["category"])
-            .limit(2000)
-            .execute()
+    existing = []
+    for category in lily_lane_bank_categories(lane):
+        try:
+            rows = await asyncio.to_thread(
+                lambda c=category: supabase.table(QUESTIONS_TABLE)
+                .select("id,question,category,status")
+                .eq("adult", fields["adult"])
+                .eq("category", c)
+                .limit(2000)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(
+                "LILY_BANK | DUP_CHECK_FAILED | lane=%s category=%s "
+                "error_class=%s error=%s", lane, category, type(e).__name__, e,
+            )
+            return {"match": "unchecked", "reason": f"{type(e).__name__}: {e}"}
+        existing.extend(
+            {
+                "id": row.get("id"),
+                "question": row.get("question"),
+                # The lane's own category, not the row's: a legacy row filed
+                # under `pop culture` is in the same lane as one under
+                # `pop_culture`, and the fuzzy limb is same-category-only.
+                "category": fields["category"],
+            }
+            for row in (rows.data or [])
+            if row.get("question")
         )
-    except Exception as e:
-        logger.warning(
-            "LILY_BANK | DUP_CHECK_FAILED | lane=%s error_class=%s error=%s",
-            lane, type(e).__name__, e,
-        )
-        return {"match": "unchecked", "reason": f"{type(e).__name__}: {e}"}
-    existing = [
-        {
-            "id": row.get("id"),
-            "question": row.get("question"),
-            "category": row.get("category") or fields["category"],
-        }
-        for row in (rows.data or [])
-        if row.get("question")
-    ]
     return lily_bank.lily_find_duplicate(
         text, fields["category"], existing, ratio=r
     )
@@ -394,6 +477,12 @@ def lily_ready_row(lane: str, question: dict, *, run_id: Optional[str] = None) -
         tier = int((question or {}).get("difficulty_tier") or 2)
     except (TypeError, ValueError):
         tier = 2
+    # CLAMPED to 1..3, the live CHECK constraint on lily_questions. The
+    # generation prompt says "tier N of 4" (lily_reasoning.py:427), so an
+    # author that takes it literally returns a 4 — and the INSERT would be
+    # refused by the database, turning a good question into a lost slot
+    # and a mystery in the error count.
+    tier = min(3, max(1, tier))
     row = {
         "mode": fields.get("mode", DECK_GENERAL),
         "adult": bool(fields.get("adult")),
@@ -452,6 +541,23 @@ async def lily_bank_insert_ready(
 # ---------------------------------------------------------------------------
 
 
+# Postgres 23505 and the phrasings PostgREST/supabase-py wrap it in. A
+# unique-constraint violation on the runs table means exactly one thing —
+# another process holds this lane — and nothing else does.
+_DUPLICATE_KEY_SIGNATURES = (
+    "duplicate key",
+    "unique constraint",
+    "uniqueviolation",
+    "23505",
+    "already exists",
+)
+
+
+def _is_duplicate_key_error(error: object) -> bool:
+    text = str(error or "").lower()
+    return any(sig in text for sig in _DUPLICATE_KEY_SIGNATURES)
+
+
 async def lily_run_start(
     supabase, *, lane: str, target: int, ready_at_start: int = 0
 ) -> Optional[str]:
@@ -491,10 +597,21 @@ async def lily_run_start(
         )
         return run_id
     except Exception as e:
-        logger.info(
-            "LILY_BANK | REPLENISH_BLOCKED | lane=%s: %s — a run is already "
-            "active for this lane", lane, e,
-        )
+        # Classified, not assumed. The partial unique index is ONE reason an
+        # insert fails here; a dropped connection, a missing table (migration
+        # 029 unapplied) and an RLS refusal are others, and reporting all of
+        # them as "a run is already active" would hide the day the receipt
+        # table does not exist behind a reassuring INFO line.
+        if _is_duplicate_key_error(e):
+            logger.info(
+                "LILY_BANK | REPLENISH_BLOCKED | lane=%s reason=already_active",
+                lane,
+            )
+        else:
+            logger.warning(
+                "LILY_BANK | REPLENISH_FAILED | lane=%s reason=run_start "
+                "error_class=%s error=%s", lane, type(e).__name__, e,
+            )
         return None
 
 
@@ -753,6 +870,10 @@ async def lily_replenish_lane(
         "errors": 0,
         "status": "completed",
         "notes": "",
+        # Author + verify calls this run WILL have made, so the cost read
+        # below knows how many usage rows to wait for instead of racing
+        # them (see _settle_cost).
+        "llm_calls_expected": 0,
     }
     if supabase is None or not lily_lane_row_fields(lane) or author is None:
         summary["status"] = "failed"
@@ -771,9 +892,18 @@ async def lily_replenish_lane(
     max_attempts = lily_config.bank_replenish_max_attempts()
     _note(runs=1)
     for _slot in range(budget):
+        # HEARTBEAT FIRST, every slot. A run whose every candidate is
+        # rejected banks nothing, and if the only heartbeat were on the
+        # insert path, a long all-rejection run would go silent and the
+        # next run would reclaim it as dead WHILE IT WAS STILL WORKING —
+        # the exact failure lily_arsenal.lily_run_reclaim_stale's
+        # heartbeat-not-existence rule exists to prevent.
+        if run_id:
+            await lily_run_heartbeat(supabase, run_id=run_id)
         question = None
         for attempt in range(1, max_attempts + 1):
             try:
+                summary["llm_calls_expected"] += 1
                 question = await author(lane, run_id)
                 break
             except asyncio.CancelledError:
@@ -794,7 +924,8 @@ async def lily_replenish_lane(
                     )
                     _note(rejected=1)
                     return await _close(
-                        summary, supabase, run_id=run_id, started=started
+                        summary, supabase, run_id=run_id, started=started,
+                        sleep=sleep,
                     )
                 moderation = lily_arsenal_gen.lily_is_moderation_rejection(e)
                 if moderation:
@@ -835,6 +966,7 @@ async def lily_replenish_lane(
 
         if verify is not None:
             try:
+                summary["llm_calls_expected"] += 1
                 ok, reason = await verify(question, run_id)
             except asyncio.CancelledError:
                 raise
@@ -873,18 +1005,65 @@ async def lily_replenish_lane(
         else:
             summary["errors"] += 1
             _note(rejected=1)
-        if run_id:
-            await lily_run_heartbeat(supabase, run_id=run_id)
 
-    return await _close(summary, supabase, run_id=run_id, started=started)
+    return await _close(
+        summary, supabase, run_id=run_id, started=started, sleep=sleep,
+    )
 
 
-async def _close(summary: dict, supabase, *, run_id, started: float) -> dict:
+async def _settle_cost(
+    supabase, *, run_id, expected_calls: int, sleep=None, deadline: float = 3.0
+) -> dict:
+    """Read the run's usage rows, waiting briefly for the ones still in
+    flight.
+
+    THE RACE this closes: the streaming transport writes its usage row
+    FIRE-AND-FORGET (lily_metrics.record_llm_call schedules a task on the
+    loop and returns). The last call's row is therefore typically NOT in
+    the table at the moment the run finishes, so a straight SELECT here
+    under-counts by one call — and on a one-question run, under-counts by
+    everything, printing cost_tokens=0 on a run that plainly cost tokens.
+
+    So: poll until as many rows as calls have landed, or the deadline
+    passes. Bounded, and honest either way — whatever landed is what the
+    receipt says, and a short run settles on the first re-read."""
+    cost = await lily_run_cost_tokens(supabase, run_id=run_id)
+    if expected_calls <= 0 or cost.get("calls", 0) >= expected_calls:
+        return cost
+    napper = sleep or asyncio.sleep
+    waited = 0.0
+    step = 0.05
+    while waited < deadline:
+        try:
+            await napper(step)
+        except asyncio.CancelledError:
+            raise
+        waited += step
+        cost = await lily_run_cost_tokens(supabase, run_id=run_id)
+        if cost.get("calls", 0) >= expected_calls:
+            return cost
+    logger.info(
+        "LILY_BANK | COST_PARTIAL | run=%s rows=%d expected=%d — the receipt "
+        "prices what landed", run_id, cost.get("calls", 0), expected_calls,
+    )
+    return cost
+
+
+async def _close(
+    summary: dict, supabase, *, run_id, started: float, sleep=None
+) -> dict:
     """Price the run off its usage rows, emit the cost receipt, close the
     receipt row. One exit for every path out of lily_replenish_lane so a
     run can never finish without a number."""
     summary["duration_seconds"] = round(time.monotonic() - started, 2)
-    cost = await lily_run_cost_tokens(supabase, run_id=run_id) if run_id else {}
+    cost = (
+        await _settle_cost(
+            supabase, run_id=run_id,
+            expected_calls=int(summary.get("llm_calls_expected", 0)),
+            sleep=sleep,
+        )
+        if run_id else {}
+    )
     summary["prompt_tokens"] = int(cost.get("prompt_tokens", 0))
     summary["completion_tokens"] = int(cost.get("completion_tokens", 0))
     summary["cost_tokens"] = int(cost.get("cost_tokens", 0))
@@ -941,7 +1120,6 @@ async def lily_replenish_sweep(
     author: Callable,
     verify: Optional[Callable] = None,
     lanes=None,
-    consumed_by_lane: Optional[dict] = None,
     sleep: Optional[Callable] = None,
 ) -> list:
     """One pass over the lanes: read each watermark, replenish EXACTLY the
@@ -962,10 +1140,7 @@ async def lily_replenish_sweep(
             )
             continue
         try:
-            mark = await lily_bank_watermark(
-                supabase, lane=lane,
-                consumed=(consumed_by_lane or {}).get(lane),
-            )
+            mark = await lily_bank_watermark(supabase, lane=lane)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1029,6 +1204,12 @@ async def lily_bank_replenish_loop(
     the delivery path reads mid-turn, and swallows every failure. An author
     that takes sixty seconds delays the NEXT sweep and nothing else.
 
+    THE WATERMARK IT READS IS SHORTFALL-ONLY. The supervisor has no
+    session's draw counts in front of it, so a lane fires when its standing
+    depth is 40% below target — see lily_bank_should_replenish, which
+    states the same limitation and deliberately has no parameter for the
+    limb it cannot measure.
+
     Returns the number of sweeps completed (tests drive it with
     max_sweeps; live it only ever returns via CancelledError)."""
     napper = sleep or asyncio.sleep
@@ -1058,32 +1239,46 @@ async def lily_bank_replenish_loop(
 # ---------------------------------------------------------------------------
 
 
-def lily_live_author(reasoning, *, avoid_by_lane: Optional[dict] = None):
+def lily_live_author(reasoning, *, supabase=None):
     """Bind the live authoring callable: the EXISTING question generator
-    (lily_reasoning.generate_question), at the BACKGROUND author's effort
-    and tagged for cost accounting.
+    (lily_reasoning.generate_question), at the BACKGROUND author's effort,
+    in the LANE'S REGISTER, steered off the lane's existing rows, and
+    tagged for cost accounting.
 
     Effort is lily_config.bank_replenish_effort() — a separate knob from
     the live prefetch tier precisely because this call is off the critical
     path: its think time costs nobody anything, so effort is a quality dial
-    here. The live path's interim "medium" is untouched by this."""
+    here. The live path's interim "medium" is untouched by this.
+
+    MODE is passed explicitly. The generation prompt has said "Mode:
+    adult" unconditionally since the unified deck landed, which is right
+    for a live prefetch (every live draw is adult-register) and wrong for
+    a general lane: without this the academic lane would be stocked with
+    innuendo. `mode` defaults to "adult" at the entry point, so the live
+    prefetch renders exactly the prompt it rendered before.
+
+    AVOID-LIST: the lane's own rows, which generate_question already
+    steers away from. The A5 gate rejects a near-duplicate AFTER paying
+    for it; this is the half that stops it being written."""
 
     async def _author(lane: str, run_id: Optional[str] = None) -> Optional[dict]:
-        deck, category = lily_parse_lane(lane)
+        deck, family = lily_parse_lane(lane)
         if not deck:
             return None
-        avoid = list((avoid_by_lane or {}).get(lane) or [])
+        avoid = await lily_lane_recent_questions(supabase, lane=lane)
         # Tier spread: the lane is topped across the difficulty range rather
         # than filled with one tier, the same spread discipline
-        # lily_arsenal_content applies to picture subjects.
+        # lily_arsenal_content applies to picture subjects. 1..3, the live
+        # CHECK constraint's range.
         tier = 1 + (int(time.time()) // 7) % 3
         return await reasoning.generate_question(
-            category,
+            lily_lane_bank_category(lane),
             tier,
             avoid,
             effort=lily_config.bank_replenish_effort(),
             purpose=USAGE_PURPOSE,
             usage_session_id=run_id,
+            mode=DECK_ADULT if deck == DECK_ADULT else DECK_GENERAL,
         )
 
     return _author
@@ -1140,9 +1335,27 @@ async def lily_run_background_author(supabase) -> int:
     )
     return await lily_bank_replenish_loop(
         supabase,
-        author=lily_live_author(reasoning),
+        author=lily_live_author(reasoning, supabase=supabase),
         verify=lily_live_verify(reasoning),
     )
+
+
+def lily_shutdown_callback(task):
+    """A ZERO-ARGUMENT coroutine function that stops `task` — the shape
+    livekit's `ctx.add_shutdown_callback` requires for a callback that
+    wants no arguments.
+
+    This is a factory rather than a lambda at the call site because the
+    framework INSPECTS the callback's arity: a one-argument callable is
+    invoked with the shutdown REASON string. A defaulted lambda
+    (`lambda t=task: ...`) reads as arity 1, so the reason would arrive as
+    `t`, the real task would never be cancelled, and the job would outlive
+    its session with nothing in the log to say so."""
+
+    async def _stop_bank_author() -> None:
+        await lily_stop_background_author(task)
+
+    return _stop_bank_author
 
 
 async def lily_stop_background_author(task) -> None:

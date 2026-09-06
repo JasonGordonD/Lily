@@ -132,17 +132,19 @@ so a lane the author just filled does not read empty and get filled again.
 
 ### The four numbers
 
-* **Lines added:** 2,962 (2,702 new files + 260 into existing files)
-* **Lines deleted:** 4 (two call sites in `lily_reasoning` re-pointed at
-  the new default-preserving kwargs; no behaviour removed)
-* **Failing-first red on `wo/supply-001`:** **49** — the 47 tests in
+* **Lines added:** 3,847
+* **Lines deleted:** 7 (call sites in `lily_reasoning` re-pointed at the
+  new default-preserving kwargs; no behaviour removed)
+* **Failing-first red on `wo/supply-001`:** **65** — the 63 tests in
   `tests/test_supply_001_s2_bank.py` + `tests/test_supply_001_s2_offpath.py`
   (arriving on base as two `ModuleNotFoundError` collection errors) plus 2
-  named failures in `tests/test_env_deploy_lint.py`
+  named failures in `tests/test_env_deploy_lint.py`. Of the 63, **11 are
+  red against the POST-review code with only the review fix reverted** —
+  they fail on the defect, not merely on the missing module
 * **Mechanisms retired:** 0
 
-Suites: **3,297** on `python3 -m pytest tests -q` and on the 3.13 venv
-(baseline 3,248 + 49). `python3 -W error -c "import lily_agent"` clean.
+Suites: **3,313** on `python3 -m pytest tests -q` and on the 3.13 venv
+(baseline 3,248 + 65). `python3 -W error -c "import lily_agent"` clean.
 One existing pin updated deliberately:
 `tests/test_s1b_divergence_nets.py::test_fault_keys_sit_beside_the_collectors_summary`
 enumerates the exact keys added to `session_metrics`, and it fired exactly
@@ -197,6 +199,78 @@ cost line) — plus the durable receipt row in `lily_bank_replenish_runs` and
 `session_metrics.bank_replenish` = `{runs, authored, accepted, rejected,
 dup}` on `lily_sessions.metadata`, built by the single
 `lily_session_metadata` builder so both write sites carry it.
+
+### Review fixes (independent review of 71cf80d — GO-WITH-FIXES)
+
+Every P1 was the same species of defect: **something that looks wired and
+does nothing.** That is the failure mode a background job is most prone to,
+because nobody is sitting in front of it while it works, and all three
+would have shipped looking healthy.
+
+* **P1-1 — the shutdown cancel was inert.** livekit 1.6.10 inspects a
+  shutdown callback's arity and hands a one-argument callable the shutdown
+  REASON string, so `lambda t=_bank_author_task:` took the reason as its
+  task and cancelled nothing; the author would have outlived its session
+  with nothing in the log to say so. `lily_shutdown_callback()` now returns
+  a **zero-argument** coroutine function — the same shape as
+  `_wait_for_persistence` twenty lines below the call site — and the test
+  drives it through a dispatcher that reproduces the framework's arity
+  inspection.
+* **P1-2 — the runner authored for free and reported it.**
+  `lily_metrics.record_llm_call` routes through a module-global collector
+  that the AGENT's entrypoint binds. A CLI process has no entrypoint:
+  unbound, `record_llm_call` returns False, no `lily_llm_usage` row is
+  ever written, and every runner receipt would have printed
+  `cost_tokens=0` — on the only job that will actually be run, and for the
+  one number the effort decision needs. `_bind_usage_context` now binds it
+  (session_id `bank_replenish`, phase `offline`) before the first
+  authoring call, and the run report warns when usage writes fail.
+* **P1-3 — two of six lanes pointed at categories the bank does not
+  have.** Measured live: the bank stores `lifestyle` (40 active) and
+  `pop_culture` (38 active); the rotation calls those families
+  `lifestyle-potpourri` and `pop culture`. Both lanes would have counted
+  **zero** rows, read as fully consumed, and authored ~74 questions into
+  category values nothing draws from — a full night's spend banked where
+  nobody can see it. `LANE_BANK_CATEGORY` now aliases both directions of
+  the seam: the depth count and the dedup read look under **every**
+  spelling a lane covers (38 under `pop_culture` **and** 6 under `pop
+  culture`), and the written row carries the bank's spelling. Second half
+  of the same finding: `_GENERATION_PROMPT` hardcoded `Mode: adult`, so
+  topping up `academic` would have filled a general lane with innuendo.
+  The register is now a parameter defaulting to `adult` — every existing
+  caller renders a byte-identical prompt — and the background author
+  passes its lane's.
+
+Also: **P2-3** the heartbeat beats at the TOP of each slot, so an
+all-rejection run is not reclaimed as stale while it is still working;
+**P2-4** `difficulty_tier` is clamped to 1..3 (the live CHECK; the prompt
+says "of 4", and an unclamped 4 is an INSERT the database refuses);
+**P2-5** `lily_run_start` classifies its failure — "already active" only on
+a duplicate-key error, the real error otherwise, so an unapplied migration
+029 is not hidden behind a reassuring INFO line; **P2-6** the cost read
+waits, bounded, for usage rows still in flight (the transport writes them
+fire-and-forget, so the last call's row is typically not in the table when
+the run ends) and logs `COST_PARTIAL` if they never land; **P2-7** the
+author is steered off the lane's existing questions via the avoid-list
+`generate_question` already takes; **P2-8** a stale docstring test
+reference corrected.
+
+**P2-2 — the watermark is SHORTFALL-ONLY, and now says so.** The arsenal's
+second limb (serves this session) needs a session's draw counts, which a
+background process does not have and the out-of-session runner cannot have
+at all. Rather than leave a parameter standing in for a thing that is not
+measured, the parameter is gone and the limitation is stated in
+`lily_bank_should_replenish`'s docstring, with a test that asserts both.
+
+**P2-1 — the run bookkeeping stays a deliberate copy** of
+`lily_arsenal`'s rather than a parameterisation of it. Two reasons, both
+worth the duplication: `lily_arsenal.py` is outside this WO's declared file
+region (S2 owns `lily_arsenal_gen.py`, and a parallel worker holds the
+arsenal), and the two receipts genuinely differ — key column `partition` vs
+`lane`/`deck`/`category`, cost in a USD price sheet vs measured tokens. The
+parts that are the same idea *are* shared: the threshold, the duplicate
+finder, and the moderation/unavailable classifiers are imported, not
+retyped.
 
 ### Files
 

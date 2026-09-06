@@ -12087,9 +12087,13 @@ async def entrypoint(ctx: JobContext) -> None:
                 lily_bank_replenish.lily_run_background_author(supabase),
                 "bank_replenish",
             )
+            # The stop half. lily_shutdown_callback returns a ZERO-ARG
+            # coroutine function on purpose: livekit 1.6.10 inspects the
+            # callback's arity and hands a 1-arg callable the shutdown
+            # REASON string, so a defaulted lambda (`lambda t=task:`) would
+            # take the reason as its task and cancel nothing.
             ctx.add_shutdown_callback(
-                lambda t=_bank_author_task:
-                lily_bank_replenish.lily_stop_background_author(t)
+                lily_bank_replenish.lily_shutdown_callback(_bank_author_task)
             )
 
     scorekeeper = LilyScorekeeper(
