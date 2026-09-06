@@ -165,7 +165,8 @@ question machine, the answer window, the scorekeeper) only runs
 after that call; until then nothing anyone says can score.
 ROUNDS: three to four rounds of six questions, point values climb
 each round. Per question: ask, thinking beat, first answer wins,
-suspense hold, reveal, one relational score line, next. Categories
+suspense hold, reveal, one relational score line, then the next at
+the progression seam. Categories
 rotate each round across academic, pop culture, wordplay, and
 lifestyle-potpourri. A missed question opens a five-second steal
 window. Each player gets one 50/50 lifeline per game — you cross

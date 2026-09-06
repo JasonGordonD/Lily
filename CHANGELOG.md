@@ -139,13 +139,19 @@ The fix gives each transition one owner:
    consumed solely by the addressed hold.
 3. `lily_is_bare_affirmative()` strips diarization/known-speaker tags itself,
    protecting callers that do not enter through the primary transcript
-   handler.
+   handler, and accepts inverted short forms such as "I am, yes".
 4. `game_start` joins question delivery/nudge in the exact-sheet rewrite.
    Round one can no longer carry generated reveal, score, or answer prose
    before the deterministic armed question.
+5. A cut, suppressed, or failed addressed playout clears its provisional
+   `responded` reservation. The retry is capped and receives the offer instead
+   of leaving the hold in `responded=true, offer_aired=false`.
+6. The system prompt now says the next question starts at the progression
+   seam, removing its contradictory immediate "score line, next" instruction.
 
 Regression coverage pins the slow-handle B8 race, the offer/P6 isolation,
-speaker-tagged affirmatives, and the contaminated round-one delivery.
+speaker-tagged/inverted affirmatives, addressed-response retry, and the
+contaminated round-one delivery.
 
 ## 2026-09-06 — HOTFIX-DOUBLE-WELCOME-001: the second welcome-back behind the first
 

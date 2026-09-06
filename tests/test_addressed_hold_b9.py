@@ -209,6 +209,7 @@ def test_response_contract_subtype(text, subtype):
     "yes", "yeah", "sure", "okay", "ready", "okay ready", "next one",
     "next question", "hit me", "yeah, next one", "go ahead", "let's go",
     "we're ready", "sure, go ahead", "bring it on", "okay go",
+    "I am, yes", "I am yes", "Yes, I am", "we're, yeah",
 ])
 def test_acceptance_detected(text):
     assert lily_scorekeeper.lily_detect_addressed_acceptance(text) is True
@@ -363,6 +364,37 @@ def test_the_offer_is_appended_when_the_model_leaves_it_off(caplog):
             sid, aired = _respond(game, "Kinsey was a biologist.")
         assert aired.endswith(OFFER)
         assert _lines(caplog, "LILY_ADDRESSED | OFFER_APPENDED")
+
+    _run(_go)
+
+
+def test_a_cut_addressed_response_reopens_the_contract(caplog):
+    game = _airgate_game()
+    _armed_next(game)
+    at = time.time()
+    _adjacent(game, at)
+
+    def _go():
+        _final(game, LIVE_KINSEY, at)
+        sid, aired = _respond(game, "Kinsey studied human sexuality.")
+        assert game.addressed_state()["responded"] is True
+
+        game.note_playout_started(sid)
+        with caplog.at_level(logging.INFO):
+            game.on_agent_speech_finished(
+                aired, speech_id=sid, interrupted=True,
+            )
+
+        state = game.addressed_state()
+        assert state["responded"] is False
+        assert state["speech_id"] is None
+        assert state["offer_aired"] is False
+        assert _lines(caplog, "LILY_ADDRESSED | RESPONSE_CUT")
+
+        retry_sid, retry = _respond(game, "Kinsey studied human sexuality.")
+        assert retry.endswith(OFFER)
+        _air(game, retry_sid, retry)
+        assert game.addressed_state()["offer_aired"] is True
 
     _run(_go)
 

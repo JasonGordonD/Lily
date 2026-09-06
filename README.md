@@ -666,7 +666,9 @@ One hold, one trigger, one exit, several response contracts:
   explicit STOP retires it (`by=stop`); an explicit pause outranks it and
   one "okay go" lifts both. On an acceptance progression resumes exactly
   where the address interrupted it — a half-aired read, else the armed
-  question — and that delivery is the reply to the acceptance.
+  question — and that delivery is the reply to the acceptance. Acceptance
+  includes inverted short affirmatives such as "I am, yes"; speaker tags
+  are stripped inside the affirmative detector itself.
 - **One wait owner**: the exact exit offer is owned only by `addressed`.
   Its trailing question mark does not enter the generic P6
   `question_pending` latch, and B8's four-second silence budget stands down
@@ -692,7 +694,10 @@ One hold, one trigger, one exit, several response contracts:
   `OFFER_APPENDED`), never silent.
 - **The whole escalation**: once the offer airs, Lily waits. A held game
   with a host who has offered the way back is the correct state; only a
-  new player final can accept the offer or restart the addressed cycle.
+  new player final can accept the offer or restart the addressed cycle. If
+  the addressed response is cut, suppressed, or fails before completion,
+  its `responded` reservation is cleared so the next organic attempt is
+  capped and receives the exit offer again.
 
 Receipts: `LILY_ADDRESSED | HELD | q= seq= subtype= fl1_score= fl1_reason=
 window_open= clock_held= text=` · `NOT_HELD | reason=` · `RESPONDED |

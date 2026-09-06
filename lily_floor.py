@@ -2569,10 +2569,21 @@ class LilyFloorMixin:
         if state.get("speech_id") != speech_id:
             return
         if interrupted or suppressed or failed:
+            # HOTFIX-TURN-STATE-001: ``responded`` is a pipeline reservation,
+            # not proof that the response reached the room. A lost playout
+            # must reopen the response contract so the next organic attempt is
+            # capped and receives the exit offer instead of leaving B9 wedged
+            # in responded=True / offer_aired=False.
+            state["responded"] = False
+            state["speech_id"] = None
+            state["sentences"] = None
+            state["trimmed"] = False
+            state["offer_appended"] = False
             logger.warning(
                 "LILY_ADDRESSED | RESPONSE_CUT | session=%s seq=%s speech_id=%s "
                 "interrupted=%s suppressed=%s failed=%s — the offer did not "
-                "reach the room; the hold stands (B9)",
+                "reach the room; the response contract is re-opened and the "
+                "hold stands (B9)",
                 self.sk.session_id, state.get("seq"), speech_id,
                 bool(interrupted), bool(suppressed), bool(failed),
             )

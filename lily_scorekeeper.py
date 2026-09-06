@@ -684,6 +684,7 @@ _BARE_AFFIRMATIVE_RE = _re.compile(
     r"y(?:es|eah|ep|up|a)|yup|sure|ok(?:ay)?|alright|all right"
     r"|yes(?:,?\s*(?:ma'?am|sir|please|i am|i do|i will))?"
     r"|yeah(?:,?\s*(?:i am|i do))?"
+    r"|(?:i am|i'?m|we are|we'?re),?\s*(?:yes|yeah)"
     r")\.?\s*$",
     _re.IGNORECASE,
 )
