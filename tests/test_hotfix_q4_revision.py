@@ -343,13 +343,10 @@ def test_acceptance_detectors_see_through_the_known_speaker_prefix(raw):
     assert lily_scorekeeper.lily_detect_addressed_acceptance(raw) is True
 
 
-def test_bare_affirmative_after_the_source_strip():
-    # lily_is_bare_affirmative matches the RAW text; the strip at the
-    # handler is what lets "[Rami] Okay." exempt the addressed trigger.
-    assert lily_scorekeeper.lily_is_bare_affirmative("[Rami] Okay.") is False
-    assert lily_scorekeeper.lily_is_bare_affirmative(
-        lily_scorekeeper.lily_strip_speaker_tags("[Rami] Okay.")
-    ) is True
+def test_bare_affirmative_strips_the_speaker_prefix_itself():
+    # Every entry point gets the same answer even if a caller bypasses the
+    # lifted transcript handler's source normalization.
+    assert lily_scorekeeper.lily_is_bare_affirmative("[Rami] Okay.") is True
 
 
 def test_handler_strips_the_known_speaker_prefix_before_the_scorekeeper():

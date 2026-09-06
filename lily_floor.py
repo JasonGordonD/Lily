@@ -2199,6 +2199,18 @@ class LilyFloorMixin:
         """True while the table's address holds progression (B9)."""
         return getattr(self, "_addressed", None) is not None
 
+    def addressed_offer_in_turn(self, text: str) -> bool:
+        """True when a live addressed response carries B9's exit offer.
+
+        The offer is owned by the addressed hold itself. It must not also
+        enter the generic conversational ``question_pending`` state merely
+        because it ends in a question mark.
+        """
+        if not self.addressed_active():
+            return False
+        normalized = " ".join(str(text or "").lower().split())
+        return self._ADDRESSED_OFFER_KEY in normalized
+
     def addressed_state(self) -> dict | None:
         """A copy of the live hold's record (receipts, tests) or None."""
         state = getattr(self, "_addressed", None)
@@ -2557,10 +2569,21 @@ class LilyFloorMixin:
         if state.get("speech_id") != speech_id:
             return
         if interrupted or suppressed or failed:
+            # HOTFIX-TURN-STATE-001: ``responded`` is a pipeline reservation,
+            # not proof that the response reached the room. A lost playout
+            # must reopen the response contract so the next organic attempt is
+            # capped and receives the exit offer instead of leaving B9 wedged
+            # in responded=True / offer_aired=False.
+            state["responded"] = False
+            state["speech_id"] = None
+            state["sentences"] = None
+            state["trimmed"] = False
+            state["offer_appended"] = False
             logger.warning(
                 "LILY_ADDRESSED | RESPONSE_CUT | session=%s seq=%s speech_id=%s "
                 "interrupted=%s suppressed=%s failed=%s — the offer did not "
-                "reach the room; the hold stands (B9)",
+                "reach the room; the response contract is re-opened and the "
+                "hold stands (B9)",
                 self.sk.session_id, state.get("seq"), speech_id,
                 bool(interrupted), bool(suppressed), bool(failed),
             )

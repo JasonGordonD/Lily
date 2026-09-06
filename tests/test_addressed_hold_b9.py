@@ -209,6 +209,7 @@ def test_response_contract_subtype(text, subtype):
     "yes", "yeah", "sure", "okay", "ready", "okay ready", "next one",
     "next question", "hit me", "yeah, next one", "go ahead", "let's go",
     "we're ready", "sure, go ahead", "bring it on", "okay go",
+    "I am, yes", "I am yes", "Yes, I am", "we're, yeah",
 ])
 def test_acceptance_detected(text):
     assert lily_scorekeeper.lily_detect_addressed_acceptance(text) is True
@@ -310,6 +311,9 @@ def test_kinsey_question_holds_answers_offers_and_q3_reads_once_after_acceptance
         # The offer reaches the room; the hold stands — the table takes it.
         _air(game, sid, aired)
         assert game.addressed_state()["offer_aired"] is True
+        # B9's exit offer is not also a P6 conversational question. One
+        # addressed hold owns the wait and the following acceptance.
+        assert game._question_pending is False
         assert _lines(caplog, "LILY_ADDRESSED | OFFER_AIRED")
         assert game.progression_paused_reason() == "addressed"
         assert game.dispatch_armed_question(source="test") is False
@@ -360,6 +364,39 @@ def test_the_offer_is_appended_when_the_model_leaves_it_off(caplog):
             sid, aired = _respond(game, "Kinsey was a biologist.")
         assert aired.endswith(OFFER)
         assert _lines(caplog, "LILY_ADDRESSED | OFFER_APPENDED")
+
+    _run(_go)
+
+
+def test_a_cut_addressed_response_reopens_the_contract(caplog):
+    game = _airgate_game()
+    _armed_next(game)
+    at = time.time()
+    _adjacent(game, at)
+
+    def _go():
+        _final(game, LIVE_KINSEY, at)
+        sid, aired = _respond(game, "Kinsey studied human sexuality.")
+        assert game.addressed_state()["responded"] is True
+
+        game.note_playout_started(sid)
+        with caplog.at_level(logging.INFO):
+            game.on_agent_speech_finished(
+                aired, speech_id=sid, interrupted=True,
+            )
+
+        state = game.addressed_state()
+        assert state["responded"] is False
+        assert state["speech_id"] is None
+        assert state["offer_aired"] is False
+        assert _lines(caplog, "LILY_ADDRESSED | RESPONSE_CUT")
+
+        retry_sid, retry = _respond(
+            game, "He later became known for studying human sexuality.",
+        )
+        assert retry.endswith(OFFER)
+        _air(game, retry_sid, retry)
+        assert game.addressed_state()["offer_aired"] is True
 
     _run(_go)
 
@@ -598,56 +635,35 @@ def test_no_timer_lifts_the_hold_and_the_reply_owed_latch_sits_below_it():
     _run(_go)
 
 
-def test_a_new_address_restarts_the_cycle_and_the_game_never_advances(
-    caplog,
-):
-    """Three addresses in sequence, no acceptance between: the game never
-    advances; each cycle's offer repeats once on the silence (B8), then
-    B8 is back to its own line; no dispatch."""
+def test_addressed_hold_owns_silence_without_b8_duplicate_reply(caplog):
+    """B8 must not race B9 before or after the addressed response.
+
+    A slow organic handle is not dead air, and an aired offer is already the
+    complete exit. Neither state may dispatch a second reply or repeat it.
+    """
     game = _airgate_game()
     _armed_next(game)
     at = time.time()
-    floor_lines = set(sum(
-        (list(v) for v in lily_say_gate.LILY_FLOOR_LINES.values()), []
-    ))
-
-    def _cycle(text, response, when):
-        _adjacent(game, when)
-        _final(game, text, when)
-        assert game.progression_paused_reason() == "addressed"
-        sid, aired = _respond(game, response)
-        _air(game, sid, aired)
-        assert game.addressed_state()["offer_aired"] is True
-        # the silence after the offer: B8 fires the offer, once
-        game.note_user_final("hmm")
-        game.note_user_turn()
-        assert game.silence_budget_state() == "fire"
-        assert game.silence_budget_fire() is True
-        assert game.session.said[-1] == OFFER
-        for sid_, act in list(game._dispatched_act_by_speech.items()):
-            game.on_agent_speech_finished(act, speech_id=sid_)
-        # a second silence in the same cycle: B8's own line, not the offer
-        game.note_user_final("hmm")
-        game.note_user_turn()
-        assert game.silence_budget_fire() is True
-        assert game.session.said[-1] in floor_lines
-        for sid_, act in list(game._dispatched_act_by_speech.items()):
-            game.on_agent_speech_finished(act, speech_id=sid_)
 
     def _go():
         with caplog.at_level(logging.INFO):
-            _cycle(LIVE_KINSEY, FIVE_SENTENCES, at)
-            _cycle(LIVE_SLOW, THREE_SENTENCES, at + 40)
-            _cycle(LIVE_NAME, "Fixed. Sorry.", at + 80)
+            _adjacent(game, at)
+            _final(game, LIVE_KINSEY, at)
+            game.note_user_turn()
+            assert game.silence_budget_state() == "addressed"
+            assert game.silence_budget_fire() is False
+
+            sid, aired = _respond(game, FIVE_SENTENCES)
+            _air(game, sid, aired)
+            assert game.addressed_state()["offer_aired"] is True
+            assert game.silence_budget_state() == "addressed"
+            assert game.silence_budget_fire() is False
+
         assert game.progression_paused_reason() == "addressed"
-        assert game.addressed_state()["seq"] == 3
         assert "question_delivery" not in _acts(game)
-        assert game.dispatch_armed_question(source="test") is False
-        released = _lines(caplog, "LILY_ADDRESSED | RELEASED")
-        assert len(released) == 2
-        assert all("by=new_address" in m for m in released)
-        assert len(_lines(caplog, "LILY_ADDRESSED | OFFER_REPEATED")) == 3
-        assert len(_addressed_events(game, "hold")) == 3
+        assert not game.session.said
+        assert not _lines(caplog, "LILY_ADDRESSED | OFFER_REPEATED")
+        assert _lines(caplog, "LILY_SILENCE | BUDGET_STAND_DOWN")
 
     _run(_go)
 

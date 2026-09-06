@@ -684,6 +684,7 @@ _BARE_AFFIRMATIVE_RE = _re.compile(
     r"y(?:es|eah|ep|up|a)|yup|sure|ok(?:ay)?|alright|all right"
     r"|yes(?:,?\s*(?:ma'?am|sir|please|i am|i do|i will))?"
     r"|yeah(?:,?\s*(?:i am|i do))?"
+    r"|(?:i am|i'?m|we are|we'?re),?\s*(?:yes|yeah)"
     r")\.?\s*$",
     _re.IGNORECASE,
 )
@@ -706,13 +707,14 @@ _OR_CHOICE_OFFER_RE = _re.compile(
 
 def lily_is_bare_affirmative(text: str) -> bool:
     """True for a short yes/yeah/yep/okay with no start/play/go payload."""
-    normalized = _normalize_command_text(text)
+    stripped = lily_strip_speaker_tags(text or "")
+    normalized = _normalize_command_text(stripped)
     if not normalized:
         return False
     # Explicit start language always wins — not bare.
     if _START_GAME_RE.search(normalized):
         return False
-    raw = (text or "").strip()
+    raw = stripped.strip()
     if len(raw) > 48:
         return False
     return bool(_BARE_AFFIRMATIVE_RE.match(raw))

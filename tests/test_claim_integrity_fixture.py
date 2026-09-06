@@ -434,3 +434,35 @@ def test_q7_apology_rewrites_to_sheet_before_claiming():
         == lily_say_gate.CLAIM_CONFIRMED
     )
     assert Q7_WALTER["prompt"] in game.metadata_publishes
+
+
+def test_game_start_delivery_drops_generated_reveal_prefix():
+    """Round-one kickoff is a question-only delivery owner.
+
+    A model turn that names the answer before eventually including the stem
+    must be replaced by the deterministic sheet, not accepted because the
+    stem happened to appear later in the same turn.
+    """
+    game = _make_game(game_started=True)
+    _arm(game, Q7_WALTER)
+    game.sk.question_number = 1
+    speech_id = "speech-game-start"
+    game._delivery_speech_acts[speech_id] = "game_start"
+    contaminated = (
+        "Nobody grabbed it — Walter White. "
+        + Q7_WALTER["prompt"]
+    )
+
+    assert (
+        game.register_delivery_claim(contaminated, speech_id=speech_id)
+        == "rewrite_strict"
+    )
+    assert game.say_registry.state("q_1_delivery") is None
+
+    game.expect_delivery()
+    sheet = game.rendered_armed_question()
+    assert sheet == Q7_WALTER["prompt"]
+    assert (
+        game.register_delivery_claim(sheet, speech_id=speech_id)
+        == "claimed_structural"
+    )

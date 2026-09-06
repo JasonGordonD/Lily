@@ -2588,8 +2588,8 @@ class LilySpeechDeliveryMixin:
     def silence_budget_state(self) -> str:
         """"fire" when the last committed turn has gone unanswered — no Lily
         speech dispatched (pending or airing) since its final, nobody on
-        the air, no hold, no answer awaiting its ruling, not already
-        floored; else the stand-down reason."""
+        the air, no hold or addressed response, no answer awaiting its
+        ruling, not already floored; else the stand-down reason."""
         seq = int(self._reply_owed_seq or 0)
         if seq == 0:
             return "no_turn"
@@ -2599,6 +2599,13 @@ class LilySpeechDeliveryMixin:
             return "game_stopped"
         if self._hold_active:
             return "hold"
+        # HOTFIX-TURN-STATE-001: B9 already owns the complete response to a
+        # direct address. Before this guard, a slow organic handle looked like
+        # dead air to B8, which dispatched a second reply; after the response
+        # aired, the same timer could repeat B9's offer. Both paths produced
+        # duplicate turns and "ready for the next one?" loops.
+        if self.addressed_active():
+            return "addressed"
         if getattr(self, "_user_speaking", False):
             return "user_speaking"
         if getattr(self.sk, "host_speaking", False):
@@ -2916,11 +2923,11 @@ class LilySpeechDeliveryMixin:
             delivery_acts.pop(speech_id, None) if speech_id else None
         )
         textual = self._delivery_text_matches_armed(spoken_text)
-        # Explicit post-reveal/nudge turns are question-only handles. Always
-        # replace their model prose with the deterministic sheet on the first
-        # pass, even when the model included the question after another
-        # celebration ("Gold is correct!" before Franklin).
-        if delivery_act in ("question_delivery", "question_nudge"):
+        # Explicit kickoff/post-reveal/nudge turns are question-only handles.
+        # Always replace their model prose with the deterministic sheet on the
+        # first pass, even when the model included the question after another
+        # celebration or reveal ("Gold is correct!" before Franklin).
+        if delivery_act in ("question_delivery", "question_nudge", "game_start"):
             logger.info(
                 "LILY_DELIVERY | EXACT_SHEET_REWRITE | session=%s q=%d "
                 "act=%s",

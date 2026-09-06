@@ -111,6 +111,47 @@ merged main 1c03eee**, 40/40 here. Docketed, not fixed: a trailing
 transcript (audit inaccuracy, not a point); `lily_binding`,
 `lily_addressee_classifier`, `lily_addressee`, `lily_evaluation:1495`
 still strip only `[S\d+]` on their own entry points.
+## 2026-09-06 — HOTFIX-TURN-STATE-001: one owner for addressed waits and round-one delivery
+
+Audit of session `lily-F46922-4632e8e1` found deterministic collisions
+between three independently correct mechanisms: B9's addressed-player hold,
+P6's conversational `question_pending` latch, and B8's four-second silence
+budget. The resulting behavior was not a prompt-only failure:
+
+* B8 treated a slow addressed response as unanswered because the organic
+  `SpeechHandle` did not yet exist, then dispatched a holding line and a
+  second generated reply. If B9's offer had already aired, the same path
+  repeated `…anyway — ready for the next one?`.
+* The offer's question mark entered P6 `question_pending`, so one spoken exit
+  was controlled by two independent latches.
+* One bare-affirmative path normalized speaker tags for intent matching but
+  applied its final regex to the raw `[Rami] Okay.` text.
+* The `game_start` delivery accepted arbitrary generated prose as long as the
+  armed question appeared somewhere later in the turn. That let a reveal or
+  answer prefix ride before the first question while still claiming a valid
+  delivery.
+
+The fix gives each transition one owner:
+
+1. `silence_budget_state()` returns `addressed` throughout a B9 hold. The
+   addressed response and exit offer cannot race a second B8 reply.
+2. A live B9 exit offer is exempt from P6 `question_pending`; acceptance is
+   consumed solely by the addressed hold.
+3. `lily_is_bare_affirmative()` strips diarization/known-speaker tags itself,
+   protecting callers that do not enter through the primary transcript
+   handler, and accepts inverted short forms such as "I am, yes".
+4. `game_start` joins question delivery/nudge in the exact-sheet rewrite.
+   Round one can no longer carry generated reveal, score, or answer prose
+   before the deterministic armed question.
+5. A cut, suppressed, or failed addressed playout clears its provisional
+   `responded` reservation. The retry is capped and receives the offer instead
+   of leaving the hold in `responded=true, offer_aired=false`.
+6. The system prompt now says the next question starts at the progression
+   seam, removing its contradictory immediate "score line, next" instruction.
+
+Regression coverage pins the slow-handle B8 race, the offer/P6 isolation,
+speaker-tagged/inverted affirmatives, addressed-response retry, and the
+contaminated round-one delivery.
 
 ## 2026-09-06 — HOTFIX-DOUBLE-WELCOME-001: the second welcome-back behind the first
 
