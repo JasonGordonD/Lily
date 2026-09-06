@@ -55,7 +55,7 @@ def test_adult_model_pins_and_coercions(monkeypatch):
     # the cheapest thing to give back under contention.
     assert lily_config.adult_vocal_effort() == "low"
     assert lily_config.adult_reasoning_model() == "grok-4.5"
-    assert lily_config.adult_reasoning_effort() == "high"
+    assert lily_config.adult_reasoning_effort() == "medium"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "low")
     assert lily_config.adult_vocal_effort() == "low"
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "medium")
@@ -63,26 +63,23 @@ def test_adult_model_pins_and_coercions(monkeypatch):
     monkeypatch.setenv("LILY_ADULT_VOCAL_EFFORT", "garbage")
     assert lily_config.adult_vocal_effort() == "low"
     monkeypatch.setenv("LILY_ADULT_REASONING_EFFORT", "off")
-    assert lily_config.adult_reasoning_effort() == "high"
+    assert lily_config.adult_reasoning_effort() == "medium"
 
 
-def test_adult_reasoning_effort_is_always_high(monkeypatch):
-    """Adult sub-theme/category/question authorship never downgrades."""
+def test_adult_reasoning_effort_is_medium_table_wide(monkeypatch):
+    """Operator ruling 2026-09-06 (HOTFIX-MC-LETTER-A-001 commit): adult
+    authoring runs MEDIUM — at high, 16 of 16 live calls hit the 20 s
+    prefetch wall. The tier is table-wide: neither an env var nor a
+    per-call injection changes it (an earlier "non-negotiably high"
+    ruling is reversed and must not be restored)."""
     monkeypatch.delenv("LILY_ADULT_REASONING_EFFORT", raising=False)
-    assert lily_config.adult_reasoning_effort() == "high"
-    # A caller pins its own tier.
-    assert lily_config.adult_reasoning_effort("high") == "high"
-    assert lily_config.adult_reasoning_effort("low") == "high"
-    # "off" injects as "send no parameter at all".
-    assert lily_config.adult_reasoning_effort("off") == "high"
-    # An unrecognised injection falls back to the CONFIGURED value rather
-    # than silently substituting a tier the operator never chose — and
-    # never raises, because a bad string must not take a lane down.
-    assert lily_config.adult_reasoning_effort("turbo") == "high"
-    monkeypatch.setenv("LILY_ADULT_REASONING_EFFORT", "low")
-    assert lily_config.adult_reasoning_effort("turbo") == "high"
-    # Injection still beats the environment.
-    assert lily_config.adult_reasoning_effort("high") == "high"
+    assert lily_config.adult_reasoning_effort() == "medium"
+    assert lily_config.adult_reasoning_effort("high") == "medium"
+    assert lily_config.adult_reasoning_effort("low") == "medium"
+    assert lily_config.adult_reasoning_effort("off") == "medium"
+    assert lily_config.adult_reasoning_effort("turbo") == "medium"
+    monkeypatch.setenv("LILY_ADULT_REASONING_EFFORT", "high")
+    assert lily_config.adult_reasoning_effort("high") == "medium"
 
 
 # -- the vocal swap ------------------------------------------------------------

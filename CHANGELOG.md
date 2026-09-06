@@ -5,6 +5,48 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — HOTFIX-MC-LETTER-A-001: option A was unanswerable once the read had finished (live 13:27 UTC)
+
+Live receipt: session lily-BE84AA-11451c02 on a59d209, Q5 (four choices,
+answer A). "A." at 13:27:27.9Z with the window open (question_timeline q5
+has window_opened_at and no window_closed_at) bound nothing; the organic
+lane re-read the question and whispered "A…"; "Yes, that's my answer."
+went to the tier-2 judge. Q2's "The answer is a." had bound only because
+the options read was still in flight — the early-answer path evaluates
+the raw text and never reaches this gate.
+
+Cause: `lily_evaluation.lily_non_answer_utterance` normalized the final
+first and returned "empty" when nothing survived — the normalizer strips
+the article "a", so "A." / "a" / "The answer is a." all became "" and
+never reached the answer-surface override the docstring promises. "b."
+survives the normalizer; only option A was dead. Fix: on a four-choice
+card the B1 letter parser (`lily_tier1_evaluate_mc`) runs first — a
+resolved pick is an attempt, whatever the normalizer makes of it. The
+bare article inside a clause ("it's a") still resolves nothing and stays
+a non-answer.
+
+Riding the same commit — **operator ruling: adult reasoning effort →
+medium.** Every reasoning call on 2026-09-06 (16 of 16 across six
+sessions, including this one) ended at the 20 s prefetch wall with no
+first byte (`lily_llm_usage` purpose=reasoning: total_ms≈20001, ttft
+null, finish_reason=cancelled) — the non-streaming transport only
+answers when generation is done, and grok-4.5 at high does not finish
+inside 20 s. Effect in the live call: Q1 31 s after "let's go", Q3 45 s
+after Q2, Q4's reveal 27 s after the answer. `adult_reasoning_effort()`
+now returns "medium" (override still ignored — the tier is table-wide);
+the literal `"high"` injections in lily_reasoning are gone; the README's
+"non-negotiably high" ruling is reversed with a do-not-restore note; the
+pins in tests/test_adult_grok.py and tests/test_model_and_thinking.py
+follow. The durable fix — a streaming transport whose wall applies to
+idle time — is WO-LILY-STREAMING-REASONING-001, in flight.
+
+Failing-first: tests/test_hotfix_mc_letter_a.py (3 tests, 2 red on
+a59d209; the third pins the conversational article and the true-empty
+reason). The production-path test drives the scorekeeper's segment path
+and `on_transcript_event` with the live shape. Live receipt to pull: a
+`window_closed_at` on the next four-choice card answered "A", and a
+scored row with method=letter.
+
 ## 2026-09-06 — Composition review of integ/w6: GO-WITH-FIXES, applied before main
 
 Reviewer verdict on 428bff1 (main 0bb3175 + WO-LILY-COMPOSITION-FOLLOWUP-001):

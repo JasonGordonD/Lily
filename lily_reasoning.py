@@ -623,7 +623,7 @@ class LilyReasoning:
             model=lily_config.adult_reasoning_model(),
             # Z2 (HOTFIX-008): a supply-recovery retry passes a de-escalated
             # effort so a hard draw does not reproduce the stall verbatim.
-            effort=effort or lily_config.adult_reasoning_effort("high"),
+            effort=effort or lily_config.adult_reasoning_effort(),
             purpose="reasoning",
         )
         # Schema mode: the output IS the JSON document — parse it directly.
@@ -652,8 +652,9 @@ class LilyReasoning:
     async def verify_question(
         self, question: dict
     ) -> tuple[bool, str]:
-        """Verification at prefetch time on Grok 4.5. Authoring/verification
-        always runs high."""
+        """Verification at prefetch time on Grok 4.5 at the table-wide
+        authoring tier (lily_config.adult_reasoning_effort — medium since
+        the 2026-09-06 operator ruling)."""
         prompt = _VERIFICATION_PROMPT.format(
             question_json=json.dumps(question, ensure_ascii=False)
         )
@@ -682,7 +683,7 @@ class LilyReasoning:
             prompt + _GROK_VERDICT_SHAPE_ADDENDUM,
             max_tokens=lily_config.reasoning_max_output_tokens(),
             model=lily_config.adult_reasoning_model(),
-            effort=lily_config.adult_reasoning_effort("high"),
+            effort=lily_config.adult_reasoning_effort(),
             purpose="reasoning",
         )
         # Schema mode: direct parse first; fence stripping is a defensive

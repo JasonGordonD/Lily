@@ -1856,10 +1856,24 @@ def lily_non_answer_utterance(
     answer no matter what else it looks like. That override is why N4's
     meta-speech classes are safe — "Why are we even talking about this?
     Chatham, I guess. Ridiculous." carries the answer and still scores."""
+    q = question or {}
+    # HOTFIX-MC-LETTER-A-001 (live 13:27:27Z, lily-BE84AA Q5): the
+    # normalizer strips the article "a", so "A." / "The answer is a."
+    # normalized to "" and returned "empty" before the answer-surface
+    # override below could see the letter — option A was unanswerable
+    # once the read had finished. On a four-choice card the B1 letter
+    # parser is the authority: if it resolves a pick, this is an attempt.
+    choices = q.get("choices")
+    if isinstance(choices, list) and len(choices) == 4:
+        pick = lily_tier1_evaluate_mc(
+            text or "", [str(c) for c in choices],
+            str(q.get("canonical_answer") or ""),
+        )
+        if isinstance(pick, dict) and pick.get("selected_index") is not None:
+            return None
     norm = lily_normalize_answer(text or "")
     if not norm:
         return "empty"
-    q = question or {}
     surfaces = {
         lily_normalize_answer(str(q.get("canonical_answer") or ""))
     }

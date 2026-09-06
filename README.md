@@ -504,7 +504,7 @@ No fixes under this clause; recommended as the next work order.
 | Framework | `livekit-agents==1.6.8` (plugin family pinned to match; endpointing uses `TurnHandlingOptions.endpointing` with FIXED mode; the LiveKit Turn Detector default remains off) |
 | STT | Speechmatics — `en`, diarization, `model=ENHANCED`; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`): `speaker_sensitivity=0.35`, `prefer_current_speaker=True`, `max_speakers=7`, FIXED turn mode, `ignore_speakers=["__ASSISTANT__"]`, player-name vocab, and StartRecognition `get_speakers`/volume injection. `LilySpeechmaticsSTT` maps the 1.6.8 plugin onto the supported RT `model` property; deprecated `operating_point` never reaches the wire. |
 | Vocal LLM | `grok-4.5`; `low` routine effort, per-turn `medium` for dispute/ambiguity/multi-intent/meta; the adult prompt layer is always-on (content-mode gate removed, WO-PRMPT-LILY-REFACTOR-001) |
-| Question reasoning | `grok-4.5` Responses API; author/verify `high` (unified adult deck); never speaks or mutates state |
+| Question reasoning | `grok-4.5`; author/verify `medium` (operator ruling 2026-09-06 — at `high` every live authoring call hit the 20 s prefetch wall; do not restore `high`); never speaks or mutates state |
 | TTS | ElevenLabs v3 via `lily_tts.py` (`/v1/text-to-speech/{voice_id}/stream`; the dialogue endpoint stays off per fleet revert). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`) |
 | VAD | Silero — barge-in enabled; STT is never gated during TTS |
 | Persistence | Supabase (`lily_*` tables), fail-fast init, checkpoint on score change / 60s / key events |
@@ -828,9 +828,14 @@ Every model ID below was verified live on the funded keys before wiring.
   tail. That tail includes current UTC and exact session elapsed time on
   every generation, giving Lily time-aware pacing without freezing a
   timestamp into the cacheable prompt.
-- **Question author/verification/distractors:** `grok-4.5` Responses API.
-  General uses `medium`; all adult sub-theme/category/question authoring and
-  verification is `high`.
+- **Question author/verification/distractors:** `grok-4.5`, `medium`
+  effort for general AND adult authoring/verification. Operator ruling
+  2026-09-06: the earlier "non-negotiably high" tier is reversed and must
+  not be restored — on the non-streaming transport every live authoring
+  call at `high` (16 of 16 across six sessions) hit the 20 s prefetch
+  wall with no first byte, so questions arrived 20–45 s late. The
+  durable fix is a streaming transport whose wall applies to idle time,
+  not total generation (in flight).
 - **Tier-2 judge:** `grok-4.5` `medium`, structured and 12s-bounded; it
   proposes correctness only and never commits score.
 - **Vision / image correspondence:** `grok-4.5` handles player photo

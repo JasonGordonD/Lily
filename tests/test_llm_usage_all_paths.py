@@ -524,7 +524,7 @@ def test_generate_question_verify_and_distractors_are_reasoning(monkeypatch):
     assert [row["purpose"] for row in sb.rows] == ["reasoning"] * 3
     efforts = sorted(row["effort"] for row in sb.rows)
     # authoring + verification run high; distractors run reasoning_effort
-    assert efforts == ["high", "high", "medium"]
+    assert efforts == ["medium", "medium", "medium"]
 
 
 def test_judge_row(monkeypatch):

@@ -91,7 +91,7 @@ def test_generate_question_sets_grok_model_effort_and_budget():
     assert q is not None and q["canonical_answer"] == "Back to the Future"
     assert seen["model"] == "grok-4.5"
     # Unified adult deck: authoring/verification always runs high.
-    assert seen["effort"] == "high"
+    assert seen["effort"] == "medium"
     assert seen["max_tokens"] == lily_config.reasoning_max_output_tokens()
 
 
@@ -104,7 +104,7 @@ def test_verify_question_sets_grok_model_effort_and_budget():
     assert ok is True and reason == "checks out"
     assert seen["model"] == "grok-4.5"
     # Unified adult deck: authoring/verification always runs high.
-    assert seen["effort"] == "high"
+    assert seen["effort"] == "medium"
     assert seen["max_tokens"] == lily_config.reasoning_max_output_tokens()
 
 

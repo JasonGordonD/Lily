@@ -44,7 +44,7 @@ def test_question_reasoning_models_are_grok_4_5():
     assert lily_config.reasoning_model() == "grok-4.5"
     assert lily_config.reasoning_effort() == "medium"
     assert lily_config.adult_reasoning_model() == "grok-4.5"
-    assert lily_config.adult_reasoning_effort() == "high"
+    assert lily_config.adult_reasoning_effort() == "medium"
     assert lily_config.judge_model() == "grok-4.5"
     assert lily_config.judge_effort() == "medium"
     assert lily_config.assessment_model() == "grok-4.5"

@@ -329,8 +329,16 @@ def adult_reasoning_model() -> str:
 
 
 def adult_reasoning_effort(override: Optional[str] = None) -> Optional[str]:
-    """Adult authoring is non-negotiably Grok 4.5 high."""
-    return "high"
+    """Adult authoring runs Grok 4.5 at MEDIUM effort (operator ruling
+    2026-09-06, reversing the earlier "non-negotiably high"): on the
+    non-streaming transport, every live authoring call at high — 16 of 16
+    across six sessions that day — hit the 20 s prefetch wall with no
+    first byte, so questions arrived 20–45 s late. Medium is the live
+    default; the durable fix is the streaming transport (so the wall
+    applies to idle time, not total generation). The override argument
+    is ignored on purpose — the tier is a table-wide decision, not a
+    per-call one."""
+    return "medium"
 
 
 def adult_imagegen_model() -> str:
