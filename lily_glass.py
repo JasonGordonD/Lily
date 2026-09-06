@@ -113,6 +113,8 @@ class StateView:
     floor_speaking: Optional[str] = None
     explain_note: Optional[str] = None
     contest_note: Optional[str] = None
+    # WO-LILY-ADDRESSED-001 (B9): the addressed hold's contract line.
+    addressed: Optional[str] = None
     late_answer_note: Optional[str] = None
     result_aired: Optional[str] = None
     lobby: list = field(default_factory=list)
@@ -128,7 +130,7 @@ class StateView:
         "why_note", "identity_probe", "returner_claim", "late_recognition",
         "recognition_dispute", "ambiguous_yes", "setup_pending",
         "adult_consent", "floor_speaking", "explain_note", "contest_note",
-        "late_answer_note", "result_aired", "lobby",
+        "addressed", "late_answer_note", "result_aired", "lobby",
     )
 
     def render(self) -> list:
@@ -658,6 +660,12 @@ class LilyGlassMixin:
         # the exception — the next final does NOT release it (live 11:50:36Z
         # "Paused." then window 3 at 11:50:43Z); only an explicit resume /
         # "okay go", or an answer landing in the still-open window, does.
+        # WO-LILY-ADDRESSED-001 (B9): the table's exits from the addressed
+        # hold — an answer landing in the open window, or the table taking
+        # the offer — read BEFORE the pause branch so one "okay go" lifts
+        # both and the pause's own resume can dispatch. A fresh address
+        # re-arms at the end of this event (note_addressed_final).
+        self.maybe_release_addressed_on_final(result, text)
         if self._hold_active:
             if self.pause_sticky():
                 if (
@@ -679,6 +687,15 @@ class LilyGlassMixin:
         # PATCH-003 P6 — the table answered the question she asked: release
         # the pending state so her normal speak-by-default engages this
         # turn as the response (she finishes the conversation she started).
+        # B9: a reply to a question SHE asked is not an address of her —
+        # remembered before the release so the addressed trigger below can
+        # exempt it. The one question that does NOT exempt: the offer
+        # ("…ready for the next one?") — a final answering THAT which is
+        # not an acceptance is the table addressing her again, and the
+        # cycle restarts.
+        answered_her_question = bool(self._question_pending) and not bool(
+            (getattr(self, "_addressed", None) or {}).get("offer_aired")
+        )
         if self._question_pending:
             self.release_question_pending(reason="user_answered")
 
@@ -1315,6 +1332,21 @@ class LilyGlassMixin:
                 )
             except Exception as e:
                 logger.warning("LILY_ANSWER | LATE_CHECK_FAILED: %s", e)
+
+        # WO-LILY-ADDRESSED-001 (B9) — THE trigger: "Progression yields to
+        # the table." Sits after every deterministic lane above has had its
+        # turn (each code-routed final returned or marked itself), so what
+        # reaches here host-directed and un-scored is an ADDRESS: the game
+        # holds, she responds in kind under the contract line the state
+        # block carries, and it resumes only when the table gives it back.
+        if not result.get("candidate_recorded"):
+            try:
+                self.note_addressed_final(
+                    result, text, judgment,
+                    answered_her_question=answered_her_question,
+                )
+            except Exception:  # pragma: no cover — never take the turn down
+                logger.exception("LILY_ADDRESSED | TRIGGER_FAILED")
 
         # Instant Tier-1 path: a clean earliest answer scores immediately.
         if result.get("candidate_recorded") and self.sk.answer_window_open:
@@ -2450,6 +2482,11 @@ class LilyGlassMixin:
         contest_note = self._contest_note
         if contest_note:
             view.contest_note = contest_note
+        # WO-LILY-ADDRESSED-001 (B9): the hold and its response contract,
+        # legible at generation time (S8) — context only, never spoken.
+        addressed_line = self.addressed_directive()
+        if addressed_line:
+            view.addressed = addressed_line
         # HOTFIX-006 N9: a correct answer that landed past the window. It
         # rides here so the miss is ANNOUNCED with its reason — the live
         # alternative was Rami's "Okay. It's Jupiter." vanishing while

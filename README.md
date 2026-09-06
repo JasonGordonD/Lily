@@ -559,6 +559,82 @@ shadow stay in the director — the authority flip + latch deletion are W4.
   custom-category overrides still work, camera lane stays available, STOP
   freezes-not-burns (LIVEFIRE-001 4b).
 
+## Progression yields to the table (WO-LILY-ADDRESSED-001, B9)
+
+The operator's UNIVERSAL RULE, verbatim:
+
+> Progression yields to the table. Whenever a player addresses her — a
+> question, a comment, a joke, a correction, a request, anything directed
+> at her rather than at the game — the game holds, she responds in kind,
+> and it resumes only when the table gives it back. Answer-shaped
+> utterances into an open window get scored. Everything else gets a host.
+
+One hold, one trigger, one exit, several response contracts:
+
+- **The hold** is `addressed` — `progression_paused_reason()` reads it
+  below STOP (`game_stopped`) and the explicit pause/hold (`hold`) and
+  above every transient reason and B7's `reply_owed`. While it stands no
+  question lane dispatches (`dispatch_armed_question` refuses; the
+  `question_delivery` / `question_nudge` acts are refused at gated_say's
+  progression chokepoint whatever lane sent them — the window fallback,
+  the supply auto-advance, the refire), the C3c/C3d read-resume defers,
+  the idle watchdog halts, and an open window's clock is held the way a
+  pause holds it (candidates kept). No timer lifts it.
+- **The trigger** is FL-1 (`lily_addressee_classifier`): a final the
+  classifier reads `host_directed` — score ≥ `host_threshold` (0.60), or
+  one of its hard rules (vocative name, floor-hold declaration, command
+  shape, definitional answer match) — that did NOT become an answer
+  candidate, in a live game, and that no code lane routed (a control
+  command, a media choice, a code-acked final, a reply to a question she
+  asked, a backchannel, a bare affirmative, an acceptance). Read at the
+  end of the transcript event, after every deterministic lane
+  (`lily_floor.note_addressed_final`). Nothing about the words triggers
+  the hold — between questions with no name and no adjacency FL-1 reads
+  side chatter (0.35) and nothing holds; that is the classifier's call.
+- **The exit** is the table's: an answer landing in an open window
+  (`by=answer`), the table taking the offer (`by=acceptance` —
+  `lily_detect_addressed_acceptance`: the B2 pause-release family, a bare
+  affirmative, "next one" / "hit me" / "yeah, go"), or the table
+  addressing her again (`by=new_address`, which restarts the cycle). An
+  explicit STOP retires it (`by=stop`); an explicit pause outranks it and
+  one "okay go" lifts both. On an acceptance progression resumes exactly
+  where the address interrupted it — a half-aired read, else the armed
+  question — and that delivery is the reply to the acceptance.
+- **The contract** (`lily_scorekeeper.lily_classify_address`) only picks
+  what the organic lane answers under; the state block carries it as an
+  `ADDRESSED (held in code, subtype=…)` line: `question` — up to three
+  sentences; `structural` — a real answer about what is hers to steer or
+  an honest referral, never the fault restated; `correction` — own it,
+  fix it on the reversal path (`lily_bind_speaker` / `lily_correct_verdict`
+  / `lily_award_bonus`), confirm; `complaint` — plain acknowledgment and
+  action, no levity; `banter` — one beat; `request` — route it or refuse
+  honestly, a bare "heard you" is not a response; `floor_hold` — the floor
+  is theirs, nothing scored; `game_meta` — the existing explain / options
+  / hint / repeat directive is the response, no offer; `other` —
+  acknowledge, hold, offer. The say pipeline (`AddressedCap`) enforces the
+  cap mechanically — three body sentences for the question contracts, two
+  for the rest — and closes the response with the operator's exit,
+  exactly `…anyway — ready for the next one?`, appended when the model
+  left it off. Every rewrite is logged (`LILY_ADDRESSED | TRIMMED` /
+  `OFFER_APPENDED`), never silent.
+- **The whole escalation**: with the offer aired and the table silent,
+  B8's silence line is the offer, once per hold; then B8 is back to its
+  own lines. A held game with a host who has offered the way back is the
+  correct state.
+
+Receipts: `LILY_ADDRESSED | HELD | q= seq= subtype= fl1_score= fl1_reason=
+window_open= clock_held= text=` · `NOT_HELD | reason=` · `RESPONDED |
+speech_id= subtype= sentences= cap= trimmed= offer=` · `TRIMMED` ·
+`OFFER_APPENDED` · `OFFER_AIRED` · `RESPONSE_CUT` · `OFFER_REPEATED` ·
+`STILL_HELD` · `RELEASED | by=answer|acceptance|new_address|stop`;
+`LILY_PROGRESSION | PAUSED … reason=addressed` and `DISPATCH_PAUSED …
+reason=addressed`; `lily_sessions.metadata.airgate_events[]`
+`{reason:"addressed", stage:"hold"|"release", detail:{utterance, subtype,
+fl1_score, fl1_reason, sentences, trimmed, offer_aired, released_by,
+held_ms}}`. SQL: `select e from lily_sessions, jsonb_array_elements(
+metadata->'airgate_events') e where session_id='<id>' and
+e->>'reason'='addressed';`
+
 ## Architecture invariants
 
 - **No generation gate or trigger loop.** Lily speaks by default — silence is

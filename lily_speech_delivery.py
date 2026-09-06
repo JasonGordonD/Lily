@@ -439,10 +439,16 @@ class LilySpeechDeliveryMixin:
             # nudge that resolves it, and host_speaking refused the nudge
             # that fires as her own turn ends (both caught by the
             # desync/adult fixtures the original P0-G left red).
+            # WO-LILY-ADDRESSED-001 (B9): and the table's address. This is
+            # the one chokepoint EVERY question lane passes (the window
+            # fallback, the supply auto-advance, the undelivered refire,
+            # the idle re-arm, dispatch_armed_question) — "no question
+            # dispatches over it" is enforced here, not lane by lane.
             paused = (
                 "address_unanswered"
                 if self._awaiting_address_since
-                else "setup_pending" if self.pending_setup_jobs() else None
+                else "setup_pending" if self.pending_setup_jobs()
+                else "addressed" if self.addressed_active() else None
             )
             if paused:
                 logger.info(
@@ -2606,6 +2612,14 @@ class LilySpeechDeliveryMixin:
         nonce = int(getattr(self, "_floor_line_nonce", 0) or 0)
         self._floor_line_nonce = nonce + 1
         line = lily_say_gate.lily_floor_line(self._floor_context(), nonce)
+        # WO-LILY-ADDRESSED-001 (B9): under an addressed hold whose offer
+        # has aired, the silence's holding line IS the offer, once per
+        # hold — the whole escalation. Then B8 is back to its own lines.
+        repeat = getattr(self, "addressed_offer_repeat_line", None)
+        if callable(repeat):
+            offer_line = repeat()
+            if offer_line:
+                line = offer_line
         logger.warning(
             "LILY_SILENCE | BUDGET_FIRED | session=%s turn=%d waited_ms=%.0f "
             "budget_s=%.1f line=%r last_final=%r — a completed turn with no "
@@ -3532,11 +3546,15 @@ class LilySpeechDeliveryMixin:
             # OWED — while it is in flight (created, not yet aired) the
             # resume defers exactly as it does while she is speaking, so
             # the read lands after the answer, never ahead of it.
+            # WO-LILY-ADDRESSED-001 (B9): and never over the table's
+            # address — the read resumes when the table gives the game
+            # back (release_addressed → _addressed_resume_progression).
             if (
                 getattr(self.sk, "host_speaking", False)
                 or self._user_speaking
                 or self._hold_active
                 or self.reply_owed_reason() is not None
+                or self.addressed_active()
             ):
                 continue
             logger.warning(
@@ -3578,6 +3596,16 @@ class LilySpeechDeliveryMixin:
                 "LILY_BARGE | QUESTION_RESUME_DEFERRED | session=%s q=%d "
                 "reason=reply_owed — the read resumes after the reply the "
                 "barge is owed, never ahead of it (B7)",
+                self.sk.session_id, qnum,
+            )
+            return False
+        if self.addressed_active():
+            # WO-LILY-ADDRESSED-001 (B9): the barge was an ADDRESS — the
+            # game is held; the read resumes when the table gives it back.
+            logger.info(
+                "LILY_BARGE | QUESTION_RESUME_DEFERRED | session=%s q=%d "
+                "reason=addressed — the table addressed her; the read "
+                "resumes on their acceptance, never over the hold (B9)",
                 self.sk.session_id, qnum,
             )
             return False
