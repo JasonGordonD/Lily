@@ -341,13 +341,31 @@ def lily_parse_google_grounding(resp) -> Optional[dict]:
     }
 
 
+# REFACTOR-STAGE-1B-001 P1-3: the grounding usage row used to skip at DEBUG
+# with no counter. Same pattern as lily_persistence's LLM-usage lane —
+# per-process counter, bounded WARNING cadence (first 10, then every 100th).
+# Consumer: the count is reported to lily_metrics.lily_note_telemetry_failure
+# ("grounding_usage") — the vocal module may not name this module — and
+# rides lily_sessions.metadata.session_metrics.telemetry_write_failures
+# as grounding_usage_failure_count.
+_grounding_usage_failure_count = 0
+_GROUNDING_USAGE_WARN_FIRST = 10
+_GROUNDING_USAGE_WARN_EVERY = 100
+
+
+def lily_grounding_usage_failure_count() -> int:
+    return _grounding_usage_failure_count
+
+
 def _record_grounding_usage(model, t0: float, resp, failure) -> None:
     """One lily_llm_usage row for a Gemini grounding call (WO-LILY-LLM-
     USAGE-ALL-PATHS-001). The google-genai SDK call is a blocking,
     NON-streaming generate_content with no first-byte hook, so ttft_ms is
     recorded EQUAL to total_ms (honest: the first byte and the last arrive
     together). Effort is None — the call sends no reasoning effort. Never
-    raises."""
+    raises; a failure to even schedule the row is `LILY_SEARCH | GROUNDING
+    | USAGE_RECORD_FAILED` (bounded WARNING) + _grounding_usage_failure_count."""
+    global _grounding_usage_failure_count
     try:
         import lily_metrics
 
@@ -376,7 +394,25 @@ def _record_grounding_usage(model, t0: float, resp, failure) -> None:
             finish_reason=finish,
         )
     except Exception as e:
-        logger.debug("LILY_SEARCH | GROUNDING | usage record skipped: %s", e)
+        _grounding_usage_failure_count += 1
+        n = _grounding_usage_failure_count
+        try:
+            import lily_metrics
+            lily_metrics.lily_note_telemetry_failure("grounding_usage")
+        except Exception:  # noqa: BLE001 — the counter here is the fallback
+            pass
+        level = (
+            logging.WARNING
+            if n <= _GROUNDING_USAGE_WARN_FIRST
+            or n % _GROUNDING_USAGE_WARN_EVERY == 0
+            else logging.DEBUG
+        )
+        logger.log(
+            level,
+            "LILY_SEARCH | GROUNDING | USAGE_RECORD_FAILED | model=%s "
+            "failures=%d error_class=%s error=%s",
+            model, n, type(e).__name__, str(e)[:300],
+        )
 
 
 async def _lily_grounded_generate(

@@ -11112,6 +11112,21 @@ def _config_snapshot_or_none():
         return None
 
 
+def _telemetry_failure_counts_or_failed() -> dict:
+    """REFACTOR-STAGE-1B-001 P1-3: the consumer of the telemetry writers'
+    failure counters (S1). Same discipline as _config_snapshot_or_none —
+    a raise here must not take the metadata write down."""
+    try:
+        counts = dict(lily_persistence.lily_telemetry_failure_counts())
+        # Off-path transports (the grounding-usage lane) report to the
+        # lily_metrics registry — the vocal module never names them.
+        counts.update(lily_metrics.lily_telemetry_failure_counts())
+        return counts
+    except Exception as e:  # noqa: BLE001 — receipt lane must not break persistence
+        logger.warning("LILY_TELEMETRY | COUNTS_FAILED | %s", e)
+        return {"outcome": f"counts_failed:{type(e).__name__}"}
+
+
 def _voice_identity_receipt_or_failed(game):
     """WO-LILY-COMPOSITION-FOLLOWUP-001 C8: the voice receipt is one lane
     of the metadata payload — a raise inside it must not take down BOTH
@@ -11159,6 +11174,10 @@ def lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics) -> di
         ("divergence_net_faults", "_divergence_net_faults"),
     ):
         session_block[key] = int(getattr(game, attr, 0) or 0)
+    # P1-3: the telemetry writers' failure counters (addressee log/label,
+    # acoustic trajectory, LLM usage, grounding usage) — process-level, one
+    # job process per session, so this IS the session's count.
+    session_block["telemetry_write_failures"] = _telemetry_failure_counts_or_failed()
     return {
         "pipeline_latency": {
             k: (round(sum(v) / len(v), 1) if v else None)

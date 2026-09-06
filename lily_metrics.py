@@ -66,6 +66,31 @@ LLM_PURPOSES = (
 
 _USAGE_FAILURE_CAP = 10_000
 
+# REFACTOR-STAGE-1B-001 P1-3: telemetry-lane failure counters for the
+# off-path transports. The vocal module must never name lily_search (web
+# guardrail, tests/test_web_guardrails.py), so lily_search reports its
+# grounding-usage failures HERE and lily_agent.lily_session_metadata reads
+# them here (session_metrics.telemetry_write_failures). Known lanes are
+# seeded so a clean session states 0, never omits the key.
+_KNOWN_TELEMETRY_LANES = ("grounding_usage",)
+_lane_failure_counts: dict = {}
+
+
+def lily_note_telemetry_failure(lane: str) -> int:
+    """Count one failed telemetry write on `lane`; returns the new total."""
+    n = int(_lane_failure_counts.get(lane, 0)) + 1
+    _lane_failure_counts[lane] = n
+    return n
+
+
+def lily_telemetry_failure_counts() -> dict:
+    """{<lane>_failure_count: n} for every known or reported lane."""
+    lanes = set(_KNOWN_TELEMETRY_LANES) | set(_lane_failure_counts)
+    return {
+        f"{lane}_failure_count": int(_lane_failure_counts.get(lane, 0))
+        for lane in sorted(lanes)
+    }
+
 
 def _resolve(value):
     """A usage-context field is a value or a zero-arg callable (the session
@@ -184,6 +209,11 @@ class LilyMetricsCollector:
         self._usage_context = None
         self._usage_rows_scheduled = 0
         self._usage_write_failures = 0
+        # REFACTOR-STAGE-1B-001 P1-3: the done-callback's OWN faults (a
+        # task object that misbehaves, a counter that raises) used to log at
+        # DEBUG with no counter; now WARNING + this, exposed as
+        # llm_usage.done_callback_failure_count in summary().
+        self._usage_done_callback_failure_count = 0
         # WO-LILY-COMPOSITION-FOLLOWUP-001 L2: the per-USER-turn end-of-turn
         # receipt. Each user turn's MetricsReport is classified
         # (commit_reason) and correlated to the framework's own DEBUG
@@ -254,7 +284,13 @@ class LilyMetricsCollector:
             if task.result() is not True:
                 self._note_usage_write_failure("insert_failed")
         except Exception as e:  # never let a callback raise into the loop
-            logger.debug("LILY_METRICS | USAGE_DONE_CB | %s", e)
+            self._usage_done_callback_failure_count += 1
+            logger.warning(
+                "LILY_METRICS | USAGE_DONE_CB_FAILED | failures=%d "
+                "error_class=%s error=%s — the usage row's outcome is unknown",
+                self._usage_done_callback_failure_count, type(e).__name__,
+                str(e)[:300], exc_info=True,
+            )
 
     def record_llm_call(
         self,
@@ -945,10 +981,14 @@ class LilyMetricsCollector:
             self._usage_context is not None
             or self._usage_rows_scheduled
             or self._usage_write_failures
+            or self._usage_done_callback_failure_count
         ):
             out["llm_usage"] = {
                 "rows_scheduled": self._usage_rows_scheduled,
                 "llm_usage_write_failures": self._usage_write_failures,
+                "done_callback_failure_count": (
+                    self._usage_done_callback_failure_count
+                ),
             }
         return out
 

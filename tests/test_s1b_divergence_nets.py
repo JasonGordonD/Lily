@@ -133,4 +133,7 @@ def test_fault_keys_sit_beside_the_collectors_summary():
     summary = collector.summary()
     for k, v in summary.items():
         assert block[k] == v
-    assert set(block) - set(summary) == {"handler_faults", "divergence_net_faults"}
+    assert set(block) - set(summary) == {
+        "handler_faults", "divergence_net_faults",
+        "telemetry_write_failures",  # P1-3's lane
+    }
