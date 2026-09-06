@@ -5,6 +5,155 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — REFACTOR-STAGE-1B-001: broken-code sweep of d4d79e3, Stage 1b (the items docketed under HOTFIX-STT-QUARANTINE-001)
+
+Branch `fix/s1b-broken-code` on integ/w6 a59d209, eight commits, one item
+each. No config default, model, effort, prompt-persona or RLS change; no
+`prompts/` edit. Every item below names its receipt (log line / metadata
+key) and the consumer that reads it (S1). Suite **3127/3127 on 3.11 and on
+3.13** (baseline 3064 on a59d209; +63 tests in `tests/test_s1b_*.py`);
+`python3 -W error -c "import lily_agent"` clean on both.
+
+**Behaviour-preserving (refactor discipline — suite green after each step):**
+
+- **P1-1 — the entrypoint's ten event handlers are module functions**
+  (`lily_agent.py:11295-11940`). The eight `@session.on` closures and the
+  two `room.on` closures were the mechanism that hid the P0 (no test could
+  call them). Each is now a plain function taking its captured state
+  explicitly — `_on_session_usage_body(session_metrics, ev)` :11340,
+  `_on_item_added_body(game, session_metrics, metrics_raw, ev)` :11367,
+  `_on_transcribed_body(game, scorekeeper, transcripts, ev)` :11482,
+  `_on_speech_created_body(game, ev)` :11661,
+  `_on_false_interruption_body(scorekeeper, ev)` :11728,
+  `_on_user_state_body(game, scorekeeper, ev)` :11735,
+  `_on_agent_state_body(game, scorekeeper, session, ev)` :11753,
+  `_on_close_body(*, game, scorekeeper, transcripts, supabase, stt,
+  metrics_raw, session_metrics, heartbeat_stop, shutdown_gate, ev)` :11779,
+  `_on_participant_connected_body(game, participant)` :11312,
+  `_on_track_subscribed_body(game, audeering_pipeline, track, publication,
+  participant)` :11913 — registered by thin lambdas at the SAME spots
+  (`lily_agent.py:12084`, `:12473-12540`, `:12843-12856`), every one
+  through `lily_guarded_handler` :11295 → `lily_stt_tuning.
+  lily_run_stt_handler` (the HOTFIX-STT-QUARANTINE-001 guard, now on all
+  ten). `_METRICS_CAP` hoisted with the item_added handler (:11292).
+  Receipt: `LILY_STT | HANDLER_FAULT | handler=<event>` (ERROR, traceback)
+  + `game._stt_handler_faults`, which now rides
+  `lily_sessions.metadata.session_metrics.handler_faults`
+  (`lily_session_metadata` :11239). Tests replaced (source-text →
+  behaviour): `tests/test_bargein_cancels.py::
+  test_the_cause_rides_the_existing_vad_wiring` no longer slices the
+  entrypoint source for `@session.on("user_state_changed")`; it calls
+  `_on_user_state_body` and asserts both VAD edges land in
+  `note_user_speech_state`. New: `tests/test_s1b_lifted_handlers.py` (22)
+  drives every lifted handler; the quarantine path runs through the real
+  `rtc.EventEmitter`, real scorekeeper (104 s span → WS-10 `span`), real
+  reconciler and real `LilyTranscriptBatcher`: the row lands with
+  `speaker_name None`, `_stt_handler_faults` stays 0, nothing below the
+  gate runs. The other five `inspect.getsource(entrypoint)` tests
+  (speechmatics model, text_output, grok builder, greet gating,
+  endpointing) assert on text that still lives in the entrypoint and were
+  left alone.
+- **P1-2 — the four divergence safety nets are loud** (`lily_agent.py:
+  11344` `_note_divergence_net_fault`; sites :11397 score, :11416 roster,
+  :11436 custom_round, :11462 verdict). `except Exception: pass` →
+  `LILY_DIVERGENCE_NET | FAULT | net=<name> session=… faults=N` at WARNING
+  with `exc_info`, + `game._divergence_net_faults`. Consumer:
+  `session_metrics.divergence_net_faults` (`lily_session_metadata` :11240),
+  present as 0 on a clean session, on both metadata write sites (heartbeat
+  + close). Tests: `tests/test_s1b_divergence_nets.py` (each net raising is
+  logged + counted and the handler still finishes; key presence + increment).
+- **P1-3 — telemetry writers warn and count** (bounded cadence: first 10 at
+  WARNING, then every 100th, the LLM-usage lane's pattern).
+  `lily_persistence.lily_log_addressee` :618 (base-row site) and :648
+  (retry site) → `LILY_ADDRESSEE_LOG | WRITE_FAILED` +
+  `_addressee_log_failure_count`; the degraded retry itself :627 →
+  `WRITE_DEGRADED` + `_addressee_log_degraded_count`;
+  `lily_update_addressee_label` :874 → `LABEL_UPDATE_FAILED` +
+  `_addressee_label_failure_count`; `lily_write_acoustic_trajectory` :919 →
+  `LILY_ACOUSTIC | TRAJECTORY_WRITE_FAILED` +
+  `_acoustic_trajectory_failure_count`; accessor
+  `lily_telemetry_failure_counts()` :695. `lily_search._record_grounding_
+  usage` :412 → `LILY_SEARCH | GROUNDING | USAGE_RECORD_FAILED` +
+  `_grounding_usage_failure_count`, reported to the new `lily_metrics`
+  lane registry (`lily_note_telemetry_failure` :79 /
+  `lily_telemetry_failure_counts` :86) because the vocal module may never
+  name lily_search (`tests/test_web_guardrails.py`). `lily_metrics.
+  _on_usage_write_done` :287 — its own fault → `LILY_METRICS |
+  USAGE_DONE_CB_FAILED` (WARNING, traceback) +
+  `summary()["llm_usage"]["done_callback_failure_count"]` :989. Consumer:
+  `session_metrics.telemetry_write_failures` (`lily_session_metadata`
+  :11247 via `_telemetry_failure_counts_or_failed` :11180 — a counts-lane
+  failure is itself the receipt, S2). Tests: `tests/test_s1b_telemetry_
+  writers.py` INSERT-tests every writer path with a client that raises
+  (S3); `tests/test_llm_usage_all_paths.py:274` (exact `llm_usage` dict
+  pin) gained the new key — the one existing-test edit this item needed.
+- **P1-5 — fire-and-forget game coroutines have an exception observer**
+  (`lily_agent.lily_spawn(coro, name, *, game=None)` :402). Done-callback
+  retrieves the exception (so asyncio's "Task exception was never
+  retrieved" never fires), logs `LILY_TASK | FAULT | name=<name>
+  session=… faults=N error_class=…` at ERROR with traceback, counts
+  `game._task_faults`; consumer `session_metrics.task_faults` :11241.
+  Sites: `_breathe` :4796 (`name=breathe`), `_immediate` :4835
+  (`fusion_clip_immediate`), `_discharge` :5001 (`discharge`), floor-line
+  `_run` :8704 (`floor_line`). Cancellation is not a fault; the
+  consume-the-coroutine test seams (`test_patch002_stems`,
+  `test_bargein_is_normal`) pass through. NOT done: the one in
+  `lily_speech_delivery.py` (W7's file). Tests: `tests/test_s1b_spawn.py`
+  — includes the control (bare `ensure_future` reaches the loop's
+  "never retrieved" handler; `lily_spawn` does not) and two real sites.
+- **P2-6 — `LILY_VOICE_IDENTITY_MATCH_MIN_SPEECH` dropped** from
+  `.github/workflows/deploy.yml` (job `env:` mapping and the docker `-e`
+  line, formerly beside `LILY_PARTICIPANT_METADATA_WAIT` :138/:214) and
+  `lily_config.voice_identity_match_min_speech_seconds` (zero callers;
+  formerly at :719, legacy pre VOICE-TRUTH-001). `tests/test_env_deploy_
+  lint.py` green (absent on both sides of the bidirectional check).
+- **P2-5 — README told a falsehood about the desk model** (`README.md:
+  1840-1849`): it said `LILY_ASSESSMENT_MODEL` pins the clinical desk and
+  that the desk has its own genai client. `lily_config.assessment_model()`
+  / `assessment_effort()` are hard-coded (`grok-4.5` / `high`) with no env
+  read, and the desk calls through `LilyReasoning._generate_grok_json`
+  (`purpose="assessment"`). README now says so; no env read added
+  (operator: config defaults untouched; the override lands at those
+  accessors later).
+
+**Behaviour-changing (failing-first, red recorded on integ/w6 a59d209):**
+
+- **P2-2 — `ev.created_at` is a float epoch** (`lily_agent.lily_event_
+  arrival_ts(created, fallback=None)` :383; used at :11519). Verified
+  against the installed package on both interpreters: livekit-agents
+  1.6.10 `voice/events.py` `UserInputTranscribedEvent.created_at: float =
+  Field(default_factory=time.time)`. The old `created.timestamp() if
+  hasattr(created, "timestamp") else time.time()` never took the first
+  branch, so `arrival_ts` — the reconciler's anchor, the scorekeeper's
+  `now=`, the transcript row's `segment_start` — was handler time. Float/
+  int accepted; a datetime still honoured; anything else → fallback/now.
+  Failing-first: `tests/test_s1b_created_at_float.py` — **4 red of 5 on
+  a59d209** (seam absent) and **4 red of 5 on the branch pre-fix** (three
+  for the absent helper; the end-to-end one for the right reason: `now=`
+  landed an hour off the event's clock). The 1 green is the premise test
+  (installed event carries a float).
+- **P1-6 — `proposed_category` has a producer** (`lily_reasoning.py:210`
+  `_GROK_QUESTION_SHAPE_ADDENDUM` now names the optional key at :220;
+  `_shape_question` :349-353 keeps a stripped non-empty string and drops
+  anything else). The consumer (`LilyGame._curate_generated_question` →
+  `lily_bank.lily_record_category_proposal`, migration 011) existed; the
+  shape never asked, so the whole promotion ladder (`lily_load_promoted_
+  categories`, the glass line "extra categories in tonight's rotation")
+  could not populate from play. The EXACTLY-these contract is unchanged;
+  `response_format` stays `json_object` (no strict schema to relax); no
+  `prompts/` wording touched. README §"Gated category proposals" :2338
+  says the field was reserved-but-never-requested before this change.
+  Failing-first: `tests/test_s1b_proposed_category.py` — **4 red of 7 on
+  a59d209** and on the branch pre-fix (addendum lacks the key, unstripped
+  pass-through, a numeric value passes through, the fixture pipeline sees
+  no instruction); 3 green pins (no-key unchanged, promoted relabel,
+  no-proposal records nothing). The fixture payload → `generate_question`
+  (Grok transport stubbed) → `_curate_generated_question` → recorded
+  `("cape cod", "geography", <group>)`, served under the round family.
+
+Not done (out of region): P2-1 (`lily_glass` Optional import) and the
+`lily_speech_delivery` fire-and-forget — both W7's files.
+
 ## 2026-09-06 — Composition review of integ/w6: GO-WITH-FIXES, applied before main
 
 Reviewer verdict on 428bff1 (main 0bb3175 + WO-LILY-COMPOSITION-FOLLOWUP-001):
