@@ -5980,6 +5980,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                         continue
                     if cand.get("_bound_attempt") is None:
                         cand["_bound_attempt"] = attempt
+                    # HOTFIX-REVISION-JUDGE-001: the player's CURRENT words
+                    # are their last answer-shaped attempt (the record path's
+                    # own rule — a revision "becomes their current answer").
+                    cand["_latest_attempt"] = attempt
                     timeline_entries.append((
                         attempt.get(
                             "segment_start_time", cand["segment_start_time"]
@@ -6054,10 +6058,41 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 # judging (zero added reveal latency); order stays decided
                 # by scorekeeper timestamps — earliest correct/partial wins.
                 consumed_speculative = False
+
+                def _bind_latest(cand: dict) -> None:
+                    """HOTFIX-REVISION-JUDGE-001: a judge verdict is about
+                    the player's current words — the ledger row names the
+                    revision that won, never the attempt it replaced."""
+                    latest = cand.get("_latest_attempt")
+                    if latest is not None and latest.get("text"):
+                        cand["text"] = latest["text"]
+                        cand["_bound_attempt"] = latest
+
                 for c in uncertain:
                     key = c["player"] or f"unrostered:{c['speaker_label']}"
                     task = self._spec_judge.get(key)
                     if task is None:
+                        continue
+                    # HOTFIX-REVISION-JUDGE-001 (live 17:33:43Z, lily-38C562
+                    # Q4): a speculative verdict on words the player has
+                    # since REVISED is stale — "incorrect" on "eight" was
+                    # consumed as the ruling on "six". A stale task is not
+                    # consumed; the batched judge below sees every attempt.
+                    judged_text = lily_glass.spec_judge_text(task)
+                    latest = (c.get("_latest_attempt") or {}).get("text")
+                    if (
+                        judged_text is not None
+                        and latest
+                        and judged_text != latest
+                    ):
+                        logger.info(
+                            "LILY_JUDGE | SPECULATIVE_STALE | session=%s "
+                            "key=%s judged=%r current=%r — not consumed; "
+                            "the reveal judges the revision "
+                            "(HOTFIX-REVISION-JUDGE-001)",
+                            self.sk.session_id, key,
+                            str(judged_text)[:60], str(latest)[:60],
+                        )
                         continue
                     try:
                         verdict = await asyncio.wait_for(
@@ -6072,13 +6107,26 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                         eval_tier = 2
                         judge_reason = verdict.get("reason", "")
                         winner_candidate = c
+                        _bind_latest(c)
                         break
 
                 if winner_candidate is None and not consumed_speculative:
                     # Fallback: one batched non-spoken LLM turn at reveal
                     # time (speculation unavailable, e.g. window closed
                     # before any final landed).
+                    # HOTFIX-REVISION-JUDGE-001: EVERY answer-shaped attempt
+                    # rides the prompt in timeline order — the pre-hotfix
+                    # `c["text"]` sent only the first uncertain attempt, so
+                    # a revision never reached the judge at all.
+                    uncertain_ids = {id(c) for c in uncertain}
                     attempts = [
+                        (
+                            c["player"] or f"unbound voice {c['speaker_label']}",
+                            attempt_text,
+                        )
+                        for _, c, attempt_text, _ in attempts_timeline
+                        if id(c) in uncertain_ids
+                    ] or [
                         (c["player"] or f"unbound voice {c['speaker_label']}", c["text"])
                         for c in uncertain
                     ]
@@ -6123,6 +6171,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                                 break
                         if winner_candidate is None:
                             winner_candidate = uncertain[0]
+                        _bind_latest(winner_candidate)
 
             points = (
                 5 if self.sk.round > self.rounds_total else max(1, self.sk.round)
@@ -9447,6 +9496,24 @@ class LilyAgent(Agent):
             in_session = denied.get("transcript") if denied else None
             if canonical and self._answer_matches(in_session, canonical):
                 corroborating_attempt = in_session
+            if corroborating_attempt is None and canonical:
+                # HOTFIX-REVISION-JUDGE-001 (live 17:33:59Z, lily-38C562):
+                # the denied row names ONE bound attempt; the player's
+                # other in-window finals for that question (a revision the
+                # ruling missed) are in-session evidence too — the same
+                # buffer the misheard ground already reads, the same
+                # Tier-1 matcher, nothing new.
+                try:
+                    for t in sk.in_window_transcripts_for(
+                        name, denied.get("question_index") if denied else None
+                    ):
+                        if self._answer_matches(t, canonical):
+                            corroborating_attempt = t
+                            break
+                except Exception:
+                    pass
+            if corroborating_attempt is not None:
+                pass
             elif canonical and self._game.supabase is not None:
                 try:
                     transcripts = (
@@ -11526,7 +11593,10 @@ def _on_transcribed_body(
     game, scorekeeper, transcripts, ev: UserInputTranscribedEvent,
 ) -> None:
     speaker_label = getattr(ev, "speaker_id", None)
-    text = re.sub(r"^\s*\[S\d+\]\s*", "", ev.transcript or "").strip()
+    # HOTFIX-SPEAKER-PREFIX-001: known-speaker labels ("[Rami]") arrive in
+    # the transcript text exactly like the engine's "[S1]"; strip every
+    # tag at the source so no detector downstream ever sees "rami yes".
+    text = lily_scorekeeper.lily_strip_speaker_tags(ev.transcript or "")
     if not text:
         return
     if not ev.is_final:

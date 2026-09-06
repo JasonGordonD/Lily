@@ -349,6 +349,23 @@ def _numeric_only(normalized: str) -> bool:
     return bool(normalized) and all(t.isdigit() for t in normalized.split())
 
 
+def _numbers_named_in(normalized: str) -> set[str]:
+    """Every number a NORMALIZED phrase names, as digit strings: digit runs
+    ("in 1968" -> {"1968"}) plus the lone small number words the normalizer
+    deliberately leaves as words inside a phrase ("or sorry six" -> {"6"},
+    "air force one" -> {"1"}). Empty when the phrase names no number.
+    HOTFIX-NUMBER-IN-PHRASE-001 — pure."""
+    out: set[str] = set()
+    for tok in (normalized or "").split():
+        if tok.isdigit():
+            out.add(str(int(tok)))
+            continue
+        value = _small_number([tok])
+        if value is not None:
+            out.add(str(value))
+    return out
+
+
 # Spoken/prompt overlap ratio — TELEMETRY ONLY since the desync WO
 # (WO-LILY-DESYNC-HONESTY-001 Sub-agent B). The tiers below used to open
 # the answer window; live evidence (ratios 0.00–0.15 on questions the
@@ -571,6 +588,43 @@ def lily_tier1_evaluate(
             if best_answer is None:
                 best_answer = raw_answer
             continue
+        # HOTFIX-NUMBER-IN-PHRASE-001 (live 17:33:38Z, lily-38C562 Q4): a
+        # numeric canonical against a SENTENCE that names the number. The
+        # normalizer turns the bare answer "six" into "6" but keeps a lone
+        # small number word inside a phrase as a word ("air force one" is
+        # a name), so "Or. Sorry. Six." normalized to "or sorry six" and
+        # containment compared "6" with "six" — every sentence carrying a
+        # number word was Tier-1 uncertain, and Rami's revision to the
+        # right number never scored. E1's rule holds: the numbers decide,
+        # digit string to digit string, nothing fuzzy. A phrase naming
+        # exactly the answer's number is correct; one naming a different
+        # number (or several) is a mismatch left to the judge.
+        if _numeric_only(answer) and not attempt_numeric:
+            named = _numbers_named_in(attempt)
+            if named:
+                if named == {answer}:
+                    logger.info(
+                        "LILY_EVAL | NUMERIC_IN_PHRASE | attempt=%r "
+                        "expected=%r verdict=correct",
+                        transcript_text, raw_answer,
+                    )
+                    if 1.0 >= t:
+                        return {
+                            "verdict": "correct",
+                            "matched_answer": raw_answer,
+                            "method": "numeric",
+                            "similarity": 1.0,
+                        }
+                    best_sim, best_answer = 1.0, raw_answer
+                    continue
+                logger.info(
+                    "LILY_EVAL | NUMERIC_IN_PHRASE | attempt=%r expected=%r "
+                    "verdict=uncertain reason=names_%s",
+                    transcript_text, raw_answer, sorted(named),
+                )
+                if best_answer is None:
+                    best_answer = raw_answer
+                continue
         # Mixed content ("Apollo 11" vs "Apollo 12"): when BOTH sides carry
         # digit tokens and they differ, the numbers decide — no fuzzy or
         # phonetic credit for the letters around them.
@@ -1202,6 +1256,9 @@ near-pronunciations, STT manglings, and the right idea in the wrong costume
 all count as correct. A hedge around the right answer is still correct.
 A genuinely different answer is incorrect. A meaningfully incomplete but
 on-target answer is partial.
+The same player may appear more than once: each later attempt is that
+player's revision and supersedes their earlier one, so judge a player on
+their LAST attempt ("eight... sorry, six" is an answer of six).
 
 Respond with ONLY a JSON object, no markdown fences, exactly this shape:
 {"verdict": "correct" | "incorrect" | "partial",

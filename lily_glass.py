@@ -32,6 +32,31 @@ import logging
 logger = logging.getLogger("lily_agent")
 
 
+# HOTFIX-REVISION-JUDGE-001: a speculative judge task carries the TEXT it
+# is judging in its task name, so the reveal can tell a verdict on the
+# player's current words from one on words they since revised.
+_SPEC_JUDGE_NAME_PREFIX = "lily_spec_judge|"
+
+
+def name_spec_judge(task, text: str) -> None:
+    try:
+        task.set_name(_SPEC_JUDGE_NAME_PREFIX + (text or ""))
+    except Exception:  # a bare Future / a stub with no set_name
+        pass
+
+
+def spec_judge_text(task) -> str | None:
+    """The text a speculative judge task was launched over, or None when
+    the task carries no name (pre-hotfix tasks, test stubs)."""
+    try:
+        name = task.get_name()
+    except Exception:
+        return None
+    if not isinstance(name, str) or not name.startswith(_SPEC_JUDGE_NAME_PREFIX):
+        return None
+    return name[len(_SPEC_JUDGE_NAME_PREFIX):]
+
+
 def lily_spine_line(
     *,
     phase: str,
@@ -1491,19 +1516,43 @@ class LilyGlassMixin:
             if acceptable:
                 for cand in ordered:
                     key = cand["player"] or f"unrostered:{cand['speaker_label']}"
-                    if key in self._spec_judge or cand.get("text") != text:
+                    if cand.get("text") != text:
                         continue
+                    # HOTFIX-REVISION-JUDGE-001 (live 17:33:38Z, lily-38C562
+                    # Q4): a speculative verdict is about ONE text. When the
+                    # player revises ("I think what? Eight." → "Or. Sorry.
+                    # Six."), the task judging the superseded words is
+                    # cancelled and the revision gets its own — the old
+                    # `key in self._spec_judge: continue` let the cached
+                    # "incorrect" on "eight" become the verdict on "six".
+                    standing = self._spec_judge.get(key)
+                    if standing is not None:
+                        if spec_judge_text(standing) == cand.get("text"):
+                            continue
+                        standing.cancel()
+                        del self._spec_judge[key]
+                        logger.info(
+                            "LILY_JUDGE | SPECULATIVE_SUPERSEDED | session=%s "
+                            "key=%s was=%r now=%r — the revision is judged, "
+                            "not the words it replaced "
+                            "(HOTFIX-REVISION-JUDGE-001)",
+                            self.sk.session_id, key,
+                            str(spec_judge_text(standing) or "")[:60],
+                            str(cand.get("text") or "")[:60],
+                        )
                     t1 = self._tier1_question(
                         cand["text"], question, key=key,
                         threshold=tier1_threshold,
                     )
                     if t1["verdict"] == "uncertain":
-                        self._spec_judge[key] = asyncio.ensure_future(
+                        task = asyncio.ensure_future(
                             self._speculative_judge(
                                 question, cand["text"], key,
                                 nbest=self._nbest_lookup(key),
                             )
                         )
+                        name_spec_judge(task, cand["text"])
+                        self._spec_judge[key] = task
             # HOTFIX-009 W4: relaxed pacing has no clock to close this beat,
             # so it closes on the roster instead — once this candidate
             # completes the rostered set, adjudicate now (no-op in timed

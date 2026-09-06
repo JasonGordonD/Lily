@@ -5,6 +5,103 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — HOTFIX Q4 (lily-38C562-2eb12a08, build 1783e82): number-in-phrase, revision-judge, speaker-prefix
+
+Live 17:33Z, Q4 (kb_271, "Henry the Eighth got through this many wives",
+canonical `six`, acceptable `6 / six / six wives`). The operator's
+transcript, and the durable rows behind it:
+
+```
+17:33:36.6  [Rami] I think what? Eight.          candidate u4, Tier-1 uncertain, "Locked in—"
+17:33:38.3  [Rami] Or. Sorry. Six.               revision u5, Tier-1 uncertain, "Locked in—"
+17:33:39.9  lily_llm_usage: ONE judge call (3.2 s), launched at the FIRST final
+17:33:43.6  lily_answers: "[Rami] I think what? Eight." incorrect, eval_tier 1, u4
+17:33:59    "What got recorded doesn't match six, so I can't put the point back"
+17:34:28+   Okay / Go ahead / Sure / Let's go / Yes!  → every exit re-held (addressed)
+```
+
+Ruling in force: *"We don't do likely bugs, we find out the real bug."*
+Each mechanism below was reproduced by replaying the row text through the
+real code on a 1783e82 worktree (`probe_q4.py`) before anything was edited.
+
+### HOTFIX-NUMBER-IN-PHRASE-001 — `lily_evaluation.lily_tier1_evaluate`
+
+`lily_normalize_answer("six")` → `"6"`, but
+`lily_normalize_answer("Or. Sorry. Six.")` → `"or sorry six"`: the
+normalizer deliberately keeps a lone small number word inside a phrase as a
+word (`"air force one"` is a name, `test_eval_integrity_001`). Containment
+then compared `"6"` with `"six"` and failed, so **every sentence carrying a
+number word was Tier-1 uncertain** against a numeric canonical — only the
+bare word scored. Fix: for a numeric canonical and a non-numeric attempt,
+`_numbers_named_in(attempt)` collects the digit runs and lone number words
+the phrase names; exactly the answer's number → `correct`
+(`method="numeric"`, threshold-gated like every accept path); a different
+number, or several, → uncertain for the judge. E1 holds: digits to digits,
+no fuzzy, no phonetic (`"or sorry sixty"` stays uncertain). The
+`air force one` rule is untouched (the branch only runs for numeric
+canonicals). Receipt: `LILY_EVAL | NUMERIC_IN_PHRASE | … verdict=`.
+
+### HOTFIX-REVISION-JUDGE-001 — the reveal judges the player's current words
+
+Three sites, one defect: a revision never reached the judge.
+
+1. `lily_glass.on_transcript_event` (speculative Tier-2): the launch guard
+   was `if key in self._spec_judge: continue` — keyed per player, so the
+   task judging "eight" stood and "six" was never judged. Now a standing
+   task whose judged text (carried in the task name, `name_spec_judge` /
+   `spec_judge_text`) differs from the candidate's current text is
+   cancelled and the revision gets its own. Receipt:
+   `LILY_JUDGE | SPECULATIVE_SUPERSEDED | … was= now=`.
+2. `lily_agent.adjudicate` (Tier-2 leg): the cached speculative verdict was
+   consumed as the ruling on the player's CURRENT words (`consumed_speculative
+   = True` → no batched judge), and the batched fallback sent `c["text"]` —
+   the first uncertain attempt — one text per candidate. Now a cached task
+   whose judged text ≠ the player's last answer-shaped attempt is **not
+   consumed** (`LILY_JUDGE | SPECULATIVE_STALE`), the batched judge receives
+   EVERY answer-shaped attempt in timeline order, and a judge-correct binds
+   the latest attempt (`_bind_latest`) so the ledger row names the words
+   that won. The judge instructions gain one line: a player who appears
+   more than once is judged on their LAST attempt (their revision) — a
+   mechanical judge rule, not persona text; flagged for the operator.
+3. `lily_agent.lily_correct_verdict` (`answer_denied`): corroboration read
+   only the bound ledger transcript ("I think what? Eight." → no match →
+   `uncorroborated_answer_denied` → "doesn't match six"). It now also reads
+   the player's other in-window finals for that question via the existing
+   `sk.in_window_transcripts_for` (the buffer the `misheard` ground already
+   uses) through the same Tier-1 matcher — nothing new, before the DB
+   fallback.
+
+Not changed, docketed: the two "Locked in—" receipts (one per attempt, by
+the receipt's (who, what) identity) and the cut-off second receipt; the
+"Correct! … It's the liver" double verdict line on Q1; the `offer_aired:
+false` receipt on the addressed rows.
+
+### HOTFIX-SPEAKER-PREFIX-001 — the known-speaker label reaches the detectors
+
+Speechmatics known-speaker labels arrive in the transcript text
+(`"[Rami] Yes!"`) exactly like the engine's `"[S1]"`; the lifted handler
+(`_on_transcribed_body`) stripped only `^\[S\d+\]`, so
+`lily_detect_addressed_acceptance("[Rami] Yes!")` and
+`lily_is_bare_affirmative("[Rami] Okay.")` were False and the addressed hold
+re-armed on every exit ("Okay", "Go ahead", "Sure", "Let's go", "Yes!" —
+airgate rows `hold/release by=new_address`). Fix:
+`lily_scorekeeper.lily_strip_speaker_tags` strips every `[label]` tag
+(engine `S<n>` or a known-speaker name) at the source;
+`_strip_diarization_tag` delegates to it so the command normalizer sees the
+same text. The scorekeeper's stored transcripts keep the prefix as before.
+
+### Tests — `tests/test_hotfix_q4_revision.py`, 26 tests
+
+Failing-first on a clean 1783e82 worktree: **21 red / 5 green** (the 5
+green are the uncertain-side rows of the number table and the
+`air force one` regression guard; 6 of the 21 red are the strip-helper
+table, red because the helper did not exist). Drives the real
+`lily_tier1_evaluate_question`, the real scorekeeper record path, the real
+`on_transcript_event` speculative branch, the real `adjudicate` with a
+recording judge fake and a stale named task, the real
+`lily_correct_verdict` tool, and the real lifted handler with a spy on
+`on_transcript_segment`. No source-text tests.
+
 ## 2026-09-06 — WO-LILY-SUPPLY-001 S1: bank-first question supply
 ## 2026-09-06 — WO-LILY-SUPPLY-001 S2: the bank serves, the author replenishes
 
