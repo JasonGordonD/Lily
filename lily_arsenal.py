@@ -70,14 +70,6 @@ logger = logging.getLogger("lily_arsenal")
 ARSENAL_TABLE = "lily_picture_arsenal"
 USAGE_TABLE = "lily_picture_arsenal_usage"
 RUNS_TABLE = "lily_picture_arsenal_runs"
-ARSENAL_STORAGE_BUCKET = "lily-arsenal"
-
-# Standing depth per partition and the replenishment watermark. These are
-# the DEFAULTS; lily_config reads the live values so depth changes without
-# a deploy. Kept as module constants because callers (and the PATCH-003
-# tests) reference them directly.
-ARSENAL_TARGET_DEPTH = 10
-ARSENAL_REPLENISH_AT_SERVED = 4  # fire when the 4th is served (6 remain)
 
 PARTITIONS = ("general", "adult_suggestive", "adult_explicit")
 ADULT_PARTITIONS = ("adult_suggestive", "adult_explicit")

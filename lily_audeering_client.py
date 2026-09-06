@@ -109,10 +109,6 @@ def _disable_uploads(reason: str) -> None:
         logger.error("LILY_AUDEERING | uploads disabled for process: %s", reason)
 
 
-def uploads_disabled_reason() -> str | None:
-    return _UPLOAD_DISABLED_REASON
-
-
 # ---------------------------------------------------------------------------
 # Response parsing — normalize devAIce JSON to the stable consumer shape
 # ---------------------------------------------------------------------------

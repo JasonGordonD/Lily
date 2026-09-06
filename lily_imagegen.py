@@ -231,7 +231,6 @@ GENERATION_TIMEOUT_SECONDS = 45.0
 ADULT_IMAGE_INTENSITIES: Final[tuple[str, ...]] = (
     "suggestive", "explicit", "mix",
 )
-ADULT_IMAGE_RENDER_LEVELS: Final[tuple[str, ...]] = ("suggestive", "explicit")
 
 
 def lily_resolve_render_intensity(intensity: Optional[str], seed: str) -> str:

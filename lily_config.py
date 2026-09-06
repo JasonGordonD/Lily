@@ -262,15 +262,6 @@ def tavily_api_key() -> Optional[str]:
     return _get("TAVILY_API_KEY")
 
 
-def imagegen_model() -> str:
-    """Gemini image model for STANDARD-deck invented-content picture
-    questions (sub-agent J; image_source='generated' only, prefetch-time
-    only). gemini-3.1-flash-lite-image = Nano Banana 2 Lite (operator-
-    directed 2026-08-06): fastest/cheapest for fun trivia cards, 1K.
-    Live-verified via generate_content on the funded GOOGLE_API_KEY."""
-    return _get("LILY_IMAGEGEN_MODEL", "gemini-3.1-flash-lite-image")
-
-
 def adult_vocal_model() -> str:
     """Vocal LLM for ADULT mode (owner directive 2026-08-06). Gemini's
     non-overridable PROHIBITED_CONTENT filter blocks spoken turns around

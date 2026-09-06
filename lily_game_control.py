@@ -27,7 +27,7 @@ constructing LilyAgent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -73,14 +73,6 @@ ADJUDICATE_ACT = "adjudicate"
 # subsumed when the lily_begin_round site is wired (later wave). may() must not
 # duplicate that ladder here — it would drift.
 BEGIN_ROUND_ACT = "begin_round"
-
-# Acts that open/continue the reveal->verdict->next transition. Reserved for
-# the later waves that rewire dispatch_armed_question / tts_node claim /
-# lily_begin_round; may() already answers them so those call sites need no new
-# vocabulary when they are wired.
-TRANSITION_ACTS = frozenset({
-    "reveal", "reveal_flourish", "reveal_scores", "reveal_finale", "verdict",
-})
 
 
 class IllegalControlState(ValueError):
@@ -204,10 +196,6 @@ class GameControl:
     def is_live(self) -> bool:
         """A round is in play (not lobby, not finished)."""
         return self.phase not in (Phase.LOBBY, Phase.FINAL)
-
-    def with_(self, **changes) -> "GameControl":
-        """A validated copy with fields replaced (re-runs __post_init__)."""
-        return replace(self, **changes)
 
 
 def _derive_delivery(
