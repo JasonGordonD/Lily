@@ -21,10 +21,16 @@ Spoken-surface freeze before any speech/delivery extract:
 
 Integration status — `integ/wave2` fully landed on `main`: W1 delivery truth,
 W3 evaluation integrity, W2 control gates, W4 voice truth, W5 LLM-usage
-telemetry, refactor Stage 1a (2939 tests, 3.11 + 3.13). A second composition
-review of the merged tree is in flight; the dated entries are at the top of
-[CHANGELOG.md](CHANGELOG.md). Live-call receipts (build → session → row) are
-the acceptance for the live-found defects — see each CHANGELOG entry.
+telemetry, refactor Stage 1a, plus two live-found hotfixes from the first
+calls on the wave — HOTFIX-BARGE-FLUSH-001 (the reply to the human's own
+utterance is never flushed as a barge) and HOTFIX-ENGINE-LABEL-001 (a
+voiceprint row under an engine label `S<n>` or with a null `player_name` is
+never injected as a known speaker; the write path never persists one) —
+2947 tests, 3.11 + 3.13. The W6 follow-up (composition-review P0s, operator
+behavior mods B1–B5, the 2.5 s endpointing cap with a per-turn receipt) is in
+flight; the dated entries are at the top of [CHANGELOG.md](CHANGELOG.md).
+Live-call receipts (build → session → row) are the acceptance for the
+live-found defects — see each CHANGELOG entry.
 
 ## Live-fire fix classes (WO-LILY-LIVEFIRE-001)
 

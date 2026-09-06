@@ -46,3 +46,38 @@ update public.lily_voice_identity
 -- Verify (expected: 4 rows, all status='retired', retired_at not null):
 -- select id, group_id, sample_count, model_tag, status, retired_at
 --   from public.lily_voice_identity where model_tag = 'ecapa-192-v1';
+
+-- ---------------------------------------------------------------------------
+-- HOTFIX-ENGINE-LABEL-001 (2026-09-06 12:21 UTC) — lily_speaker_voiceprints
+-- row 427 joins the retirement set. Same rule: RETIRE, do not delete; the
+-- row stays in place as the receipt. Applied only on the operator's word.
+--
+-- WHY. Row 427 (group c6ee161e-edd6-4d56-a8d9-b758babba7cd, speaker_label
+-- 'S1', player_name NULL, created 2026-08-14, identifiers rewritten
+-- 2026-09-06 12:01:57Z) held
+-- Speechmatics identifiers written under the engine's own diarization label
+-- by the 12:01 session's enrollment path. Injected as a known speaker, it
+-- failed StartRecognition schema validation ("speakers.0.label: Must not
+-- validate the schema (not)") and three sessions ran deaf. The code guard
+-- (lily_stt_tuning.lily_filter_enrollable_speakers: engine labels and
+-- null player_name never injected) is the mechanical block; this
+-- retirement is the audit trail. The columns do not exist on this table
+-- yet, so the guarded ALTERs create them.
+
+alter table public.lily_speaker_voiceprints
+  add column if not exists status text not null default 'active';
+alter table public.lily_speaker_voiceprints
+  add column if not exists retired_at timestamptz;
+
+update public.lily_speaker_voiceprints
+   set status     = 'retired',
+       retired_at = now(),
+       updated_at = now()
+ where id = 427
+   and speaker_label = 'S1'
+   and player_name is null
+   and status = 'active';
+
+-- Verify (expected: 1 row, status='retired', retired_at not null):
+-- select id, group_id, speaker_label, player_name, status, retired_at
+--   from public.lily_speaker_voiceprints where id = 427;

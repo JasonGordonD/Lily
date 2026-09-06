@@ -1369,16 +1369,26 @@ async def lily_enroll_voiceprints(
             resolved_name = label_to_name.get(label)
             if resolved_name is None and isinstance(label, str):
                 resolved_name = name_lookup.get(label.strip().lower())
+            # Speechmatics may already return the enrolled player name as
+            # the label on a rematch (known_speakers are injected with
+            # player-name labels) — keep the roster mapping, then the
+            # stored binding, as fallbacks.
+            player_name = resolved_name or known_names_by_label.get(label)
+            # HOTFIX-ENGINE-LABEL-001: an engine label (S<n>) with no bound
+            # player — not on the roster, not previously bound in the table —
+            # is not a voice we can ever inject (Speechmatics rejects S<n>
+            # known-speaker labels), so persisting identifiers under it only
+            # poisons the next session's StartRecognition (row 427, 12:01Z).
+            if player_name is None and lily_stt_tuning.lily_is_engine_speaker_label(label):
+                logger.info(
+                    "LILY_ENROLL | UNBOUND_ENGINE_LABEL_SKIPPED | trigger=%s "
+                    "label=%s — no player bound to this voice yet", trigger, label,
+                )
+                continue
             rows.append({
                 "group_id": gid,
                 "speaker_label": label,
-                # Speechmatics may already return the enrolled player name as
-                # the label on a rematch (known_speakers are injected with
-                # player-name labels) — keep the roster mapping as fallback.
-                "player_name": (
-                    resolved_name
-                    or known_names_by_label.get(label)
-                ),
+                "player_name": player_name,
                 "speaker_identifiers": identifiers,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
@@ -2748,13 +2758,16 @@ async def lily_load_voiceprints(
     group_id: str,
 ) -> list:
     """Load stored voiceprints for a returning group. Returns plain dicts
-    ({label, speaker_identifiers}); lily_agent.py converts them to
+    ({id, label, player_name, speaker_label, speaker_identifiers}); every
+    consumer runs them through lily_stt_tuning.lily_filter_enrollable_speakers
+    (which needs `id` for its skip receipts and `player_name` for the
+    unbound-row rule, HOTFIX-ENGINE-LABEL-001) before converting them to
     Speechmatics SpeakerIdentifier objects for the known_speakers kwarg.
     Instant recognition on rematch."""
     try:
         result = await asyncio.to_thread(
             lambda: supabase.table("lily_speaker_voiceprints")
-            .select("speaker_label, player_name, speaker_identifiers")
+            .select("id, speaker_label, player_name, speaker_identifiers")
             .eq("group_id", group_id)
             .execute()
         )
@@ -2765,7 +2778,10 @@ async def lily_load_voiceprints(
             if not identifiers:
                 continue
             known.append({
+                "id": row.get("id"),
                 "label": row.get("player_name") or row.get("speaker_label"),
+                "player_name": row.get("player_name"),
+                "speaker_label": row.get("speaker_label"),
                 "speaker_identifiers": identifiers,
             })
         if known:

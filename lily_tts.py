@@ -644,15 +644,30 @@ class LilyChunkedStream(tts.ChunkedStream):
 async def lily_prewarm_tts_connection() -> None:
     """Establish the pooled TCP+TLS connection to ElevenLabs at session
     start so the FIRST synthesis request of the session skips the full
-    handshake (~100-250ms off first-greeting TTFB). Any response status is
-    fine — the connection in the shared keep-alive pool is the product.
-    Fire-and-forget; never raises."""
+    handshake (~100-250ms off first-greeting TTFB). The connection in the
+    shared keep-alive pool (the same one `_ensure_session` hands the
+    synthesis POST) is the product. Fire-and-forget; never raises.
+
+    HOTFIX-ENGINE-LABEL-001 follow-up: the probe used to GET /v1/models
+    with no credentials and reported the resulting 404 as a success line.
+    It now sends the same xi-api-key header the synthesis path sends and
+    a non-200 is a WARNING naming the path — a wrong URL cannot hide again.
+    """
+    path = "/models"
     try:
         session = utils.http_context.http_session()
         async with session.get(
-            f"{ELEVENLABS_API_BASE}/models",
+            f"{ELEVENLABS_API_BASE}{path}",
+            headers={"xi-api-key": lily_config.eleven_api_key()},
             timeout=aiohttp.ClientTimeout(total=5),
         ) as resp:
-            logger.info("TTS | prewarm connection status=%s", resp.status)
+            if resp.status == 200:
+                logger.info("TTS | prewarm connection status=200 path=%s", path)
+            else:
+                logger.warning(
+                    "TTS | PREWARM_NOT_OK | status=%s path=%s — pool still "
+                    "warmed, but the probe URL/credentials need attention",
+                    resp.status, path,
+                )
     except Exception as e:
         logger.debug("TTS | prewarm skipped: %s", e)

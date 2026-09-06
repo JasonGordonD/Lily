@@ -5,6 +5,60 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — HOTFIX-ENGINE-LABEL-001: STT never started (live 12:20–12:22 UTC, three deaf sessions on d4d79e3)
+
+Live receipt: sessions lily-A2930D-8b4c61db, lily-879368-f7c030f1,
+lily-FE9AD4-12697417 — VAD heard the room (vad_seconds 4.4 / 2.05), zero
+Speechmatics segments, zero user transcripts. Worker log:
+`speechmatics.voice._client — Server error: invalid input:
+transcription_config.speaker_diarization_config.speakers.0.label: Must not
+validate the schema (not)` → `livekit.agents — Error in _stt_pump`.
+Cause: lily_speaker_voiceprints row id 427 (group
+c6ee161e-edd6-4d56-a8d9-b758babba7cd, speaker_label "S1", player_name null)
+had its identifiers rewritten by the 12:01Z session's enrollment refresh
+and was then injected as a known speaker at StartRecognition. Speechmatics
+reserves S<n> for its own diarization labels and rejects the whole request,
+so nothing was ever transcribed. The hygiene chokepoint only dropped
+dunder labels; the loader carried neither the row id nor player_name.
+
+Both halves of the operator's rule, mechanical, with the row id in every
+skip line:
+
+- **Injection guard** — `lily_stt_tuning.lily_filter_enrollable_speakers`
+  (the one chokepoint every injection path runs: session start, device-
+  candidate staging, upgrade refresh) now drops any row whose label is an
+  engine label (`^[Ss]\d+$`, `lily_is_engine_speaker_label`) →
+  `LILY_STT_TUNING | ENGINE_LABEL_SKIPPED | label=S1 row_id=427`, and any
+  row whose `player_name` is null/empty →
+  `NULL_PLAYER_NAME_SKIPPED | label=… row_id=…`. `lily_load_voiceprints`
+  now selects and returns `id` and `player_name` so the receipts can name
+  the row.
+- **Write guard** — `lily_enroll_voiceprints` never persists identifiers
+  under an engine label that has no bound player (not on the roster, not
+  previously bound in the table): `LILY_ENROLL | UNBOUND_ENGINE_LABEL_SKIPPED
+  | label=S1`. A refresh of a label the table already binds still writes
+  (the Priya case in test_voiceprint_enrollment keeps its name).
+- **Row 427** — RETIRE, not delete: appended to
+  `migrations/027_retire_ecapa_v1_room_tone_centroids.sql` (guarded
+  `status`/`retired_at` columns on lily_speaker_voiceprints, `update … where
+  id = 427 and speaker_label = 'S1' and player_name is null`). Script only;
+  applied on the operator's word, together with the three ECAPA v1 rows.
+  The code guard is the block; the retirement is the receipt.
+- **TTS prewarm** — the probe GET `/v1/models` carried no credentials and
+  logged its 404 as an info line. It now sends the same `xi-api-key` header
+  the synthesis POST sends (same keep-alive pool) and a non-200 is
+  `TTS | PREWARM_NOT_OK | status=… path=/models`.
+
+Failing-first: tests/test_hotfix_engine_label_reject.py (6 tests, 5 red on
+d4d79e3 — the sixth is the real-names-starting-with-S guard). The
+row-427 test drives the exact PostgREST row through `lily_load_voiceprints`
+and the chokepoint and asserts the skip line names `row_id=427`. Suite
+2947/2947 on 3.11 and 3.13.
+
+Live receipt to pull on the next call: `ENGINE_LABEL_SKIPPED … row_id=427`
+in the worker log, no `Error in _stt_pump`, user transcripts present,
+`TTS | prewarm connection status=200 path=/models`.
+
 ## 2026-09-06 — HOTFIX-BARGE-FLUSH-001: silence after the name (live 11:59 UTC, first call on the wave)
 
 Live receipt: session lily-FCE88B-7a2b83e1, OTel bundle. After "Hi, this is

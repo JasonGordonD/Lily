@@ -19,6 +19,7 @@ import lily_evaluation
 import lily_forget
 import lily_memory
 import lily_persistence
+import lily_stt_tuning
 import lily_voice_embedder
 import lily_voice_identity
 
@@ -994,7 +995,11 @@ class LilyIdentityMixin:
                 "speaker_label": row.get("label"),
                 "speaker_identifiers": row.get("speaker_identifiers"),
             }
-            for row in voiceprints or []
+            # HOTFIX-ENGINE-LABEL-001: staged voices go through the same
+            # label hygiene as every injection (engine S<n> labels out).
+            for row in lily_stt_tuning.lily_filter_enrollable_speakers(
+                voiceprints or []
+            )
             if row.get("speaker_identifiers")
         ]
         self.memory_settled.set()
@@ -2561,7 +2566,12 @@ class LilyIdentityMixin:
                     SpeakerIdentifier,
                     lily_stt_focus_kwargs,
                 )
-                known_rows = known_res or []
+                # HOTFIX-ENGINE-LABEL-001: the same hygiene chokepoint the
+                # session-start injection runs — engine labels (S<n>) and
+                # dunder labels never reach StartRecognition.
+                known_rows = lily_stt_tuning.lily_filter_enrollable_speakers(
+                    known_res or []
+                )
                 known_speakers = [
                     SpeakerIdentifier(
                         label=row["label"],

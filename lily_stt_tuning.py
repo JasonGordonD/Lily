@@ -45,6 +45,7 @@ WER and DER against fixture ground truth — never perceptual quality.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable, Optional
 
 import lily_config
@@ -157,6 +158,17 @@ def lily_tuned_stt_kwargs(
     return kwargs
 
 
+_ENGINE_SPEAKER_LABEL_RE = re.compile(r"[Ss]\d+")
+
+
+def lily_is_engine_speaker_label(label) -> bool:
+    """True for Speechmatics' own diarization labels (S1, S2, … — any
+    case). The engine forbids them as known-speaker labels in
+    StartRecognition; the whole STT session fails validation if one is
+    injected (HOTFIX-ENGINE-LABEL-001)."""
+    return bool(_ENGINE_SPEAKER_LABEL_RE.fullmatch(str(label or "").strip()))
+
+
 def lily_filter_enrollable_speakers(rows: list[dict]) -> list[dict]:
     """Enrollment hygiene chokepoint for known-speaker rows.
 
@@ -172,14 +184,43 @@ def lily_filter_enrollable_speakers(rows: list[dict]) -> list[dict]:
        StartRecognition's speakers list are undefined engine behaviour;
        the same-name rows are the same human, so their identifier blobs
        merge under one label (all blobs kept as match hints).
+    3. HOTFIX-ENGINE-LABEL-001 (live 2026-09-06 12:21, three sessions
+       deaf — lily_speaker_voiceprints row 427, label "S1", player_name
+       null): Speechmatics reserves its own diarization labels (S1, S2, …)
+       and StartRecognition REJECTS a known speaker carrying one —
+       "speakers.0.label: Must not validate the schema (not)" — which kills
+       the whole STT pump: VAD hears the room, nothing is ever transcribed.
+       Two rules, each logged with the row id: never inject a row whose
+       label is an engine label, and never inject a row whose player_name
+       is null (an unbound voice is not an identity; rows that carry no
+       player_name key at all — synthetic, pre-loader — are not judged by
+       the second rule).
     """
     merged: dict[str, dict] = {}
     order: list[str] = []
     for row in rows or []:
-        label = str((row or {}).get("label") or "")
+        row = row or {}
+        label = str(row.get("label") or "")
+        row_id = row.get("id")
         if label.startswith("__") and label.endswith("__"):
             logger.warning(
-                "LILY_STT_TUNING | dunder label dropped from enrollment: %s", label
+                "LILY_STT_TUNING | dunder label dropped from enrollment: %s "
+                "row_id=%s", label, row_id,
+            )
+            continue
+        if lily_is_engine_speaker_label(label):
+            logger.warning(
+                "LILY_STT_TUNING | ENGINE_LABEL_SKIPPED | label=%s row_id=%s "
+                "(Speechmatics rejects S<n> known-speaker labels; the row is "
+                "unbound — bind the player to enroll under a name)",
+                label, row_id,
+            )
+            continue
+        if "player_name" in row and not str(row.get("player_name") or "").strip():
+            logger.warning(
+                "LILY_STT_TUNING | NULL_PLAYER_NAME_SKIPPED | label=%s row_id=%s "
+                "(voiceprint row has no bound player; not injected)",
+                label, row_id,
             )
             continue
         identifiers = (row or {}).get("speaker_identifiers") or []
