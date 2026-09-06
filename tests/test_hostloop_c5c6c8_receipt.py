@@ -669,6 +669,9 @@ def test_c8_the_reair_retakes_the_key_so_the_next_question_is_not_wedged():
     assert game._transition_holds_next_delivery("post_reveal") is True
 
     assert game.reair_cut_verdict(released) is True
+    # (WO-LILY-EVAL-INTEGRITY-001 E6 keys the solo line on a roster of
+    # exactly ONE; this fixture has no roster at all, so the generic line
+    # stands. The solo re-air is pinned in test_eval_integrity_001.)
     assert game.session.texts == ["Nobody had it — Canberra."]
     assert game.say_registry.state(key) == lily_say_gate.CLAIM_PENDING
     # ...and once the re-aired line plays out, N+1 is released as normal.

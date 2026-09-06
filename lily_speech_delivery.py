@@ -1136,6 +1136,7 @@ class LilySpeechDeliveryMixin:
             winner = detail.get("winner") if correct else None
             line = lily_say_gate.lily_verdict_reair_line(
                 correct=correct, answer=answer, winner=winner,
+                solo=len(self.sk.players) == 1,  # E6: no "nobody" to a table of one
             )
             logger.error(
                 "LILY_VERDICT | CUT_REAIR | session=%s q=%d key=%s correct=%s "

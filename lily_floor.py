@@ -1689,8 +1689,15 @@ class LilyFloorMixin:
         )
         shape = None
         if band == lily_evaluation.BAND_REJECT:
+            # WO-LILY-EVAL-INTEGRITY-001 E2: the sensor reads the question's
+            # answer surfaces so "Wilde, the" (the answer, then a stall) is
+            # committed while "face" on "Oscar Wilde" is a fragment.
+            question = self.sk.current_question or getattr(
+                self, "armed_question", None
+            ) or {}
             shape = lily_evaluation.lily_uncommitted_answer_shape(
-                str(cand.get("text") or "")
+                str(cand.get("text") or ""),
+                expected_answers=lily_evaluation.lily_expected_answers(question),
             )
             if shape is None:
                 return  # committed shape — the classification stands (B1)
@@ -1729,9 +1736,22 @@ class LilyFloorMixin:
             # D1: the fragment must not stand as a bound answer while the
             # clarify is out — withdraw AFTER mark_pending_clarify (which
             # reads the candidate for the clarified-utterance corpus row).
-            self.sk.withdraw_candidate(
+            # WO-LILY-EVAL-INTEGRITY-001 E3: the withdrawn candidate RIDES
+            # the pending clarify — the door opens both ways. An
+            # affirmative reply re-binds it (disfluency-stripped), a
+            # negative drops it, a new answer replaces it (_resolve_clarify).
+            withdrawn = self.sk.withdraw_candidate(
                 player, reason=f"uncommitted_shape:{shape}"
             )
+            pending = self.pending_clarify.get(player)
+            if withdrawn is not None and pending is not None:
+                pending["withdrawn"] = withdrawn
+                pending["withdrawn_text"] = (
+                    lily_evaluation.lily_strip_trailing_disfluency(
+                        str(withdrawn.get("text") or "")
+                    ) or str(withdrawn.get("text") or "")
+                )
+                pending["shape"] = shape
         self.gated_say(
             f"q_{qnum}_clarify",
             "clarify_question",
@@ -1889,6 +1909,8 @@ class LilyFloorMixin:
             "LILY_CLARIFY | RESOLVED | session=%s player=%s label=%s reply=%r",
             self.sk.session_id, player_name, label, reply_text[:80],
         )
+        if pending.get("withdrawn") is not None:
+            self._settle_shape_clarify(player_name, pending, label, reply_text)
         row_task = pending.get("row_task")
         if row_task is None or self.supabase is None:
             return
@@ -1905,6 +1927,93 @@ class LilyFloorMixin:
                 )
 
         asyncio.ensure_future(_apply())
+
+    def _settle_shape_clarify(
+        self, player_name: str, pending: dict, label: str, reply_text: str
+    ) -> None:
+        """WO-LILY-EVAL-INTEGRITY-001 E3 — the clarify door opens both ways.
+
+        The scorekeeper's recording pass has ALREADY run on the reply by the
+        time this is reached (on_transcript_event records, then resolves),
+        so "Yes, that's my answer." may be sitting in the player's slot as a
+        fresh candidate — pre-fix it stayed there, aired its own receipt and
+        was adjudicated as the attempt. Now:
+          * affirmative -> the ORIGINAL withdrawn candidate is re-bound
+            (disfluency-stripped) and the reply candidate is displaced;
+          * negative    -> the reply candidate (if any) is withdrawn and the
+            original is dropped for good — the slot is empty, the window
+            stays live;
+          * anything else is a NEW answer: a reply that recorded as a
+            candidate stands as the attempt; a reply with an uncommitted
+            shape of its own is withdrawn (the once-per-question clarify
+            cap would otherwise let a second fragment bind)."""
+        withdrawn = pending.get("withdrawn") or {}
+        original_uid = withdrawn.get("utterance_id")
+        current = self.sk.answer_candidates.get(player_name)
+        reply_recorded = (
+            current is not None
+            and current.get("utterance_id") != original_uid
+        )
+        qnum = pending.get("question_number")
+        if label == lily_addressee.LABEL_HOST_DIRECTED:
+            text = pending.get("withdrawn_text") or withdrawn.get("text")
+            self.sk.restore_candidate(
+                player_name, withdrawn, text=text,
+                reason="clarify_affirmative",
+            )
+            logger.info(
+                "LILY_CLARIFY | REBIND | session=%s q=%s player=%s text=%r "
+                "reply=%r — the original attempt is the answer, not the reply",
+                self.sk.session_id, qnum, player_name, str(text)[:80],
+                reply_text[:60],
+            )
+            return
+        if label == lily_addressee.LABEL_DELIBERATION:
+            if reply_recorded:
+                self.sk.withdraw_candidate(
+                    player_name, reason="clarify_negative_reply"
+                )
+            logger.info(
+                "LILY_CLARIFY | DROPPED | session=%s q=%s player=%s text=%r "
+                "reply=%r — thinking out loud; nothing bound, window live",
+                self.sk.session_id, qnum, player_name,
+                str(withdrawn.get("text") or "")[:80], reply_text[:60],
+            )
+            return
+        # LABEL_UNKNOWN: a new answer, or another fragment.
+        if reply_recorded:
+            question = self.sk.current_question or getattr(
+                self, "armed_question", None
+            ) or {}
+            reply_shape = lily_evaluation.lily_uncommitted_answer_shape(
+                str(current.get("text") or ""),
+                expected_answers=lily_evaluation.lily_expected_answers(question),
+            )
+            if reply_shape is not None:
+                self.sk.withdraw_candidate(
+                    player_name, reason=f"clarify_reply_uncommitted:{reply_shape}"
+                )
+                logger.info(
+                    "LILY_CLARIFY | DROPPED | session=%s q=%s player=%s "
+                    "reply=%r shape=%s — another fragment; nothing bound",
+                    self.sk.session_id, qnum, player_name, reply_text[:60],
+                    reply_shape,
+                )
+                return
+            logger.info(
+                "LILY_CLARIFY | NEW_ANSWER | session=%s q=%s player=%s "
+                "text=%r — the reply is the attempt; the withdrawn %r is gone",
+                self.sk.session_id, qnum, player_name,
+                str(current.get("text") or "")[:80],
+                str(withdrawn.get("text") or "")[:60],
+            )
+            return
+        logger.info(
+            "LILY_CLARIFY | UNRESOLVED | session=%s q=%s player=%s reply=%r "
+            "— reply was not an answer; the withdrawn %r stays withdrawn",
+            self.sk.session_id, qnum, player_name, reply_text[:60],
+            str(withdrawn.get("text") or "")[:60],
+        )
 
     # -- transcript-event layer --------------------------------------------------
 

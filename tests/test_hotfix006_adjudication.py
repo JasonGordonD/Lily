@@ -999,9 +999,12 @@ def test_a_missed_question_forbids_narrating_anyone_correct(monkeypatch):
     _run(_scenario)
 
     # REFACTOR W2a: with no correct committed row the deterministic sheet is
-    # the nobody-landed-it beat — it credits no one and names no player.
+    # the missed beat — it credits no one and names no player.
+    # WO-LILY-EVAL-INTEGRITY-001 E6: this is a table of ONE (Rami), so the
+    # beat is the solo miss line, never "Nobody landed it" to one person.
     said = game.session.said
-    assert any("Nobody landed it" in s for s in said), said
+    assert any("Not this one — it was Jupiter." in s for s in said), said
+    assert not any("Nobody" in s for s in said), said
     assert not any("Rami" in s for s in said)
     assert not any("Correct" in s or "Point to" in s for s in said)
 

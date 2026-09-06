@@ -526,7 +526,8 @@ def lily_answer_receipt(verdict: str | None) -> Optional[str]:
 
 
 def lily_verdict_reair_line(
-    *, correct: bool, answer: str, winner: str | None = None
+    *, correct: bool, answer: str, winner: str | None = None,
+    solo: bool = False,
 ) -> str:
     """ONE line that re-airs a verdict whose beat was cut by a barge-in
     (C8 / Session B 36:25, where the cut released the claim and the result
@@ -535,12 +536,15 @@ def lily_verdict_reair_line(
     Unlike the receipts above this DOES carry the answer — the dropped
     thing was the result, and a re-air that omits it re-airs nothing. One
     beat only: verdict word, the answer, the name when there is one. No
-    flourish, no next question."""
+    flourish, no next question. `solo` (WO-LILY-EVAL-INTEGRITY-001 E6): a
+    table of one hears "Not this one —", never "Nobody had it —"."""
     answer_text = str(answer or "").strip().rstrip(".!?")
     if correct:
         if winner:
             return f"Correct, {winner} — {answer_text}."
         return f"Correct — {answer_text}."
+    if solo:
+        return f"Not this one — {answer_text}."
     return f"Nobody had it — {answer_text}."
 
 

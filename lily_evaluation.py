@@ -65,14 +65,50 @@ _FILLER_PREFIXES = (
 
 _PUNCT_RE = re.compile(r"[^a-z0-9\s]")
 
+# WO-LILY-EVAL-INTEGRITY-001 E2(a): trailing DISFLUENCY tokens ("Sam
+# Shepard, uh", "George Bernard Shaw, hmm.", MC "B. Um.") are stripped
+# BEFORE similarity and shape classification, so the words that carry the
+# answer are what gets evaluated. Only the filler vocabulary — never "no" /
+# "wait" (self-negation is a shape of its own) and never "huh" (the "uh huh"
+# backchannel must survive to the backchannel gate).
+_TRAILING_DISFLUENCY_WORDS = (
+    "uh", "um", "er", "erm", "uhh", "umm", "hmm", "hm", "eh", "mm", "ah",
+    "mmm", "ahh", "ehh",
+)
+_TRAILING_DISFLUENCY_RE = re.compile(
+    r"(?P<punct>[.!?…]?)[\s,;:\-]*"
+    r"(?:\b(?:" + "|".join(_TRAILING_DISFLUENCY_WORDS)
+    + r")\b[\s,.;:!?…\-]*)+$",
+    re.IGNORECASE,
+)
+_ONLY_DISFLUENCY_RE = re.compile(
+    r"^(?:(?:" + "|".join(_TRAILING_DISFLUENCY_WORDS) + r")[\s,.;:!?…\-]*)+$",
+    re.IGNORECASE,
+)
+
+
+def lily_strip_trailing_disfluency(text: str) -> str:
+    """Strip trailing disfluency tokens and their punctuation from a raw
+    utterance, preserving the case/punctuation of what remains ("Wild, uh"
+    -> "Wild"; "What's he. Face. Uh." -> "What's he. Face."). A pure-filler
+    utterance strips to "". Pure."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    if _ONLY_DISFLUENCY_RE.match(raw):
+        return ""
+    stripped = _TRAILING_DISFLUENCY_RE.sub(r"\g<punct>", raw).rstrip(" ,;:-")
+    return stripped
+
 
 def _strip_fillers(text: str) -> str:
     """Lowercase, strip punctuation, and repeatedly strip hedge/filler
     prefixes — WITHOUT dropping articles (the multiple-choice letter parser
-    needs a bare 'a' to survive). Returns "" for pure-filler utterances."""
+    needs a bare 'a' to survive). Trailing disfluency tokens are stripped
+    too (E2a). Returns "" for pure-filler utterances."""
     if not text:
         return ""
-    lowered = text.lower().strip()
+    lowered = lily_strip_trailing_disfluency(text).lower().strip()
     lowered = _PUNCT_RE.sub(" ", lowered)
     lowered = re.sub(r"\s+", " ", lowered).strip()
 
@@ -91,14 +127,226 @@ def _strip_fillers(text: str) -> str:
     return lowered
 
 
+# ---------------------------------------------------------------------------
+# Spoken numbers (WO-LILY-EVAL-INTEGRITY-001 E1, operator addendum).
+#
+# STT delivers "nineteen sixty-eight" as often as "1968". Numeric answers
+# compare digit-string to digit-string AFTER this normalization: years
+# ("nineteen sixty-eight", "twenty twenty-four", "nineteen oh five",
+# "eighteen hundred"), cardinals ("one hundred", "three thousand two
+# hundred", "twelve"), ordinals ("the fourth" -> 4), hyphen/space variants.
+# Deliberately small — not a full parser: no fractions, no decimals, no
+# "a hundred", no "dozen".
+# ---------------------------------------------------------------------------
+
+_NUM_UNITS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9,
+}
+_NUM_TEENS = {
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19,
+}
+_NUM_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_NUM_SCALES = {"hundred": 100, "thousand": 1000, "million": 1000000}
+_NUM_ORDINALS = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+    "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
+    "eleventh": 11, "twelfth": 12, "thirteenth": 13, "fourteenth": 14,
+    "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18,
+    "nineteenth": 19, "twentieth": 20, "thirtieth": 30, "fortieth": 40,
+    "fiftieth": 50, "sixtieth": 60, "seventieth": 70, "eightieth": 80,
+    "ninetieth": 90, "hundredth": 100, "thousandth": 1000,
+}
+_NUM_ZERO_WORDS = {"oh", "o"}
+_NUM_WORDS = (
+    set(_NUM_UNITS) | set(_NUM_TEENS) | set(_NUM_TENS) | set(_NUM_SCALES)
+)
+
+
+def _num_tokens(text: str) -> list[str]:
+    lowered = (text or "").lower().replace("-", " ")
+    lowered = re.sub(r"[^a-z0-9\s]", " ", lowered)
+    return lowered.split()
+
+
+def _small_number(tokens: list[str]) -> Optional[int]:
+    """0..99 from one or two tokens (teen | tens [unit] | unit)."""
+    if not tokens or len(tokens) > 2:
+        return None
+    if len(tokens) == 1:
+        t = tokens[0]
+        if t in _NUM_UNITS:
+            return _NUM_UNITS[t]
+        if t in _NUM_TEENS:
+            return _NUM_TEENS[t]
+        if t in _NUM_TENS:
+            return _NUM_TENS[t]
+        return None
+    a, b = tokens
+    if a in _NUM_TENS and b in _NUM_UNITS:
+        return _NUM_TENS[a] + _NUM_UNITS[b]
+    return None
+
+
+def _parse_cardinal(tokens: list[str]) -> Optional[int]:
+    """Standard cardinal parse with hundred/thousand/million scales."""
+    if not tokens:
+        return None
+    total = 0
+    current = 0
+    seen = False
+    for t in tokens:
+        if t == "and":
+            continue
+        if t in _NUM_UNITS or t in _NUM_TEENS or t in _NUM_TENS:
+            v = _NUM_UNITS.get(t, _NUM_TEENS.get(t, _NUM_TENS.get(t)))
+            current += v
+            seen = True
+        elif t == "hundred":
+            if current == 0:
+                return None  # "a hundred" is not handled; "hundred" alone
+            current *= 100
+            seen = True
+        elif t in ("thousand", "million"):
+            if current == 0:
+                return None
+            total += current * _NUM_SCALES[t]
+            current = 0
+            seen = True
+        else:
+            return None
+    if not seen:
+        return None
+    return total + current
+
+
+def _parse_year(tokens: list[str]) -> Optional[int]:
+    """Two-part spoken years: [teen | tens(+unit)] + [teen | tens(+unit) |
+    oh unit | hundred]. "nineteen sixty eight" -> 1968, "twenty twenty
+    four" -> 2024, "nineteen oh five" -> 1905, "eighteen hundred" -> 1800.
+    The first part must be a complete 10..99 number."""
+    if len(tokens) < 2 or len(tokens) > 4:
+        return None
+    for split in (1, 2):
+        head, tail = tokens[:split], tokens[split:]
+        first = _small_number(head)
+        if first is None or first < 10:
+            continue
+        if not tail:
+            continue
+        if tail == ["hundred"]:
+            return first * 100
+        if len(tail) == 2 and tail[0] in _NUM_ZERO_WORDS and tail[1] in _NUM_UNITS:
+            return first * 100 + _NUM_UNITS[tail[1]]
+        second = _small_number(tail)
+        if second is None:
+            continue
+        if len(tail) == 1 and tail[0] in _NUM_UNITS:
+            continue  # "twenty five" is 25, not a year
+        return first * 100 + second
+    return None
+
+
+def lily_spoken_number_to_digits(text: str) -> Optional[str]:
+    """The digit string a WHOLE spoken/written number phrase names, or
+    None when the phrase is not a number. "nineteen sixty-eight" -> "1968",
+    "one hundred" -> "100", "the fourth" -> "4", "1,968" -> "1968",
+    "Canberra" -> None. Pure."""
+    tokens = _num_tokens(text)
+    if tokens and tokens[0] in _ARTICLES:
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+    # Digit groups: "1968", "1,968" (thousands separators become groups).
+    if all(t.isdigit() for t in tokens):
+        if len(tokens) == 1:
+            return str(int(tokens[0]))
+        if all(len(t) == 3 for t in tokens[1:]):
+            return str(int("".join(tokens)))
+        return None
+    if any(t.isdigit() for t in tokens):
+        return None
+    # Ordinal: the last token names the ordinal, the rest is cardinal.
+    last = tokens[-1]
+    if last in _NUM_ORDINALS:
+        head = [t for t in tokens[:-1] if t != "and"]
+        if not head:
+            return str(_NUM_ORDINALS[last])
+        base = _parse_cardinal(head)
+        if base is None:
+            return None
+        return str(base + _NUM_ORDINALS[last])
+    for t in tokens:
+        if t not in _NUM_WORDS and t not in _NUM_ZERO_WORDS and t != "and":
+            return None
+    year = _parse_year(tokens)
+    if year is not None:
+        return str(year)
+    value = _parse_cardinal(tokens)
+    return str(value) if value is not None else None
+
+
+def _normalize_spoken_numbers_in(text: str) -> str:
+    """Replace spoken numbers inside an already-normalized answer string.
+    The whole string converts as one number when it is one; otherwise
+    runs of two or more number words (or a single word >= ten) convert in
+    place ("year nineteen sixty eight" -> "year 1968"). A lone digit-word
+    inside a longer phrase stays a word ("air force one")."""
+    if not text:
+        return text
+    whole = lily_spoken_number_to_digits(text)
+    if whole is not None:
+        return whole
+    tokens = text.split()
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] not in _NUM_WORDS:
+            out.append(tokens[i])
+            i += 1
+            continue
+        j = i
+        while j < len(tokens) and (
+            tokens[j] in _NUM_WORDS
+            or (j > i and tokens[j] in _NUM_ZERO_WORDS | {"and"})
+        ):
+            j += 1
+        while j > i and tokens[j - 1] not in _NUM_WORDS:
+            j -= 1  # a run ends on a number word, never on "and"/"oh"
+        run = tokens[i:j]
+        single_small = len(run) == 1 and run[0] in _NUM_UNITS
+        digits = None if single_small else lily_spoken_number_to_digits(
+            " ".join(run)
+        )
+        if digits is not None:
+            out.append(digits)
+        else:
+            out.extend(run)
+        i = j
+    return " ".join(out)
+
+
 def lily_normalize_answer(text: str) -> str:
     """Tier-1 normalization: lowercase, strip punctuation, strip hedge
-    prefixes, drop articles, collapse whitespace."""
+    prefixes and trailing disfluencies, drop articles, normalize spoken
+    numbers to digits, collapse whitespace."""
     lowered = _strip_fillers(text)
     if not lowered:
         return ""
     words = [w for w in lowered.split() if w not in _ARTICLES]
-    return " ".join(words)
+    return _normalize_spoken_numbers_in(" ".join(words))
+
+
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _numeric_only(normalized: str) -> bool:
+    return bool(normalized) and all(t.isdigit() for t in normalized.split())
 
 
 # Spoken/prompt overlap ratio — TELEMETRY ONLY since the desync WO
@@ -201,10 +449,18 @@ def lily_turn_presents_question(
 def _soundex(word: str) -> str:
     """Soundex-style phonetic key. Unlike classic Soundex, the FIRST letter
     is also encoded by its consonant group, so STT manglings that swap
-    homophonic initials ("Kanberra"/"Canberra") still key identically."""
-    word = re.sub(r"[^a-z]", "", word.lower())
+    homophonic initials ("Kanberra"/"Canberra") still key identically.
+
+    WO-LILY-EVAL-INTEGRITY-001 E1: a token with NO letters (a year, a
+    count) keys to a non-comparable sentinel carrying its own digits —
+    "#1968" — never to "". Pre-fix every digit string keyed "", so
+    1968 ≡ 1969 ≡ 1786 ≡ 1776 by "phonetic agreement" and any two years
+    with sim ≥ 0.75 scored CORRECT in production."""
+    raw = word.lower()
+    word = re.sub(r"[^a-z]", "", raw)
     if not word:
-        return ""
+        digits = re.sub(r"[^0-9]", "", raw)
+        return f"#{digits}" if digits else ""
     codes = {
         "b": "1", "f": "1", "p": "1", "v": "1",
         "c": "2", "g": "2", "j": "2", "k": "2", "q": "2",
@@ -278,9 +534,50 @@ def lily_tier1_evaluate(
             "similarity": 0.0,
         }
 
+    attempt_numeric = _numeric_only(attempt)
+    attempt_digits = _DIGITS_RE.findall(attempt)
+
     for raw_answer in acceptable_answers:
         answer = lily_normalize_answer(raw_answer)
         if not answer:
+            continue
+
+        # WO-LILY-EVAL-INTEGRITY-001 E1 — NUMERIC answers compare digit
+        # string to digit string after spoken-number normalization, and
+        # NOTHING else: no fuzzy ("100" vs "1000" is 0.857 — a near miss
+        # in letters, a factor of ten in numbers), no phonetic. A numeric
+        # mismatch reports similarity 0.0 so a confident "1968" can never
+        # land in the clarify band; it stays a committed (wrong) answer
+        # for the judge. method="numeric" is the operator's receipt.
+        if attempt_numeric and _numeric_only(answer):
+            if attempt == answer:
+                logger.info(
+                    "LILY_EVAL | NUMERIC | attempt=%r expected=%r verdict=correct",
+                    transcript_text, raw_answer,
+                )
+                if 1.0 >= t:
+                    return {
+                        "verdict": "correct",
+                        "matched_answer": raw_answer,
+                        "method": "numeric",
+                        "similarity": 1.0,
+                    }
+                best_sim, best_answer = 1.0, raw_answer
+                continue
+            logger.info(
+                "LILY_EVAL | NUMERIC | attempt=%r expected=%r verdict=uncertain "
+                "reason=digit_mismatch", transcript_text, raw_answer,
+            )
+            if best_answer is None:
+                best_answer = raw_answer
+            continue
+        # Mixed content ("Apollo 11" vs "Apollo 12"): when BOTH sides carry
+        # digit tokens and they differ, the numbers decide — no fuzzy or
+        # phonetic credit for the letters around them.
+        answer_digits = _DIGITS_RE.findall(answer)
+        if attempt_digits and answer_digits and attempt_digits != answer_digits:
+            if best_answer is None:
+                best_answer = raw_answer
             continue
 
         # Exact normalized match
@@ -320,9 +617,13 @@ def lily_tier1_evaluate(
                 "similarity": round(sim, 3),
             }
 
-        # Phonetic path: soundex agreement + moderate string similarity
+        # Phonetic path: soundex agreement + moderate string similarity.
+        # E1: phonetics is a property of LETTERS — both sides must carry
+        # alphabetic content, or the branch is not comparable at all.
         if (
             t <= 1.0
+            and _has_alpha(attempt)
+            and _has_alpha(answer)
             and _phrase_soundex(attempt) == _phrase_soundex(answer)
             and sim >= phonetic_t
         ):
@@ -336,9 +637,22 @@ def lily_tier1_evaluate(
     return {
         "verdict": "uncertain",
         "matched_answer": best_answer,
-        "method": None,
+        # A pure numeric mismatch names its method so the audit trail can
+        # show WHY the digits did not score (E1 operator receipt).
+        "method": "numeric" if (attempt_numeric and best_sim == 0.0
+                                and best_answer is not None
+                                and _numeric_only(
+                                    lily_normalize_answer(best_answer)
+                                )) else None,
         "similarity": round(best_sim, 3),
     }
+
+
+_ALPHA_RE = re.compile(r"[a-z]")
+
+
+def _has_alpha(normalized: str) -> bool:
+    return bool(_ALPHA_RE.search(normalized or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -1083,41 +1397,239 @@ def lily_meta_speech_utterance(text: str) -> Optional[str]:
 LILY_SHAPE_WH_SEARCH = "wh_search"
 LILY_SHAPE_DISFLUENCY_TAIL = "disfluency_tail"
 LILY_SHAPE_FRAGMENT_TAIL = "fragment_tail"
+# WO-LILY-EVAL-INTEGRITY-001 E2(c) — the classes the WO-3 sensor missed
+# (Auditor C: every one of these HARD-BOUND on the deployed classifier).
+LILY_SHAPE_SEARCH_PHRASE = "search_phrase"      # "the Irish guy", "Oscar something"
+LILY_SHAPE_DEFERRAL = "deferral"                # "I don't know", "let me think"
+LILY_SHAPE_HINT = "hint"                        # "starts with an O"
+LILY_SHAPE_SELF_NEGATION = "self_negation"      # "Oscar… no wait"
+LILY_SHAPE_INTERJECTION = "interjection"        # "oh god", "damn"
+LILY_SHAPE_FRAGMENT_TOKEN = "fragment_token"    # "face", "He. Face."
 
+_SHAPE_LEAD_FILLER = (
+    r"(?:(?:oh|ah|ooh|hmm|hm|like|wait|uh|um|er|well|so|okay|ok)[,.!?\s]+)*"
+)
 _WH_SEARCH_RE = re.compile(
-    r"^(?:(?:oh|ah|ooh|hmm|hm|like|wait|uh|um|er|well|so)[,.!?\s]+)*"
-    r"(?:what|who|where|which|when|how)"
+    r"^" + _SHAPE_LEAD_FILLER
+    + r"(?:what|who|where|which|when|how)"
     r"(?:'?s|s| is| was| are| were| did| do| does)?"
-    r"\s+(?:he|she|it|they|his|her|hers|him|them|its|their|that|this)\b"
+    r"\s+(?:he|she|it|they|his|her|hers|him|them|its|their|that|this"
+    # E2c: a wh-word reaching for a PLACEHOLDER noun — "what's the guy",
+    # "who's the one" — retrieval struggle, not a claim. "how many
+    # states" / "what is photosynthesis" carry content and never match.
+    r"|(?:the|that|this) (?:guy|girl|dude|one|thing|name|word|person|man"
+    r"|woman|actor|actress|author|writer|singer|player|place|city|country"
+    r"|book|movie|film|song|band|show|thingy|whatsit))\b"
 )
 _DISFLUENCY_TAIL_RE = re.compile(
     r"(?:^|[\s,.;:!?])(?:uh|um|er|erm|uhh|umm|hmm|hm|eh)[\s.!?…]*$"
 )
-_FRAGMENT_TAIL_RE = re.compile(
-    r"\b(?:the|a|an|his|her|their|its|my|your|of|and|or|but|with|to|in|on"
-    r"|at|for|by|from)[\s.!?…]*$"
+_FUNCTION_TAIL_WORDS = (
+    "the|a|an|his|her|their|its|my|your|of|and|or|but|with|to|in|on"
+    "|at|for|by|from"
 )
+_FRAGMENT_TAIL_RE = re.compile(
+    r"(?:^|\s)(" + _FUNCTION_TAIL_WORDS + r")[\s.!?…]*$"
+)
+# "the X guy" / "X something" / "something like X" / "that one guy"
+_SEARCH_PHRASE_RE = re.compile(
+    r"^" + _SHAPE_LEAD_FILLER
+    + r"(?:(?:the|that|this|some) (?:[a-z'\-]+ ){0,2}(?:guy|girl|dude|one"
+    r"|thing|person|man|woman|actor|actress|author|writer|singer|player)"
+    r"|[a-z'\-]+ something|something like [a-z'\-]+|[a-z'\-]+ or something"
+    r"|[a-z'\-]+ whatever|whatshisname|whatshername|what'?s his name"
+    r"|what'?s her name|what'?s his face|what'?s her face)[.!?…\s]*$"
+)
+# Explicit thinking / deferral — the WHOLE utterance (a hedge around an
+# answer, "I'm thinking Aphrodite", never matches).
+_DEFERRAL_RE = re.compile(
+    r"^" + _SHAPE_LEAD_FILLER
+    + r"(?:i (?:don'?t|do not|dont) know|(?:i have |i've |i got )?no idea"
+    r"|(?:oh )?i know (?:this|it|that)(?: one)?|let me think(?: about (?:it|that))?"
+    r"|(?:give|gimme) me (?:a|one|two) (?:sec|secs|second|seconds|minute|moment)"
+    r"|(?:one|two|a) (?:sec|second|seconds|moment|minute)(?: please)?"
+    r"|hold on(?: a (?:sec|second|minute|moment))?|hang on(?: a (?:sec|second|minute))?"
+    r"|(?:i'?m|im|i am|i was|still|just) thinking|thinking|(?:i'?m|im) not sure"
+    r"|(?:i|we) (?:can'?t|cannot|don'?t) remember|(?:i|we) forget|(?:i|we) forgot"
+    r"|it'?s gone|blanking|(?:i'?m|im) blanking|drawing a blank|pass)"
+    r"[.!?…\s]*$"
+)
+# Hint shape — anywhere in the utterance.
+_HINT_RE = re.compile(
+    r"\b(?:starts? with (?:an?|the letter)|begins? with (?:an?|the letter)"
+    r"|tip of my tongue|rhymes with|sounds like)\b"
+)
+# Self-negation — content, then a retraction as the tail.
+_SELF_NEGATION_RE = re.compile(
+    r"^(?P<content>.+?)[\s,.;:!?…\-]+(?:no wait|wait no|no no|no|nope|nah"
+    r"|never ?mind|scratch that|forget (?:it|that))[.!?…\s]*$"
+)
+# Interjections alone.
+_INTERJECTIONS = frozenset({
+    "oh god", "oh my god", "omg", "god", "damn", "dammit", "damn it", "ugh",
+    "shoot", "oh no", "oh man", "man", "jeez", "geez", "crap", "oh crap",
+    "shit", "oh shit", "fuck", "oh fuck", "argh", "aargh", "ah", "oh",
+    "oh boy", "gosh", "oh gosh", "dang", "oh dear", "yikes", "oops", "whoops",
+    "phew", "hmm", "hm", "uh", "um", "er",
+})
+# Placeholder nouns that are never a committed answer on their own.
+_FRAGMENT_TOKENS = frozenset({
+    "face", "guy", "thing", "thingy", "name", "one", "stuff", "something",
+    "whatever", "person", "dude", "word", "whatsit", "whatchamacallit",
+    "it", "that", "this", "he", "she", "they", "him", "her", "them",
+})
+_PRONOUN_TOKENS = frozenset({
+    "he", "she", "it", "they", "him", "her", "them", "his", "hers", "its",
+    "their", "i", "we", "you", "me", "us", "that", "this",
+})
+_COPULA_TOKENS = frozenset({
+    "is", "was", "were", "are", "be", "been", "being", "it's", "its", "am",
+})
 
 
-def lily_uncommitted_answer_shape(text: str) -> Optional[str]:
+def _shape_tokens(normalized: str) -> list[str]:
+    return re.sub(r"[^a-z0-9'\s]", " ", normalized).split()
+
+
+def _matches_expected(text: str, expected_answers: Optional[list]) -> bool:
+    """Does `text` name an expected answer — whole-string containment /
+    fuzzy at the phonetic bar, or a token that is one of the answer's
+    tokens (last names count: "Wilde" for "Oscar Wilde")?"""
+    if not expected_answers or not text:
+        return False
+    norm = lily_normalize_answer(text)
+    if not norm:
+        return False
+    tokens = norm.split()
+    for raw in expected_answers:
+        exp = lily_normalize_answer(str(raw))
+        if not exp:
+            continue
+        if norm == exp or _contains_phrase(exp, norm) or _contains_phrase(norm, exp):
+            return True
+        if SequenceMatcher(None, norm, exp).ratio() >= PHONETIC_FUZZY_THRESHOLD:
+            return True
+        exp_tokens = exp.split()
+        for tok in tokens:
+            if len(tok) < 3:
+                continue
+            for et in exp_tokens:
+                if len(et) >= 3 and SequenceMatcher(
+                    None, tok, et
+                ).ratio() >= PHONETIC_FUZZY_THRESHOLD:
+                    return True
+    return False
+
+
+def lily_uncommitted_answer_shape(
+    text: str, expected_answers: Optional[list] = None
+) -> Optional[str]:
     """The shape class of an utterance that carries NO COMMITTED ANSWER —
-    LILY_SHAPE_WH_SEARCH / LILY_SHAPE_DISFLUENCY_TAIL /
-    LILY_SHAPE_FRAGMENT_TAIL — or None when the utterance is shaped like a
-    committed answer (however wrong) and must stay bindable.
+    one of the LILY_SHAPE_* classes — or None when the utterance is shaped
+    like a committed answer (however wrong) and must stay bindable.
 
     Reject-side sensor ONLY (D1): the caller applies it exclusively to
     BAND_REJECT similarity, so it can demote a fragment to the clarify
-    path but can never eat a real answer that matched anything."""
+    path but can never eat a real answer that matched anything.
+
+    WO-LILY-EVAL-INTEGRITY-001 E2: trailing disfluencies are stripped
+    FIRST ("Sam Shepard, uh" is classified as "Sam Shepard" — committed);
+    a function-word tail is a fragment only when fewer than two tokens
+    precede it and they name no expected answer ("Rebel Without a" /
+    "Once Upon a Time in" / "Queen Elizabeth the" are committed titles);
+    and the gap classes (search phrase, deferral, hint, self-negation,
+    interjection, bare placeholder token) route to clarify. A bare token
+    that IS an expected answer token is committed ("face" for "Face").
+    `expected_answers` is optional context — without it the placeholder
+    stoplist alone decides the bare-token rule."""
     normalized = _meta_normalize(text)
     if not normalized:
         return None
-    if _WH_SEARCH_RE.match(normalized):
-        return LILY_SHAPE_WH_SEARCH
-    if _DISFLUENCY_TAIL_RE.search(normalized):
+    core = lily_strip_trailing_disfluency(normalized).strip().lower()
+    if not core:
+        # Nothing but filler — the utterance died on its own disfluency.
         return LILY_SHAPE_DISFLUENCY_TAIL
-    if _FRAGMENT_TAIL_RE.search(normalized):
+    tokens = _shape_tokens(core)
+    if not tokens:
+        return LILY_SHAPE_DISFLUENCY_TAIL
+    joined = " ".join(tokens)
+    if joined in _INTERJECTIONS:
+        return LILY_SHAPE_INTERJECTION
+    if _WH_SEARCH_RE.match(core):
+        return LILY_SHAPE_WH_SEARCH
+    if _SEARCH_PHRASE_RE.match(core):
+        return LILY_SHAPE_SEARCH_PHRASE
+    if _DEFERRAL_RE.match(core):
+        return LILY_SHAPE_DEFERRAL
+    if _HINT_RE.search(core):
+        return LILY_SHAPE_HINT
+    m = _SELF_NEGATION_RE.match(core)
+    if m and _shape_tokens(m.group("content")):
+        return LILY_SHAPE_SELF_NEGATION
+    m = _FRAGMENT_TAIL_RE.search(core)
+    if m:
+        before = core[: m.start(1)]
+        before_norm = _strip_fillers(before)
+        before_tokens = [
+            t for t in before_norm.split()
+            if t not in _PRONOUN_TOKENS and t not in _COPULA_TOKENS
+            and t not in _ARTICLES
+        ]
+        if len(before_tokens) >= 2:
+            return None  # a committed title / phrase ("Rebel Without a")
+        if before_tokens and _matches_expected(before_norm, expected_answers):
+            return None  # "Wilde, the" — the answer, then a stall
         return LILY_SHAPE_FRAGMENT_TAIL
+    content = [t for t in tokens if t not in _PRONOUN_TOKENS]
+    if len(content) == 1 and content[0] in _FRAGMENT_TOKENS:
+        if _matches_expected(content[0], expected_answers):
+            return None
+        return LILY_SHAPE_FRAGMENT_TOKEN
+    if not content and tokens:
+        # Only pronouns ("he", "it") — nothing was named.
+        return LILY_SHAPE_FRAGMENT_TOKEN
     return None
+
+
+def lily_expected_answers(question: Optional[dict]) -> list[str]:
+    """The answer surfaces of a question — canonical, acceptable variants,
+    MC choices — as the `expected_answers` context for the shape sensor.
+    Pure; an empty/None question yields []."""
+    q = question or {}
+    out: list[str] = []
+    canonical = q.get("canonical_answer")
+    if canonical:
+        out.append(str(canonical))
+    for acc in q.get("acceptable_answers") or []:
+        if acc:
+            out.append(str(acc))
+    for choice in q.get("choices") or []:
+        if choice:
+            out.append(str(choice))
+    return out
+
+
+def lily_misheard_corroborates(attempt: str, canonical: str) -> bool:
+    """WO-LILY-EVAL-INTEGRITY-001 E5: does a recorded in-window transcript
+    corroborate a "you misheard me" claim against `canonical`? The whole
+    string must sit at/above the Tier-1 CLARIFY band
+    (FUZZY_CORRECT_THRESHOLD - clarify margin) or a content token must
+    match an answer token at the phonetic bar ("Wild" for "Oscar Wilde").
+    A transcript that resembles nothing ("Shaw", "It's on me.") never
+    corroborates — that is a wrong answer, not a mishearing. Pure."""
+    if not attempt or not canonical:
+        return False
+    r = lily_tier1_evaluate(attempt, [canonical])
+    if r["verdict"] == "correct":
+        return True
+    try:
+        import lily_config as _cfg
+        margin = _cfg.tier1_clarify_margin()
+    except Exception:  # pragma: no cover — stdlib-only fallback
+        margin = 0.15
+    if float(r.get("similarity") or 0.0) >= FUZZY_CORRECT_THRESHOLD - margin:
+        return True
+    return _matches_expected(attempt, [canonical])
 
 
 _FORMAT_MARKER_RE = re.compile(r"\bmulti(?:ple)?\s*choices?\b|\bmcqs?\b")
@@ -1167,6 +1679,41 @@ def lily_detect_format_directive(text: str) -> bool:
     return not [tok for tok in norm.split() if tok not in _FORMAT_SCAFFOLD]
 
 
+# WO-LILY-EVAL-INTEGRITY-001 E3 (Auditor C section B): a bare CONFIRMATION
+# — "Yes, that's my answer.", "final answer", "lock it in" — carries no
+# answer content. In an open window it used to RECORD as an attempt: as the
+# clarify reply it became the adjudicated text, and after a plain bind it
+# REVISED the bound answer (the self-correction path takes any later final).
+# Anchored to the whole utterance; "the answer is Paris" never matches
+# (content), and the answer-surface override upstream keeps a yes/no
+# question's "yes" scoreable.
+_CONFIRMATION_RE = re.compile(
+    r"^(?:"
+    # "yes, that's my answer" / "that's my final answer" / "my answer"
+    r"(?:(?:yes|yeah|yep|yup|ok|okay|sure|right|correct|exactly)[,.!?\s]+)*"
+    r"(?:(?:that'?s|thats|that is|it'?s|its|it is|this is)\s+)?"
+    r"(?:(?:my|our|the)\s+)?(?:final\s+)?answer(?:\s+final)?"
+    r"|"
+    # "final answer" / "lock it in" / "I'm sure" / "that's it"
+    r"(?:(?:yes|yeah|yep|yup|ok|okay|sure)[,.!?\s]+)*"
+    r"(?:final answer|lock (?:it|that) in|locking (?:it|that) in|lock it"
+    r"|i'?m sure|im sure|i'?m answering|im answering|that'?s it|thats it"
+    r"|that'?s what i said|thats what i said|(?:i'?ll|ill) go with (?:that|it))"
+    r")[.!?\s]*$"
+)
+
+
+def lily_confirmation_utterance(text: str) -> bool:
+    """True when `text` is a bare confirmation of an answer already given
+    ("yes, that's my answer", "final answer", "lock it in") — a reply to
+    a clarify, or a self-affirmation — with no answer content. Pure."""
+    norm = re.sub(r"\s+", " ", (text or "").strip().lower())
+    norm = norm.replace("’", "'")
+    if not norm:
+        return False
+    return bool(_CONFIRMATION_RE.match(norm))
+
+
 def lily_non_answer_utterance(
     text: str, question: Optional[dict], roster_names: Optional[list] = None
 ) -> Optional[str]:
@@ -1200,6 +1747,9 @@ def lily_non_answer_utterance(
         return "backchannel"
     if norm in LILY_PROCEDURAL_IMPERATIVES:
         return "procedural"
+    # E3: "Yes, that's my answer." confirms an answer; it is not one.
+    if lily_confirmation_utterance(text):
+        return "confirmation"
     for name in roster_names or []:
         if norm == lily_normalize_answer(str(name)):
             return "bare_name"

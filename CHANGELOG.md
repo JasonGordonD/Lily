@@ -5,6 +5,178 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — WO-LILY-EVAL-INTEGRITY-001: numeric answers, the shape regression, the clarify door, the contest regex, corroborated corrections, solo miss lines
+
+Auditor C executed every case below against the deployed classifiers
+(`scratchpad/audit_scenarios.py`, sections B and F — the failing-first
+seed; `tests/test_eval_integrity_001.py` re-executes the same lists as
+behaviour tests, none of which assert on source text). Six defects, one
+P0 that was awarding wrong points in production.
+
+**PRIOR CLAIMS THAT WERE FALSE.**
+* WO-LILY-BIND-DISPUTE-001 D1 claimed the shape sensor was "deliberately
+  narrow — it gates FRAGMENTS, never confident wrong answers". It diverted
+  "Sam Shepard, uh", "George Bernard Shaw, hmm.", "Rebel Without a", "Once
+  Upon a Time in", "Queen Elizabeth the" and MC "B. Um." / "C, uh" / "the
+  first one, uh" to clarify+withdraw, and still HARD-BOUND "what's the
+  guy", "the Irish guy", "Oscar something", "I don't know", "let me think",
+  "give me a second", "It starts with an O", "Oscar… no wait", "face" and
+  "He. Face." (the live fragment minus its first word).
+* D1 also claimed the clarify reply "settles it". `_resolve_clarify` only
+  relabelled the corpus row: the withdrawn bind was never restored, and the
+  reply text ("Yes, that's my answer.") RECORDED as the attempt, aired its
+  own receipt, and was adjudicated. A bare confirmation could also REVISE
+  a real bound answer through the self-correction path.
+* HOTFIX-005 X12 claimed the contest regex was "anchored so a fresh answer
+  to a live question does not read as a contest". `(?:not|correct|right|it)`
+  had no trailing `\b`: "I say Detro-IT", "I said B-RIGHT", "I said it's
+  Franklin" and "the answer is a dog / a horse / A. Lincoln" all fired.
+* HOTFIX-009 W1 claimed "the other grounds (wrong_rule / misheard /
+  out_of_window) stay judged by the caller within the existing bounds".
+  There were no bounds: `lily_correct_verdict` passed the LLM's grounds
+  straight through and `ledger_row_for(name, None)` returned the LAST row,
+  so "you misheard me" after every miss converted it to a hit, once per
+  (player, question).
+
+**E1 — P0, numeric adjudication (`lily_evaluation`).** `_soundex`
+stripped non-letters, so every digit string keyed `""` and the phonetic
+branch (soundex equal + sim ≥ 0.75) scored 1968→1969, 1786→1776,
+1000→100 CORRECT. Now: a letter-less token keys to a sentinel carrying its
+own digits (`#1968`); the phonetic branch requires alphabetic content on
+BOTH sides; numeric answers compare digit-string to digit-string after
+spoken-number normalization and NOTHING else (no fuzzy — "100" vs "1000"
+is 0.857 in letters, a factor of ten in numbers; mixed phrases "Apollo 11"
+vs "Apollo 12" fall the same way). A mismatch reports similarity 0.0 so a
+confident "1968" can never land in the clarify band. Operator addendum:
+`lily_spoken_number_to_digits` (years "nineteen sixty-eight" / "twenty
+twenty-four" / "nineteen oh five" / "eighteen hundred", cardinals "one
+hundred" / "three thousand two hundred" / "twelve", ordinals "the fourth"
+→ 4, hyphen/space variants, "1,968") runs inside `lily_normalize_answer`
+(whole phrase, or runs ≥ 2 number words / a single word ≥ ten inside a
+phrase; "Air Force One" stays words). Thresholds unchanged. Not built: a
+full parser (no "a hundred", fractions, decimals).
+LIVE RECEIPT: log `LILY_EVAL | NUMERIC | attempt='1968' expected='1969'
+verdict=uncertain reason=digit_mismatch`; the `lily_answers` row for that
+utterance reads `transcript='1968'`, `verdict='incorrect'`, `eval_tier=2`
+(the judge ruled — pre-fix: `verdict='correct'`, `eval_tier=1`, a point
+awarded); `lily_transcripts`: the receipt after a wrong year is
+"Locked in—" (pre-fix "Correct!"), the sheet is the miss line.
+
+**E2 — the shape regression (`lily_evaluation`, `lily_floor`,
+`lily_agent._receipt_yields_to_clarify`).** (a) trailing disfluency tokens
+are stripped BEFORE similarity and shape classification
+(`lily_strip_trailing_disfluency`; `_strip_fillers` applies it, so
+"Sam Shepard, uh" is evaluated as "Sam Shepard" and MC "B. Um." resolves
+letter B). (b) a function-word tail is a fragment only when fewer than two
+content tokens precede it (pronouns/copulas/articles excluded) and they
+name no expected answer — "Rebel Without a", "Once Upon a Time in",
+"Queen Elizabeth the", "Wilde, the" are committed; "It was the." is not.
+(c) new uncommitted classes: `search_phrase` ("the Irish guy", "Oscar
+something", wh + placeholder noun "what's the guy"), `deferral` (whole
+utterance: "I don't know", "no idea", "let me think", "give me a second",
+"hold on", "I'm thinking", "thinking"; "I'm thinking Aphrodite" stays
+committed), `hint` ("starts with an", "tip of my tongue"),
+`self_negation` ("Oscar… no wait", "Oscar, no"), `interjection` ("oh
+god", "damn", "ugh", "shoot"), `fragment_token` (a bare placeholder token
+"face" / "He. Face." unless it IS an expected answer token). The sensor
+takes `expected_answers` (`lily_expected_answers(question)`); the receipt
+seam and the clarify trigger read the same context. "how many states",
+"Paris", "Benjamin. Franklin." bind exactly as before; MC resolution
+unchanged except the filler tolerance.
+LIVE RECEIPT: `LILY_STATE | ANSWER_CANDIDATE … text='Sam Shepard, uh'`
+followed by a verdict and NO `LILY_CLARIFY | SHAPE_TRIGGER` for that q;
+for the gap list `LILY_CLARIFY | SHAPE_TRIGGER … shape=search_phrase|
+deferral|hint|self_negation|interjection|fragment_token` (new shape
+names — pre-fix only wh_search/disfluency_tail/fragment_tail existed) and
+`LILY_STATE | ANSWER_WITHDRAWN … reason=uncommitted_shape:<class>`;
+`lily_transcripts`: no "answer, or thinking out loud?" turn after a
+trailing-filler answer.
+
+**E3 — the clarify door opens both ways (`lily_floor._maybe_fire_clarify`
+/ `_resolve_clarify` / new `_settle_shape_clarify`, `LilyScorekeeper.
+restore_candidate`, `lily_evaluation.lily_confirmation_utterance`).** The
+withdrawn candidate rides `pending_clarify[player]["withdrawn"]` (+
+`withdrawn_text`, disfluency-stripped). Affirmative reply → the ORIGINAL
+candidate is re-bound (utterance id, timestamps and capture entries
+restored; the reply candidate, if recorded, displaced); negative → the
+reply candidate is withdrawn and the original dropped, window live; a
+NEW answer → it stands (a reply that is itself a fragment is withdrawn —
+the once-per-question cap would otherwise let it bind). A bare
+confirmation ("Yes, that's my answer.", "final answer", "lock it in") is
+now `lily_non_answer_utterance` class `confirmation`: never recorded, so
+it can neither become the attempt nor revise a bound answer (Auditor C
+section B, re-run: "Wild, uh" binds and survives the affirmation).
+LIVE RECEIPT: `LILY_CLARIFY | REBIND|DROPPED|NEW_ANSWER|UNRESOLVED …`,
+`LILY_STATE | ANSWER_REBOUND … reason=clarify_affirmative`,
+`LILY_ANSWER | NON_ANSWER_LOGGED … reason=confirmation`; the
+`lily_answers` row after an affirmative clarify carries the ORIGINAL
+utterance text, never "Yes, that's my answer."
+
+**E4 — the contest regex (`lily_scorekeeper._VERDICT_CONTEST_RE`,
+`lily_detect_verdict_contest(text, *, multiple_choice=None)`).** Cue words
+are whole words (`\b`); a bare "it" is a contest only as the utterance's
+end ("I said it"); "the correct answer is A" stays a contest shape
+(anchored at the end); the bare "the answer is/was A" arm moved to
+`_VERDICT_CONTEST_LETTER_RE`, consulted only when `multiple_choice` is
+not False (an explicit False — a freeform question — stands it down; the
+pre-WO callers pass nothing and keep the anchored arm). The four live
+protest lines (08-14 21:54:50 / 21:54:54, 08-15 17:49:27 / 17:49:47) still
+detect verbatim; the binding-denial arm is untouched (W2 restricts the
+settle-withdraw to it). NOT wired: `lily_glass` (W2's routing) does not
+yet pass `multiple_choice=`.
+LIVE RECEIPT: no `LILY_CONTEST | REQUEST` / `LILY_DISPUTE | ARMED` after
+an "I say Detroit" / "I said Bright" / "the answer is a dog" final;
+`lily_transcripts`: no re-check turn follows a restated answer.
+
+**E5 — corroborated correction grounds (`LilyScorekeeper.correct_verdict`,
+`lily_agent.lily_correct_verdict`).** `misheard` requires a corroborating
+transcript from that question's window — the denied row's transcript, the
+player's in-window `transcript_buffer` lines (entries now carry
+`question_index` + `in_window`; `in_window_transcripts_for`), or the
+addressee-log in-window fuzzy matches — that resembles canonical at the
+Tier-1 clarify band or by answer token (`lily_misheard_corroborates`:
+"Wild" corroborates "Oscar Wilde"; "Shaw" / "It's on me." never do).
+`wrong_rule` requires `sk.pacing == "relaxed"` AND a clock denial on that
+question (a `late_answer` ledger row or late-answer record — the diamond
+class). `out_of_window` requires a late-answer record for (player,
+question) with `seconds_late` inside `late_answer_grace_seconds`. Every
+refusal is logged with its reason and written to
+`sk.last_correction_refusal`; the tool returns the reason and rewrites
+`_contest_note` with the verdict (S6 closed loop) so the reply says WHY
+the ruling stands. Every accepted correction still lands one audited
+`verdict_correction` row through `apply_score_event`.
+LIVE RECEIPT: `LILY_SCORE | VERDICT_CORRECTION_UNCORROBORATED … grounds=
+misheard|wrong_rule|out_of_window` and `LILY_SCORE |
+VERDICT_CORRECTION_REFUSED … reason=uncorroborated_misheard|
+wrong_rule_not_relaxed|wrong_rule_no_clock_denial|
+out_of_window_no_late_record|out_of_window_past_grace`; `lily_answers`:
+no `cause='verdict_correction'` row with `grounds=misheard` unless an
+in-window `lily_addressee_log` / `lily_transcripts` line for that player
+resembles the canonical answer; `lily_transcripts`: Lily's reply after a
+refused "you misheard me" names the reason ("nothing you said in that
+window resembled the answer").
+
+**E6 — solo miss lines (`lily_verdict_sheet(solo=)`,
+`lily_verdict_reair_line(solo=)`, `_reveal_instructions`).** Keyed on
+roster size exactly 1 (an empty roster is not a table of one): "Not this
+one — it was X." replaces "Nobody landed it — it was X."; the cut re-air
+says "Not this one — X."; the reveal instruction names the one player and
+forbids "nobody". Multiplayer lines unchanged.
+LIVE RECEIPT: on a 1-player session `LILY_RESULT | AIRED … text='Not this
+one — it was …'` and the `lily_transcripts` LILY line "Not this one — it
+was X." where "Nobody landed it — it was X." / "Nobody had it — X." used
+to air.
+
+Tests: `tests/test_eval_integrity_001.py` (32, failing-first: 26 of the
+first 31 failed on a380531; the 5 that passed were the baseline's
+unconditional-accept cases). Updated behaviour pins:
+`test_bind_dispute_p0` (the stripped "It was the. Um." is a fragment
+tail), `test_hotfix009_verdict_correction` (misheard needs corroboration;
+the `inspect.getsource` contest-note test replaced by a driven one),
+`test_hotfix006_adjudication` and `test_hostloop_c5c6c8_receipt` (solo /
+empty-roster miss lines). Full suite 2798 on python3 and venv313
+(baseline 2766).
+
 ## 2026-08-17 — WO-LILY-RESTART-001: restart the game on request — kill the game, keep the people
 
 Operator directive: Lily must be able to RESTART the game on request.

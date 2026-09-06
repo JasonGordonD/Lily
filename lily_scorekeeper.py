@@ -1108,12 +1108,22 @@ def lily_detect_explain_request(text: str) -> bool:
 _VERDICT_CONTEST_RE = _re.compile(
     r"\b(?:"
     r"you (?:misheard|didn t hear|mis heard|got me wrong)"
-    r"|i (?:did |actually |already )?(?:said|say|answered)\b[a-z0-9 ']*?"
-    r"(?:not|correct|right|it)"
+    # WO-LILY-EVAL-INTEGRITY-001 E4: the cue words are WHOLE WORDS. Pre-fix
+    # "(?:not|correct|right|it)" had no trailing \b and matched INSIDE the
+    # answer — "I say Detro-IT", "I said B-RIGHT" — so a restated live
+    # answer read as a contest. A bare "it" is a contest only as the
+    # utterance's end ("I said it"); "I said it's Franklin" is an answer.
+    r"|i (?:did |actually |already )?(?:said|say|answered)\b"
+    r"(?:[a-z0-9 ']*?\b(?:not|correct|correctly|right|already|before"
+    r"|earlier|first|the first time)\b|(?: it| that)?\s*$)"
     r"|(?:that s|thats|that is) (?:wrong|not right|incorrect|not what i said)"
-    r"|i (?:was|am) (?:right|correct)"
-    r"|i (?:did |actually )?(?:get|got) (?:it|that) right"
-    r"|(?:the )?(?:correct )?answer (?:is|was) (?:a|b|c|d)\b"
+    r"|i (?:was|am) (?:right|correct)\b"
+    r"|i (?:did |actually )?(?:get|got) (?:it|that) right\b"
+    # "the correct answer is A" (X12 live) — always a contest shape. The
+    # bare "the answer is A" arm lives in _VERDICT_CONTEST_LETTER_RE and
+    # is consulted only when the caller says the question is MULTIPLE
+    # CHOICE (E4: "the answer is a dog" is an answer, not a contest).
+    r"|(?:the )?correct answer (?:is|was) (?:a|b|c|d)\s*$"
     r"|i (?:should have|shoulda) (?:got|gotten) (?:the|that|a) point"
     r"|(?:check|go back to|review) (?:the|that|my) (?:answer|last one)"
     # W1 (HOTFIX-009) rule-violation contest — the diamond form: the player
@@ -1153,14 +1163,34 @@ _VERDICT_CONTEST_RE = _re.compile(
 )
 
 
-def lily_detect_verdict_contest(text: str) -> bool:
+# E4: "the answer is/was A" — a letter is an answer only where letters ARE
+# answers. Anchored at the utterance end, so "the answer is a dog" / "the
+# answer is A. Lincoln" never fire even on an MC question.
+_VERDICT_CONTEST_LETTER_RE = _re.compile(
+    r"\b(?:the )?answer (?:is|was) (?:a|b|c|d)\s*$"
+)
+
+
+def lily_detect_verdict_contest(
+    text: str, *, multiple_choice: Optional[bool] = None
+) -> bool:
     """True when a player contests the last ruling — asserting they were
     misheard or that their answer was correct (X12). Anchored so a fresh
-    answer to a live question is not mistaken for a contest."""
+    answer to a live question is not mistaken for a contest.
+
+    `multiple_choice` (WO-LILY-EVAL-INTEGRITY-001 E4): whether the live /
+    last question offered lettered choices. The bare "the answer is A"
+    arm fires only when this is not False — an unknown format (None,
+    the pre-WO callers) keeps the anchored arm; an explicit False (a
+    freeform question) stands it down entirely."""
     normalized = _normalize_command_text(text)
     if not normalized:
         return False
-    return bool(_VERDICT_CONTEST_RE.search(normalized))
+    if _VERDICT_CONTEST_RE.search(normalized):
+        return True
+    if multiple_choice is False:
+        return False
+    return bool(_VERDICT_CONTEST_LETTER_RE.search(normalized))
 
 
 def lily_detect_control_command(text: str) -> Optional[str]:
@@ -1757,9 +1787,14 @@ def lily_verdict_sheet(
     winner: Optional[str],
     winner_scored: bool,
     receipt_aired: bool = False,
+    solo: bool = False,
 ) -> str:
     """REFACTOR W2a. The deterministic verdict beat — the spine's own words,
     composed from the COMMITTED ruling, replacing the 8-13s LLM composite.
+
+    `solo` (WO-LILY-EVAL-INTEGRITY-001 E6): a table of ONE never hears
+    "Nobody landed it" — there is no crowd to have missed. The miss line
+    becomes "Not this one — it was X." Keyed on roster size by the caller.
 
     RULINGS-001 R1 register anchor: the verdict word FIRST, then at most one
     short flourish (the answer and the point). HOSTLOOP-001 C6 anti-double: if
@@ -1782,6 +1817,8 @@ def lily_verdict_sheet(
     # correct outcome arrives on its own note, not this beat).
     if receipt_aired:
         return f"It was {answer} — no point this time." if answer else "No point this time."
+    if solo:
+        return f"Not this one — it was {answer}." if answer else "Not this one."
     return f"Nobody landed it — it was {answer}." if answer else "Nobody landed it."
 
 
@@ -2072,6 +2109,11 @@ class LilyScorekeeper:
         # Q3 PRE_WINDOW_REPLAY + LATE_WITHIN_GRACE "prostate" 0-score class)
         # is flagged in the session it happens in rather than lost.
         self._captured_answer_utterances: dict = {}
+        # WO-LILY-EVAL-INTEGRITY-001 E5 (S6 closed loop): why the last
+        # correct_verdict call refused — {"reason", "grounds", "detail"} —
+        # so the contest reply can say WHY the ruling stands. None after an
+        # accepted correction.
+        self.last_correction_refusal: Optional[dict] = None
 
         # Prior-state inputs (WO-ADDRESSEE-H1 Task 2). host_speaking is SET
         # by the agent layer on the framework's agent-state transitions
@@ -3480,13 +3522,21 @@ class LilyScorekeeper:
                 self.session_id, seg.speaker_label, clean[:80],
             )
 
-        # Transcript buffer (rolling)
+        # Transcript buffer (rolling). WO-LILY-EVAL-INTEGRITY-001 E5: each
+        # player line carries the question it was spoken during and whether
+        # it landed in that question's open window — the in-session
+        # corroboration source for a "you misheard me" contest.
         self.transcript_buffer.append({
             "speaker": player or seg.speaker_label or "?",
             "speaker_label": seg.speaker_label,
             "text": clean,
             "timestamp": ts,
             "duration": duration,
+            "question_index": self.question_number,
+            "in_window": bool(
+                seg.assume_in_window
+                or self.window_contains(seg.segment_start_time, now=t)
+            ),
         })
         if len(self.transcript_buffer) > TRANSCRIPT_BUFFER_SIZE:
             self.transcript_buffer = self.transcript_buffer[-TRANSCRIPT_BUFFER_SIZE:]
@@ -3803,6 +3853,53 @@ class LilyScorekeeper:
         )
         return cand
 
+    def restore_candidate(
+        self, key: str, cand: dict, *, text: Optional[str] = None,
+        reason: str,
+    ) -> dict:
+        """WO-LILY-EVAL-INTEGRITY-001 E3: put a WITHDRAWN candidate back —
+        the clarify's affirmative reply ("yes, that's my answer") re-binds
+        the ORIGINAL utterance as the attempt, never the reply text. The
+        exact inverse of withdraw_candidate: the slot, the P0-4 capture
+        entries and the attempt counter are re-stamped. `text` (the
+        disfluency-stripped form) replaces the candidate's text and its
+        bound attempt's text; the utterance id and timestamps stay the
+        original's, so the ledger row names the utterance that was spoken.
+        Any candidate currently in the slot (the reply itself, recorded by
+        the same final) is withdrawn first."""
+        current = self.answer_candidates.get(key)
+        if current is not None and current is not cand:
+            self.withdraw_candidate(key, reason=f"{reason}:displaced_reply")
+        restored = dict(cand)
+        if text:
+            restored["text"] = text
+            attempts = [dict(a) for a in (cand.get("attempts") or [])]
+            if attempts:
+                attempts[-1]["text"] = text
+                restored["attempts"] = attempts
+        self.answer_candidates[key] = restored
+        qidx = restored.get("window_question_index")
+        if qidx is None:
+            qidx = self.question_number
+        captured = self._captured_answer_utterances.setdefault(qidx, set())
+        for uid in [restored.get("utterance_id")] + [
+            a.get("utterance_id") for a in (restored.get("attempts") or [])
+        ]:
+            if uid:
+                captured.add(uid)
+        player = restored.get("player")
+        state = self.players.get(player) if player else None
+        if state is not None:
+            state["answers_attempted"] = state.get("answers_attempted", 0) + 1
+        logger.warning(
+            "LILY_STATE | ANSWER_REBOUND | session=%s q=%s key=%s reason=%s "
+            "text=%r — the withdrawn bind is restored as the attempt "
+            "(WO-LILY-EVAL-INTEGRITY-001 E3)",
+            self.session_id, qidx, key, reason,
+            str(restored.get("text") or "")[:80],
+        )
+        return restored
+
     # -- game flow ---------------------------------------------------------
 
     def start_question(self, question: Optional[dict] = None) -> None:
@@ -4068,20 +4165,32 @@ class LilyScorekeeper:
         non-positive delta / uncorroborated answer_denied) — each refusal
         warns and mutates nothing.
         """
+        self.last_correction_refusal = None
+        ground = (grounds or "").strip().lower()
+
+        def _refuse(reason: str, detail: str) -> None:
+            # S6 closed loop: every refusal is logged with its reason AND
+            # written back where the contest reply can read it.
+            self.last_correction_refusal = {
+                "reason": reason, "grounds": ground, "detail": detail,
+                "player": player_name,
+            }
+
         state = self.players.get(player_name)
         if state is None:
             logger.warning(
                 "LILY_SCORE | VERDICT_CORRECTION_UNKNOWN_PLAYER | "
                 "session=%s name=%s", self.session_id, player_name,
             )
+            _refuse("unknown_player", f"{player_name!r} is not on the roster")
             return None
-        ground = (grounds or "").strip().lower()
         if ground not in self.CORRECTION_GROUNDS:
             logger.warning(
                 "LILY_SCORE | VERDICT_CORRECTION_BAD_GROUNDS | session=%s "
                 "player=%s grounds=%r — refused", self.session_id,
                 player_name, grounds,
             )
+            _refuse("bad_grounds", f"{grounds!r} is not a correction ground")
             return None
         original = self.ledger_row_for(player_name, question_id)
         if original is None:
@@ -4092,6 +4201,7 @@ class LilyScorekeeper:
                 "player=%s question_id=%s — refused (nothing to correct)",
                 self.session_id, player_name, question_id,
             )
+            _refuse("no_verdict", "no committed verdict to amend")
             return None
         if self.existing_correction(player_name, original.get("question_id")):
             logger.warning(
@@ -4099,6 +4209,7 @@ class LilyScorekeeper:
                 "session=%s player=%s question_id=%s — refused",
                 self.session_id, player_name, original.get("question_id"),
             )
+            _refuse("already_corrected", "that verdict was already corrected once")
             return None
         # This tool RESTORES a denied point. delta must be positive; negative
         # reversal (taking a point off the wrong player) has no caller yet and
@@ -4109,6 +4220,7 @@ class LilyScorekeeper:
                 "session=%s player=%s delta=%s — refused (restoration only)",
                 self.session_id, player_name, delta,
             )
+            _refuse("non_positive_delta", "a correction only restores a point")
             return None
         # The grounds must match reality, deterministically. A restoration
         # only applies to a verdict that actually DENIED the point — a
@@ -4124,7 +4236,109 @@ class LilyScorekeeper:
                 "scored; nothing was denied)", self.session_id, player_name,
                 original.get("question_id"),
             )
+            _refuse("not_denied", "that answer already scored its point")
             return None
+        qid = original.get("question_id")
+        # WO-LILY-EVAL-INTEGRITY-001 E5: the other three grounds were
+        # UNCORROBORATED — the LLM's grounds passed straight through, so
+        # "you misheard me" after every miss converted it to a hit, once
+        # per (player, question). Each ground now has a mechanical check.
+        if ground == "misheard":
+            # A mishearing leaves a trace: an in-window transcript from the
+            # player that resembles the answer (Tier-1 clarify band, or a
+            # token match — "Wild" for "Oscar Wilde"). The caller supplies
+            # the best in-window line; the denied row's own transcript is
+            # the fallback. No resemblance anywhere ⇒ a wrong answer, not
+            # a mishearing ⇒ refused.
+            attempt = (
+                corroborating_attempt
+                if corroborating_attempt is not None
+                else original.get("transcript")
+            )
+            corroborated = bool(canonical_answer) and (
+                lily_evaluation.lily_misheard_corroborates(
+                    attempt or "", canonical_answer
+                )
+            )
+            if not corroborated:
+                logger.warning(
+                    "LILY_SCORE | VERDICT_CORRECTION_UNCORROBORATED | "
+                    "session=%s player=%s question_id=%s grounds=misheard — "
+                    "refused (no in-window transcript resembles canonical "
+                    "%r; best candidate %r)", self.session_id, player_name,
+                    qid, canonical_answer, (attempt or "")[:60],
+                )
+                _refuse(
+                    "uncorroborated_misheard",
+                    "nothing you said in that window resembled the answer",
+                )
+                return None
+        elif ground == "wrong_rule":
+            # The rule that can be misapplied is the CLOCK: a timer on a
+            # relaxed round (the diamond class). Requires a relaxed table
+            # AND a clock denial on that question — a late_answer row, or a
+            # late-answer record — otherwise a wrong answer on a relaxed
+            # table is just wrong.
+            if self.pacing != "relaxed":
+                logger.warning(
+                    "LILY_SCORE | VERDICT_CORRECTION_UNCORROBORATED | "
+                    "session=%s player=%s question_id=%s grounds=wrong_rule "
+                    "— refused (pacing=%s; a clock is the rule on a timed "
+                    "table)", self.session_id, player_name, qid, self.pacing,
+                )
+                _refuse(
+                    "wrong_rule_not_relaxed",
+                    "the table plays timed, so the clock was the rule",
+                )
+                return None
+            if not self._denied_by_clock(player_name, qid):
+                logger.warning(
+                    "LILY_SCORE | VERDICT_CORRECTION_UNCORROBORATED | "
+                    "session=%s player=%s question_id=%s grounds=wrong_rule "
+                    "— refused (no clock denial on that question; the "
+                    "recorded attempt %r was ruled on its content)",
+                    self.session_id, player_name, qid,
+                    str(original.get("transcript") or "")[:60],
+                )
+                _refuse(
+                    "wrong_rule_no_clock_denial",
+                    "no timer ruled on that one — the answer itself was wrong",
+                )
+                return None
+        elif ground == "out_of_window":
+            # "Judged outside its own window" is the N9 race: a correct
+            # answer inside the STATED grace margin that the expiry task
+            # closed on anyway. It leaves a late-answer record; the record
+            # must sit inside late_answer_grace_seconds.
+            late = self._late_record_for(player_name, qid)
+            if late is None:
+                logger.warning(
+                    "LILY_SCORE | VERDICT_CORRECTION_UNCORROBORATED | "
+                    "session=%s player=%s question_id=%s "
+                    "grounds=out_of_window — refused (no late-answer record "
+                    "for that question)", self.session_id, player_name, qid,
+                )
+                _refuse(
+                    "out_of_window_no_late_record",
+                    "that answer was ruled inside its window",
+                )
+                return None
+            grace = max(0.0, lily_config.late_answer_grace_seconds())
+            seconds_late = late.get("seconds_late")
+            if not isinstance(seconds_late, (int, float)) or seconds_late > grace:
+                logger.warning(
+                    "LILY_SCORE | VERDICT_CORRECTION_UNCORROBORATED | "
+                    "session=%s player=%s question_id=%s "
+                    "grounds=out_of_window — refused (late by %ss, grace "
+                    "%.1fs)", self.session_id, player_name, qid,
+                    seconds_late, grace,
+                )
+                _refuse(
+                    "out_of_window_past_grace",
+                    f"it landed {seconds_late}s past the window, outside "
+                    f"the {grace:.1f}s grace",
+                )
+                return None
         # HOTFIX-009 W1 harden: answer_denied is the highest-risk ground (a
         # rightly-denied WRONG answer is ledger-indistinguishable from a
         # denied CORRECT one). Corroborate it mechanically — the recorded
@@ -4150,6 +4364,10 @@ class LilyScorekeeper:
                     "canonical %r via Tier-1)", self.session_id, player_name,
                     original.get("question_id"), (attempt or "")[:60],
                     canonical_answer,
+                )
+                _refuse(
+                    "uncorroborated_answer_denied",
+                    "the recorded answer does not match the canonical answer",
                 )
                 return None
         corrects = {
@@ -4195,6 +4413,53 @@ class LilyScorekeeper:
             points=points,
             transcript=transcript,
         )
+
+    def _denied_by_clock(self, player_name: str, question_id: Optional[str]) -> bool:
+        """E5 wrong_rule corroboration: did a CLOCK deny this player on this
+        question — a late_answer ledger row or a late-answer record?"""
+        for entry in self.score_ledger:
+            if (
+                entry.get("cause") == "late_answer"
+                and entry.get("player") == player_name
+                and entry.get("question_id") == question_id
+            ):
+                return True
+        return self._late_record_for(player_name, question_id) is not None
+
+    def _late_record_for(
+        self, player_name: str, question_id: Optional[str]
+    ) -> Optional[dict]:
+        """The most recent note_late_answer record for (player, question)."""
+        found = None
+        for rec in getattr(self, "late_answers", None) or []:
+            if rec.get("player") != player_name:
+                continue
+            if question_id is not None and rec.get("question_id") != question_id:
+                continue
+            found = rec
+        return found
+
+    def in_window_transcripts_for(
+        self, player_name: str, question_index: Optional[int]
+    ) -> list[str]:
+        """E5: this player's transcript-buffer lines spoken INSIDE the
+        answer window of `question_index` (None = any question), newest
+        last — the in-session corroboration source for a misheard claim."""
+        out: list[str] = []
+        for entry in self.transcript_buffer:
+            if entry.get("speaker") != player_name:
+                continue
+            if not entry.get("in_window"):
+                continue
+            if (
+                question_index is not None
+                and entry.get("question_index") != question_index
+            ):
+                continue
+            text = entry.get("text")
+            if text:
+                out.append(text)
+        return out
 
     def ledger_row_for(
         self, player_name: Optional[str], question_id: Optional[str] = None
