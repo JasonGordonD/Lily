@@ -750,6 +750,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._last_airgate_decision = None
         self._first_frame_hooks = None
         self._dispatch_suppressed_listeners = None
+        # Consumers of the suppression hook register here (reset above, so a
+        # restart's re-init never doubles them): W2's restart-confirm unwind.
+        self.add_dispatch_suppressed_listener(self._restart_on_dispatch_suppressed)
         self._device_candidate_memory = None
         self._device_verify_attempts = 0
         self._device_verify_task = None

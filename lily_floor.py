@@ -1049,12 +1049,15 @@ class LilyFloorMixin:
             lily_config.restart_confirm_ttl_seconds(),
         )
 
-    def on_dispatch_suppressed(
-        self, act: str, speech_id: str | None, reason: str
+    def _restart_on_dispatch_suppressed(
+        self, act: str | None, speech_id: str | None, reason: str, **_facts
     ) -> None:
-        """SEAM (W1 exposes this hook from the say-gate / flush / cancel
-        paths and calls it with the act, the handle id and the reason; this
-        is the consumer). A restart confirm that never reached the room —
+        """LISTENER on LilySpeechDeliveryMixin.on_dispatch_suppressed (the
+        dispatcher; registered in _init_all_game_state). Integration note:
+        this was first written as a same-named method and shadowed the
+        dispatcher in the MRO (Floor precedes SpeechDelivery), which broke
+        every airgate event record and raised on the `stage=` kwarg. A
+        consumer is a listener, never the hook itself. A restart confirm that never reached the room —
         suppressed by the freshness gate, flushed by a barge, interrupted,
         failed — unwinds the pending state: re-ask ONCE, else drop the ask
         with a one-line 'didn't catch a yes'. Any other act: no-op here."""
