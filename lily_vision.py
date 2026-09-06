@@ -39,6 +39,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from typing import Annotated, Optional
 from urllib.parse import urlparse
 
@@ -46,6 +47,7 @@ import aiohttp
 from livekit.agents import RunContext, function_tool
 
 import lily_config
+import lily_metrics
 
 logger = logging.getLogger("lily_vision")
 
@@ -67,10 +69,11 @@ def _valid_http_url(url: str) -> bool:
 
 
 async def lily_describe_image(
-    image_url: str, prompt: Optional[str] = None
+    image_url: str, prompt: Optional[str] = None, *, purpose: str = "vision"
 ) -> dict:
     """Analyze one image URL with Grok vision. Structured dict contract
-    (see module docstring); never raises."""
+    (see module docstring); never raises. `purpose` tags the usage row
+    (WO-LILY-LLM-USAGE-ALL-PATHS-001)."""
     url = (image_url or "").strip()
     if not url:
         return {"status": "unavailable", "reason": "empty image_url"}
@@ -83,21 +86,48 @@ async def lily_describe_image(
             "reason": "vision provider unconfigured",
         }
     ask = (prompt or "").strip() or _DEFAULT_PROMPT
-    return await _grok_vision_text(url, ask)
+    return await _grok_vision_text(url, ask, purpose=purpose)
 
 
 async def _grok_vision_text(
-    image_url: str, prompt: str, *, json_mode: bool = False
+    image_url: str, prompt: str, *, json_mode: bool = False,
+    purpose: str = "vision",
 ) -> dict:
-    """One Grok 4.5 image→text call for URLs or data URLs."""
+    """One Grok 4.5 image→text call for URLs or data URLs.
+
+    WO-LILY-LLM-USAGE-ALL-PATHS-001: every call records one lily_llm_usage
+    row (fire-and-forget) with the model ACTUALLY sent in the payload;
+    effort is None — this call sends no reasoning effort. ttft_ms is the
+    time to the response headers (non-streaming: the provider answers once
+    generation is done), total_ms is headers + body. Failures record too
+    (finish_reason http_<n> / timeout / error:<class>)."""
     api_key = lily_config.xai_api_key()
     if not api_key:
         return {
             "status": "unavailable",
             "reason": "vision provider unconfigured",
         }
+    model = lily_config.vision_model()
+    t0 = time.monotonic()
+    ttft_ms: Optional[float] = None
+    usage: dict = {}
+    finish: Optional[str] = None
+
+    def _record(reason: Optional[str]) -> None:
+        p, c = usage.get("prompt_tokens"), usage.get("completion_tokens")
+        lily_metrics.record_llm_call(
+            purpose=purpose,
+            model=model,
+            effort=None,
+            ttft_ms=ttft_ms,
+            total_ms=round((time.monotonic() - t0) * 1000, 1),
+            prompt_tokens=int(p) if isinstance(p, (int, float)) else None,
+            completion_tokens=int(c) if isinstance(c, (int, float)) else None,
+            finish_reason=reason,
+        )
+
     payload = {
-        "model": lily_config.vision_model(),
+        "model": model,
         "messages": [
             {
                 "role": "user",
@@ -124,27 +154,44 @@ async def _grok_vision_text(
                     "Content-Type": "application/json",
                 },
             ) as resp:
+                # Headers are back: the first byte of the response.
+                ttft_ms = round((time.monotonic() - t0) * 1000, 1)
                 try:
                     data = await resp.json(content_type=None)
                 except Exception:
                     data = {"raw": await resp.text()}
                 if resp.status < 200 or resp.status >= 300:
+                    _record(f"http_{resp.status}")
                     return {"status": "error", "reason": f"HTTP {resp.status}"}
+        if isinstance(data, dict):
+            usage = data.get("usage") or {}
+            if not isinstance(usage, dict):
+                usage = {}
         try:
-            text = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            text = choice["message"]["content"]
+            finish = choice.get("finish_reason") or None
         except (KeyError, IndexError, TypeError):
+            _record("error:unexpected_response")
             return {"status": "error", "reason": "unexpected response"}
         if not isinstance(text, str) or not text.strip():
+            _record("empty")
             return {"status": "error", "reason": "empty response"}
+        _record(str(finish) if finish else "ok")
         logger.info(
-            "LILY_VISION | complete | model=%s chars=%d",
-            lily_config.vision_model(), len(text),
+            "LILY_VISION | complete | purpose=%s model=%s chars=%d ttft_ms=%s",
+            purpose, model, len(text), ttft_ms,
         )
         return {"status": "ok", "description": text.strip()}
+    except asyncio.CancelledError:
+        _record("cancelled")
+        raise
     except asyncio.TimeoutError:
+        _record("timeout")
         logger.warning("LILY_VISION | timeout")
         return {"status": "error", "reason": f"timeout after {_TIMEOUT_S:.0f}s"}
     except Exception as exc:
+        _record(f"error:{type(exc).__name__}")
         reason = str(exc) or type(exc).__name__
         logger.warning("LILY_VISION | error | error=%s", reason)
         return {"status": "error", "reason": reason}
@@ -156,6 +203,7 @@ async def lily_describe_image_bytes(
     prompt: str,
     *,
     json_mode: bool = False,
+    purpose: str = "vision",
 ) -> dict:
     if not image_bytes:
         return {"status": "error", "reason": "empty image bytes"}
@@ -165,17 +213,19 @@ async def lily_describe_image_bytes(
         + base64.b64encode(image_bytes).decode("ascii")
     )
     return await _grok_vision_text(
-        data_url, prompt, json_mode=json_mode
+        data_url, prompt, json_mode=json_mode, purpose=purpose
     )
 
 
 async def lily_classify_image_bytes(
-    image_bytes: bytes, content_type: str, prompt: str
+    image_bytes: bytes, content_type: str, prompt: str, *,
+    purpose: str = "vision",
 ) -> tuple[bool, str]:
     result = await lily_describe_image_bytes(
         image_bytes, content_type, prompt + "\nReturn JSON: "
         '{"approved": true|false, "reason": "short reason"}.',
         json_mode=True,
+        purpose=purpose,
     )
     if result.get("status") != "ok":
         return False, str(result.get("reason") or "vision unavailable")

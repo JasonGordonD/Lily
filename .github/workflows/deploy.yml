@@ -87,7 +87,11 @@ jobs:
           SQL
 
       - name: Build production image
-        run: docker build --tag lily-ci .
+        # LILY_GIT_SHA baked in (WO-LILY-LLM-USAGE-ALL-PATHS-001 addendum) so
+        # a CI-built image self-identifies; the deploy job below forwards the
+        # same value as a runtime env because the LiveKit Cloud build has no
+        # build-arg hook.
+        run: docker build --build-arg LILY_GIT_SHA="${{ github.sha }}" --tag lily-ci .
 
   deploy:
     needs: test
@@ -172,6 +176,7 @@ jobs:
             -e AUDEERING_CHILD_HALT_ENABLED="${AUDEERING_CHILD_HALT_ENABLED}" \
             -e AUDEERING_CHILD_STEP_UP_ENABLED="${AUDEERING_CHILD_STEP_UP_ENABLED}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e LILY_GIT_SHA="${{ github.sha }}" \
             -v "${{ github.workspace }}:/workspace" \
             -w "/workspace" \
             docker.io/livekit/cloud-agents-github-plugin:v2.12.1

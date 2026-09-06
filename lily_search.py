@@ -29,6 +29,7 @@ the image generator (that is sub-agent J's invented-content-only stack).
 import inspect
 import logging
 import re
+import time
 import urllib.parse
 from typing import Optional
 
@@ -340,13 +341,57 @@ def lily_parse_google_grounding(resp) -> Optional[dict]:
     }
 
 
+def _record_grounding_usage(model, t0: float, resp, failure) -> None:
+    """One lily_llm_usage row for a Gemini grounding call (WO-LILY-LLM-
+    USAGE-ALL-PATHS-001). The google-genai SDK call is a blocking,
+    NON-streaming generate_content with no first-byte hook, so ttft_ms is
+    recorded EQUAL to total_ms (honest: the first byte and the last arrive
+    together). Effort is None — the call sends no reasoning effort. Never
+    raises."""
+    try:
+        import lily_metrics
+
+        total_ms = round((time.monotonic() - t0) * 1000, 1)
+        prompt_tokens = completion_tokens = None
+        finish = failure
+        if resp is not None:
+            um = getattr(resp, "usage_metadata", None)
+            p = getattr(um, "prompt_token_count", None)
+            c = getattr(um, "candidates_token_count", None)
+            prompt_tokens = int(p) if isinstance(p, (int, float)) else None
+            completion_tokens = int(c) if isinstance(c, (int, float)) else None
+            cands = getattr(resp, "candidates", None) or []
+            fr = getattr(cands[0], "finish_reason", None) if cands else None
+            finish = (
+                str(getattr(fr, "name", None) or fr).lower() if fr else "ok"
+            )
+        lily_metrics.record_llm_call(
+            purpose="grounding",
+            model=model,
+            effort=None,
+            ttft_ms=total_ms,
+            total_ms=total_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            finish_reason=finish,
+        )
+    except Exception as e:
+        logger.debug("LILY_SEARCH | GROUNDING | usage record skipped: %s", e)
+
+
 async def _lily_grounded_generate(
     prompt: str, *, use_search: bool, use_url_context: bool, timeout: float,
 ) -> Optional[dict]:
     """Shared grounded generate_content call: enable google_search and/or
     url_context built-in tools (Gemini runs the whole loop server-side).
     Returns the parsed grounding dict or None. Reasoning-node only."""
-    lily_forbid_vocal_import(lily_direct_importer(None))
+    # Call-time tripwire (same form as the import-time one). The previous
+    # `lily_direct_importer(None)` iterated None and raised TypeError on
+    # EVERY real call — a latent crash with no live caller until
+    # WO-LILY-LLM-USAGE-ALL-PATHS-001 drove the transport under test.
+    lily_forbid_vocal_import(
+        [f.frame.f_globals.get("__name__", "") for f in inspect.stack()]
+    )
     if not (prompt or "").strip() or not lily_config.google_api_key_present():
         return None
     try:
@@ -361,10 +406,13 @@ async def _lily_grounded_generate(
         if not tools:
             return None
         client = _genai_grounding_client()
+        # WO-LILY-LLM-USAGE-ALL-PATHS-001: model captured HERE — the value
+        # the call actually sends, recorded on the usage row below.
+        model = lily_config.google_grounding_model()
 
         def _call():
             return client.models.generate_content(
-                model=lily_config.google_grounding_model(),
+                model=model,
                 contents=prompt,
                 config=gt.GenerateContentConfig(
                     tools=tools,
@@ -374,7 +422,20 @@ async def _lily_grounded_generate(
                 ),
             )
 
-        resp = await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout)
+        t0 = time.monotonic()
+        try:
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(_call), timeout=timeout
+            )
+        except BaseException as e:
+            _record_grounding_usage(
+                model, t0, None,
+                "timeout" if isinstance(e, asyncio.TimeoutError)
+                else "cancelled" if isinstance(e, asyncio.CancelledError)
+                else f"error:{type(e).__name__}",
+            )
+            raise
+        _record_grounding_usage(model, t0, resp, None)
         result = lily_parse_google_grounding(resp)
         if result:
             logger.info(

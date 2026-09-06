@@ -28,6 +28,7 @@ import json
 import logging
 import random
 import re
+import time
 import uuid
 from typing import Optional
 
@@ -35,6 +36,7 @@ import aiohttp
 
 import lily_config
 import lily_evaluation
+import lily_metrics
 # Web tools + image pipeline (WO-LILY-OMNIBUS-002): lily_search and
 # lily_imagegen are REASONING-NODE-ONLY — this module is their one legal
 # consumer seam. The vocal node (lily_agent) must never import them; web
@@ -122,6 +124,44 @@ def _lily_extract_chat_text(data) -> str:
         return data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
         raise RuntimeError(f"xAI adult generation malformed response: {e}")
+
+
+def _lily_extract_usage(data, responses_api: bool) -> tuple:
+    """(prompt_tokens, completion_tokens) off a chat-completions or
+    Responses API payload; (None, None) when the payload carries no usage.
+    Defensive: never raises."""
+    try:
+        usage = (data or {}).get("usage") or {}
+        if responses_api:
+            p, c = usage.get("input_tokens"), usage.get("output_tokens")
+        else:
+            p, c = usage.get("prompt_tokens"), usage.get("completion_tokens")
+        return (
+            int(p) if isinstance(p, (int, float)) else None,
+            int(c) if isinstance(c, (int, float)) else None,
+        )
+    except Exception:
+        return None, None
+
+
+def _lily_extract_finish_reason(data, responses_api: bool) -> Optional[str]:
+    """The provider's own finish verdict: chat `choices[0].finish_reason`
+    or the Responses API `status` (completed / incomplete). None when the
+    payload does not say. Defensive: never raises."""
+    try:
+        if responses_api:
+            status = (data or {}).get("status")
+            if status == "incomplete":
+                reason = ((data or {}).get("incomplete_details") or {}).get(
+                    "reason"
+                )
+                return f"incomplete:{reason}" if reason else "incomplete"
+            return str(status) if status else None
+        choices = (data or {}).get("choices") or []
+        reason = choices[0].get("finish_reason") if choices else None
+        return str(reason) if reason else None
+    except Exception:
+        return None
 
 
 def _lily_extract_responses_text(data) -> str:
@@ -344,6 +384,8 @@ class LilyReasoning:
         timeout: Optional[float] = None,
         effort: Optional[str] = None,
         model: Optional[str] = None,
+        purpose: str = "adult_reasoning",
+        usage_session_id: Optional[str] = None,
     ) -> str:
         """Structured Grok transport for every question/reasoning lane.
 
@@ -355,7 +397,19 @@ class LilyReasoning:
         the lanes have different economics, so a live prefetch a player is
         waiting on and an out-of-session seeding run should not be forced
         to share one global tier. None means "use the configured
-        default"."""
+        default".
+
+        WO-LILY-LLM-USAGE-ALL-PATHS-001: EVERY call through here writes one
+        lily_llm_usage row (fire-and-forget via lily_metrics) tagged with
+        `purpose` and the model/effort ACTUALLY sent. `usage_session_id`
+        overrides the bound session (the report sweep assessing another
+        session). Timing is measured around the transport: ttft_ms is the
+        time to the response HEADERS (first byte back — this transport is
+        NON-streaming, so the provider only answers once generation is
+        done and ttft tracks total_ms closely); total_ms is headers + body.
+        A failed call records too (finish_reason error:<class> / http_<n>
+        / timeout / cancelled) — a call that never came back is the row
+        the dead-air class needs most."""
         key = lily_config.xai_api_key()
         if not key:
             raise RuntimeError(
@@ -365,6 +419,7 @@ class LilyReasoning:
         effort = effort or lily_config.adult_reasoning_effort()
         if timeout is None:
             timeout = lily_config.prefetch_timeout_seconds()
+        responses_api = _lily_uses_responses_api(model)
         # xAI's multi-agent tier (grok-*-multi-agent) does NOT support the
         # Chat Completions endpoint (HTTP 400 "Multi Agent requests are not
         # allowed on chat completions") and rejects `max_tokens`; it speaks
@@ -402,32 +457,70 @@ class LilyReasoning:
             }
             if effort:
                 body["reasoning_effort"] = effort
-        async with aiohttp.ClientSession() as http:
-            async with http.post(
-                endpoint,
-                json=body,
-                headers={"Authorization": f"Bearer {key}"},
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                if resp.status != 200:
-                    err = await resp.text()
-                    raise RuntimeError(
-                        f"xAI adult generation {resp.status}: {err[:300]}"
-                    )
-                data = await resp.json()
+        # -- the receipt (WO-LILY-LLM-USAGE-ALL-PATHS-001) ------------------
+        t0 = time.monotonic()
+        ttft_ms: Optional[float] = None
+        finish: Optional[str] = None
+        tokens = (None, None)
+        data = None
+
+        def _record(reason: Optional[str]) -> None:
+            total_ms = round((time.monotonic() - t0) * 1000, 1)
+            lily_metrics.record_llm_call(
+                purpose=purpose,
+                model=model,
+                effort=effort,
+                ttft_ms=ttft_ms,
+                total_ms=total_ms,
+                prompt_tokens=tokens[0],
+                completion_tokens=tokens[1],
+                finish_reason=reason,
+                session_id=usage_session_id,
+            )
+
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.post(
+                    endpoint,
+                    json=body,
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as resp:
+                    # Headers are back: the first byte of the response.
+                    ttft_ms = round((time.monotonic() - t0) * 1000, 1)
+                    if resp.status != 200:
+                        err = await resp.text()
+                        finish = f"http_{resp.status}"
+                        raise RuntimeError(
+                            f"xAI adult generation {resp.status}: {err[:300]}"
+                        )
+                    data = await resp.json()
+            tokens = _lily_extract_usage(data, responses_api)
+            finish = _lily_extract_finish_reason(data, responses_api)
+        except asyncio.CancelledError:
+            _record("cancelled")
+            raise
+        except asyncio.TimeoutError:
+            _record("timeout")
+            raise
+        except Exception as e:
+            _record(finish or f"error:{type(e).__name__}")
+            raise
         text = (
             _lily_extract_responses_text(data)
-            if _lily_uses_responses_api(model)
+            if responses_api
             else _lily_extract_chat_text(data)
         )
         if not (text or "").strip():
+            _record("empty")
             raise RuntimeError(f"empty candidate from {model}")
+        _record(finish or "ok")
         logger.info(
-            "LILY_REASONING | ADULT_GROK_GENERATION | model=%s effort=%s "
-            "transport=%s chars=%d",
-            model, effort or "-",
-            "responses" if _lily_uses_responses_api(model) else "chat",
-            len(text),
+            "LILY_REASONING | ADULT_GROK_GENERATION | purpose=%s model=%s "
+            "effort=%s transport=%s chars=%d ttft_ms=%s",
+            purpose, model, effort or "-",
+            "responses" if responses_api else "chat",
+            len(text), ttft_ms,
         )
         return text
 
@@ -531,6 +624,7 @@ class LilyReasoning:
             # Z2 (HOTFIX-008): a supply-recovery retry passes a de-escalated
             # effort so a hard draw does not reproduce the stall verbatim.
             effort=effort or lily_config.adult_reasoning_effort("high"),
+            purpose="reasoning",
         )
         # Schema mode: the output IS the JSON document — parse it directly.
         parsed: Optional[dict] = None
@@ -589,6 +683,7 @@ class LilyReasoning:
             max_tokens=lily_config.reasoning_max_output_tokens(),
             model=lily_config.adult_reasoning_model(),
             effort=lily_config.adult_reasoning_effort("high"),
+            purpose="reasoning",
         )
         # Schema mode: direct parse first; fence stripping is a defensive
         # last resort. Honest failure stays intact — an unparseable verdict
@@ -645,6 +740,7 @@ class LilyReasoning:
                 max_tokens=lily_config.reasoning_max_output_tokens(),
                 model=lily_config.reasoning_model(),
                 effort=lily_config.reasoning_effort(),
+                purpose="reasoning",
             )
             try:
                 data = json.loads(raw)
@@ -915,6 +1011,7 @@ class LilyReasoning:
                 timeout=12.0,
                 model=lily_config.judge_model(),
                 effort=lily_config.judge_effort(),
+                purpose="judge",
             ),
             timeout=12.0,
         )

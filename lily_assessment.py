@@ -27,6 +27,7 @@ Runs offline on Grok 4.5 High; no live-turn latency impact.
 
 import asyncio
 import datetime
+import functools
 import json
 import logging
 import re
@@ -101,7 +102,9 @@ def _parse_assessment_json(text: str) -> dict:
     return parsed
 
 
-async def _default_generate(transcript: list, game_stats: dict) -> dict:
+async def _default_generate(
+    transcript: list, game_stats: dict, *, session_id: Optional[str] = None
+) -> dict:
     prompt = json.dumps(
         {"transcript": transcript, "game_stats": game_stats},
         ensure_ascii=False, default=str,
@@ -109,6 +112,9 @@ async def _default_generate(transcript: list, game_stats: dict) -> dict:
     reasoning = lily_reasoning.LilyReasoning.__new__(
         lily_reasoning.LilyReasoning
     )
+    # WO-LILY-LLM-USAGE-ALL-PATHS-001: the usage row carries the ASSESSED
+    # session's id — the reconciliation sweep runs inside some other live
+    # session's process, so the bound default would mis-attribute it.
     text = await reasoning._generate_grok_json(
         prompt,
         system_instruction=_SYSTEM_INSTRUCTION,
@@ -116,6 +122,8 @@ async def _default_generate(transcript: list, game_stats: dict) -> dict:
         timeout=60.0,
         model=_assessment_model(),
         effort=lily_config.assessment_effort(),
+        purpose="assessment",
+        usage_session_id=session_id,
     )
     if not text:
         raise RuntimeError(f"empty candidate from {_assessment_model()}")
@@ -184,7 +192,9 @@ async def lily_assess_session(
     (a fresh generation), and if that also fails to parse the row is
     TERMINALIZED (report_status='failed') so the sweep stops re-running a
     permanent error instead of looping on it forever."""
-    generate = generate or _default_generate
+    generate = generate or functools.partial(
+        _default_generate, session_id=session_id
+    )
 
     async def _generate_once() -> dict:
         return await asyncio.wait_for(
