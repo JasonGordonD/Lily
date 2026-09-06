@@ -23,50 +23,7 @@ import lily_audeering_consumers
 import lily_say_gate
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-        self.said: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-    def say(self, text, *a, **k):
-        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
-        self.said.append(text)
-        return None
-
-
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
-
-
-class _FakeRoomAPI:
-    def __init__(self) -> None:
-        self.requests: list = []
-
-    async def update_room_metadata(self, req) -> None:
-        self.requests.append(req)
-
-
-class _FakeLocalParticipant:
-    def __init__(self) -> None:
-        self.attributes: dict = {}
-
-    async def set_attributes(self, attrs) -> None:
-        self.attributes.update(attrs)
-
-
-class _FakeCtx:
-    def __init__(self) -> None:
-        self.api = type("API", (), {"room": _FakeRoomAPI()})()
-        self.room = type(
-            "Room", (),
-            {"name": "test-room", "local_participant": _FakeLocalParticipant()},
-        )()
+from fakes import FakeSayingSession, FakeAgentHandle, FakeCtx
 
 
 class _FakeReasoning:
@@ -98,9 +55,9 @@ QUESTION = {
 
 def _make_game() -> LilyGame:
     game = LilyGame.bare()
-    game.ctx = _FakeCtx()
-    game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
+    game.ctx = FakeCtx()
+    game.session = FakeSayingSession()
+    game.agent = FakeAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper("test-room")

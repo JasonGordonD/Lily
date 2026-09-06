@@ -15,23 +15,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
+from fakes import FakeRoomAPI
 
 
 def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-class _FakeRoomAPI:
-    def __init__(self) -> None:
-        self.requests: list = []
-
-    async def update_room_metadata(self, req) -> None:
-        self.requests.append(req)
-
-
 class _FakeAPI:
     def __init__(self) -> None:
-        self.room = _FakeRoomAPI()
+        self.room = FakeRoomAPI()
 
 
 class _FakeCtx:

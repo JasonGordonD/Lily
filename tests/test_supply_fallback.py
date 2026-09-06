@@ -38,6 +38,7 @@ import lily_persistence
 import lily_say_gate
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
+from fakes import FakeSession
 
 SESSION_ID = "lily-81BCB0-583a0f16"
 
@@ -52,17 +53,9 @@ BANK_Q = {
 }
 
 
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-
 def _make_game(game_started: bool = True) -> LilyGame:
     game = LilyGame.bare()
-    game.session = _FakeSession()
+    game.session = FakeSession()
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper(SESSION_ID)
     game.game_started = game_started

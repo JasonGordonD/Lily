@@ -40,26 +40,14 @@ import lily_say_gate
 import lily_agent
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
+from fakes import FakeSession, FakeAgentHandle
 
 
 def _make_game() -> LilyGame:
     """Minimal LilyGame via __new__ (test_desync_fixture pattern)."""
     game = LilyGame.bare()
-    game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
+    game.session = FakeSession()
+    game.agent = FakeAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper("ws14-interruption")

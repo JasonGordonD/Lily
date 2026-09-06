@@ -51,38 +51,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import lily_audeering_consumers
 import lily_persistence
 import lily_say_gate
 from lily_agent import LilyGame
-from lily_scorekeeper import LilyScorekeeper
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
-
-
-class _FakeReasoning:
-    """The incident's supply state: the q2 prefetch FAILED and nothing is
-    prefetched — every draw returns None."""
-
-    async def prefetch_question(self, sk, **kw):
-        return None
-
-    async def prefetch_picture_question(self, supabase, **kw):
-        return None
-
-    async def judge(self, *a, **kw):
-        return '{"verdict": "incorrect", "reason": "not an answer"}'
+from fakes import FakeSession, FakeAgentHandle, FakeReasoning, make_live_game
 
 
 # The real q1 of the incident session (id from the 03:42:56 durable-asked
@@ -104,70 +76,10 @@ ORGANIC_VERDICT = (
 
 
 def _make_game(session_id: str = "lily-938EFF-2260354c") -> LilyGame:
-    game = LilyGame.bare()
-    game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
-    game._preemptive_paused = False
-    game.say_registry = lily_say_gate.SpeechActRegistry()
-    game.sk = LilyScorekeeper(session_id)
-    game.rounds_total = 3
-    game.ui_phase = "answering"
-    game.memory_block = ""
-    game.reconnected = False
-    game.game_started = True
-    game.game_over = False
-    game.armed_question = None
-    game.next_question = None
-    game.eliminated = []
-    game.used_prompts = []
-    game.asked_history = []
-    game.group_id = "grp_test"
-    game.promoted_categories = []
-    game.prewager_standings = None
-    game.highlights = []
-    game.supabase = None
-    game.reasoning = _FakeReasoning()
-    game.background_audio = None
-    game._bed_handle = None
-    game._prefetch_task = None
-    game._window_timer = None
-    game._watchdog_task = None
-    game._prefetch_stall_ticks = 0
-    game._armed_limbo_ticks = 0
-    game._steal_window = False
-    game._adjudicating = False
-    game._judged_keys = set()
-    game._spec_judge = {}
-    game._addressee_rows = {}
-    game._pending_reveal_event = None
-    game._pending_unbound_award = None
-    game._user_turn_index = 0
-    game._armed_speech_misses = 0
-    game._pending_delivery_qnum = None
-    game._state_note = None
-    game.pending_clarify = {}
-    game.forget_state = "idle"
-    game.forget_requester = None
-    game._forget_target_group = None
-    game.prefs = {}
-    game._prefs_offer_made = False
-    game.acoustic = lily_audeering_consumers.LilyAcousticState()
-
-    game.metadata_publishes: list[str] = []
-    game.attribute_publishes: list[dict] = []
-
-    async def _publish_metadata(question_text, **kwargs):
-        game.metadata_publishes.append(question_text or "")
-
-    async def _publish_attributes(*a, **k):
-        game.attribute_publishes.append(
-            {n: s["score"] for n, s in game.sk.players.items()}
-        )
-
-    game.publish_metadata = _publish_metadata
-    game.publish_attributes = _publish_attributes
-    game.send_event_nowait = lambda kind, payload=None: None
-    return game
+    return make_live_game(
+        session_id, session=FakeSession(), agent=FakeAgentHandle(),
+        reasoning=FakeReasoning(),
+    )
 
 
 def _arm_incident_q1(game: LilyGame) -> float:

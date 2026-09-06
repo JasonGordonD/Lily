@@ -63,6 +63,7 @@ import lily_say_gate
 import lily_scorekeeper
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
+from fakes import FakeSayingSession, FakeAgentHandle, FakeCtx
 
 
 # ---------------------------------------------------------------------------
@@ -70,51 +71,6 @@ from lily_scorekeeper import LilyScorekeeper
 # drive, plus a capture seam on the lily_answers write so the LEDGER ROW is
 # the assertion surface (these defects are all ledger defects).
 # ---------------------------------------------------------------------------
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-        self.said: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-    def say(self, text, *a, **k):
-        # REFACTOR W2a: the deterministic direct_say lane. The verdict beat is
-        # now a fixed sheet, not an LLM instruction.
-        self.said.append(text)
-        return None
-
-
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
-
-
-class _FakeRoomAPI:
-    def __init__(self) -> None:
-        self.requests: list = []
-
-    async def update_room_metadata(self, req) -> None:
-        self.requests.append(req)
-
-
-class _FakeLocalParticipant:
-    def __init__(self) -> None:
-        self.attributes: dict = {}
-
-    async def set_attributes(self, attrs) -> None:
-        self.attributes.update(attrs)
-
-
-class _FakeCtx:
-    def __init__(self) -> None:
-        self.api = type("API", (), {"room": _FakeRoomAPI()})()
-        self.room = type(
-            "Room", (),
-            {"name": "test-room", "local_participant": _FakeLocalParticipant()},
-        )()
 
 
 class _FakeReasoning:
@@ -171,9 +127,9 @@ Q_4821 = {
 
 def _make_game(session_id: str = "lily-fixture") -> LilyGame:
     game = LilyGame.bare()
-    game.ctx = _FakeCtx()
-    game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
+    game.ctx = FakeCtx()
+    game.session = FakeSayingSession()
+    game.agent = FakeAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper(session_id)
@@ -569,7 +525,6 @@ def test_answers_bind_to_their_own_question_not_the_previous_one(monkeypatch):
     game = _make_game("lily-4FB3B2")
     game.supabase = object()
     game.sk.bind_speaker("S2", "Rhonda")
-    now = time.time()
 
     def _scenario():
         # Question one — answered, window closes without adjudicating (the

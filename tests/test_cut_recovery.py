@@ -29,6 +29,7 @@ import lily_audeering_consumers  # noqa: F401  (import-order parity)
 import lily_say_gate
 from lily_agent import LilyGame, _CUT_RECOVERY_DIRECTIVE
 from lily_scorekeeper import LilyScorekeeper
+from fakes import FakeAgentHandle
 
 
 class _FakeSession:
@@ -40,15 +41,10 @@ class _FakeSession:
         return object()  # a truthy SpeechHandle stand-in
 
 
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
-
-
 def _make_game(session_id: str = "ws3-cut") -> LilyGame:
     game = LilyGame.bare()
     game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
+    game.agent = FakeAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper(session_id)

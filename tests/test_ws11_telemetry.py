@@ -47,6 +47,7 @@ import lily_say_gate
 from lily_agent import LilyGame
 from lily_nbest import LilyNBestCollector
 from lily_scorekeeper import LilyScorekeeper
+from fakes import FakeSession, FakeAgentHandle
 
 
 def _add_transcript(*results):
@@ -295,23 +296,10 @@ def test_garble_detector_thresholds():
     assert lily_nbest.lily_nbest_garbled(short, min_mean_confidence=0.65) is False
 
 
-class _FakeSession:
-    def __init__(self):
-        self.instructions = []
-
-    def generate_reply(self, instructions):
-        self.instructions.append(instructions)
-
-
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled):
-        pass
-
-
 def _make_game():
     game = LilyGame.bare()
-    game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
+    game.session = FakeSession()
+    game.agent = FakeAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper("test-room")
