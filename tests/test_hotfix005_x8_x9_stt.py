@@ -121,8 +121,13 @@ def test_min_endpointing_delay_raised(monkeypatch):
 
 
 def test_max_endpointing_delay_default_pinned(monkeypatch):
+    # WO-LILY-COMPOSITION-FOLLOWUP-001 L1 (operator): the ceiling is 2.5 s
+    # (was 6.0; the framework's own default is 3.0 / 2.5 with a streaming
+    # detector — the old "framework default 6.0" claim was wrong).
     monkeypatch.delenv("LILY_STT_MAX_ENDPOINTING_DELAY", raising=False)
-    assert lily_config.stt_max_endpointing_delay() == 6.0
+    assert lily_config.stt_max_endpointing_delay() == 2.5
+    monkeypatch.setenv("LILY_STT_MAX_ENDPOINTING_DELAY", "4.0")
+    assert lily_config.stt_max_endpointing_delay() == 4.0
 
 
 def test_entrypoint_uses_non_deprecated_turn_handling_endpointing():

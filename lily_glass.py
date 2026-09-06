@@ -9,6 +9,7 @@ module-level typed schema + render(); this mixin POPULATES it from game state
 from __future__ import annotations
 
 import asyncio
+import random
 import uuid
 import json
 import time
@@ -22,6 +23,7 @@ import lily_capabilities
 import lily_forget
 import lily_memory
 import lily_config
+import lily_evaluation
 import lily_scorekeeper
 from lily_scorekeeper import lily_detect_state_contradiction
 
@@ -647,8 +649,28 @@ class LilyGlassMixin:
         # PATCH-002 A4 — any user final RELEASES the hold (they've spoken;
         # conversation may resume). Sticky STOP remains an independent game
         # delivery freeze unless the explicit resume detector above fired.
+        # WO-LILY-COMPOSITION-FOLLOWUP-001 B2: a player-requested PAUSE is
+        # the exception — the next final does NOT release it (live 11:50:36Z
+        # "Paused." then window 3 at 11:50:43Z); only an explicit resume /
+        # "okay go", or an answer landing in the still-open window, does.
         if self._hold_active:
-            self.release_hold(reason="user_speech")
+            if self.pause_sticky():
+                if (
+                    lily_scorekeeper.lily_detect_pause_release(text)
+                    and not lily_scorekeeper.lily_detect_restart_game(text)
+                ):
+                    self.resume_from_pause(reason="spoken_resume", text=text)
+                elif result.get("candidate_recorded"):
+                    self.resume_from_pause(reason="answer_landed", text=None)
+                else:
+                    logger.info(
+                        "LILY_PAUSE | HELD | session=%s text=%r — a final "
+                        "under the pause; progression stays held until an "
+                        "explicit resume (COMPOSITION-FOLLOWUP-001 B2)",
+                        self.sk.session_id, str(text)[:60],
+                    )
+            else:
+                self.release_hold(reason="user_speech")
         # PATCH-003 P6 — the table answered the question she asked: release
         # the pending state so her normal speak-by-default engages this
         # turn as the response (she finishes the conversation she started).
@@ -886,7 +908,10 @@ class LilyGlassMixin:
             command is None
             and not result.get("media_choice")
             and not self._contest_note
-            and lily_scorekeeper.lily_detect_verdict_contest(text)
+            and lily_scorekeeper.lily_detect_verdict_contest(
+                # COMPOSITION-FOLLOWUP-001 C5: the format hint E4 asked for.
+                text, multiple_choice=self.contest_multiple_choice_hint()
+            )
         ):
             # WO-LILY-CONTROL-GATES-001 D2: arming lives in the floor
             # mixin (arm_contest_note) so the note carries a sequence
@@ -931,6 +956,12 @@ class LilyGlassMixin:
                 or speaker_key == self._pending_pacing_requester
             ):
                 verdict = lily_forget.lily_parse_forget_confirmation(text)
+                if verdict is None and (
+                    lily_scorekeeper.lily_detect_meta_request(text) == "keep"
+                ):
+                    # Operator B3: "let's keep it like it is" answers a
+                    # pending switch as a NO — the standing pacing stays.
+                    verdict = "no"
                 if verdict == "yes":
                     target = self._pending_pacing
                     self._pending_pacing = None
@@ -960,6 +991,11 @@ class LilyGlassMixin:
                     self._pending_pacing = None
                     self._pending_pacing_requester = None
                     self.mark_deterministic_reply(text)  # AIRGATE-001 D4
+                    if kept == "relaxed":
+                        # B3: confirming relaxed kills any clock still on
+                        # the open window (defensive — D1a converts on the
+                        # flip; a kept relaxed must never leave one running).
+                        self._convert_window_untimed(reason="pacing_kept:voice_confirm")
                     self.gated_say(
                         None,
                         "pacing_kept",
@@ -1013,6 +1049,26 @@ class LilyGlassMixin:
                         source="voice_confirm",
                     )
                     return
+
+        # WO-LILY-COMPOSITION-FOLLOWUP-001 P0-3 / operator B3-B4: a META
+        # request about the question (options / MC for this one, a hint, a
+        # repeat, "keep it like it is"). The scorekeeper already refused it
+        # as a candidate (result["meta_request"], window open) — outside
+        # the window it is detected here. Never a candidate, never a
+        # StopResponse on its own; it arms the directive the organic lane
+        # answers now, or (B4) hands the choices-on-demand lane the reply.
+        if (
+            command is None
+            and not result.get("media_choice")
+            and not lily_scorekeeper.lily_detect_explain_request(text)
+        ):
+            meta_kind = result.get("meta_request") or (
+                lily_scorekeeper.lily_detect_meta_request(text)
+            )
+            if meta_kind:
+                self.note_meta_request(
+                    meta_kind, text, requester=player or speaker_label
+                )
 
         if command == "forget_me":
             # AIRGATE-001 D4: the forget flow's confirmation ask is the one
@@ -1402,6 +1458,270 @@ class LilyGlassMixin:
             # completes the rostered set, adjudicate now (no-op in timed
             # mode, and when the roster is not yet complete).
             self._maybe_close_relaxed_beat()
+
+    # -- mid-window META requests (COMPOSITION-FOLLOWUP-001 P0-3 / B3 / B4) --
+
+    def note_meta_request(
+        self, kind: str, text: str, *, requester: str | None = None
+    ) -> None:
+        """Route one detected meta request. "keep" → the standing pacing is
+        re-asserted (B3: a kept relaxed converts an open timed window);
+        "choices" on a live card WITH four options → a directive to offer
+        them now; on a numeric/freeform card → the choices-on-demand lane
+        (B4) builds four options and re-asks the SAME question as MC with
+        the window still open; "hint" / "repeat" → a one-line directive on
+        the organic lane. The directive rides the X12 explain-note slot
+        (same lifecycle: context only, leak-filtered, cleared with the
+        question)."""
+        question = self.sk.current_question or getattr(
+            self, "armed_question", None
+        ) or {}
+        live = bool(question) and bool(
+            getattr(self, "game_started", False)
+        ) and not getattr(self, "game_over", False)
+        logger.info(
+            "LILY_META | REQUEST | session=%s q=%d kind=%s live=%s "
+            "window=%s text=%r (COMPOSITION-FOLLOWUP-001 P0-3)",
+            self.sk.session_id, self.sk.question_number, kind, live,
+            bool(getattr(self.sk, "answer_window_open", False)), str(text)[:80],
+        )
+        if kind == "keep":
+            self._handle_keep_request(text)
+            return
+        prompt_text = str(question.get("prompt", "")).strip()
+        choices = question.get("choices")
+        has_choices = isinstance(choices, list) and len(choices) == 4
+        if kind == "choices":
+            if not live:
+                self._explain_request_note = (
+                    "[options request — a player asked for multiple-choice "
+                    "options, but no question is live. One light line: "
+                    "options come with the next question if they want them "
+                    "(lily_set_round_format); do not invent a question.]"
+                )
+                return
+            if has_choices:
+                labels = lily_evaluation.MC_CHOICE_LETTERS
+                rendered = "; ".join(
+                    f"{labels[i]}) {c}" for i, c in enumerate(choices[:4])
+                )
+                self._explain_request_note = (
+                    "[options request — a player asked for the options on "
+                    "the CURRENT question. Before anything else, offer its "
+                    f"four options VERBATIM, in order: {rendered}. Do not "
+                    "switch modes, do not reveal, do not move on — the "
+                    "answer window stays open.]"
+                )
+                return
+            # B4: build four options and re-ask as MC. The request never
+            # OWNS the turn (operator): the organic lane answers now with
+            # the one-line directive below, and the deterministic re-ask
+            # (or the honest free-answer line) follows from the lane.
+            self._explain_request_note = (
+                "[options request — a player asked for options on the "
+                "CURRENT question; four options are being built in code "
+                "and will be read out in a moment. ONE short line "
+                "('coming right up') and NOTHING else: no options of your "
+                "own, no answer, no hint, no reveal, do not move on.]"
+            )
+            try:
+                asyncio.ensure_future(
+                    self.offer_choices_on_demand(question, requester=requester)
+                )
+            except RuntimeError:
+                logger.warning(
+                    "LILY_META | CHOICES_NO_LOOP | session=%s — no running "
+                    "loop; the request stands as a directive",
+                    self.sk.session_id,
+                )
+                self._explain_request_note = (
+                    "[options request — offer four plausible options for "
+                    f"the current question \"{prompt_text}\" (the true "
+                    "answer among them), then wait; the window stays open.]"
+                )
+            return
+        if kind == "hint":
+            if live:
+                self._explain_request_note = (
+                    "[hint request — a player asked for a hint on the "
+                    "CURRENT question. Give ONE light hint that narrows the "
+                    "field without revealing or spelling the answer, then "
+                    "let them answer. Do not move on, do not reveal. The "
+                    f"question on the table is: \"{prompt_text}\".]"
+                )
+            else:
+                self._explain_request_note = (
+                    "[hint request — no question is live; one light line, "
+                    "nothing to hint at yet.]"
+                )
+            return
+        if kind == "repeat":
+            if live:
+                sheet = prompt_text
+                if has_choices:
+                    labels = lily_evaluation.MC_CHOICE_LETTERS
+                    sheet += " " + " ".join(
+                        f"{labels[i]}) {c}" for i, c in enumerate(choices[:4])
+                    )
+                self._explain_request_note = (
+                    "[repeat request — a player asked you to repeat the "
+                    "CURRENT question. Before anything else, read it again "
+                    "(same substance, with every option when present, no "
+                    "hint, no reveal), then let them answer: "
+                    f"\"{sheet}\".]"
+                )
+            return
+
+    def _handle_keep_request(self, text: str) -> None:
+        """Operator B3: "keep it like it is" re-asserts the standing pacing
+        preference — spoken this session or the stored usual (weakly, the
+        staged device candidate's pacing key, exactly as
+        apply_prefs_at_game_start does). A kept RELAXED converts any open
+        timed window to untimed; a kept TIMED changes nothing. With no
+        preference on file the organic lane acknowledges and changes
+        nothing."""
+        pref = (self.prefs or {}).get("pacing")
+        source = "prefs"
+        if pref not in ("timed", "relaxed"):
+            staged = getattr(self, "_device_candidate_prefs", None) or {}
+            if staged.get("pacing") in ("timed", "relaxed"):
+                pref, source = staged.get("pacing"), "staged_candidate"
+            else:
+                pref = None
+        if pref is None:
+            self._explain_request_note = (
+                "[keep-it request — a player asked to keep things as they "
+                "are. Acknowledge in one light line and change NOTHING (no "
+                "pacing flip, no mode switch, no re-ask).]"
+            )
+            return
+        self.mark_deterministic_reply(text)
+        converted = False
+        if pref != self.sk.pacing:
+            self.set_pacing(pref, source="voice_keep")
+            converted = self.sk.answer_window_deadline is None and bool(
+                getattr(self.sk, "answer_window_open", False)
+            )
+        elif pref == "relaxed" and getattr(self.sk, "answer_window_open", False):
+            converted = self._convert_window_untimed(reason="voice_keep")
+        logger.info(
+            "LILY_PREFS | KEPT | session=%s pacing=%s source=%s "
+            "window_converted=%s (COMPOSITION-FOLLOWUP-001 B3)",
+            self.sk.session_id, pref, source, converted,
+        )
+        clock = (
+            " — no clock on this question" if pref == "relaxed" else ""
+        )
+        self.gated_say(
+            None,
+            "pacing_kept",
+            f"They asked to keep things as they are — {pref} pacing stands, "
+            f"committed in code{clock}. One light line honoring it, then "
+            "straight back into the game. Never re-raise it.",
+            source="voice_confirm",
+        )
+
+    async def offer_choices_on_demand(
+        self, question: dict, *, requester: str | None = None
+    ) -> bool:
+        """Operator B4 — CHOICES ON DEMAND. A player asked for options on a
+        numeric / freeform question (live kb_318, 11:48:55Z: request, no
+        delivery): build four plausible options — the true answer plus
+        three distractors: deterministic NEIGHBOURS for an integer answer
+        (lily_numeric_distractors), else the reasoning node's distractor
+        synthesis (LilyReasoning.ensure_choices, off the vocal path) — put
+        them on the LIVE card and RE-ASK the same question as multiple
+        choice with the window still open (a timed window gets a fresh
+        clock from the re-ask). Never says "already live as a number". On
+        a failed synthesis the honest free-answer line airs instead — the
+        lane always replies. Returns True when the MC re-ask dispatched."""
+        qnum = self.sk.question_number
+        generation = getattr(self, "_game_generation", None)
+        canonical = str(question.get("canonical_answer", "")).strip()
+        distractors = lily_evaluation.lily_numeric_distractors(canonical)
+        source = "numeric_neighbors"
+        if distractors and canonical:
+            choices = list(distractors) + [canonical]
+            random.shuffle(choices)
+            question["choices"] = choices
+        else:
+            source = "reasoning_node"
+            ensure = getattr(getattr(self, "reasoning", None), "ensure_choices", None)
+            if callable(ensure):
+                try:
+                    await ensure(question)
+                except Exception as e:  # noqa: BLE001 — the lane must reply either way
+                    logger.warning(
+                        "LILY_META | CHOICES_SYNTHESIS_FAILED | session=%s "
+                        "q=%d error=%s", self.sk.session_id, qnum, e,
+                    )
+        if (
+            self.sk.question_number != qnum
+            or (generation is not None and generation != getattr(
+                self, "_game_generation", None
+            ))
+            or not getattr(self.sk, "answer_window_open", False)
+        ):
+            logger.info(
+                "LILY_META | CHOICES_STALE | session=%s q=%d — the question "
+                "moved on while the options were built; nothing aired",
+                self.sk.session_id, qnum,
+            )
+            return False
+        choices = question.get("choices")
+        if not (isinstance(choices, list) and len(choices) == 4):
+            self.gated_say(
+                None,
+                "question_reask",
+                "[deterministic: no options could be built for this one]",
+                source="choices_on_demand",
+                text="No options on this one — it's a free answer. Take your shot.",
+            )
+            return False
+        for live in (self.sk.current_question, getattr(self, "armed_question", None)):
+            if isinstance(live, dict) and live is not question:
+                live["choices"] = list(choices)
+        labels = lily_evaluation.MC_CHOICE_LETTERS
+        rendered = "  ".join(
+            f"{labels[i]}) {c}" for i, c in enumerate(choices[:4])
+        )
+        prompt_text = str(question.get("prompt", "")).strip()
+        try:
+            self.sk.note_question_mark("choices_on_demand", source)
+        except Exception:
+            pass
+        logger.warning(
+            "LILY_META | CHOICES_ON_DEMAND | session=%s q=%d source=%s "
+            "requester=%s choices=%s — re-asking as multiple choice; the "
+            "window stays open (COMPOSITION-FOLLOWUP-001 B4)",
+            self.sk.session_id, qnum, source, requester, choices,
+        )
+        dispatched = self.gated_say(
+            None,
+            "question_reask",
+            "[deterministic multiple-choice re-ask of the live question]",
+            source="choices_on_demand",
+            text=f"Same question, now with options. {prompt_text} {rendered}",
+        )
+        if dispatched and self.sk.answer_window_deadline is not None:
+            # A timed window gets a fresh full clock from the re-ask (the
+            # same re-arm set_pacing's timed branch performs).
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                timer = getattr(self, "_window_timer", None)
+                if timer is not None and not timer.done():
+                    timer.cancel()
+                dur = self._answer_window_duration()
+                self.sk.answer_window_deadline = time.time() + dur
+                self._arm_window_expiry(dur)
+                try:
+                    self.sk.note_question_time("window_retimed_at")
+                except Exception:
+                    pass
+        return bool(dispatched)
 
     def picture_lane_status(self) -> dict:
         """PATCH-003 P4: field-granular picture-lane truth. Each field is

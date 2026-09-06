@@ -164,7 +164,7 @@ LILY_LOCAL_ONLY_ENV = {
     # inert until the shouted-utterance acceptance risk is measured).
     "LILY_STT_FOCUS_MODE",
     # HOTFIX-005 X9 endpointing floor + X8 roster retune. The delays ship on
-    # in-code defaults (0.6 / 6.0); the roster retune is default OFF (a live
+    # in-code defaults (0.6 / 2.5); the roster retune is default OFF (a live
     # STT reconnect, STT-001 Q4's to validate). Tune via deploy.yml vars.
     "LILY_STT_MIN_ENDPOINTING_DELAY",
     "LILY_STT_MAX_ENDPOINTING_DELAY",

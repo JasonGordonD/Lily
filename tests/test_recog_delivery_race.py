@@ -544,7 +544,10 @@ def test_continuity_rail_names_owed_content():
     )[0]
     assert "OWED, not banned" in body
     assert "RE-AIRS only" in body
-    assert "never a repeat" in body
+    # WO-LILY-COMPOSITION-FOLLOWUP-001 L3 (operator wording): the owed
+    # welcome-back is the CONFIRMED-identity case only.
+    assert "owed ONLY when identity is CONFIRMED" in body
+    assert "never a repeat" not in body
     # Still one block, rails intact (the antirepeat pins also run).
     assert LILY_SYSTEM_PROMPT.count("CONTINUITY PROTOCOL") == 1
 

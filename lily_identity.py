@@ -1752,6 +1752,20 @@ class LilyIdentityMixin:
         self._voice_probe = probe
         self._voice_identity_window_started_at = time.monotonic()
         self._voice_identity_gate_source = getattr(probe, "gate_source", None)
+        # COMPOSITION-FOLLOWUP-001 C10: the resample of a voiced slice now
+        # lands OFF the event loop; the probe calls back when the audio has
+        # actually joined the union so the match check re-runs then.
+        if hasattr(probe, "on_voiced_landed"):
+            probe.on_voiced_landed = self._on_voice_probe_landed
+
+    def _on_voice_probe_landed(self, added: float) -> None:
+        """A deferred (off-loop) resampled slice joined the voiced union."""
+        try:
+            self._sync_voice_probe()
+            if added > 0:
+                self.maybe_start_voice_identity_match()
+        except Exception:  # pragma: no cover — never raise into the callback
+            logger.exception("LILY_VOICE_ID | LANDED_HOOK_FAILED")
 
     def note_voiced_segment(self, start, end, speaker_label=None) -> float:
         """SEAM (one line in the transcript handler): a human (non-LILY)

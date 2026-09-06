@@ -43,6 +43,261 @@ this); the divergence safety nets and telemetry writers that swallow their
 own failure at DEBUG; the fire-and-forget game coroutines with no
 exception observer; the `proposed_category` consumer with no producer;
 `ev.created_at` treated as a datetime (it is a float in 1.6.10).
+## 2026-09-06 — WO-LILY-COMPOSITION-FOLLOWUP-001: the composition reviewer's findings on the deployed wave + operator B1-B5 / L1-L3
+
+Live receipts: session lily-D11A7E-c46e33c3 (11:43Z). The composition
+reviewer (read-only, executed evidence) found three P0s, three P1s and a
+P2 tail on the deployed tree; the operator widened three of them (B1, B2,
+B4), added B3/B5 and three decisions (L1 endpointing cap, L2 per-turn
+end-of-turn receipt, L3 continuity rails). Every fix below is behaviour
+with a behaviour-driving test (`tests/test_composition_followup_w6.py`,
+109 tests, **91 red on main 2f58d8a**, 18 green invariance pins: the
+bare-letter / option-equality / positional MC cases, the start guards,
+"Ready to start?", the joined-turn mark, the no-contest result gate and
+the E4 letter arm). No model / effort / prompt-persona change; no RLS or
+policy change. Prompt rail 3 edited on the operator's lifted hold (L3).
+
+**P0-1 / B2 — the PAUSE is a hard stop on progression** (`lily_scorekeeper.
+lily_detect_pause_request` / `lily_detect_pause_release`, `lily_floor.
+maybe_route_stop` / `handle_pause_request` / `resume_from_pause` /
+`pause_sticky`, `lily_agent.hold_window_clock_for_pause` /
+`resume_window_clock_after_pause` / `_wp_hold`, `lily_glass.on_transcript_
+event`). Receipt: 11:43Z "I need you to pause the game for a moment" →
+"Paused." → next question 6 s later; 11:50:36Z "Paused." → window 3 at
+11:50:43Z, window 4 at 11:51:34Z. Executed: the sentence matched no
+detector; an organic "Paused." backed no hold; the C13 hold is released
+by the very next user final (lily_glass.py:650-651) and by the 90 s
+timeout. Now: the pause SENTENCE class ("need you to pause", "can we
+pause", "pause please", "let's pause", "hit pause"; negation/meta-guarded)
+and the C13 hold-equivalents ("hold on a sec", "wait a minute", "one
+sec") route to ONE sticky pause — `progression_paused_reason() == "hold"`,
+`dispatch_armed_question` refuses, the open window's CLOCK is held
+(deadline lifted, expiry cancelled, remaining seconds remembered), the
+window, its candidates and the current question SURVIVE. Released ONLY by
+an explicit resume (`lily_detect_resume_game` — "resume", "continue", "go
+on", "let's keep going", "unpause" (new) — or a short utterance-shaped
+"okay go" / "go ahead" / "we're back" / "ready"), or by an answer
+candidate landing in the still-open window (the player is back in play);
+the next ordinary final and the hold timeout do NOT release it. The
+resume re-arms the held clock on a timed window and delivers the armed
+card when no window is open. ARCHAEOLOGY DECIDED AGAINST the reviewer's
+named target (`handle_stop_primitive`): the STOP brake retires the open
+window and wipes its candidates (`_freeze_game_delivery_for_stop`), so
+"hold on a sec" mid-window — the operator's own example — would have
+burned the live question. `lily_detect_hold_narration` now fires on a
+turn that OPENS with "paused" ("Paused.", "Okay — paused. Say when."), so
+`back_hold_narration` backs it; "the clock paused for a second" does not.
+Fixed in passing (in-region, recorded by DELIVERY-TRUTH-001 as
+out-of-scope): the C13 hold ack was dispatched with source
+"hold_request", which is NOT hold-exempt, so the hold it had just entered
+blocked its own "Take your time." — both the hold ack and the pause ack
+now dispatch with the exempt source "hold_ack". Receipt to pull:
+`LILY_PAUSE | REQUESTED` … `LILY_WINDOW | CLOCK_HELD` … `LILY_PAUSE |
+HELD` on each intervening final … `LILY_PAUSE | RESUMED` /
+`CLOCK_RESUMED`; `question_timeline[q].paused_by`, `window_held_at`,
+`window_resumed_at`, `pause_resumed_by`.
+
+**P0-2 / B1 — a choice letter inside a sentence; the utterance IS the
+option** (`lily_evaluation.lily_tier1_evaluate_mc`, `_MC_TERMINAL_LETTER_
+RE`, `_mc_utterance_core`, `lily_mc_unresolved`, `LILY_SHAPE_MC_
+UNRESOLVED`; `lily_floor._maybe_fire_clarify`, `lily_agent._receipt_
+yields_to_clarify`; `LilyScorekeeper._mc_pick_locked`). Receipt: 11:47:38Z
+"I would comfortably say a." → uncertain/None; 11:47:55Z "Earth tool."
+(STT for "Earth to Lily") bound to the option "Earth" via the freeform
+CONTAINMENT matcher and burned the question. Now: a terminal letter is
+parsed from the RAW lowercased text before normalization ("I would
+comfortably say a." → A, "say b." → B, "I'd say c" → C, "I'd go A" → A,
+"a" → A; method="letter"); option text resolves only when the WHOLE
+utterance is the option after filler/lead-in/tail stripping — normalized
+equality, else fuzzy ≥ threshold or the freeform phonetic path on the
+whole utterance ("Mars, uh" → Mars, "it's Venus, final answer" → Venus,
+"Jupitor" → Jupiter); NEVER containment or prefix ("Earth tool." / "earth
+to Lily" / "is Earth even a planet in this game" → unresolved). On a
+four-choice card an utterance that resolves NO option is the new
+reject-side shape `mc_unresolved`: it goes through the clarify door with
+its bind WITHDRAWN (the receipt stands down too), never to the judge.
+Binding precedence (B1): a RESOLVED pick closes binding for that player —
+a later final that resolves no option cannot revise it
+(`LILY_ANSWER | REVISION_REFUSED`, `result["revision_refused"]`); a later
+resolved pick ("no wait, C") still does.
+
+**P0-3 / B4 — a mid-window META request never binds, never owns the
+turn; CHOICES ON DEMAND** (`lily_scorekeeper.lily_detect_meta_request` —
+classes choices / hint / repeat / keep — consulted in `_handle_answer_
+candidate` after the answer-surface override; `lily_glass.note_meta_
+request` / `offer_choices_on_demand`; `lily_evaluation.lily_numeric_
+distractors`; act `question_reask`). Receipt: 11:48:55Z "can I get some
+multiple choice answers" on kb_318 (numeric) → `candidate_recorded`,
+StopResponse in on_user_turn_completed, no lane replied for 45 s; "Let's
+keep it like it is" bound the same way. Now: the request is never a
+candidate (`LILY_ANSWER | META_REQUEST`, `result["meta_request"]`), it
+never raises StopResponse (the prehook reads it as not answer-shaped; the
+lane arms a one-line directive on the X12 explain-note slot so the
+organic lane answers NOW), and — B4 — on a numeric/freeform card the
+choices-on-demand lane builds four options (integer answer: deterministic
+neighbours, e.g. 1969 → 1963/1966/1972; otherwise `LilyReasoning.
+ensure_choices` on the reasoning node, off the vocal path), puts them on
+the LIVE card (`sk.current_question["choices"]`, so "I'd say b" now
+resolves), and RE-ASKS the same question as multiple choice with the
+window still open (a timed window gets a fresh clock); a failed synthesis
+airs "No options on this one — it's a free answer." — the lane always
+replies, and never "already live as a number". On a card WITH choices the
+directive lists them verbatim (no mode switch). "hint" / "repeat" arm
+their directives. Receipt: `LILY_META | REQUEST` … `CHOICES_ON_DEMAND`;
+`question_timeline[q].choices_on_demand = numeric_neighbors |
+reasoning_node`.
+
+**B3 — relaxed pacing kills the timer on every path** (`lily_glass.
+_handle_keep_request`, the pending-pacing NO branch, `lily_agent.apply_
+prefs_at_game_start`). Receipt: 11:48:17Z "question's still up", window
+closed on its timer 11:48:18Z with relaxed on file. "Keep it like it is"
+re-asserts the standing preference (spoken this session, else the stored
+usual, weakly the staged candidate's pacing key — the same source order
+as game start): a kept RELAXED converts an open timed window
+(`set_pacing` D1a, `LILY_PREFS | KEPT`), answers a pending switch as NO,
+and the `pacing_kept` ack owns the utterance; the stored usual applied at
+game start converts an open timed window too (`prefs_applied:<source>`).
+Verified: the confirm path (`voice_confirm` yes) already converted through
+`set_pacing`.
+
+**B5 — any start phrase starts** (`lily_scorekeeper._START_GAME_RE`,
+`_BARE_START_TOKEN_RE`, `_START_DEFERRAL_RE`). Receipt: 11:45:40Z start
+phrase → first question 11:47:05Z. "ready", "let's go", "get the show on
+the road", "I'm ready whenever you are" (the deferral guard no longer
+reads "whenever YOU are" as a deferral), "we're ready", "let's get
+started", "let's do this", "ready to start" and a PLAYER's "Ready to
+start?" all start through on_transcript_event with no lock-the-table
+beat; "are you ready to start?", "not ready yet", "we're ready to order",
+"let's go get a drink first" still do not.
+
+**C1 — STOP × restart confirm** (`lily_floor._restart_on_dispatch_
+suppressed`): a confirm cancelled by `stop_primitive` / `game_restart`
+is dropped silently (`confirm_cancelled:<reason>`), never re-asked over
+the brake; a later "yes" wipes nothing.
+**C2 — an unconsumed code-ack mark cannot own a later turn**
+(`lily_agent.mark_deterministic_reply` stamps `_deterministic_reply_seq`;
+`lily_speech_delivery.note_user_final` → `_purge_stale_deterministic_
+marks`): with the acks NON-interruptible (A6) the framework skips
+on_user_turn_completed for the trigger final (1.6.10 agent_activity.
+_user_turn_completed_task: "skipping reply to user input, current speech
+generation cannot be interrupted"), so the A9 mark was never consumed and
+containment let "yes" own "yes let's go again" and "no" own "no stop it I
+know this one". A mark may own only the commit of the final that made it:
+when final N+1 lands, marks older than N are purged (`LILY_REPLY |
+MARK_PURGED`); a mark from N survives exactly one more final because the
+framework joins consecutive finals into one commit (audit R5) — pinned.
+RESIDUAL (stated honestly): the rule cannot tell a joined commit from a
+skipped commit followed by the very next final; "yes" immediately
+followed by "yes let's go again" with NO final between is still owned.
+**C3 — the addressing turn is not cut by the result gate**
+(`lily_speech_delivery.result_narration_already_aired`, keyless branch):
+W2's CHANGELOG claimed a W1 post-protest exemption that did not exist;
+with `_contest_note` or `_dispute_hold_since` live the keyless branch
+returns None (`LILY_SAY | RESULT_RESTATE_LICENSED`) so the addressing
+turn may restate the ruling and discharge the hold.
+**C4** `restart_confirm_dropped`, `dispute_timeout_ack`,
+`start_settle_override` (and the new `question_reask`) join
+`_FRESHNESS_EXEMPT_ACTS` and `_BARGE_FLUSH_EXEMPT_ACTS`.
+**C5** the contest detector gets its E4 format hint at both call sites
+via `contest_multiple_choice_hint()` — ARCHAEOLOGY: no question dict
+carries a `multiple_choice` key, so the reviewer's literal
+`current_question.get("multiple_choice")` would have read False on every
+MC card and stood the arm down everywhere; a card is MC when it carries
+four choices (the last-adjudicated card is consulted after the verdict,
+`_last_adjudicated_question`); None with no card (the pre-WO arm stays).
+**C6** `migrations/027_retire_ecapa_v1_room_tone_centroids.sql` →
+`028_…` (it collided with `027_lily_llm_usage_effort.sql`); header
+corrected: deploy.yml's migration step DOES apply it, against an EMPTY
+database (harmless: zero rows); the live retirement stays operator-run.
+HOTFIX-ENGINE-LABEL-001's appended row-427 block carried verbatim.
+**C7** `lily_acts`: `ACT_RESTART_CONFIRM_DROPPED`, `ACT_DISPUTE_TIMEOUT_
+ACK`, `ACT_START_SETTLE_OVERRIDE`, `ACT_QUESTION_REASK`, `META_AIRGATE_
+EVENTS`, `META_CONFIG_SNAPSHOT` (define only).
+**C8** `lily_session_metadata` wraps `game.voice_identity_receipt()`
+(`_voice_identity_receipt_or_failed`): a raise yields `{"outcome":
+"receipt_failed:<Exc>"}` instead of taking both metadata writes down.
+**C10** `LilyVoiceProbe._slice_into_voiced`: the resample of a voiced
+slice runs OFF the event loop (`loop.run_in_executor`, default executor)
+when a loop is running; the union grows and `voiced_seconds` counts when
+the audio LANDS, and the owner's `on_voiced_landed` hook
+(`attach_voice_probe` → `_on_voice_probe_landed`) re-runs the match check
+then. Synchronous with no running loop (tests, the fallback). MEASURED
+with the real rtc resampler at 48 kHz, on-loop blocking per
+`note_voiced_segment` (median of 5): 1 s slice 3.1 → 0.36 ms, 3 s 9.6 →
+1.07 ms, 8 s 27.9 → 4.67 ms (the reviewer's 4.8/10.4/28). The receipt
+gains `probe.pending_slices` / `landed_slices`.
+
+**L1 — endpointing cap** (`lily_config.stt_max_endpointing_delay`):
+default 6.0 → **2.5 s** (`LILY_STT_MAX_ENDPOINTING_DELAY` still
+overrides). The docstring's / README's "framework default 6.0s" claim was
+WRONG and is corrected in both (and in the X9 entry below): livekit-agents
+1.6.10 voice/turn.py ships max_delay 3.0 (2.5 with a streaming detector).
+stt_tuned.json / Speechmatics untouched. Pins updated:
+test_hotfix005_x8_x9_stt, test_interruption_layer, test_env_deploy_lint.
+
+**L2 — the per-turn end-of-turn receipt** (`lily_metrics.
+LilyMetricsCollector.attach_eot_tap` / `bind_turn_detector` /
+`bind_endpointing_bounds` / `classify_commit_reason` / `_fold_user_turn`,
+wired in the entrypoint after `enable_preemptive_used_capture`). Every
+USER-turn MetricsReport folds to one entry: `vad_end_of_speech_at`
+(= stopped_speaking_at), `stt_final_at` (+ transcription_delay),
+`commit_at` (+ end_of_turn_delay), `commit_reason` ∈ {max_delay (|eot −
+max| < 0.05), stt_final (|eot − transcription_delay| < 0.3), min_delay
+(|eot − min| < 0.05), other} against lily_config's min/max, plus the
+framework's own numbers tapped off `logging.getLogger("livekit.agents")`
+exactly as `attach_preemptive_tap` does (a Filter; record.__dict__): the
+"eot prediction" DEBUG record (probability, unlikely_threshold,
+endpointing_delay, trigger, from_cache) and "user turn committed"
+(last_speaking_time, delay_completed, source, end_of_turn_probability,
+unlikely_threshold), correlated by |last_speaking_time −
+stopped_speaking_at| ≤ 0.25 s; the warnings "eot prediction timed out" /
+"cloud turn detector failed" are counted; `session.turn_detection`'s name
+is stamped per commit. UNITS: `eot_probability` / `eot_threshold` are the
+framework's 0–1 decimals as emitted (0.00569…, 0.56), numbers, never
+percentages or strings. EVERY entry carries `eot_probability`,
+`eot_threshold`, `eot_model`, `eot_source` — `eot_source` is
+`debug_record` when matched, `no_debug_record` when the tap saw nothing
+for that turn, `tap_not_attached` when the tap never ran,
+`prediction_timed_out` after the timeout warning. INDEPENDENCE: the tap
+sets the logger to DEBUG itself (only ever lowers it) and installs its
+own root-handler shield (`_FrameworkDebugShield`, shared with the C12
+capture, added only where a handler has none), asserts
+`isEnabledFor(DEBUG)` at attach (`LILY_METRICS | EOT_TAP | level=…`) and
+persists `eot_tap_attached` / `eot_tap_level`. PERSISTED via the existing
+`lily_session_metadata` builder (both write sites, no new table/column):
+`session_metrics.turn_taking = {turns: [≤200, oldest dropped],
+commit_reasons: {reason: n}, end_of_turn_delay_ms_p95, eot_tap_attached,
+eot_tap_level, eot_prediction_timeouts, cloud_turn_detector_failures,
+turn_detector, …p50s}`. Receipt SQL:
+`select session_id, metadata->'session_metrics'->'turn_taking'->'commit_reasons',
+metadata->'session_metrics'->'turn_taking'->>'eot_tap_level' from
+lily_sessions where session_id = '<id>';` and per turn
+`select t->>'commit_reason', t->>'end_of_turn_delay_ms', t->>'eot_probability',
+t->>'eot_source' from lily_sessions, jsonb_array_elements(
+metadata->'session_metrics'->'turn_taking'->'turns') t where session_id='<id>';`.
+
+**L3 — continuity rails, operator wording verbatim** (`prompts/lily_
+system.txt` `<continuity>`): rail 1's owed line — before: "A first
+welcome-back after a cold greeting is a delivery, never a repeat." →
+after: "A first welcome-back is owed ONLY when identity is CONFIRMED
+(voice match or the player gave their name this session). On a
+device-guess or partial history, nothing is owed — open as a fresh
+table."; rail 3 — before: "Fold related asks into a single question
+joined with "or"; never stack a second." → after: "The name question
+stands alone on its own turn. Who-else-is-here and the fun fact are
+separate beats on later turns. Never fold two of them into one breath,
+and never join them with 'or'." (PAIR 3 as W4 applied it elsewhere; the
+V5 residual is closed). Prefix byte-stable (precall-cache +
+prompt-structure suites green); the one pin on the old rail-1 text
+(test_recog_delivery_race) updated.
+
+Tests: full suite **3056** green on python3.11 and the 3.13 venv
+(baseline 2947 + 109). `python3 -W error -c "import lily_agent"` clean;
+`ruff --select F` on the touched files: 41 findings, all pre-existing on
+main (identical list), 0 new; the new test file is clean.
+
+Deliberately NOT done: B6-B8 (a separate worker); the C2 residual above;
+folding the hot files' act literals onto lily_acts (define only, per C7).
 
 ## 2026-09-06 — HOTFIX-ENGINE-LABEL-001: STT never started (live 12:20–12:22 UTC, three deaf sessions on d4d79e3)
 

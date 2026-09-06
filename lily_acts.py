@@ -49,6 +49,14 @@ ACT_FLOOR: Final[str] = "floor"
 ACT_RESTART_CONFIRM: Final[str] = "restart_confirm"
 ACT_RESTART_DECLINED: Final[str] = "restart_declined"
 ACT_RESTART_ACK: Final[str] = "restart_ack"
+# WO-LILY-CONTROL-GATES-001 (W2) obligation lines, named here per
+# WO-LILY-COMPOSITION-FOLLOWUP-001 C7 (define only — the hot files keep
+# their literals until the retarget wave).
+ACT_RESTART_CONFIRM_DROPPED: Final[str] = "restart_confirm_dropped"
+ACT_DISPUTE_TIMEOUT_ACK: Final[str] = "dispute_timeout_ack"
+ACT_START_SETTLE_OVERRIDE: Final[str] = "start_settle_override"
+# COMPOSITION-FOLLOWUP-001 B4: the choices-on-demand re-ask.
+ACT_QUESTION_REASK: Final[str] = "question_reask"
 
 # Identity / greeting lane.
 ACT_GREET: Final[str] = "greet"
@@ -99,6 +107,14 @@ def claim_key(qnum, act: str) -> str:
     (an int normally; None pre-game renders as ``q_None_...``)."""
     return f"q_{qnum}_{act}"
 
+
+# ---------------------------------------------------------------------------
+# lily_sessions.metadata lanes (lily_agent.lily_session_metadata) — the
+# wave's receipt keys, named per COMPOSITION-FOLLOWUP-001 C7 (define only).
+# ---------------------------------------------------------------------------
+
+META_AIRGATE_EVENTS: Final[str] = "airgate_events"
+META_CONFIG_SNAPSHOT: Final[str] = "config_snapshot"
 
 # ---------------------------------------------------------------------------
 # LWW participant attributes (LilyGlassMixin.publish_attributes) — exact

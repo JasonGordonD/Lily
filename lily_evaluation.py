@@ -733,6 +733,84 @@ _NUMBER_INDEX = {
 }
 _NUMBER_POSITIONAL_RE = re.compile(r"^(?:the )?number (one|two|three|four|[1-4])$")
 
+# WO-LILY-COMPOSITION-FOLLOWUP-001 P0-2: a choice letter at the END of a
+# sentence, read off the raw lowercased text. The lead-in is optional (a
+# bare "a" still parses); the letter must be a whole word and the last
+# content of the utterance (trailing punctuation only).
+_MC_TERMINAL_LETTER_RE = re.compile(
+    r"(?:^|\b(?:say|said|pick|picking|choose|choosing|go with|going with|"
+    r"it s|it's|its|is|answer is|i d say|i'd say|i think|think|guess|"
+    r"guessing|take|option|letter|choice|probably|maybe|definitely|be|"
+    r"with|for|on|and|or))?\s*\b([abcd])\b[\s.!?,;:]*$"
+)
+# The bounded TAIL a spoken pick may carry after the option ("Mars, final
+# answer", "Jupiter I think", "Venus for sure").
+_MC_TAIL_RE = re.compile(
+    r"(?:\s+(?:final answer|final|for sure|i think|i guess|definitely|"
+    r"lily|right|yeah|please|that s my answer|i m sure|for real|probably|"
+    r"maybe|obviously|of course))+$"
+)
+
+
+def _mc_utterance_core(text: str) -> str:
+    """The whole utterance as a candidate OPTION: fillers/lead-ins
+    stripped (the freeform normalizer), then a bounded tail, then the
+    same normalization the option texts get. "" when nothing remains."""
+    kept = _strip_fillers(text)
+    if not kept:
+        return ""
+    kept = _MC_TAIL_RE.sub("", kept).strip()
+    if not kept:
+        return ""
+    return lily_normalize_answer(kept) or kept
+
+
+def lily_mc_unresolved(text: str, question: Optional[dict]) -> bool:
+    """B1: True when `question` is a four-choice card and `text` resolves
+    NONE of its options (no letter, no position, no whole-utterance option
+    match) — the shape the clarify door must catch ("Earth tool.") so an
+    unresolved MC utterance is never adjudicated as a pick."""
+    q = question or {}
+    choices = q.get("choices")
+    if not isinstance(choices, list) or len(choices) != 4:
+        return False
+    r = lily_tier1_evaluate_mc(
+        text, [str(c) for c in choices], str(q.get("canonical_answer", "")),
+    )
+    return r.get("selected_index") is None
+
+
+def lily_numeric_distractors(canonical_answer: str) -> Optional[list[str]]:
+    """Operator B4 (choices on demand): three deterministic, plausible
+    NEIGHBOUR values for an integer canonical answer — no reasoning-node
+    call needed. Step scales with magnitude (1 under 20, 5 under 200, 3
+    for year-sized values, a power of ten beyond). None when the answer
+    is not a single non-negative integer."""
+    norm = lily_normalize_answer(str(canonical_answer or ""))
+    if not norm or not _numeric_only(norm) or " " in norm:
+        return None
+    try:
+        n = int(norm)
+    except ValueError:
+        return None
+    if n < 20:
+        step = 1
+    elif n < 200:
+        step = 5
+    elif n < 3000:
+        step = 3
+    else:
+        step = 10 ** (len(str(n)) - 2)
+    candidates = [n - 2 * step, n - step, n + step, n + 2 * step, n + 3 * step]
+    out: list[str] = []
+    for value in candidates:
+        if value < 0 or value == n or str(value) in out:
+            continue
+        out.append(str(value))
+        if len(out) == 3:
+            break
+    return out if len(out) == 3 else None
+
 
 def lily_canonical_choice_index(
     choices: list[str], canonical_answer: str
@@ -788,22 +866,32 @@ def lily_tier1_evaluate_mc(
     selected: Optional[int] = None
     method: Optional[str] = None
     similarity = 0.0
+    t = FUZZY_CORRECT_THRESHOLD if threshold is None else threshold
 
-    # Per-choice text evaluation (reuses the freeform matcher one choice at
-    # a time). exact/containment selects immediately; fuzzy/phonetic hits
-    # are held as the LAST resort — a letter or position is more explicit.
-    fuzzy_best: Optional[int] = None
-    fuzzy_sim = 0.0
-    if choices:
-        for i, choice in enumerate(choices):
-            r = lily_tier1_evaluate(
-                transcript_text, [str(choice)], threshold=threshold
-            )
-            if r["method"] in ("exact", "containment"):
-                selected, method, similarity = i, "choice_text", r["similarity"]
+    # WO-LILY-COMPOSITION-FOLLOWUP-001 P0-2 (operator B1): the utterance
+    # must BE the option — normalized equality on the WHOLE utterance
+    # (fillers, lead-ins and a bounded tail stripped), or a fuzzy hit on
+    # the whole utterance held as the last resort below. NEVER
+    # containment / prefix: live 11:47:55Z "Earth tool." (STT for "Earth
+    # to Lily") resolved to the option "Earth" through the freeform
+    # containment matcher and burned the question.
+    norms = [lily_normalize_answer(str(c)) for c in choices] if choices else []
+    core = _mc_utterance_core(transcript_text)
+    if core and 1.0 >= t:
+        for i, n in enumerate(norms):
+            if n and core == n:
+                selected, method, similarity = i, "choice_text", 1.0
                 break
-            if r["verdict"] == "correct" and r["similarity"] > fuzzy_sim:
-                fuzzy_best, fuzzy_sim = i, r["similarity"]
+
+    # P0-2: a TERMINAL letter inside a sentence, parsed from the RAW
+    # lowercased text before normalization — "I would comfortably say a."
+    # (live 11:47:38Z, read as uncertain) / "say b." / "I'd say c". The
+    # article-stripping normalizer can never see it.
+    if selected is None:
+        raw = lily_strip_trailing_disfluency(transcript_text or "").lower().strip()
+        m = _MC_TERMINAL_LETTER_RE.search(raw) if raw else None
+        if m:
+            selected, method, similarity = _LETTER_INDEX[m.group(1)], "letter", 1.0
 
     kept = _strip_fillers(transcript_text)  # articles preserved: bare "a" = A
 
@@ -827,9 +915,28 @@ def lily_tier1_evaluate_mc(
                     _NUMBER_INDEX[m.group(1)], "positional", 1.0,
                 )
 
-    # Fuzzy/phonetic option-text hit — the least explicit resolver.
-    if selected is None and fuzzy_best is not None:
-        selected, method, similarity = fuzzy_best, "choice_text", fuzzy_sim
+    # Fuzzy option-text hit on the WHOLE utterance — the least explicit
+    # resolver ("Jupitor" → Jupiter; "Earth tool" vs "Earth" is 0.6 and
+    # stays unresolved).
+    if selected is None and core and norms and t <= 1.0:
+        phonetic_t = PHONETIC_FUZZY_THRESHOLD * (t / FUZZY_CORRECT_THRESHOLD)
+        best_i, best_sim = None, 0.0
+        for i, n in enumerate(norms):
+            if not n:
+                continue
+            sim = SequenceMatcher(None, core, n).ratio()
+            if sim >= t and sim > best_sim:
+                best_i, best_sim = i, sim
+            elif (
+                sim >= phonetic_t
+                and sim > best_sim
+                and _has_alpha(core)
+                and _has_alpha(n)
+                and _phrase_soundex(core) == _phrase_soundex(n)
+            ):
+                best_i, best_sim = i, sim  # the freeform phonetic path
+        if best_i is not None:
+            selected, method, similarity = best_i, "choice_text", best_sim
 
     if selected is None or not choices or selected >= len(choices):
         return {
@@ -1405,6 +1512,7 @@ LILY_SHAPE_HINT = "hint"                        # "starts with an O"
 LILY_SHAPE_SELF_NEGATION = "self_negation"      # "Oscar… no wait"
 LILY_SHAPE_INTERJECTION = "interjection"        # "oh god", "damn"
 LILY_SHAPE_FRAGMENT_TOKEN = "fragment_token"    # "face", "He. Face."
+LILY_SHAPE_MC_UNRESOLVED = "mc_unresolved"      # "Earth tool." on a 4-choice card (B1)
 
 _SHAPE_LEAD_FILLER = (
     r"(?:(?:oh|ah|ooh|hmm|hm|like|wait|uh|um|er|well|so|okay|ok)[,.!?\s]+)*"
