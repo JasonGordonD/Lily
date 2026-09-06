@@ -18,9 +18,11 @@ import re
 import time
 from typing import Optional
 
+import lily_config
+
 logger = logging.getLogger("lily_binding")
 
-FRAGMENT_ACCUMULATION_SECONDS = 2.0
+FRAGMENT_ACCUMULATION_SECONDS = lily_config.fragment_accumulation_seconds()
 
 # Auxiliary verbs — never names (lifted from lbs_onboarding.AUXILIARY_VERBS)
 AUXILIARY_VERBS = {

@@ -36,8 +36,8 @@ import lily_stt_tuning
 
 logger = logging.getLogger("lily_persistence")
 
-TRANSCRIPT_BATCH_SIZE = 10
-TRANSCRIPT_BATCH_FLUSH_SECONDS = 30.0
+TRANSCRIPT_BATCH_SIZE = lily_config.transcript_batch_size()
+TRANSCRIPT_BATCH_FLUSH_SECONDS = lily_config.transcript_batch_flush_seconds()
 TRANSCRIPT_FLUSH_ATTEMPTS = 3
 BANK_FETCH_CANDIDATE_LIMIT = 100
 
@@ -267,7 +267,9 @@ async def lily_session_end(
     logger.info("Session ended — session_id=%s", scorekeeper.session_id)
 
 
-ABANDONED_SESSION_MIN_AGE_SECONDS = 900.0  # 15 min inactive, non-ended
+ABANDONED_SESSION_MIN_AGE_SECONDS = (
+    lily_config.abandoned_session_min_age_seconds()  # 15 min inactive, non-ended
+)
 
 
 async def lily_sweep_abandoned_sessions(
@@ -2344,7 +2346,7 @@ async def lily_find_name_fragments(
 # Hard cap on the whole cascade (deletes + verification counts). Deletion
 # is NOT fire-and-forget: it must complete and be VERIFIED before the tool
 # acknowledges — but it must also never hang a live table.
-FORGET_CASCADE_TIMEOUT_SECONDS = 20.0
+FORGET_CASCADE_TIMEOUT_SECONDS = lily_config.forget_cascade_timeout_seconds()
 
 
 async def lily_forget_group_data(
