@@ -11145,14 +11145,26 @@ def lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics) -> di
         detail/ts) so "was that ruling suppressed before its first frame
         and re-aired?" is a SQL query against the session row;
       * voice_identity — the voice-ID outcome + stage timings."""
+    session_block = dict(
+        session_metrics.summary() if session_metrics is not None else {}
+    )
+    # REFACTOR-STAGE-1B-001: the per-session fault counters' consumer (S1).
+    # handler_faults — lifted session/room handlers that raised (HOTFIX-
+    # STT-QUARANTINE-001 guard, LILY_STT | HANDLER_FAULT); divergence_net_
+    # faults — HOTFIX-005/006 safety nets that raised inside their own check
+    # (LILY_DIVERGENCE_NET | FAULT). Always present, 0 when nothing fired,
+    # so "no faults" is a stated value.
+    for key, attr in (
+        ("handler_faults", "_stt_handler_faults"),
+        ("divergence_net_faults", "_divergence_net_faults"),
+    ):
+        session_block[key] = int(getattr(game, attr, 0) or 0)
     return {
         "pipeline_latency": {
             k: (round(sum(v) / len(v), 1) if v else None)
             for k, v in (metrics_raw or {}).items()
         },
-        "session_metrics": (
-            session_metrics.summary() if session_metrics is not None else {}
-        ),
+        "session_metrics": session_block,
         "question_timeline": getattr(scorekeeper, "question_timeline", {}),
         "identity_promotions": getattr(
             game, "_identity_promotion_events", None
@@ -11243,6 +11255,29 @@ def _on_session_usage_body(session_metrics, ev) -> None:
     session_metrics.collect_session_usage(getattr(ev, "usage", None))
 
 
+def _note_divergence_net_fault(game, net: str) -> None:
+    """REFACTOR-STAGE-1B-001 P1-2: a HOTFIX-005/006 divergence safety net
+    (score / roster / custom_round / verdict) raised INSIDE its own check.
+    The nets exist to make a prevention failure loud; a net that dies
+    silently (`except Exception: pass`) is the S1 anti-pattern — a sensor
+    that reports nothing is read as "no divergence". Receipts: this
+    WARNING with traceback, and game._divergence_net_faults, which rides
+    lily_sessions.metadata.session_metrics.divergence_net_faults
+    (lily_session_metadata)."""
+    try:
+        game._divergence_net_faults = int(
+            getattr(game, "_divergence_net_faults", 0) or 0
+        ) + 1
+    except Exception:  # noqa: BLE001 — a fake game must not mask the log line
+        pass
+    logger.warning(
+        "LILY_DIVERGENCE_NET | FAULT | net=%s session=%s faults=%s — the "
+        "safety net raised; its verdict for this turn is unknown",
+        net, getattr(getattr(game, "sk", None), "session_id", "?"),
+        getattr(game, "_divergence_net_faults", "?"), exc_info=True,
+    )
+
+
 def _on_item_added_body(game, session_metrics, metrics_raw, ev) -> None:
     msg = ev.item
     role = getattr(msg, "role", None)
@@ -11273,7 +11308,7 @@ def _on_item_added_body(game, session_metrics, metrics_raw, ev) -> None:
                     game.sk.session_id, div["spoken"], div["ledger_values"],
                 )
         except Exception:
-            pass
+            _note_divergence_net_fault(game, "score")
         # HOTFIX-006 N13: the same safety net for the ROSTER COUNT. Live:
         # "Whenever you four..." to a table of three, right after naming
         # all three. The state block injects the authoritative count
@@ -11292,7 +11327,7 @@ def _on_item_added_body(game, session_metrics, metrics_raw, ev) -> None:
                     ",".join(rdiv["names"]),
                 )
         except Exception:
-            pass
+            _note_divergence_net_fault(game, "roster")
         # HOTFIX-006 N2: the same safety net for CUSTOM ROUNDS. In
         # lily-16A9AE she narrated a Cape Cod round twice with nothing
         # registered under it, and no log said so — the fiction was only
@@ -11312,7 +11347,7 @@ def _on_item_added_body(game, session_metrics, metrics_raw, ev) -> None:
                     game.sk.session_id, topic,
                 )
         except Exception:
-            pass
+            _note_divergence_net_fault(game, "custom_round")
         # HOTFIX-006 N9 part 3: the same safety net for VERDICTS. At
         # 21:10 she said "Jupiter was spot on, Rami, but just a split
         # second late!" while Rami's committed q_1052 row read
@@ -11338,7 +11373,7 @@ def _on_item_added_body(game, session_metrics, metrics_raw, ev) -> None:
                     vdiv["utterance_id"],
                 )
         except Exception:
-            pass
+            _note_divergence_net_fault(game, "verdict")
         m = report or {}
         get = (lambda k: m.get(k)) if isinstance(m, dict) else (
             lambda k: getattr(m, k, None)
