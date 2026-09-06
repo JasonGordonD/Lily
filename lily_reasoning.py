@@ -378,13 +378,20 @@ class _LilyStreamAccumulator:
 # is the primary parser and the fence-stripping path is a defensive last resort.
 #
 # The question shape carries ALL fields — current plus reserved-for-later
-# sub-agents — so downstream evolution is additive, never breaking. Reserved
-# optional fields, populated by later sub-agents (NOT emitted by the base
-# authoring prompt):
+# sub-agents — so downstream evolution is additive, never breaking. Optional
+# fields beyond the exact required set:
 #   choices            (exactly 4 strings; multiple-choice, sub-agent G — ACTIVE:
 #                       added via _MC_CHOICES_ADDENDUM when the round runs MC)
-#   image_url / image_source (generated|web|none; images, sub-agent H)
-#   proposed_category  (category proposals, sub-agent F)
+#   image_url / image_source (generated|web|none; images, sub-agent H — NOT
+#                       emitted by the authoring prompt)
+#   proposed_category  (category proposals, sub-agent F — ACTIVE since
+#                       REFACTOR-STAGE-1B-001 P1-6: the addendum below asks
+#                       for it as optional; _shape_question keeps a stripped
+#                       string and drops anything else; the consumer is
+#                       LilyGame._curate_generated_question ->
+#                       lily_bank.lily_record_category_proposal, the base of
+#                       the promotion ladder. Before P1-6 the shape never
+#                       asked, so the ladder could not populate from play.)
 _GROK_QUESTION_SHAPE_ADDENDUM = """
 
 Respond with ONLY a JSON object, no markdown fences, with EXACTLY these
@@ -394,7 +401,10 @@ host should speak it), "canonical_answer" (string),
 "acceptable_answers" (array of lowercase strings: the canonical answer
 plus common variants), "reveal_color" (one short spicy fact for the
 reveal). Include "choices" (array of exactly 4 strings) ONLY for a
-multiple-choice question."""
+multiple-choice question. You MAY add one optional field,
+"proposed_category" (string): a short category name this question would
+suit better than the one given, ONLY when it genuinely belongs to a
+category not on tonight's list; omit the field otherwise."""
 
 _GROK_VERDICT_SHAPE_ADDENDUM = """
 
@@ -518,6 +528,14 @@ def _shape_question(data) -> Optional[dict]:
     data.setdefault("category", "potpourri")
     data.setdefault("difficulty_tier", 2)
     data.setdefault("reveal_color", "")
+    # P1-6: the optional proposal (sub-agent F) — a stripped non-empty string
+    # flows to the consumer; anything else is dropped so a stray number or
+    # list never reaches lily_record_category_proposal.
+    proposed = data.get("proposed_category")
+    if isinstance(proposed, str) and proposed.strip():
+        data["proposed_category"] = proposed.strip()
+    else:
+        data.pop("proposed_category", None)
     return data
 
 

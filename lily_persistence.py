@@ -573,8 +573,10 @@ async def lily_log_addressee(
 ) -> Optional[int]:
     """Fire-and-forget insert into lily_addressee_log. Returns the new row
     id when available (kept by the caller for the later label UPDATE).
-    Tolerates failures silently — corpus logging must never surface into
-    the live session (debug log only).
+    Tolerates failures — corpus logging must never surface into the live
+    session — but never silently: a failed write is a bounded WARNING
+    (LILY_ADDRESSEE_LOG | WRITE_FAILED) plus _addressee_log_failure_count
+    (REFACTOR-STAGE-1B-001 P1-3).
 
     WS-11 fail-soft: the telemetry columns land in later migrations —
     FL-1's migration 018 (agent_classification + addressee_score +
@@ -599,6 +601,7 @@ async def lily_log_addressee(
         "timing_source",
         "timing_drift_seconds",
     )
+    global _addressee_log_failure_count, _addressee_log_degraded_count
     try:
         result = await asyncio.to_thread(
             lambda: supabase.table("lily_addressee_log").insert(row).execute()
@@ -609,11 +612,23 @@ async def lily_log_addressee(
         return None
     except Exception as e:
         if not any(k in row for k in _TELEMETRY_KEYS):
-            logger.debug("lily_log_addressee error: %s", e)
+            _addressee_log_failure_count += 1
+            logger.log(
+                _lily_telemetry_failure_level(_addressee_log_failure_count),
+                "LILY_ADDRESSEE_LOG | WRITE_FAILED | session=%s failures=%d "
+                "error_class=%s error=%s",
+                row.get("session_id"), _addressee_log_failure_count,
+                type(e).__name__, str(e)[:300],
+            )
             return None
-        logger.debug(
-            "lily_log_addressee telemetry insert failed (%s) — retrying "
-            "without WS-11 columns (migration 018 not applied here)", e,
+        _addressee_log_degraded_count += 1
+        logger.log(
+            _lily_telemetry_failure_level(_addressee_log_degraded_count),
+            "LILY_ADDRESSEE_LOG | WRITE_DEGRADED | session=%s degraded=%d "
+            "error_class=%s error=%s — retrying without the WS-11/FL-1 "
+            "columns (migration 018/019 not applied here)",
+            row.get("session_id"), _addressee_log_degraded_count,
+            type(e).__name__, str(e)[:300],
         )
         base_row = {k: v for k, v in row.items() if k not in _TELEMETRY_KEYS}
         try:
@@ -627,7 +642,14 @@ async def lily_log_addressee(
                 return data[0].get("id")
             return None
         except Exception as e2:
-            logger.debug("lily_log_addressee retry error: %s", e2)
+            _addressee_log_failure_count += 1
+            logger.log(
+                _lily_telemetry_failure_level(_addressee_log_failure_count),
+                "LILY_ADDRESSEE_LOG | WRITE_FAILED | session=%s failures=%d "
+                "(retry without telemetry columns) error_class=%s error=%s",
+                row.get("session_id"), _addressee_log_failure_count,
+                type(e2).__name__, str(e2)[:300],
+            )
             return None
 
 
@@ -645,6 +667,41 @@ _llm_usage_absent_columns: set = set()
 _llm_usage_failure_count = 0
 _LLM_USAGE_WARN_FIRST = 10
 _LLM_USAGE_WARN_EVERY = 100
+
+# REFACTOR-STAGE-1B-001 P1-3: the other telemetry writers (addressee-log
+# insert, addressee-label update, acoustic-trajectory insert) used to fail
+# at DEBUG with no counter — a dead corpus lane looked identical to a
+# healthy one. Same pattern as the LLM-usage lane: a per-process counter
+# (one job process per session on LiveKit Cloud) and a bounded WARNING
+# cadence (first _LLM_USAGE_WARN_FIRST in full, then every
+# _LLM_USAGE_WARN_EVERY-th). Consumer: lily_telemetry_failure_counts() rides
+# lily_sessions.metadata.session_metrics.telemetry_write_failures
+# (lily_agent.lily_session_metadata) on both write sites.
+_addressee_log_failure_count = 0
+_addressee_log_degraded_count = 0
+_addressee_label_failure_count = 0
+_acoustic_trajectory_failure_count = 0
+
+
+def _lily_telemetry_failure_level(n: int) -> int:
+    """WARNING for the first _LLM_USAGE_WARN_FIRST failures of a lane and
+    every _LLM_USAGE_WARN_EVERY-th after; DEBUG between (S3: never silent,
+    never a flood)."""
+    if n <= _LLM_USAGE_WARN_FIRST or n % _LLM_USAGE_WARN_EVERY == 0:
+        return logging.WARNING
+    return logging.DEBUG
+
+
+def lily_telemetry_failure_counts() -> dict:
+    """The telemetry lanes' failure counters for this process, keyed the
+    way they land in session_metrics.telemetry_write_failures."""
+    return {
+        "llm_usage_failure_count": _llm_usage_failure_count,
+        "addressee_log_failure_count": _addressee_log_failure_count,
+        "addressee_log_degraded_count": _addressee_log_degraded_count,
+        "addressee_label_failure_count": _addressee_label_failure_count,
+        "acoustic_trajectory_failure_count": _acoustic_trajectory_failure_count,
+    }
 
 
 def _lily_llm_usage_column_error(exc: Exception, column: str) -> bool:
@@ -799,7 +856,10 @@ async def lily_update_addressee_label(
 ) -> None:
     """Fire-and-forget label UPDATE on an earlier lily_addressee_log row
     (implicit labels at adjudication commit, appeal corrections, explicit
-    clarify resolutions). Silent on failure (debug log only)."""
+    clarify resolutions). Never raises; a failed update is a bounded
+    WARNING (LILY_ADDRESSEE_LOG | LABEL_UPDATE_FAILED) plus
+    _addressee_label_failure_count."""
+    global _addressee_label_failure_count
     try:
         await asyncio.to_thread(
             lambda: supabase.table("lily_addressee_log")
@@ -808,7 +868,14 @@ async def lily_update_addressee_label(
             .execute()
         )
     except Exception as e:
-        logger.debug("lily_update_addressee_label error: %s", e)
+        _addressee_label_failure_count += 1
+        logger.log(
+            _lily_telemetry_failure_level(_addressee_label_failure_count),
+            "LILY_ADDRESSEE_LOG | LABEL_UPDATE_FAILED | row_id=%s label=%s "
+            "source=%s failures=%d error_class=%s error=%s",
+            row_id, label, label_source, _addressee_label_failure_count,
+            type(e).__name__, str(e)[:300],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -823,10 +890,13 @@ async def lily_write_acoustic_trajectory(
 ) -> None:
     """One lily_acoustic_trajectories row per user turn — the LATEST devAIce
     capture at the moment the turn finalized. Fire-and-forget via to_thread;
-    silent on failure (debug log only — telemetry must never surface into
-    the live session). No row is written when no snapshot exists (breaker
+    never raises (telemetry must never surface into the live session) but a
+    failed write is a bounded WARNING (LILY_ACOUSTIC |
+    TRAJECTORY_WRITE_FAILED) plus _acoustic_trajectory_failure_count. No
+    row is written when no snapshot exists (breaker
     open / nothing captured yet) — the trajectory table records signal, the
     addressee log records the explicit-null health state."""
+    global _acoustic_trajectory_failure_count
     if supabase is None or not snapshot:
         return
     try:
@@ -843,7 +913,14 @@ async def lily_write_acoustic_trajectory(
             }).execute()
         )
     except Exception as e:
-        logger.debug("lily_write_acoustic_trajectory error: %s", e)
+        _acoustic_trajectory_failure_count += 1
+        logger.log(
+            _lily_telemetry_failure_level(_acoustic_trajectory_failure_count),
+            "LILY_ACOUSTIC | TRAJECTORY_WRITE_FAILED | session=%s turn=%s "
+            "failures=%d error_class=%s error=%s",
+            session_id, turn_index, _acoustic_trajectory_failure_count,
+            type(e).__name__, str(e)[:300],
+        )
 
 
 # ---------------------------------------------------------------------------

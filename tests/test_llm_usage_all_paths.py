@@ -318,6 +318,8 @@ def test_collector_schedules_row_and_summary_carries_health():
     assert c.llm_usage_rows_scheduled == 1
     assert c.summary()["llm_usage"] == {
         "rows_scheduled": 1, "llm_usage_write_failures": 0,
+        # REFACTOR-STAGE-1B-001 P1-3: the done-callback's own fault counter.
+        "done_callback_failure_count": 0,
     }
 
 

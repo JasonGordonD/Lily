@@ -245,12 +245,28 @@ def test_the_vad_budget_is_the_frameworks_interruption_floor():
 def test_the_cause_rides_the_existing_vad_wiring():
     """NO NEW LAYERS (mandate rule 2): the cut cause is read off the
     `user_state_changed` subscription that already existed for the P0-2
-    kickoff floor — one handler, no second VAD subscriber."""
-    src = inspect.getsource(lily_agent.entrypoint)
-    assert src.count('@session.on("user_state_changed")') == 1
-    handler = src[src.index('@session.on("user_state_changed")'):]
-    handler = handler[: handler.index('@session.on("agent_state_changed")')]
-    assert "note_user_speech_state" in handler
+    kickoff floor — one handler, no second VAD subscriber.
+
+    REFACTOR-STAGE-1B-001 P1-1: the handler is the module-level
+    `_on_user_state_body`; this drives it directly instead of slicing the
+    entrypoint's source text. The rising edge lands in
+    note_user_speech_state(True) (and sets the kickoff block), the falling
+    edge in note_user_speech_state(False) — the same call Y7's
+    cut_was_deliberate_barge_in reads the edge stamp from."""
+    game = _make_game()
+    seen = []
+    game.note_user_speech_state = lambda speaking: (
+        seen.append(speaking), setattr(game, "_user_speaking", speaking)
+    )
+
+    class _Ev:
+        def __init__(self, new_state):
+            self.new_state = new_state
+
+    lily_agent._on_user_state_body(game, game.sk, _Ev("speaking"))
+    lily_agent._on_user_state_body(game, game.sk, _Ev("listening"))
+    assert seen == [True, False]
+    assert game._user_speaking is False
 
 
 def test_recovery_gained_no_new_dispatch_path():
