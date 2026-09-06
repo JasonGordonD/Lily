@@ -658,16 +658,22 @@ def test_a_new_address_restarts_the_cycle_and_the_game_never_advances(
 
 
 def test_fl1_gates_the_hold_side_chatter_never_holds():
-    """The same words with no adjacency and no name read side_chatter at
-    FL-1 (0.35 < host_threshold 0.60) — no hold. The classifier is the
-    trigger, not the words."""
+    """FL-1 is the trigger, not the words: a multi-player remark with no
+    name, not interrogative, no adjacency reads side_chatter (0.35 <
+    host_threshold 0.60) — no hold. (B9b: the operator's three hard rules
+    — solo session, her name anywhere, an interrogative with no open
+    window — now cover the cases this test used to pin as gaps; see
+    test_addressed_hold_b9b.py.)"""
     game = _airgate_game()
     _armed_next(game)
+    game.sk.bind_speaker("S2", "Chris")  # not a solo session
     at = time.time()
-    game.addressee_classifier = lily_addressee_classifier.LilyAddresseeClassifier()
+    classifier = lily_addressee_classifier.LilyAddresseeClassifier()
+    classifier.note_agent_prompt(at - 60.0)
+    game.addressee_classifier = classifier
 
     def _go():
-        _final(game, LIVE_KINSEY, at)
+        _final(game, "that was a good one dude", at)
         judgment = game.last_addressee_judgment
         assert judgment.classification == "side_chatter"
         assert game.addressed_active() is False

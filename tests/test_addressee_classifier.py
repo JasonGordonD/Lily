@@ -296,14 +296,21 @@ def test_adjacency_biases_host():
 
 
 def test_referential_name_is_mild_side_evidence():
+    """WO-LILY-ADDRESSED-001 B9b (operator ruling): "an utterance
+    containing her name is host-directed regardless of adjacency" — the
+    vocative rule generalized to contain-anywhere, referential use
+    included. The referential SCORE evidence is kept as telemetry (the
+    name component stays negative); the classification is the ruling's."""
     base = LilyAddresseeClassifier().classify(
         _sig("she is a joke", phase="idle")
     )
     referential = LilyAddresseeClassifier().classify(
         _sig("Lily is a joke", phase="idle")
     )
-    assert referential.classification == CLASS_SIDE_CHATTER
-    assert referential.score < base.score
+    assert base.classification == CLASS_SIDE_CHATTER
+    assert referential.classification == CLASS_HOST_DIRECTED
+    assert referential.reason == "name"
+    assert referential.components["name"] < 0  # still mild side evidence
 
 
 def test_acoustic_register_moves_the_score():

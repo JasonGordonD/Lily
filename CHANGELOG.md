@@ -226,6 +226,80 @@ is "back to the question", not "the next one" — the same sentence airs
 today), and the non-question contracts (the doc says use the same
 sentence unless the operator gives another).
 
+**Addendum — B9b, the FL-1 gap (branch `fix/w9b-fl1-rules` on
+integ/next b463dc1).** Operator ruling on the gap reported above,
+verbatim: "Do NOT widen the corpus for this. The trigger already has the
+hard-rule path — use it. Three deterministic rules, no corpus change: a)
+Solo session: every utterance is host-directed by definition. There is
+nobody else. b) Any session: an utterance containing her name is
+host-directed regardless of adjacency. c) Any session: an
+interrogative-shaped utterance with no open answer window is
+host-directed regardless of adjacency. These cover the between-questions
+gap where the classifier scores 0.35. Corpus widening is later, measured
+work under STT-001's labelled-set requirement, not a blind change because
+one adjacency window was too narrow." Done ON the existing hard-rule
+branch of `lily_addressee_classifier.LilyAddresseeClassifier.classify`
+(the vocative/command branch — no parallel detector, no scoring change,
+no corpus change): two more inputs on `LilyUtteranceSignals` — `solo`
+(the roster is exactly one BOUND player, placeholders excluded:
+`sk.roster_size(include_placeholder=False) == 1`) and `question_shaped`
+(`lily_scorekeeper.lily_is_question_shaped`, the W7 helper) — assembled
+by `lily_floor.classify_addressee` like `command_shaped` is; the branch
+now fires on vocative OR command OR solo OR her name anywhere
+(`name_evidence != NAME_NONE` — a mention or a referential use included)
+OR (question-shaped AND no open window AND not addressed to the table),
+with the reason tag `solo` / `name` / `interrogative` (vocative and
+command keep their tags; the definitional and floor-hold rules still rank
+above, so an answer-shaped interrogative INTO an open window is
+`window+match` and scores — rule (c) is gated on the window being
+closed). ONE refinement inside rule (c), stated for the operator: a
+question addressed to the OTHER PLAYERS as a group ("Have you guys seen
+Loki?" — `lily_table_address`, FL-1's own solo-run cluster anchor from
+the 81BCB0 ground truth this classifier was built on) is asked of the
+table, not of her, and rule (c) stands down for it; without this the
+81BCB0 derailment replay (`test_81bcb0_derailment_beats_classify_side_
+cluster`) reads Lily as addressed by the tangent she was built to stay
+out of. Each rule reaches the `addressed` trigger through the same
+`host_directed` classification — no bypass — and breaks a live
+side-cluster exactly as the vocative rule does. TWO CONSEQUENCES on the
+record: (1) a REFERENTIAL use of her name ("Lily is a joke") is now
+host-directed by rule (b) — the FL-1 pin `test_referential_name_is_
+mild_side_evidence` (WO-LILY-FLOOR-001: referential = mild side
+evidence) is rewritten to the ruling's contract; the name component stays
+negative as telemetry; the operator may narrow (b) to vocative + mention
+later — one line. (2) A verdict protest right behind a ruling is BOTH a
+D2 dispute and a B9 address: both holds stand, and `progression_paused_
+reason` now names `dispute_hold` ABOVE `addressed` (the more specific
+state while it lasts; `addressed` reads after the dispute discharges) —
+precedence becomes STOP > pause/hold > restart_confirm > dispute_hold >
+addressed > reply_owed; the `test_hold_ack_and_pacing_text_do_not_
+release_the_dispute` pin (WO-LILY-CONTROL-GATES-001) is what surfaced it
+and is unchanged. RECEIPT: on the classification line itself,
+`LILY_ADDRESSEE | CLASSIFIED | session= {json} | HARD_RULE |
+rule=solo|name|interrogative text=`; the judgment's `reason` carries the
+same tag into `lily_addressee_log.addressee_score_components.reason`.
+Tests: `tests/test_addressed_hold_b9b.py`, 15 tests — **10 red on
+b463dc1** (10 failed, 5 passed: seven fail on behaviour, three on the
+base's `LilyUtteranceSignals` lacking the `solo` / `question_shaped`
+fields; the five green are the two operator negatives, the 0.35-prior
+pin, the vocative arm of rule (b) and the answer-into-window case) — 15
+green after; the B9 test that pinned "Kinsey with no adjacency reads side
+chatter" is rewritten to the operator's negative (a multi-player side
+remark, no name, not interrogative), since rules (a) and (c) now hold
+exactly that case. Full suite **3263** on python3.11 and the 3.13
+venv (integ/next baseline 3248 + 15). `python3 -W error -c "import
+lily_agent"` clean; `ruff --select F` on the touched files clean. README
+rule untouched. Files: lily_addressee_classifier.py, lily_floor.py,
+tests/test_addressed_hold_b9b.py, tests/test_addressed_hold_b9.py,
+tests/test_addressee_classifier.py, this addendum. Consequence to state
+plainly: in a SOLO session every non-answer final is now host-directed —
+so the P9 address debt (`_awaiting_address_since`) is minted on every
+such final, and the B9 hold arms for anything the solo player says that
+is not an answer, a command, a backchannel, an affirmative or a reply to
+her question. That is the operator's rule ("there is nobody else"), and
+the exemptions in `_addressed_exempt_reason` are what keep a "yes" or an
+"uh huh" from holding the game.
+
 **Deliberately NOT done**: widening FL-1 (above); a timer of any kind;
 fixing `mcq_barge_resume` consuming `_delivery_barge_cut_qnum` even when
 its dispatch is suppressed at the chokepoint (pre-existing — a stood-down

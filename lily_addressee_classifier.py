@@ -353,6 +353,15 @@ class LilyUtteranceSignals:
     # classifier's own note_agent_prompt anchor.
     seconds_since_agent_prompt: Optional[float] = None
     register: Optional[LilyAcousticRegister] = None
+    # WO-LILY-ADDRESSED-001 B9b (operator ruling, no corpus change): two
+    # more deterministic hard-rule inputs, assembled by the wiring.
+    # solo — the roster is exactly one bound player: every utterance is
+    # host-directed by definition; there is nobody else.
+    solo: bool = False
+    # question_shaped — the utterance asks something (the scorekeeper's
+    # lily_is_question_shaped); with NO open answer window it is
+    # host-directed regardless of adjacency.
+    question_shaped: bool = False
 
 
 @dataclass(frozen=True)
@@ -636,15 +645,47 @@ class LilyAddresseeClassifier:
                     )
                     cluster_id = declared
                     cluster_event = CLUSTER_LOCK
-        elif name_evidence == NAME_VOCATIVE or signals.command_shaped:
+        elif (
+            name_evidence == NAME_VOCATIVE
+            or signals.command_shaped
+            # WO-LILY-ADDRESSED-001 B9b — the operator's three deterministic
+            # rules, on the existing hard-rule path (no parallel detector,
+            # no corpus change): (a) a solo session — every utterance is
+            # host-directed, there is nobody else; (b) her name anywhere —
+            # the vocative rule generalized to contain-anywhere (a mention
+            # or referential use included); (c) an interrogative-shaped
+            # utterance with NO open answer window. They cover the
+            # between-questions gap where the prior alone scores 0.35. An
+            # answer-shaped utterance INTO an open window never reaches
+            # here: the definitional rule above already owns it, and (c)
+            # is gated on the window being closed. One refinement inside
+            # (c), from the 81BCB0 ground truth this classifier was built
+            # on: a question addressed to the OTHER PLAYERS as a group
+            # ("Have you guys seen Loki?" — lily_table_address, the
+            # solo-run cluster anchor) is asked of the table, not of her.
+            or signals.solo
+            or name_evidence != NAME_NONE
+            or (
+                signals.question_shaped
+                and not signals.window_open
+                and not lily_table_address(signals.text)
+            )
+        ):
             if self._active_cluster is not None:
                 cluster_id = self._active_cluster["id"]
                 cluster_event = CLUSTER_BREAK
                 self._active_cluster = None
             score = max(score, self.host_threshold)
-            reason = (
-                "vocative" if name_evidence == NAME_VOCATIVE else "command"
-            )
+            if name_evidence == NAME_VOCATIVE:
+                reason = "vocative"
+            elif signals.command_shaped:
+                reason = "command"
+            elif signals.solo:
+                reason = "solo"
+            elif name_evidence != NAME_NONE:
+                reason = "name"
+            else:
+                reason = "interrogative"
             classification = CLASS_HOST_DIRECTED
         elif self._active_cluster is not None:
             # Inside a locked cluster: utterances classify as a cluster,
