@@ -57,13 +57,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import lily_audeering_consumers
-import lily_persistence
 import lily_say_gate
 import lily_scorekeeper
 import lily_transition
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
+from fakes import FakeSayingSession, FakeAgentHandle, FakeReasoning, make_live_game
 
 
 # ---------------------------------------------------------------------------
@@ -71,42 +70,6 @@ from lily_scorekeeper import LilyScorekeeper
 # drive, extended with the playout seam (on_agent_speech_finished) because
 # every N12 assertion is about the ORDER two lanes reach the air in.
 # ---------------------------------------------------------------------------
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-        self.said: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-    def say(self, text, *a, **k):
-        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
-        self.said.append(text)
-        return None
-
-
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
-
-
-class _FakeReasoning:
-    async def prefetch_question(self, sk, **kw):
-        return None
-
-    async def prefetch_picture_question(self, supabase, **kw):
-        return None
-
-    async def judge(self, *a, **kw):
-        # Tier-2 IS legitimately reached in the N8 fixtures: Rhonda's real
-        # "We don't know." matches no answer surface, so the judge is
-        # consulted and rules it a miss. That miss is precisely the
-        # precondition for a steal window — which is the mechanic under
-        # test on both sides (protected when unrevealed, refused when
-        # revealed).
-        return '{"verdict": "incorrect", "reason": "not an answer"}'
 
 
 # The live 2026-08-08 questions, by their real ids.
@@ -149,70 +112,10 @@ N8_REVEAL = "No worries! The correct answer is Frankenstein"
 
 
 def _make_game(session_id: str = "lily-D99BE7") -> LilyGame:
-    game = LilyGame.bare()
-    game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
-    game._preemptive_paused = False
-    game.say_registry = lily_say_gate.SpeechActRegistry()
-    game.sk = LilyScorekeeper(session_id)
-    game.rounds_total = 3
-    game.ui_phase = "answering"
-    game.memory_block = ""
-    game.reconnected = False
-    game.game_started = True
-    game.game_over = False
-    game.armed_question = None
-    game.next_question = None
-    game.eliminated = []
-    game.used_prompts = []
-    game.asked_history = []
-    game.group_id = "grp_test"
-    game.promoted_categories = []
-    game.prewager_standings = None
-    game.highlights = []
-    game.supabase = None
-    game.reasoning = _FakeReasoning()
-    game.background_audio = None
-    game._bed_handle = None
-    game._prefetch_task = None
-    game._window_timer = None
-    game._watchdog_task = None
-    game._prefetch_stall_ticks = 0
-    game._armed_limbo_ticks = 0
-    game._steal_window = False
-    game._adjudicating = False
-    game._judged_keys = set()
-    game._spec_judge = {}
-    game._addressee_rows = {}
-    game._pending_reveal_event = None
-    game._pending_unbound_award = None
-    game._user_turn_index = 0
-    game._armed_speech_misses = 0
-    game._pending_delivery_qnum = None
-    game._state_note = None
-    game.pending_clarify = {}
-    game.forget_state = "idle"
-    game.forget_requester = None
-    game._forget_target_group = None
-    game.prefs = {}
-    game._prefs_offer_made = False
-    game.acoustic = lily_audeering_consumers.LilyAcousticState()
-
-    game.metadata_publishes: list[str] = []
-    game.attribute_publishes: list[dict] = []
-
-    async def _publish_metadata(question_text, **kwargs):
-        game.metadata_publishes.append(question_text or "")
-
-    async def _publish_attributes(*a, **k):
-        game.attribute_publishes.append(
-            {n: s["score"] for n, s in game.sk.players.items()}
-        )
-
-    game.publish_metadata = _publish_metadata
-    game.publish_attributes = _publish_attributes
-    game.send_event_nowait = lambda kind, payload=None: None
-    return game
+    return make_live_game(
+        session_id, session=FakeSayingSession(), agent=FakeAgentHandle(),
+        reasoning=FakeReasoning(),
+    )
 
 
 def _arm(game: LilyGame, question: dict, *, delivered: bool = True) -> None:
@@ -417,7 +320,6 @@ def test_a_stale_transition_stops_owning_her_words():
     """The same bound for a transition that never got a next delivery (the
     finale, a stalled supply line): past a beat's length she is talking
     about a ruling, not announcing it."""
-    import lily_agent
 
     game = _make_game()
     _run(_adjudicate_q3(game), game)

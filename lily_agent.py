@@ -67,7 +67,7 @@ from livekit.agents.voice.events import UserInputTranscribedEvent
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.speechmatics import (
     AdditionalVocabEntry,
-    SpeakerFocusMode,
+    SpeakerFocusMode,  # noqa: F401 — re-exported for tests/test_stt_focus.py
     SpeakerIdentifier,
     TurnDetectionMode,
 )
@@ -98,6 +98,14 @@ import lily_floor
 import lily_identity
 import lily_supply
 import lily_stt_tuning
+# Re-exported (REFACTOR Stage 1a): the two STT helpers now live in
+# lily_stt_tuning; lily_identity's lazy `from lily_agent import
+# lily_stt_focus_kwargs` and tests/test_stt_focus / test_stt_config_applied
+# still resolve them here until a later stage retargets them.
+from lily_stt_tuning import (  # noqa: F401
+    lily_stt_config_applied,
+    lily_stt_focus_kwargs,
+)
 from lily_speechmatics import LilySpeechmaticsSTT
 from lily_binding import (
     LilyFragmentAccumulator,
@@ -360,7 +368,6 @@ def lily_build_grok_vocal_llm(
     return llm
 
 
-
 # Contract-note packet-kind spellings for the `event` discriminator alias
 # (seam contract: bind / reveal / callout / finale).
 
@@ -524,7 +531,6 @@ _DEVICE_CANDIDATE_SOURCES = (
     "participant_metadata_late",
     "dispatch_metadata",
 )
-
 
 
 # ---------------------------------------------------------------------------
@@ -1541,8 +1547,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             )
 
 
-
-
     def game_control(self) -> "lily_game_control.GameControl | None":
         """Project the current latch state as a typed GameControl. Returns
         None only if the latches form a combination the machine refuses to
@@ -1646,9 +1650,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 f"{site}:{may_reason}!={legacy_reason}",
                 f"act={act} source={source}",
             )
-
-
-
 
 
     def _set_ui_phase(self, phase: str) -> None:
@@ -1810,10 +1811,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     # -- gated speech dispatch (say-gate WO §1) -------------------------------
 
 
-
-
-
-
     # -- structural delivery claims (desync WO Sub-agent B) -------------------
     #
     # The q_{N}_delivery CLAIM is the delivery-registration event: the
@@ -1835,15 +1832,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     # (on_agent_speech_finished) — what changed is WHAT registers delivery.
 
 
-
-
-
     # -- regeneration gate (WS-3) --------------------------------------------
-
-
-
-
-
 
 
     # -- cut-recovery contract (WS-3, WO-LILY-STREAM-INTEGRITY-002) ----------
@@ -1873,9 +1862,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     # floor or a hold is active, and the dispatch itself goes through
     # gated_say like every other code-driven turn. Silence is a legitimate
     # outcome of this watchdog, not a failure of it.
-
-
-
 
 
     def mark_deterministic_reply(self, text: str) -> None:
@@ -2011,10 +1997,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         return True
 
 
-
-
-
-
     def memory_disclosure_instruction(self) -> str:
         """Task 4 lobby disclosure (WO-LILY-FORGETME-001) — RETURNING
         groups only, frequency-capped (first rematch, then every 5th; the
@@ -2109,17 +2091,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         )
 
 
-
     # -- WS-5: MC answer-aborts-read + buzz-buffer widening -------------------
-
-
-
-
-
-
-
-
-
 
 
     def note_post_tts_text(self, speech_id: str | None, text: str) -> None:
@@ -2170,7 +2142,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 (fallback or "")[:160], final[:160],
             )
         return final
-
 
 
     def record_agent_turn(
@@ -2369,9 +2340,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self.persist_prefs()
 
 
-
-
-
     async def await_greeting_memory(self) -> None:
         """Memory at the door (WO-LILY-DESYNC-HONESTY-001 F): hold the
         composed greeting until group resolution + memory load have
@@ -2403,7 +2371,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 "greeting cold; recognition arrives naturally if memory "
                 "resolves later", budget,
             )
-
 
 
     def can_claim_empty_memory(self) -> bool:
@@ -2631,8 +2598,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 ",".join(sorted(pending)) or "none",
             )
         return intents
-
-
 
 
     def unowned_kickoff_must_suppress(
@@ -2974,9 +2939,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         )
 
 
-
-
-
     def _difficulty_for_round(self, rnd: int) -> int:
         if rnd <= 1:
             return 1
@@ -3006,7 +2968,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # rounds.
             return "real_entity"
         return None
-
 
 
     WATCHDOG_INTERVAL_SECONDS = 10.0
@@ -3787,23 +3748,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     FLOOR_HOLD = "hold"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     def back_hold_narration(self, spoken_text: str) -> bool:
         """W8 honest-narration integrity: a turn that narrates a stopped/
         hold state ("Stopped. I'm listening.", "Still stopped until you say
@@ -3971,7 +3915,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 self.supabase, dict(question),
             ))
         return question
-
 
 
     def restore_reconnected_state(self) -> None:
@@ -5344,8 +5287,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         return t1
 
 
-
-
     def _receipt_yields_to_clarify(
         self, t1: dict, tier1_threshold: float
     ) -> bool:
@@ -5389,10 +5330,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             return False
         except Exception:
             return False
-
-
-
-
 
 
     async def _speculative_judge(
@@ -6800,23 +6737,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self.fire_enrollment("under_threshold_retry")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     async def start_game(self, source: str) -> None:
         if self.game_started:
             return
@@ -7199,18 +7119,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     # -- standing picture arsenal (PATCH-003 binding additions A/B/C) --------------
 
 
-
     _ARSENAL_PARTITION_INTENSITY = {
         "adult_suggestive": "suggestive",
         "adult_explicit": "explicit",
     }
-
-
-
-
-
-
-
 
 
     def set_delivery_pace(self, level: str) -> bool:
@@ -7265,15 +7177,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self.sk.session_id, qnum, armed.get("id"), reason,
         )
         return True
-
-
-
-
-
-
-
-
-
 
 
     def _score_authority_line(self) -> str | None:
@@ -7373,9 +7276,6 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             + self.sk.volatile_state_lines()
         )
         return stable, volatile
-
-
-
 
 
     def _no_repeat_exclusion(self) -> tuple[set, set]:
@@ -10138,35 +10038,55 @@ class LilyAgent(Agent):
         vocal_depth = vocal_depth or {}
         text_chars = 0
         tool_calls = 0
-        try:
-            async for chunk in self._vocal_llm_stream(
-                chat_ctx, tools, model_settings, vocal_depth
-            ):
-                t_n, tc_n = lily_llm_chunk_signal(chunk)
-                text_chars += t_n
-                tool_calls += tc_n
-                yield chunk
-        except APIStatusError as exc:
-            if not lily_is_prohibited_content_error(exc):
+        sheet_aired = False
+
+        async def _attempt(attempt: int):
+            """One streamed attempt. Counts text/tool signal into the
+            enclosing counters; a prohibited-content refusal with a vetted
+            delivery sheet yields the sheet and sets `sheet_aired` so the
+            caller returns (the historical attempt-1 / retry bodies were
+            identical except for this log's wording)."""
+            nonlocal text_chars, tool_calls, sheet_aired
+            try:
+                async for chunk in self._vocal_llm_stream(
+                    chat_ctx, tools, model_settings, vocal_depth
+                ):
+                    t_n, tc_n = lily_llm_chunk_signal(chunk)
+                    text_chars += t_n
+                    tool_calls += tc_n
+                    yield chunk
+            except APIStatusError as exc:
+                if not lily_is_prohibited_content_error(exc):
+                    raise
+                self._log_prohibited_content(exc, chat_ctx, tools)
+                sheet = self._blocked_delivery_sheet()
+                if sheet:
+                    logger.error(
+                        "LILY_LLM | PROHIBITED_CONTENT_SHEET | session=%s "
+                        "q=%d chars=%d — %s",
+                        self._game.sk.session_id,
+                        self._game.sk.question_number,
+                        len(sheet),
+                        (
+                            "bypassing blocked model with vetted "
+                            "deterministic delivery"
+                            if attempt == 1
+                            else "deterministic delivery after retry block"
+                        ),
+                    )
+                    self._game.expect_delivery()
+                    sheet_aired = True
+                    yield sheet
+                    return
+                # Non-delivery conversation has no deterministic truth sheet.
+                # Preserve the provider's non-retryable failure so the speech
+                # handle releases/suppresses; never retry into a storm.
                 raise
-            self._log_prohibited_content(exc, chat_ctx, tools)
-            sheet = self._blocked_delivery_sheet()
-            if sheet:
-                logger.error(
-                    "LILY_LLM | PROHIBITED_CONTENT_SHEET | session=%s "
-                    "q=%d chars=%d — bypassing blocked model with vetted "
-                    "deterministic delivery",
-                    self._game.sk.session_id,
-                    self._game.sk.question_number,
-                    len(sheet),
-                )
-                self._game.expect_delivery()
-                yield sheet
-                return
-            # Non-delivery conversation has no deterministic truth sheet.
-            # Preserve the provider's non-retryable failure so the speech
-            # handle releases/suppresses; never retry into a storm.
-            raise
+
+        async for chunk in _attempt(1):
+            yield chunk
+        if sheet_aired:
+            return
 
         if not lily_llm_stream_is_empty_stop(text_chars, tool_calls):
             return
@@ -10178,31 +10098,10 @@ class LilyAgent(Agent):
         )
         text_chars = 0
         tool_calls = 0
-        try:
-            async for chunk in self._vocal_llm_stream(
-                chat_ctx, tools, model_settings, vocal_depth
-            ):
-                t_n, tc_n = lily_llm_chunk_signal(chunk)
-                text_chars += t_n
-                tool_calls += tc_n
-                yield chunk
-        except APIStatusError as exc:
-            if not lily_is_prohibited_content_error(exc):
-                raise
-            self._log_prohibited_content(exc, chat_ctx, tools)
-            sheet = self._blocked_delivery_sheet()
-            if sheet:
-                logger.error(
-                    "LILY_LLM | PROHIBITED_CONTENT_SHEET | session=%s "
-                    "q=%d chars=%d — deterministic delivery after retry block",
-                    self._game.sk.session_id,
-                    self._game.sk.question_number,
-                    len(sheet),
-                )
-                self._game.expect_delivery()
-                yield sheet
-                return
-            raise
+        async for chunk in _attempt(2):
+            yield chunk
+        if sheet_aired:
+            return
 
         if not lily_llm_stream_is_empty_stop(text_chars, tool_calls):
             logger.info(
@@ -10952,55 +10851,6 @@ async def _lily_camera_frame_fork(track, game) -> None:
             game._latest_video_frame = getattr(ev, "frame", None) or ev
     except Exception as e:
         logger.warning("LILY_CAMERA | FRAME_FORK_ENDED | %s", e)
-
-
-def lily_stt_focus_kwargs(known_speakers) -> dict:
-    """WO-LILY-STT-001 Q0: the Speechmatics focus kwargs. Returns
-    focus_speakers + focus_mode=IGNORE ONLY when focus is enabled AND the
-    enrolled set has usable labels; {} otherwise. The non-empty guard is the
-    safety invariant — focus_mode=IGNORE with no focus set drops every voice,
-    muting the whole table, so it is withheld (loudly) rather than risked."""
-    if lily_config.stt_focus_mode() != "ignore":
-        return {}
-    labels = [s.label for s in (known_speakers or []) if getattr(s, "label", None)]
-    if not labels:
-        logger.warning(
-            "LILY_STT_FOCUS | WITHHELD | reason=no_enrolled_speakers — "
-            "focus_mode=IGNORE never enabled on an empty set (would mute the "
-            "table)"
-        )
-        return {}
-    return {"focus_speakers": labels, "focus_mode": SpeakerFocusMode.IGNORE}
-
-
-def lily_stt_config_applied(stt) -> dict:
-    """WO-LILY-STT-001 Q3: the EFFECTIVE Speechmatics config, read off the
-    constructed STT's _stt_options (what the wire will actually carry) — not
-    what we intended to set. Logged at session start and asserted
-    intended==applied by test, so the audit's claimed-but-unwired class (the
-    max_speakers=7 ghost that was never wired to roster) reads red at build
-    time instead of hiding live. Defensive: returns {} if the options object
-    isn't present (test stubs)."""
-    opts = getattr(stt, "_stt_options", None)
-    if opts is None:
-        return {}
-
-    def _name(v):
-        return getattr(v, "value", None) or getattr(v, "name", None) or str(v)
-
-    return {
-        "model": str(getattr(stt, "model", "enhanced")),
-        "turn_detection_mode": _name(getattr(opts, "turn_detection_mode", None)),
-        "max_delay": getattr(opts, "max_delay", None),
-        "speaker_sensitivity": getattr(opts, "speaker_sensitivity", None),
-        "max_speakers": getattr(opts, "max_speakers", None),
-        "prefer_current_speaker": getattr(opts, "prefer_current_speaker", None),
-        "enable_diarization": getattr(opts, "enable_diarization", None),
-        "focus_mode": _name(getattr(opts, "focus_mode", None)),
-        "focus_speakers": len(getattr(opts, "focus_speakers", None) or []),
-        "known_speakers": len(getattr(opts, "known_speakers", None) or []),
-        "additional_vocab": len(getattr(opts, "additional_vocab", None) or []),
-    }
 
 
 def lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics) -> dict:

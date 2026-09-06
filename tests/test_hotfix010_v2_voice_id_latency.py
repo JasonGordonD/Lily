@@ -26,8 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import lily_config
 import lily_persistence
 import lily_voice_embedder
-from lily_agent import LilyGame
-from lily_scorekeeper import LilyScorekeeper
+from fakes import make_voice_identity_game
 
 
 class _Result:
@@ -79,15 +78,7 @@ TAG = "ecapa-192-v1"
 
 
 def _game(sb):
-    g = LilyGame.bare()
-    g.sk = LilyScorekeeper("vi")
-    g.supabase = sb
-    g.group_id = "voiceA"
-    g.group_id_source = "participant_metadata"
-    g.device_identity_verified = False
-    g.forget_state = None
-    g._voice_identity_pcm = [0.1, 0.2, 0.3]
-    return g
+    return make_voice_identity_game(sb)
 
 
 def _enable(monkeypatch, *, available=True, embedding=None):

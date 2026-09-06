@@ -27,8 +27,10 @@ constructing LilyAgent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
+
+import lily_acts
 
 
 class Phase(Enum):
@@ -55,15 +57,11 @@ DELIVERY_STATES = frozenset({"none", "pending", "active", "confirmed"})
 # Live game-lane payloads (mirror of LilyGame._GAME_LANE_ACTS). None of these
 # may air without a live game; a STOP freezes them all. Kept here so may() and
 # the legacy game_payload_blocked share ONE taxonomy.
-GAME_LANE_ACTS = frozenset({
-    "question_delivery", "question_nudge", "verdict", "reveal",
-    "reveal_flourish", "reveal_scores", "reveal_finale", "steal_window",
-    "answer_receipt",
-})
+GAME_LANE_ACTS = lily_acts.GAME_LANE_ACTS
 
 # The adjudication commit is not a gated_say act — it is the reveal/verdict
 # transition's own entry gate (LilyGame.adjudicate).
-ADJUDICATE_ACT = "adjudicate"
+ADJUDICATE_ACT = lily_acts.ACT_ADJUDICATE
 
 # The kickoff act. Its refusal ladder is LilyGame.start_blocked_reason() — the
 # single choke already on main (game_stopped / recognition_dispute /
@@ -72,15 +70,7 @@ ADJUDICATE_ACT = "adjudicate"
 # (game_stopped); the rest are DELEGATED to start_blocked_reason and will be
 # subsumed when the lily_begin_round site is wired (later wave). may() must not
 # duplicate that ladder here — it would drift.
-BEGIN_ROUND_ACT = "begin_round"
-
-# Acts that open/continue the reveal->verdict->next transition. Reserved for
-# the later waves that rewire dispatch_armed_question / tts_node claim /
-# lily_begin_round; may() already answers them so those call sites need no new
-# vocabulary when they are wired.
-TRANSITION_ACTS = frozenset({
-    "reveal", "reveal_flourish", "reveal_scores", "reveal_finale", "verdict",
-})
+BEGIN_ROUND_ACT = lily_acts.ACT_BEGIN_ROUND
 
 
 class IllegalControlState(ValueError):
@@ -204,10 +194,6 @@ class GameControl:
     def is_live(self) -> bool:
         """A round is in play (not lobby, not finished)."""
         return self.phase not in (Phase.LOBBY, Phase.FINAL)
-
-    def with_(self, **changes) -> "GameControl":
-        """A validated copy with fields replaced (re-runs __post_init__)."""
-        return replace(self, **changes)
 
 
 def _derive_delivery(

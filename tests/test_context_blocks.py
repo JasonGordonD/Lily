@@ -33,6 +33,7 @@ from lily_agent import (
     _message_text,
     lily_temporal_context,
 )
+from fakes import FakeSession
 
 
 class _FakeSk:
@@ -218,14 +219,6 @@ def test_set_preemptive_generation_flips_live_turn_handling():
     assert agent._turn_handling["preemptive_generation"]["enabled"] is True
 
 
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-
 class _FakePreemptiveAgent:
     def __init__(self) -> None:
         self.calls: list[bool] = []
@@ -236,7 +229,7 @@ class _FakePreemptiveAgent:
 
 def _make_game_for_replies() -> LilyGame:
     game = LilyGame.bare()
-    game.session = _FakeSession()
+    game.session = FakeSession()
     game.agent = _FakePreemptiveAgent()
     game._preemptive_paused = False
     return game

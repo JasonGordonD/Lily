@@ -12,6 +12,57 @@ nonzero gaps.
 
 import os
 
+import pytest
+
+from fakes import (
+    FakeAgentHandle,
+    FakeCtx,
+    FakeLocalParticipant,
+    FakeReasoning,
+    FakeRoomAPI,
+    FakeSayingSession,
+    FakeSession,
+)
+
+
+# Shared fakes as fixtures (REFACTOR Stage 1a). The classes live in
+# tests/fakes.py so a builder can also construct them directly; these
+# fixtures are the pytest-native handle for tests that take them as args.
+
+@pytest.fixture
+def fake_session() -> FakeSession:
+    return FakeSession()
+
+
+@pytest.fixture
+def fake_saying_session() -> FakeSayingSession:
+    return FakeSayingSession()
+
+
+@pytest.fixture
+def fake_agent_handle() -> FakeAgentHandle:
+    return FakeAgentHandle()
+
+
+@pytest.fixture
+def fake_ctx() -> FakeCtx:
+    return FakeCtx()
+
+
+@pytest.fixture
+def fake_local_participant() -> FakeLocalParticipant:
+    return FakeLocalParticipant()
+
+
+@pytest.fixture
+def fake_room_api() -> FakeRoomAPI:
+    return FakeRoomAPI()
+
+
+@pytest.fixture
+def fake_reasoning() -> FakeReasoning:
+    return FakeReasoning()
+
 
 def pytest_configure(config) -> None:
     os.environ["LILY_ROOM_DISCHARGE_SECONDS"] = "0"

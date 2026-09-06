@@ -2126,7 +2126,7 @@ span_violations=2 at the 30s threshold.
 `lily_stt_tuning.LILY_STT_TUNED`, drift-tested) — and is the incumbent arm
 of the WS-15 diarization bake-off. Matrix axes for the acoustic sweep:
 `speaker_sensitivity` [0.3, 0.4, 0.5] × `max_speakers` [5, 6, 7] ×
-`volume_threshold` [0.0, 1.6, 3.2] (27 cells, `lily_matrix_cells()`).
+`volume_threshold` [0.0, 1.6, 3.2] (27 cells, `lily_matrix_cells()` in scripts/lily_stt_scoring.py).
 
 ### Config audit: every plugin kwarg at livekit-plugins-speechmatics 1.6.6
 

@@ -55,7 +55,7 @@ NUM_CHANNELS = 1
 # guard for a single sentence longer than the cap — split with comfortable
 # margin BELOW 4,200 so a boundary-less long sentence never rides the edge.
 ELEVENLABS_REQUEST_CHAR_CAP = 4200
-MAX_CHUNK_SIZE = 3800
+MAX_CHUNK_SIZE = lily_config.tts_max_chunk_size()
 
 # HOTFIX-005 X5: how many times a single chunk's synthesis is re-fetched
 # in-place when its stream is torn early having pushed ZERO bytes (a clean

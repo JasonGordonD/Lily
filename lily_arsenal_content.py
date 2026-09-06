@@ -67,7 +67,7 @@ BINDING_QUESTION_FIRST: Final[str] = "question_first"
 # Eighteen per partition, and eighteen is a considered number rather than a
 # round one. The seeding plan walks these round-robin, so the list length
 # IS the repeat interval: at ten entries per partition (the standing depth
-# in lily_arsenal.ARSENAL_TARGET_DEPTH) an eighteen-area list cannot repeat
+# from lily_config.arsenal_target_depth) an eighteen-area list cannot repeat
 # a subject at all, and a full night plus two replenishment cycles still
 # will not come back to the same area twice.
 #

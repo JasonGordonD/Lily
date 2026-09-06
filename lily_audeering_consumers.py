@@ -80,9 +80,6 @@ class LilyRoomBaseline:
     # segment-level scores.
     child_high_streak: int = 0
     child_borderline_streak: int = 0
-    # Hard-question streak fed by the game (sagging-valence gimme rule).
-    hard_question_streak: int = 0
-    segments_seen: int = 0
 
     def observe_avd(
         self,
@@ -273,8 +270,7 @@ def derive_room_read(baseline: LilyRoomBaseline) -> str | None:
         return "flat / low energy"
     if v < -0.3:
         # The rubric's gimme rule keys on this phrase when the game has
-        # been running hard questions (hard_question_streak is advisory
-        # color for logs; the phrase itself carries no scalar).
+        # been running hard questions (the phrase itself carries no scalar).
         return "valence sagging"
     return None
 
@@ -472,7 +468,6 @@ def derive_state_lines(
     if not isinstance(parsed, dict):
         return (), None
 
-    baseline.segments_seen += 1
     scene_label = scene_top_label(parsed)
 
     # SAFETY FIRST (JRVS child-gate fix, lifted): the child ladder runs

@@ -17,19 +17,12 @@ import lily_audeering_consumers
 import lily_say_gate
 from lily_agent import WINDOW_FALLBACK_AGENT_TURNS, LilyGame
 from lily_scorekeeper import LilyScorekeeper
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
+from fakes import FakeSession
 
 
 def _game(prompt: str) -> LilyGame:
     game = LilyGame.bare()
-    game.session = _FakeSession()
+    game.session = FakeSession()
     game.agent = None
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()

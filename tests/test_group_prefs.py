@@ -19,16 +19,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import lily_audeering_consumers
 import lily_config
-import lily_memory
 import lily_persistence
 import lily_say_gate
-from lily_agent import LilyAgent, LilyGame
+from lily_agent import LilyGame
 from lily_memory import lily_build_memory_block, lily_prefs_summary
 from lily_scorekeeper import (
     LilyScorekeeper,
     lily_detect_control_command,
     lily_detect_pacing_choice,
 )
+from fakes import FakeSession, FakeAgentHandle, FakeRoomCtx
 
 
 # ---------------------------------------------------------------------------
@@ -474,42 +474,12 @@ def test_memory_block_without_prefs_has_no_usual_line():
 # Game-level harness (test_forget_flow pattern)
 # ---------------------------------------------------------------------------
 
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
-
-
-class _FakeLocalParticipant:
-    def __init__(self) -> None:
-        self.attributes: dict = {}
-
-    async def set_attributes(self, attrs) -> None:
-        self.attributes.update(attrs)
-
-
-class _FakeRoom:
-    def __init__(self) -> None:
-        self.local_participant = _FakeLocalParticipant()
-
-
-class _FakeCtx:
-    def __init__(self) -> None:
-        self.room = _FakeRoom()
-
 
 def _make_game(supabase=None) -> LilyGame:
     game = LilyGame.bare()
-    game.ctx = _FakeCtx()
-    game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
+    game.ctx = FakeRoomCtx()
+    game.session = FakeSession()
+    game.agent = FakeAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper("test-room")

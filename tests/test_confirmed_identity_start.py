@@ -9,27 +9,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lily_agent import LilyAgent, LilyGame
-from lily_binding import LilyFragmentAccumulator
-from lily_scorekeeper import LilyScorekeeper
+from fakes import make_identity_gate_game
 
 
 def _game() -> LilyGame:
-    game = LilyGame.bare()
-    game.sk = LilyScorekeeper("identity-before-q1")
-    game.fragments = LilyFragmentAccumulator()
-    game._confirmed_name_evidence = {}
-    game._identity_required_before_start = True
-    game._delivery_stop_sticky = False
-    game._recognition_dispute = False
-    game._recognition_dispute_why_answered = False
-    game._ambiguous_yes_blocks_start = False
-    game._setup_pending = set()
-    game._user_speaking = False
-    game.game_started = False
-    game.game_over = False
-    game._last_bind_at = None
-    game.on_speaker_bound = lambda label, name: ""
-    return game
+    return make_identity_gate_game("identity-before-q1")
 
 
 def _call_bind(game: LilyGame, label: str, name: str) -> str:

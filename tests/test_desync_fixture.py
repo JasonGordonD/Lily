@@ -47,25 +47,7 @@ from lily_scorekeeper import (
     LilyScorekeeper,
     lily_detect_state_contradiction,
 )
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-        self.said: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-    def say(self, text, *a, **k):
-        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
-        self.said.append(text)
-        return None
-
-
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
+from fakes import FakeSayingSession, FakeAgentHandle
 
 
 def _make_game() -> LilyGame:
@@ -73,8 +55,8 @@ def _make_game() -> LilyGame:
     window-open / state-block paths touch (test_say_gate_dispatch pattern,
     extended for on_agent_speech_finished + open_window)."""
     game = LilyGame.bare()
-    game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
+    game.session = FakeSayingSession()
+    game.agent = FakeAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper("desync-fixture")
@@ -241,7 +223,6 @@ def test_q2_replay_structural_claim_registers_delivery(caplog):
     assert Q2_PROMPT in game.metadata_publishes
 
 
-
 def test_q3_replay_no_ghost_window_then_nudged_delivery(caplog):
     # The q3 shape with NO structural dispatch: organic banter-weave below
     # any recognizable performance. The window must NOT open on those
@@ -281,7 +262,6 @@ def test_q3_replay_no_ghost_window_then_nudged_delivery(caplog):
     assert "DELIVERY_NUDGE" in joined
 
 
-
 def test_bbd306_wrong_quiz_never_opens_engine_window():
     # 22:54 session (lily-BBD306): Lily verbally ran a DIFFERENT quiz
     # while q=5 sat armed — the ratio fallback opened windows against
@@ -303,7 +283,6 @@ def test_bbd306_wrong_quiz_never_opens_engine_window():
         await _drain()
 
     _run(scenario(), game)
-
 
 
 # -- organic claims: the core-sentence contract --------------------------------
@@ -331,7 +310,6 @@ def test_organic_core_sentence_claims_delivery():
     assert game.sk.answer_window_open is True
 
 
-
 def test_flourish_inside_the_core_sentence_rewrites_before_playout():
     # The prompt contract is "flourish before and after, never inside":
     # a sentence broken up mid-flight is not a clean performance. A
@@ -347,7 +325,6 @@ def test_flourish_inside_the_core_sentence_rewrites_before_playout():
     assert game.say_registry.state("q_1_delivery") is None
 
 
-
 def test_duplicate_reask_is_suppressed_not_redelivered():
     # BUG-2 stands: once q_N is delivered, a turn that textually
     # re-performs it comes back "duplicate" (tts_node yields silence) —
@@ -361,7 +338,6 @@ def test_duplicate_reask_is_suppressed_not_redelivered():
         await _drain()
 
     _run(scenario(), game)
-
 
 
 def test_banter_after_registered_delivery_speaks_normally():
@@ -380,7 +356,6 @@ def test_banter_after_registered_delivery_speaks_normally():
     _run(scenario(), game)
 
 
-
 def test_ratio_telemetry_still_logs(caplog):
     # The matcher is demoted, not deleted: every playout with a question
     # armed logs `LILY_WINDOW | RATIO | … telemetry` and acts on nothing.
@@ -397,7 +372,6 @@ def test_ratio_telemetry_still_logs(caplog):
     assert "LILY_WINDOW | RATIO" in joined
     assert "telemetry" in joined
     assert game.sk.answer_window_open is False
-
 
 
 # -- scripted round: delivered and registered exactly once ----------------------
@@ -479,7 +453,6 @@ def test_scripted_round_every_question_delivered_and_registered_once(caplog):
         )
 
 
-
 # -- expect_delivery edge discipline -------------------------------------------
 
 
@@ -500,7 +473,6 @@ def test_expect_delivery_noops_when_window_open_or_claimed():
     _run(scenario(), game)
 
 
-
 def test_stale_delivery_intent_dies_at_next_arm():
     # A pending flag for q_N never leaks into q_N+1: arming resets it.
     game = _make_game()
@@ -510,7 +482,6 @@ def test_stale_delivery_intent_dies_at_next_arm():
     _arm(game, Q2_PROMPT)
     assert game._pending_delivery_qnum is None
     assert game.consume_pending_delivery(2) is False
-
 
 
 # ==============================================================================

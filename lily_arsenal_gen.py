@@ -69,7 +69,6 @@ ADULT_AUTHOR_TIMEOUT_SECONDS = 180.0
 
 # Outcomes a slot can end in. Everything is counted; nothing is dropped.
 OUTCOME_CREATED = "created"
-OUTCOME_DUPLICATE = "duplicate"
 OUTCOME_MODERATION = "moderation_rejected"
 OUTCOME_CLASSIFIER = "classifier_rejected"
 OUTCOME_AUTHOR_FAILED = "author_failed"

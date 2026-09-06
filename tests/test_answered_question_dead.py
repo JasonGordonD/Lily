@@ -17,19 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import lily_say_gate
 from lily_agent import LilyAgent, LilyGame
 from lily_scorekeeper import LilyScorekeeper
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
+from fakes import FakeSession
 
 
 def _game() -> LilyGame:
     game = LilyGame.bare()
-    game.session = _FakeSession()
+    game.session = FakeSession()
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper("answered-dead")
     game.sk.bind_speaker("S1", "Rami")

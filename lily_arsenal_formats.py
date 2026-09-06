@@ -78,6 +78,14 @@ PARTITIONS: Final[tuple[str, ...]] = (
 BINDING_IMAGE_FIRST: Final[str] = "image_first"
 BINDING_QUESTION_FIRST: Final[str] = "question_first"
 
+# The "imagined" verdict's spoken manglings, shared by every real_or_imagined
+# exemplar (each entry materializes its own fresh list from this tuple).
+_IMAGINED_ACCEPTABLE_ANSWERS: Final[tuple[str, ...]] = (
+    "imagined", "imagine", "fake", "a fake", "generated",
+    "ai", "ai generated", "made up", "not real", "imaginary",
+    "invented", "it's fake",
+)
+
 # Answer styles. 'freeform' goes to the Tier-1 fuzzy/phonetic matcher;
 # 'multiple_choice' goes to the option resolver in lily_evaluation.
 ANSWER_FREEFORM: Final[str] = "freeform"
@@ -440,63 +448,6 @@ def lily_formats_for_partition(
 
 
 # ---------------------------------------------------------------------------
-# Rendering the spoken line
-# ---------------------------------------------------------------------------
-
-
-def _spoken_options(options) -> str:
-    """Four options as ONE spoken list: 'a, b, c, or d'.
-
-    No letters, no numbers, no 'option one' — the words themselves are the
-    handles. lily_evaluation will still resolve a letter or a position if
-    a player volunteers one; the bank simply never puts that idea in their
-    head, because a letter a player invents is a letter they chose to say
-    clearly."""
-    items = [str(o).strip() for o in (options or []) if str(o).strip()]
-    if not items:
-        return ""
-    if len(items) == 1:
-        return items[0]
-    return f"{', '.join(items[:-1])}, or {items[-1]}"
-
-
-def lily_spoken_question(entry: dict) -> str:
-    """Render the line Lily actually says for one entry.
-
-    Substitution is done with str.replace rather than str.format on
-    purpose: authored question text contains apostrophes, dashes and
-    occasionally braces, and a KeyError or ValueError thrown while
-    building a spoken line would surface as silence at a live table. A
-    template missing a placeholder simply keeps its own words."""
-    if not isinstance(entry, dict):
-        return ""
-    stem = str(entry.get("question_text") or "").strip()
-    spec = lily_format_spec(str(entry.get("format") or ""))
-    if spec is None:
-        # Unknown format tag: the authored question is still a real
-        # question, so say it rather than dropping the entry.
-        return stem
-    options = entry.get("options")
-    if spec["answer_style"] == ANSWER_MULTIPLE_CHOICE:
-        if not isinstance(options, list) or len(options) != MC_OPTION_COUNT:
-            # A multiple-choice entry with no usable options degrades to a
-            # freeform read of its own stem — which is a fair question,
-            # just an easier one. Loud, because it means the entry was
-            # banked malformed.
-            logger.warning(
-                "LILY_ARSENAL_FORMATS | MC_OPTIONS_MISSING | expected=%d got=%r "
-                "— reading as freeform", MC_OPTION_COUNT, options,
-            )
-            return stem
-    rendered = (
-        str(spec["spoken_template"])
-        .replace("{stem}", stem)
-        .replace("{options}", _spoken_options(options))
-    )
-    return " ".join(rendered.split())
-
-
-# ---------------------------------------------------------------------------
 # EXEMPLARS — the bar for the whole bank
 # ---------------------------------------------------------------------------
 #
@@ -643,11 +594,7 @@ EXEMPLARS: tuple[dict, ...] = (
         "difficulty_tier": 1,
         "question_text": "Look at the bridge in the middle of that photograph.",
         "canonical_answer": "imagined",
-        "acceptable_answers": [
-            "imagined", "imagine", "fake", "a fake", "generated",
-            "ai", "ai generated", "made up", "not real", "imaginary",
-            "invented", "it's fake", "that's fake",
-        ],
+        "acceptable_answers": [*_IMAGINED_ACCEPTABLE_ANSWERS, "that's fake"],
         "options": None,
         "reveal_color": (
             "Imagined — and look where it goes. That bridge crosses the "
@@ -835,11 +782,7 @@ EXEMPLARS: tuple[dict, ...] = (
             "garage for eleven years — or nobody ever did."
         ),
         "canonical_answer": "imagined",
-        "acceptable_answers": [
-            "imagined", "imagine", "fake", "a fake", "generated",
-            "ai", "ai generated", "made up", "not real", "imaginary",
-            "invented", "it's fake",
-        ],
+        "acceptable_answers": list(_IMAGINED_ACCEPTABLE_ANSWERS),
         "options": None,
         "reveal_color": (
             "Imagined. Right era, right pose, right shade of red, right "
@@ -1024,11 +967,7 @@ EXEMPLARS: tuple[dict, ...] = (
             "did."
         ),
         "canonical_answer": "imagined",
-        "acceptable_answers": [
-            "imagined", "imagine", "fake", "a fake", "generated",
-            "ai", "ai generated", "made up", "not real", "imaginary",
-            "invented", "it's fake",
-        ],
+        "acceptable_answers": list(_IMAGINED_ACCEPTABLE_ANSWERS),
         "options": None,
         "reveal_color": (
             "Imagined — every letter of it. The cinema, the title, the "
@@ -1085,54 +1024,3 @@ EXEMPLARS: tuple[dict, ...] = (
         ),
     },
 )
-
-
-# Not in EXEMPLARS — odd_one_out is out of scope, and shipping an exemplar
-# for an off format would put it in front of the authoring prompt as if it
-# were live. It sits here so the operator can judge the format on evidence
-# when he decides whether the grid-composition work is worth doing.
-ODD_ONE_OUT_PREVIEW: dict = {
-    "partition": "general",
-    "format": "odd_one_out",
-    "binding_direction": BINDING_QUESTION_FIRST,
-    "subject_area": "tools",
-    "difficulty_tier": 2,
-    "question_text": "The rule is the trade they belong to.",
-    "canonical_answer": "bottom right",
-    "acceptable_answers": [
-        "bottom right", "the bottom right", "bottom right one",
-        "the last one", "fourth", "the fourth", "number four",
-        "the trowel", "trowel", "bottom right corner",
-    ],
-    "options": None,
-    "reveal_color": (
-        "Bottom right. Plane, chisel, marking gauge — all woodwork, all "
-        "shavings. And then a bricklayer's trowel, sitting there in the "
-        "corner with sawdust on it, hoping nobody noticed."
-    ),
-    "generation_prompt": (
-        "A clean two-by-two grid of four separate photographic panels, "
-        "equal size, thin neutral gutters. Top left: a wooden hand plane. "
-        "Top right: a bevel-edge wood chisel. Bottom left: a marking "
-        "gauge. Bottom right: a bricklayer's pointing trowel. Each tool "
-        "centred in its own panel on the same plain grey background, same "
-        "lighting in every panel, each one clearly readable on its own."
-    ),
-}
-
-
-def lily_exemplars_for(partition: str) -> tuple[dict, ...]:
-    """Every hand-built exemplar for one partition, in format order.
-
-    These are the few-shot examples the authoring model is shown and the
-    reference the operator signs off against. Unknown partition returns ()
-    rather than falling back to general — showing an adult authoring run
-    the general exemplars would quietly retune its register."""
-    key = (partition or "").strip().lower()
-    if key not in PARTITIONS:
-        logger.warning(
-            "LILY_ARSENAL_FORMATS | UNKNOWN_PARTITION | partition=%r — no "
-            "exemplars", partition,
-        )
-        return ()
-    return tuple(e for e in EXEMPLARS if e["partition"] == key)

@@ -98,17 +98,12 @@ def test_grok_vocal_sets_session_stable_cache_routing_header():
     assert conversation_id != lily_grok_conversation_id("another-session")
 
 
-def test_standard_imagegen_is_nano_banana_2_lite():
-    assert lily_config.imagegen_model() == "gemini-3.1-flash-lite-image"
-
-
 def test_adult_imagegen_routes_to_grok():
     assert lily_config.adult_imagegen_model() == "grok-imagine-image-2.0"
 
 
 def test_image_and_brain_pins_are_separate_constants():
     # 3.6-flash does NOT do image generation — the pins must not collapse.
-    assert lily_config.vocal_model() != lily_config.imagegen_model()
     assert lily_config.vocal_model() != lily_config.adult_imagegen_model()
 
 

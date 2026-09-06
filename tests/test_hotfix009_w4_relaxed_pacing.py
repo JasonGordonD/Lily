@@ -35,7 +35,6 @@ must refuse the clock even with the wrong roster.
 Same import boundary note as test_hotfix006_transitions.py.
 """
 
-import pytest
 
 import asyncio
 import time
@@ -50,38 +49,7 @@ import lily_config
 import lily_say_gate
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-        self.said: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
-
-    def say(self, text, *a, **k):
-        # REFACTOR W2a: deterministic direct_say lane (the verdict beat).
-        self.said.append(text)
-        return None
-
-
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
-
-
-class _FakeReasoning:
-    """The judge rules the surrender incorrect (lily_answers id=131)."""
-
-    async def prefetch_question(self, sk, **kw):
-        return None
-
-    async def prefetch_picture_question(self, supabase, **kw):
-        return None
-
-    async def judge(self, *a, **kw):
-        return '{"verdict": "incorrect", "reason": "not an answer"}'
+from fakes import FakeSayingSession, FakeAgentHandle, FakeReasoning
 
 
 # The real q2 of the incident session (id from the 05:31:25 asked_history
@@ -117,8 +85,8 @@ DIAMOND_ANSWER = "Answer to your fucking question is diamond."
 
 def _make_game(session_id: str = "lily-5E3036-b56b5eb4") -> LilyGame:
     game = LilyGame.bare()
-    game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
+    game.session = FakeSayingSession()
+    game.agent = FakeAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper(session_id)
@@ -138,7 +106,7 @@ def _make_game(session_id: str = "lily-5E3036-b56b5eb4") -> LilyGame:
     game.prewager_standings = None
     game.highlights = []
     game.supabase = None
-    game.reasoning = _FakeReasoning()
+    game.reasoning = FakeReasoning()
     game.background_audio = None
     game._bed_handle = None
     game._prefetch_task = None

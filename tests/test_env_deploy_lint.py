@@ -175,7 +175,6 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_GARBLE_CLARIFY_MIN_CONFIDENCE",
     # Misc: image model id (prefetch-only) and voice preset 1 (hardcoded
     # default ID, same pattern as Zuna's VOICE_NADIA).
-    "LILY_IMAGEGEN_MODEL",
     # Adult-deck image model id — ships on its in-code default
     # (grok-imagine-image-2.0); the xAI credential it uses (XAI_API_KEY) is
     # already forwarded.
@@ -183,6 +182,15 @@ LILY_LOCAL_ONLY_ENV = {
     # Grok Imagine 2.0 quality tier — ships on its in-code default ("low"),
     # env-overridable low|medium on the box; no credential of its own.
     "LILY_IMAGE_QUALITY",
+    # REFACTOR Stage 1a item 6: module-level tunables lifted into lily_config
+    # from lily_binding / lily_persistence / lily_tts. Each ships on the value
+    # its module used to hard-code; env hooks exist for local/test override.
+    "LILY_FRAGMENT_ACCUMULATION_SECONDS",
+    "LILY_TRANSCRIPT_BATCH_SIZE",
+    "LILY_TRANSCRIPT_BATCH_FLUSH_SECONDS",
+    "LILY_ABANDONED_SESSION_MIN_AGE_SECONDS",
+    "LILY_FORGET_CASCADE_TIMEOUT_SECONDS",
+    "LILY_TTS_MAX_CHUNK_SIZE",
     "LILY_VOICE_1",
 }
 

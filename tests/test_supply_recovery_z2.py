@@ -53,6 +53,7 @@ import lily_persistence
 import lily_say_gate
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
+from fakes import FakeSession
 
 SESSION_ID = "lily-938EFF-2260354c"
 
@@ -75,14 +76,6 @@ BANK_Q = {
     "difficulty_tier": 1,
     "reveal_color": "",
 }
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
 
 
 class _FakeReasoning:
@@ -118,7 +111,7 @@ def _make_game(mode: str = "general") -> LilyGame:
     start_prefetch and a scriptable reasoning fake — the Z2 contract is
     about the real supply task's failure path."""
     game = LilyGame.bare()
-    game.session = _FakeSession()
+    game.session = FakeSession()
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper(SESSION_ID)
     game.sk.mode = mode

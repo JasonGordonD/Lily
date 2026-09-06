@@ -262,15 +262,6 @@ def tavily_api_key() -> Optional[str]:
     return _get("TAVILY_API_KEY")
 
 
-def imagegen_model() -> str:
-    """Gemini image model for STANDARD-deck invented-content picture
-    questions (sub-agent J; image_source='generated' only, prefetch-time
-    only). gemini-3.1-flash-lite-image = Nano Banana 2 Lite (operator-
-    directed 2026-08-06): fastest/cheapest for fun trivia cards, 1K.
-    Live-verified via generate_content on the funded GOOGLE_API_KEY."""
-    return _get("LILY_IMAGEGEN_MODEL", "gemini-3.1-flash-lite-image")
-
-
 def adult_vocal_model() -> str:
     """Vocal LLM for ADULT mode (owner directive 2026-08-06). Gemini's
     non-overridable PROHIBITED_CONTENT filter blocks spoken turns around
@@ -1490,3 +1481,47 @@ def arsenal_real_images_enabled() -> bool:
     if raw in ("1", "true", "yes", "on"):
         return True
     return bool(exa_api_key())
+
+
+# ---------------------------------------------------------------------------
+# Module-level tunables lifted from NON-hot modules (REFACTOR Stage 1a item
+# 6). Each ships on the exact value its module used to hard-code; the module
+# keeps its historical constant name as a re-export read from here at import
+# time, so existing call sites and monkeypatches are unchanged.
+# ---------------------------------------------------------------------------
+
+
+def fragment_accumulation_seconds() -> float:
+    """lily_binding.FRAGMENT_ACCUMULATION_SECONDS — the window for stitching
+    a name across consecutive STT finals."""
+    return _get_float("LILY_FRAGMENT_ACCUMULATION_SECONDS", 2.0)
+
+
+def transcript_batch_size() -> int:
+    """lily_persistence.TRANSCRIPT_BATCH_SIZE — rows buffered before a
+    transcript flush."""
+    return _get_int("LILY_TRANSCRIPT_BATCH_SIZE", 10)
+
+
+def transcript_batch_flush_seconds() -> float:
+    """lily_persistence.TRANSCRIPT_BATCH_FLUSH_SECONDS — max age of a
+    buffered transcript batch before it flushes regardless of size."""
+    return _get_float("LILY_TRANSCRIPT_BATCH_FLUSH_SECONDS", 30.0)
+
+
+def abandoned_session_min_age_seconds() -> float:
+    """lily_persistence.ABANDONED_SESSION_MIN_AGE_SECONDS — inactivity
+    (non-ended) age before a session row is closed as abandoned."""
+    return _get_float("LILY_ABANDONED_SESSION_MIN_AGE_SECONDS", 900.0)
+
+
+def forget_cascade_timeout_seconds() -> float:
+    """lily_persistence.FORGET_CASCADE_TIMEOUT_SECONDS — hard cap on the
+    whole forget cascade (deletes + verification)."""
+    return _get_float("LILY_FORGET_CASCADE_TIMEOUT_SECONDS", 20.0)
+
+
+def tts_max_chunk_size() -> int:
+    """lily_tts.MAX_CHUNK_SIZE — per-request character cap for ElevenLabs
+    synthesis chunks (kept comfortably below the 4,200 request cap)."""
+    return _get_int("LILY_TTS_MAX_CHUNK_SIZE", 3800)

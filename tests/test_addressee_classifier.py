@@ -520,6 +520,7 @@ import lily_persistence
 import lily_say_gate
 from lily_agent import LilyGame
 from lily_scorekeeper import LilyScorekeeper
+from fakes import FakeAgentHandle
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 SESSION_ID = "lily-81BCB0-583a0f16"
@@ -548,11 +549,6 @@ class _FakeSession:
         self.instructions.append(instructions)
 
 
-class _FakeAgentHandle:
-    def set_preemptive_generation(self, enabled: bool) -> None:
-        pass
-
-
 class _FakeTranscripts:
     async def discard_pending(self, *, disable=False) -> None:
         pass
@@ -563,7 +559,7 @@ def _make_game() -> LilyGame:
     transcript-event + addressee-log surfaces live."""
     game = LilyGame.bare()
     game.session = _FakeSession()
-    game.agent = _FakeAgentHandle()
+    game.agent = FakeAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
     game.sk = LilyScorekeeper(SESSION_ID)

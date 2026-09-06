@@ -31,14 +31,7 @@ import lily_say_gate
 import lily_agent
 from lily_agent import Agent, LilyAgent, LilyGame
 from lily_scorekeeper import LilyScorekeeper
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.instructions: list[str] = []
-
-    def generate_reply(self, instructions: str) -> None:
-        self.instructions.append(instructions)
+from fakes import FakeSession
 
 
 class _RecordingAgentHandle:
@@ -51,7 +44,7 @@ class _RecordingAgentHandle:
 
 def _make_game() -> LilyGame:
     game = LilyGame.bare()
-    game.session = _FakeSession()
+    game.session = FakeSession()
     game.agent = _RecordingAgentHandle()
     game._preemptive_paused = False
     game.say_registry = lily_say_gate.SpeechActRegistry()
