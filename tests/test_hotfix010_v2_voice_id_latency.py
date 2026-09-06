@@ -78,7 +78,9 @@ TAG = "ecapa-192-v1"
 
 
 def _game(sb):
-    return make_voice_identity_game(sb)
+    g = make_voice_identity_game(sb)
+    g._voice_identity_voiced_seconds = 12.0  # VOICE-TRUTH-001: voiced, gated
+    return g
 
 
 def _enable(monkeypatch, *, available=True, embedding=None):

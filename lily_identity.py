@@ -72,15 +72,239 @@ _NAME_DOOR_TRIGGERS = ("name_stated", "device_plus_name")
 # case (7 memory groups for a single individual) so real returners are served.
 _NAME_DOOR_AMBIGUOUS_CEILING = 12
 
+# WO-LILY-VOICE-TRUTH-001 V3: promotion sources that CONFIRM identity (the
+# operator's PAIR 1 binding — a name may be spoken only under one of these).
+# voice: the ECAPA/vendor biometric; name_stated / device_plus_name: the
+# player gave their name THIS session. Everything else (a staged or promoted
+# device candidate with no stated name, memory present with verified=False)
+# is GUESSED: no name, no "welcome back".
+_CONFIRMED_IDENTITY_SOURCES = (
+    "voice_identity_match",
+    "voiceprint_match",
+    "name_stated",
+    "device_plus_name",
+)
+
+# V3: a dispatched late beat / an armed carry watch that never reaches the air
+# inside this many seconds is dead (a wedged or invalidated flight); the beat
+# re-arms as OWED instead of holding the seam forever.
+_RECOG_FLIGHT_STALE_SECONDS = 30.0
+
+# OPERATOR DECISION wording (WO-LILY-VOICE-TRUTH-001 PAIR 1), VERBATIM — the
+# same text lily_agent._PAIR1_CONFIRMED_VS_GUESSED and prompts/lily_system.txt
+# carry (a top-level import of lily_agent would cycle; the prompt pin test
+# asserts the three copies are byte-identical).
+_PAIR1_CONFIRMED_VS_GUESSED = (
+    "If identity is CONFIRMED (voice match, or the player gave their name "
+    "this session), greet the returner by name ONCE, one beat, then move on "
+    "— 'welcome back, Rami' is allowed here and only here. If identity is "
+    "only GUESSED (known device, partial history), do NOT use a name and do "
+    "NOT say 'welcome back'; open as a fresh table. Never list prior "
+    "players, winners, or newcomers by name off the record. The continuity "
+    "rail's 'first welcome-back is owed' applies only to the CONFIRMED case."
+)
+
+
+def _fmt_score(value) -> str:
+    return f"{value:.4f}" if isinstance(value, (int, float)) else "-"
+
+
+def _history_label(h) -> str:
+    h = h or {}
+    return f"{int(h.get('sessions') or 0)}s/{int(h.get('questions') or 0)}q"
+
 
 class LilyIdentityMixin:
+    # -- WO-LILY-VOICE-TRUTH-001 V3: the carrier registry --------------------
+    #
+    # WO-2 (RECOG-DELIVERY-001) claimed "the stamp lands on the carrying
+    # turn's playout CONFIRM". Auditor B executed the interleavings: the
+    # watch was keyed by ORDER, not by speech id — resolve_recognition_carry
+    # (confirmed=True) ran on EVERY finished speech, and note_generation_
+    # snapshot marked the NEXT generation, preemptive ones included. I1: a
+    # greeting still in flight when the fast door armed the watch confirmed
+    # first -> "uncarried" -> beat re-armed -> the organic reply carried the
+    # welcome-back AND the seam beat aired a second one. I2: a preemptive
+    # generation marked inflight, an unrelated deterministic line confirmed
+    # -> recognition stamped by a speech that never carried it -> the real
+    # reply was cut -> PERMANENT blackout.
+    #
+    # Now every generation that snapshots WITH the memory block while a
+    # recognition lane is owed/armed is registered as a CARRIER under its
+    # OWN speech id (llm_node reads the framework's SpeechHandle context
+    # var; a deterministic `say` never passes llm_node and can never be a
+    # carrier). Only that speech id's CONFIRM stamps; a cut carrier that
+    # reached the air re-arms the beat; a carrier that never aired
+    # (invalidated preemptive) is dropped silently; a suppression re-arms.
+
+    # -- PAIR 1 mechanical binding: CONFIRMED vs GUESSED from STATE ---------
+
+    def identity_status_line(self) -> str:
+        """The operator's PAIR 1 binding: CONFIRMED = the promotion source is
+        a voice match, name_stated, or device_plus_name (device + the
+        player gave their name this session); GUESSED = a device candidate
+        staged/promoted without a stated name, or memory present with
+        verified=False. Derived from state, never from model judgment, and
+        injected in front of the verbatim rule so the model cannot guess."""
+        source = getattr(self, "identity_confirmed_source", None)
+        if source in ("voice_identity_match", "voiceprint_match"):
+            return (
+                "IDENTITY STATUS (from state, not judgment): CONFIRMED — "
+                "voice match."
+            )
+        if source == "name_stated":
+            return (
+                "IDENTITY STATUS (from state, not judgment): CONFIRMED — the "
+                "player gave their name this session."
+            )
+        if source == "device_plus_name":
+            return (
+                "IDENTITY STATUS (from state, not judgment): CONFIRMED — "
+                "known device and the player gave their name this session."
+            )
+        return (
+            "IDENTITY STATUS (from state, not judgment): GUESSED — no voice "
+            "match and no name stated this session (known device / partial "
+            "history only)."
+        )
+
+    def _carriers(self) -> dict:
+        carriers = self._recognition_carriers
+        if carriers is None:
+            carriers = self._recognition_carriers = {}
+        return carriers
+
+    def _dispatched_act_for(self, speech_id) -> str | None:
+        acts = getattr(self, "_dispatched_act_by_speech", None) or {}
+        return acts.get(speech_id) if speech_id else None
+
+    def _latest_dispatched_speech_for_act(self, act: str) -> str | None:
+        acts = getattr(self, "_dispatched_act_by_speech", None) or {}
+        for sid in reversed(list(acts)):
+            if acts[sid] == act:
+                return sid
+        return None
+
+    def _rearm_owed_recognition(self, reason: str, event=None) -> None:
+        """The welcome-back never reached the air: the beat is OWED again."""
+        watch = self._name_door_watch
+        if watch is not None and watch.get("source"):
+            # The lane that owes it survives the re-arm, so a later carrier
+            # (I1: the organic reply after the greeting) is filed under it.
+            self._owed_recognition_source = watch.get("source")
+        self._name_door_watch = None
+        self._late_recognition_flight = None
+        self._late_recognition_promotion_owed = True
+        self._late_recognition_fired = False
+        self._late_recognition_pending = True
+        if event is not None:
+            event["short_circuit_decision"] = "beat_armed_after_flight"
+            event["carried_memory"] = False
+        logger.info(
+            "LILY_MEMORY | RECOGNITION_CARRY_UNRESOLVED | session=%s "
+            "reason=%s — the carrying speech never played out with the "
+            "memory block; the beat is re-armed as owed",
+            getattr(self.sk, "session_id", "?"), reason,
+        )
+
+    def note_recognition_playout_started(self, speech_id) -> None:
+        """SEAM (consumed from W1's canonical first-frame hook,
+        note_playout_started(speech_id) — wired one line after it in the
+        agent_state_changed handler): this speech is ON THE AIR. A carrier
+        is marked aired (so a later cut re-arms instead of being dropped
+        as an invalidated preemptive); a dispatched late beat binds to its
+        speech id here when the dispatch record names it."""
+        if not speech_id:
+            return
+        entry = self._carriers().get(speech_id)
+        if entry is not None and entry.get("aired_at") is None:
+            entry["aired_at"] = time.monotonic()
+        flight = self._late_recognition_flight
+        if flight is not None:
+            if flight.get("speech_id") is None and (
+                self._dispatched_act_for(speech_id) == "late_recognition"
+            ):
+                flight["speech_id"] = speech_id
+            if flight.get("speech_id") == speech_id:
+                flight["aired_at"] = time.monotonic()
+
+    def note_recognition_dispatch_suppressed(
+        self, act: str | None, speech_id, reason: str | None = None
+    ) -> None:
+        """SEAM (consumed from W1's on_dispatch_suppressed(act, speech_id,
+        reason)): a dispatch died before/without airing (freshness gate,
+        flush, hold). A suppressed late beat or carrier is OWED again —
+        never stamped, never silently lost."""
+        if self._recognition_aired is not None:
+            return
+        carriers = self._carriers()
+        was_carrier = speech_id in carriers if speech_id else False
+        if was_carrier:
+            carriers.pop(speech_id, None)
+        flight = self._late_recognition_flight
+        flight_hit = flight is not None and (
+            act == "late_recognition"
+            or (speech_id and flight.get("speech_id") == speech_id)
+        )
+        if flight_hit or (was_carrier and not carriers):
+            watch = self._name_door_watch
+            self._rearm_owed_recognition(
+                f"dispatch_suppressed:{reason or 'unknown'}",
+                event=(watch or {}).get("event") if watch else None,
+            )
+
+    def _recognition_on_dispatch_suppressed(
+        self, act, speech_id, reason=None, **_facts
+    ) -> None:
+        """LISTENER on LilySpeechDeliveryMixin.on_dispatch_suppressed (the
+        dispatcher; registered in _init_all_game_state). Integration note:
+        first shipped as a same-named method that shadowed the dispatcher
+        in the MRO (Identity precedes SpeechDelivery) and raised on W1's
+        keyword facts. A consumer is a listener, never the hook itself."""
+        self.note_recognition_dispatch_suppressed(act, speech_id, reason)
+
+    def _prune_dead_recognition_flights(self) -> None:
+        """Bounded liveness: a carrier/beat/watch that never reached the
+        air inside _RECOG_FLIGHT_STALE_SECONDS is dead — re-arm as owed
+        rather than hold the seam forever (blackout by wedge)."""
+        now = time.monotonic()
+        carriers = self._carriers()
+        for sid, entry in list(carriers.items()):
+            if entry.get("aired_at") is None and (
+                now - float(entry.get("at") or now)
+            ) > _RECOG_FLIGHT_STALE_SECONDS:
+                carriers.pop(sid, None)
+                logger.info(
+                    "LILY_MEMORY | RECOGNITION_CARRIER_STALE | session=%s "
+                    "speech=%s — never reached the air; dropped",
+                    getattr(self.sk, "session_id", "?"), sid,
+                )
+        flight = self._late_recognition_flight
+        if flight is not None and flight.get("aired_at") is None and (
+            now - float(flight.get("at") or now)
+        ) > _RECOG_FLIGHT_STALE_SECONDS and not carriers:
+            self._rearm_owed_recognition("late_beat_never_aired")
+        watch = self._name_door_watch
+        if watch is not None and not carriers and (
+            now - float(watch.get("armed_at") or now)
+        ) > _RECOG_FLIGHT_STALE_SECONDS:
+            self._rearm_owed_recognition(
+                "carry_watch_timeout", event=watch.get("event")
+            )
+
     def late_recognition_blocked_reason(self) -> str | None:
         """Return the live beat that makes recognition speech unsafe."""
-        # WO-LILY-RECOG-DELIVERY-001: a carried-recognition confirm watch is
-        # armed — a turn composed WITH the memory block is in flight and
-        # will stamp on its playout confirm. The beat holds so the two
-        # lanes can never stack (the 11:31 double, kept dead); a cut
-        # flight re-arms the beat via resolve_recognition_carry.
+        # WO-LILY-RECOG-DELIVERY-001 / VOICE-TRUTH-001 V3: a carried-
+        # recognition watch, a registered carrier, or a dispatched late
+        # beat is in flight — a turn composed WITH the memory block will
+        # stamp on ITS playout confirm. The beat holds so two lanes can
+        # never stack (the 11:31 double and Auditor B's I1, kept dead);
+        # a cut or suppressed flight re-arms the beat.
+        self._prune_dead_recognition_flights()
+        if self._carriers():
+            return "recognition_carry_inflight"
+        if self._late_recognition_flight is not None:
+            return "recognition_beat_inflight"
         if self._name_door_watch is not None:
             return "recognition_carry_inflight"
         # CLASS 7 (LIVEFIRE-001) 7a: once the round has started, recognition
@@ -215,7 +439,10 @@ class LilyIdentityMixin:
                 "present this session (the ROSTER field is the sole naming "
                 "authority) or they have stated their name tonight; if no "
                 "voice is matched present, name no one — just welcome the "
-                "table back. Do NOT re-introduce yourself, do NOT repeat "
+                "table back. "
+                + self.identity_status_line() + " "
+                + _PAIR1_CONFIRMED_VS_GUESSED +
+                " Do NOT re-introduce yourself, do NOT repeat "
                 "any line of your opener, do NOT offer a refresher or ask "
                 "about preferences, and do NOT ask a question of your own — "
                 "one warm beat, then hand straight back to the game."
@@ -235,7 +462,7 @@ class LilyIdentityMixin:
                 self._late_recognition_fired = False
                 self._late_recognition_pending = True
             else:
-                self.note_recognition_aired("late_recognition_beat")
+                self._arm_late_recognition_flight()
             return dispatched
         ack = (
             "Recognition just landed MID-SESSION: the [RETURNING TABLE] "
@@ -248,7 +475,10 @@ class LilyIdentityMixin:
             "stated their name tonight; a remembered name is NOT a present "
             "person, so do not read any roster of names from memory. If no "
             "voice is matched present yet, name no one — just welcome the "
-            "table back. Never pretend you knew all along, and never "
+            "table back. "
+            + self.identity_status_line() + " "
+            + _PAIR1_CONFIRMED_VS_GUESSED +
+            " Never pretend you knew all along, and never "
             "apologize in a spiral. THEN STOP AND LET THEM ANSWER. This turn "
             "is the acknowledgment and at most ONE offer ('want a refresher "
             "on the options, or straight in?') — it does NOT contain a "
@@ -286,11 +516,32 @@ class LilyIdentityMixin:
             self._late_recognition_fired = False
             self._late_recognition_pending = True
         else:
-            # ANTIREPEAT-PROTOCOL-001: the beat carried the welcome-back
-            # to dispatch — stamp the durable fact so no other lane (a
-            # later promotion, the game-start ride-along) re-airs it.
-            self.note_recognition_aired("late_recognition_beat")
+            self._arm_late_recognition_flight()
         return dispatched
+
+    def _arm_late_recognition_flight(self) -> None:
+        """VOICE-TRUTH-001 V3 (Auditor D P1-2): the late beat used to
+        stamp recognition_aired AT DISPATCH, keyless — a beat the
+        freshness gate or a flush then suppressed had already retired every
+        other lane: blackout. The dispatch now arms a FLIGHT; the fact
+        stamps only when the beat's own generation (a carrier under its
+        speech id) CONFIRMS; a suppressed/cut/never-aired beat re-arms as
+        owed (note_recognition_dispatch_suppressed / resolve_recognition_
+        carry / the stale prune)."""
+        self._late_recognition_flight = {
+            "source": "late_recognition_beat",
+            "speech_id": self._latest_dispatched_speech_for_act(
+                "late_recognition"
+            ),
+            "at": time.monotonic(),
+            "aired_at": None,
+        }
+        logger.info(
+            "LILY_MEMORY | LATE_RECOGNITION_DISPATCHED | session=%s "
+            "speech=%s — stamped on ITS playout confirm, never at dispatch",
+            getattr(self.sk, "session_id", "?"),
+            self._late_recognition_flight.get("speech_id"),
+        )
 
     def flush_late_recognition_at_seam(self) -> bool:
         """Emit a deferred recognition beat only when the game is between Qs."""
@@ -333,6 +584,8 @@ class LilyIdentityMixin:
         # confirm watch are settled by the airing — recognition is paid.
         self._late_recognition_promotion_owed = False
         self._name_door_watch = None
+        self._late_recognition_flight = None
+        self._recognition_carriers = {}
         logger.info(
             "LILY_MEMORY | RECOGNITION_AIRED | session=%s source=%s — "
             "recognition is on air; every other recognition lane is retired "
@@ -376,32 +629,74 @@ class LilyIdentityMixin:
     #     including BETWEEN QUESTIONS after game start (the promotion-owed
     #     exemption from the CLASS 7 forbid).
 
-    def note_generation_snapshot(self) -> int:
+    def note_generation_snapshot(self, speech_id=None) -> int:
         """The per-turn context marker: one call per real generation, at the
         moment the per-generation context copy is finalized (llm_node's
         include_volatile _apply_context_blocks). Returns the new sequence.
-        If a carried-recognition watch is armed and the memory block is now
-        in context, this generation is the one carrying the recognition —
-        mark it so its playout CONFIRM can stamp."""
+
+        VOICE-TRUTH-001 V3: `speech_id` is the framework SpeechHandle this
+        generation belongs to (llm_node reads _SpeechHandleContextVar). If
+        a recognition lane is owed/armed and the memory block is in THIS
+        snapshot, the generation is registered as a CARRIER under its own
+        id — only that id's playout confirm stamps. A snapshot with no id
+        cannot be keyed and is never a carrier (honest: no receipt without
+        an identity)."""
         self._ctx_snapshot_seq += 1
+        seq = self._ctx_snapshot_seq
+        if self._recognition_aired is not None or not self.memory_block:
+            return seq
         watch = self._name_door_watch
-        if (
+        flight = self._late_recognition_flight
+        lane_open = (
             watch is not None
-            and watch.get("inflight_seq") is None
-            and self.memory_block
-        ):
-            watch["inflight_seq"] = self._ctx_snapshot_seq
+            or flight is not None
+            or self._late_recognition_pending
+        )
+        if not lane_open:
+            return seq
+        if not speech_id:
+            logger.info(
+                "LILY_MEMORY | RECOGNITION_CARRY_UNKEYED | session=%s seq=%d "
+                "— a generation snapshotted WITH the memory block but no "
+                "speech id reached the marker; it cannot be a carrier",
+                getattr(self.sk, "session_id", "?"), seq,
+            )
+            return seq
+        act = self._dispatched_act_for(speech_id)
+        if act == "late_recognition":
+            source = "late_recognition_beat"
+        elif act == "game_start":
+            source = "game_start_ride_along"
+        elif watch is not None:
+            source = watch.get("source") or "name_door_organic"
+        else:
+            source = self._owed_recognition_source or "memory_turn_organic"
+        carriers = self._carriers()
+        if speech_id not in carriers:
+            carriers[speech_id] = {
+                "source": source,
+                "seq": seq,
+                "at": time.monotonic(),
+                "aired_at": None,
+            }
+            if watch is not None and watch.get("inflight_seq") is None:
+                watch["inflight_seq"] = seq
+            if flight is not None and flight.get("speech_id") is None and (
+                act == "late_recognition"
+            ):
+                flight["speech_id"] = speech_id
             logger.info(
                 "LILY_MEMORY | RECOGNITION_CARRY_INFLIGHT | session=%s "
-                "source=%s seq=%d — a generation snapshotted WITH the "
-                "memory block; its playout confirm stamps recognition_aired",
-                getattr(self.sk, "session_id", "?"),
-                watch.get("source"), self._ctx_snapshot_seq,
+                "source=%s seq=%d speech=%s — a generation snapshotted WITH "
+                "the memory block; ITS playout confirm stamps "
+                "recognition_aired",
+                getattr(self.sk, "session_id", "?"), source, seq, speech_id,
             )
-        return self._ctx_snapshot_seq
+        return seq
 
     def _record_identity_promotion(
-        self, source: str, group_id, *, decision: str, carried_memory
+        self, source: str, group_id, *, decision: str, carried_memory,
+        **extra,
     ) -> dict:
         """S1/S16 telemetry: identity-promotion events persist in
         lily_sessions.metadata.identity_promotions (both existing metadata
@@ -409,7 +704,11 @@ class LilyIdentityMixin:
         and the short-circuit decision are a SQL query, never a
         reconstruction from prompt-token deltas. Idempotent per
         (source, group_id): the double promotion tail (_promote awaits
-        upgrade_group_id first) records once."""
+        upgrade_group_id first) records once.
+
+        VOICE-TRUTH-001 V4: name-door promotions also carry ts_start (door
+        entry), ts_resolved (memory block visible) and door_ms — the door
+        latency is a SQL query."""
         events = self._identity_promotion_events
         if events is None:
             events = self._identity_promotion_events = []
@@ -423,6 +722,12 @@ class LilyIdentityMixin:
             "short_circuit_decision": decision,
             "carried_memory": carried_memory,
         }
+        opened = self._name_door_opened_at
+        if source in _NAME_DOOR_TRIGGERS and opened is not None:
+            ev["ts_start"] = round(float(opened), 3)
+            ev["ts_resolved"] = ev["ts"]
+            ev["door_ms"] = round((ev["ts"] - float(opened)) * 1000, 1)
+        ev.update(extra)
         events.append(ev)
         logger.info(
             "LILY_MEMORY | IDENTITY_PROMOTION | session=%s source=%s "
@@ -461,6 +766,7 @@ class LilyIdentityMixin:
                 "source": "name_door_organic",
                 "group_id": group_id,
                 "armed_at_seq": self._ctx_snapshot_seq,
+                "armed_at": time.monotonic(),
                 "inflight_seq": None,
                 "event": event,
             }
@@ -490,57 +796,96 @@ class LilyIdentityMixin:
             )
             self.maybe_fire_late_recognition()
 
-    def resolve_recognition_carry(self, *, confirmed: bool) -> None:
-        """A speech playout ended — resolve the carried-recognition watch.
+    def resolve_recognition_carry(
+        self, *, confirmed: bool, speech_id=None, suppressed: bool = False
+    ) -> None:
+        """A speech playout ended — resolve recognition carry BY SPEECH ID.
         Called from on_agent_speech_finished on BOTH exits (confirm and
-        interrupted/suppressed).
+        interrupted/suppressed), with the finishing speech's id.
 
-        CONFIRMED and a memory-carrying generation was marked in flight:
-        the room heard a turn composed WITH the [RETURNING TABLE] block —
-        stamp recognition_aired (the watch's source names the lane).
-
-        Anything else — the carrying turn was cut, or a memory-BLIND turn
-        finished first (a validated preemptive reply that snapshotted
-        before the promotion landed and aired without the block) —
-        recognition never reached the air: re-arm the beat as OWED.
-        Known approximation, accepted and bounded: the finishing speech is
-        identified by ordering, not by id (llm_node has no speech id at
-        snapshot time). A different speech interleaving between the arm and
-        the carrying turn can mis-resolve one way or the other; every
-        mis-resolution degrades to the late beat delivering (or the
-        antirepeat fact suppressing a second airing), never to a silent
-        blackout."""
-        watch = self._name_door_watch
-        if watch is None:
-            return
+        VOICE-TRUTH-001 V3 (replaces WO-2's order-keyed resolution, whose
+        "known approximation" Auditor B executed into a double (I1) and a
+        permanent blackout (I2)):
+          * the finishing speech IS a registered carrier (its own context
+            snapshot held the memory block):
+              - CONFIRMED -> stamp recognition_aired under the carrier's
+                source; every other lane retires;
+              - cut after reaching the air, or suppressed -> re-arm OWED
+                (unless another carrier is still in flight);
+              - cut WITHOUT ever airing and not suppressed -> an
+                invalidated preemptive generation; dropped silently, the
+                real reply follows and registers itself.
+            Older carriers that never aired are pruned with it.
+          * the finishing speech is NOT a carrier: it says nothing about
+            recognition while a carrier is in flight; a dispatched late
+            beat that died without a carrier snapshot re-arms; a
+            memory-blind turn finishing under an armed watch with no
+            carrier registered is the 17:51 shape (uncarried) -> re-arm."""
         if self._recognition_aired is not None:
             self._name_door_watch = None
+            self._late_recognition_flight = None
+            self._recognition_carriers = {}
             return
-        event = watch.get("event")
-        if confirmed and watch.get("inflight_seq") is not None:
-            self._name_door_watch = None
-            if event is not None:
-                event["short_circuit_decision"] = "organic_confirmed"
-                event["carried_memory"] = True
-                event["confirmed_at"] = round(time.time(), 3)
-            self.note_recognition_aired(
-                watch.get("source") or "name_door_organic"
+        carriers = self._carriers()
+        watch = self._name_door_watch
+        flight = self._late_recognition_flight
+        event = watch.get("event") if watch else None
+        act = self._dispatched_act_for(speech_id)
+        if speech_id and speech_id in carriers:
+            entry = carriers.pop(speech_id)
+            for sid, other in list(carriers.items()):
+                if other.get("seq", 0) < entry.get("seq", 0) and (
+                    other.get("aired_at") is None
+                ):
+                    carriers.pop(sid, None)  # an older never-aired generation
+            if confirmed:
+                self._name_door_watch = None
+                self._late_recognition_flight = None
+                if event is not None:
+                    event["short_circuit_decision"] = "organic_confirmed"
+                    event["carried_memory"] = True
+                    event["confirmed_at"] = round(time.time(), 3)
+                    event["carrier_speech_id"] = speech_id
+                self.note_recognition_aired(entry.get("source") or "memory_turn_organic")
+                return
+            if entry.get("aired_at") is None and not suppressed:
+                logger.info(
+                    "LILY_MEMORY | RECOGNITION_CARRY_INVALIDATED | session=%s "
+                    "speech=%s — a carrier generation was cancelled before "
+                    "airing (invalidated preemptive); the real reply follows",
+                    getattr(self.sk, "session_id", "?"), speech_id,
+                )
+                return
+            if carriers:
+                return  # another carrier still in flight decides
+            self._rearm_owed_recognition(
+                "carrier_suppressed" if suppressed else "carrier_cut",
+                event=event,
             )
             return
-        self._name_door_watch = None
-        self._late_recognition_promotion_owed = True
-        self._late_recognition_fired = False
-        self._late_recognition_pending = True
-        if event is not None:
-            event["short_circuit_decision"] = "beat_armed_after_flight"
-            event["carried_memory"] = False
-        logger.info(
-            "LILY_MEMORY | RECOGNITION_CARRY_UNRESOLVED | session=%s "
-            "source=%s confirmed=%s inflight=%s — the carrying turn never "
-            "played out with the memory block; the beat is re-armed as owed",
-            getattr(self.sk, "session_id", "?"), watch.get("source"),
-            confirmed, watch.get("inflight_seq") is not None,
-        )
+        if flight is not None and (
+            (speech_id and flight.get("speech_id") == speech_id)
+            or act == "late_recognition"
+        ):
+            if confirmed:
+                # The beat played out but never snapshotted with the block
+                # (memory cleared mid-flight) — it still aired as the beat.
+                self._late_recognition_flight = None
+                self.note_recognition_aired("late_recognition_beat")
+                return
+            self._rearm_owed_recognition(
+                "late_beat_suppressed" if suppressed else "late_beat_cut"
+            )
+            return
+        if carriers:
+            return  # a carrier is still in flight; this speech is unrelated
+        if watch is not None:
+            # No carrier ever registered: the turn the watch expected to
+            # carry aired memory-BLIND (a preemptive that snapshotted before
+            # the promotion) — uncarried, the beat is owed.
+            self._rearm_owed_recognition(
+                "memory_blind_turn_finished", event=event
+            )
 
     def note_game_start_carries_recognition(self) -> None:
         """The game-start composite composed the one welcome-back ride-along
@@ -558,6 +903,7 @@ class LilyIdentityMixin:
             "source": "game_start_ride_along",
             "group_id": self.group_id,
             "armed_at_seq": self._ctx_snapshot_seq,
+            "armed_at": time.monotonic(),
             "inflight_seq": None,
             "event": None,
         }
@@ -624,7 +970,12 @@ class LilyIdentityMixin:
             # the game-memory write threshold. Voice verification still earns
             # those names; it does not earn invented scores/history.
             memory["player_names"] = voiceprint_names
-        block = lily_memory.lily_build_memory_block(memory, prefs=prefs)
+        # VOICE-TRUTH-001 V5 provenance: the block states HOW the table was
+        # recognized; the staging source is a placeholder until promotion
+        # rebuilds it under the real trigger (voice / device+name / name).
+        block = lily_memory.lily_build_memory_block(
+            memory, prefs=prefs, recognized_by=source
+        )
         if not block and not prefs and not voiceprints:
             logger.info(
                 "LILY_MEMORY | DEVICE_CANDIDATE_EMPTY | source=%s group=%s",
@@ -779,8 +1130,14 @@ class LilyIdentityMixin:
         if not candidate:
             return
         memory = dict(self._device_candidate_memory or {})
-        block = self._device_candidate_memory_block
         staged_prefs = dict(self._device_candidate_prefs)
+        # VOICE-TRUTH-001 V5 provenance: rebuild the block under the REAL
+        # promotion trigger so the [RETURNING TABLE] block states the true
+        # door (voice / device+name / stated name) — never "voice
+        # recognition matched" for a name-door promotion (S2).
+        block = lily_memory.lily_build_memory_block(
+            memory, prefs=staged_prefs, recognized_by=trigger
+        ) or self._device_candidate_memory_block
         # Record HOW the table was recognised. This hardcoded
         # "voiceprint_match" and discarded its own `trigger`, so an ECAPA
         # centroid match and a Speechmatics identifier overlap were written
@@ -791,16 +1148,22 @@ class LilyIdentityMixin:
         # found a twelve-game table on 2026-08-08. Collapsing them cost the
         # provenance an operator needs to debug exactly this class of
         # problem. Both remain strong sources; only the label changes.
-        await self.upgrade_group_id(
-            candidate, trigger if trigger in _KNOWN_GROUP_SOURCES
-            else "voiceprint_match"
-        )
+        label = trigger if trigger in _KNOWN_GROUP_SOURCES else "voiceprint_match"
+        # VOICE-TRUTH-001 V4: MEMORY FIRST. The staged block is already in
+        # hand — inject it NOW, before the rekey/reload awaits (the 17:51
+        # door's ~80s of sequential Supabase round-trips used to sit
+        # between "group resolved" and "block visible to the next
+        # generation"). The carried/uncarried tail is decided at THIS
+        # moment, the moment the block became visible.
         merged_prefs = staged_prefs
         merged_prefs.update(self.prefs or {})
         self.prefs = merged_prefs
         self.memory_block = block
         self.memory_total_games = int(memory.get("total_games") or 0)
         self.memory_player_names = list(memory.get("player_names") or [])
+        self.identity_confirmed_source = (
+            trigger if trigger in _CONFIRMED_IDENTITY_SOURCES else None
+        )
         if verified:
             self.device_identity_verified = True
         self.device_candidate_group_id = None
@@ -814,19 +1177,23 @@ class LilyIdentityMixin:
         # not inside the beat — trigger-independent, so a short-circuited
         # beat never costs the table its saved 'usual'.
         self._apply_stored_pacing()
-        if trigger in _NAME_DOOR_TRIGGERS and self.memory_block:
+        name_door = trigger in _NAME_DOOR_TRIGGERS and bool(self.memory_block)
+        if name_door:
             # Name-door tail (WO-LILY-RECOG-DELIVERY-001, un-lying
             # ANTIREPEAT-PROTOCOL-001's stamp): the organic reply answering
             # the name utterance carries the just-promoted memory block ONLY
             # when its context snapshot came after the promotion — a slow
             # promotion (17:51, ~80s of Supabase awaits) aired it
-            # memory-blind. The tail now decides mechanically: carried →
+            # memory-blind. The tail decides mechanically: carried →
             # stamp on that turn's playout CONFIRM; uncarried → the beat
             # stays ARMED and delivers at the next seam. The prefs offer
             # still needs no beat: the memory block's "usual:" line plus the
             # system prompt's standing instruction carry it.
             self._name_door_promotion_tail(trigger, candidate)
-        else:
+        # Rekey + reloads run AFTER the block is visible (concurrently
+        # inside upgrade_group_id); its own tail call no-ops.
+        await self.upgrade_group_id(candidate, label)
+        if not name_door:
             # Task 1 (RECOGNITION-VARIETY): a voiceprint verification landing
             # after the greeting is the same late-recognition moment as a
             # name-hash upgrade — same acknowledgment beat, same one-shot.
@@ -1365,56 +1732,257 @@ class LilyIdentityMixin:
 
         asyncio.ensure_future(_load())
 
+    # -- WO-LILY-VOICE-TRUTH-001 V1: the speech-gated probe lifecycle -------
+    #
+    # The probe object (lily_voice_embedder.LilyVoiceProbe) is attached by
+    # the track frame sink; the transcript handler feeds it human STT
+    # segments (rule (a), primary) and the sink feeds it the VAD flag
+    # (fallback). Every voiced increment re-evaluates the match schedule
+    # (rules (b)/(c)); the window (c) closes the biometric question; the
+    # receipt (f) rides lily_sessions.metadata.voice_identity at both write
+    # sites; enrollment (d)/(e) reads the voiced UNION only.
+
+    def attach_voice_probe(self, probe) -> None:
+        """The frame sink hands over its probe at fork start."""
+        self._voice_probe = probe
+        self._voice_identity_window_started_at = time.monotonic()
+        self._voice_identity_gate_source = getattr(probe, "gate_source", None)
+
+    def note_voiced_segment(self, start, end, speaker_label=None) -> float:
+        """SEAM (one line in the transcript handler): a human (non-LILY)
+        STT final [start, end] landed — rule (a), the primary voiced
+        signal. Returns voiced seconds added."""
+        if speaker_label == "LILY":
+            return 0.0
+        probe = self._voice_probe
+        if probe is None:
+            return 0.0
+        added = probe.note_voiced_segment(start, end)
+        self._sync_voice_probe()
+        if added > 0:
+            self.maybe_start_voice_identity_match()
+        return added
+
+    def note_voice_probe_vad(self, speaking: bool) -> float:
+        """Per-frame from the sink: the framework VAD user_speaking flag
+        (rule (a) fallback). Also the tick that closes the window (c)
+        when the room has gone quiet."""
+        probe = self._voice_probe
+        if probe is None:
+            return 0.0
+        added = probe.note_vad_state(speaking)
+        if added > 0:
+            self._sync_voice_probe()
+            self.maybe_start_voice_identity_match()
+        elif (
+            not self._voice_identity_resolved
+            and not self._voice_identity_inflight
+            and self.voice_probe_window_elapsed()
+        ):
+            self._sync_voice_probe()
+            self._voice_identity_close_window_nowait("window_elapsed")
+        return added
+
+    def _sync_voice_probe(self) -> None:
+        probe = self._voice_probe
+        if probe is None:
+            return
+        self._voice_identity_voiced_seconds = float(probe.voiced_seconds)
+        self._voice_identity_gate_source = probe.gate_source
+        # A truthy marker only: the match/enroll PCM is built lazily off
+        # the event loop (see _voice_identity_audio_probe).
+        self._voice_identity_pcm = True if probe.ready() else None
+
+    def voice_probe_window_elapsed(self) -> bool:
+        started = self._voice_identity_window_started_at
+        if started is None:
+            return False
+        return (
+            time.monotonic() - started
+        ) >= lily_config.voice_probe_window_seconds()
+
+    def voice_probe_sink_should_close(self) -> bool:
+        """The sink may stop resampling/holding frames once the biometric
+        question is closed AND the enrollment union is full (d)."""
+        probe = self._voice_probe
+        if probe is None:
+            return True
+        matching_done = (
+            self._voice_identity_matched
+            or self._voice_identity_resolved
+            or self.voice_probe_window_elapsed()
+        )
+        return matching_done and (
+            probe.union_seconds >= lily_config.voice_enroll_max_seconds()
+        )
+
     def _voice_identity_audio_probe(self):
-        """Captured mono PCM for embedding, or None when unavailable. Reads a
-        buffer a track frame sink fills (`_voice_identity_pcm`); None keeps the
-        feature inert until that sink lands. Injected directly in tests."""
+        """Captured VOICED PCM for a match, or None when unavailable. With a
+        live probe attached this returns a zero-arg builder (the float list
+        is built inside the embedder thread, off the event loop); tests
+        inject `_voice_identity_pcm` directly."""
+        probe = self._voice_probe
+        if probe is not None:
+            return probe.match_pcm if probe.ready() else None
         return self._voice_identity_pcm
 
-    def maybe_start_voice_identity_match(self) -> bool:
-        """Start the one session match only after captured PCM is ready.
+    def _voice_identity_enroll_probe(self):
+        """The voiced UNION for enrollment (rule (d)) — never the first 8s."""
+        probe = self._voice_probe
+        if probe is not None:
+            return probe.enroll_pcm if probe.ready() else None
+        enroll = self._voice_identity_enroll_pcm
+        return enroll if enroll is not None else self._voice_identity_pcm
 
-        Returns True when scheduled. A pre-probe call remains retryable; this
-        is the key distinction from the former first-final one-shot.
-        """
+    def maybe_start_voice_identity_match(self) -> bool:
+        """Schedule a match attempt when the gate says one is due.
+
+        Rules (b)/(c): the first attempt needs min_voiced seconds of VOICED
+        audio; each further attempt needs retry_voiced more; attempts stop
+        at a match or when the probe window elapses. Never one-shot: the
+        old `_voice_identity_attempted` latch fired ONE match at 2.5s of
+        wall-clock frames (room tone) and never tried again. Returns True
+        when an attempt was scheduled."""
         # Warming is what makes _voice_identity_ready() cheap: the load runs
         # in a thread while this call returns immediately. The trigger is
         # retryable by design, so a not-yet-warm model simply means "next
-        # transcript".
+        # voiced chunk".
         self._warm_voice_embedder()
         if (
-            self._voice_identity_attempted
+            self._voice_identity_matched
+            or self._voice_identity_resolved
+            or self._voice_identity_inflight
             or not self._voice_identity_ready()
-            or self._voice_identity_audio_probe() is None
         ):
             return False
+        probe = self._voice_probe
+        min_voiced = lily_config.voice_min_voiced_seconds()
+        retry_voiced = lily_config.voice_retry_voiced_seconds()
+        if probe is not None:
+            if self.voice_probe_window_elapsed():
+                self._voice_identity_close_window_nowait("window_elapsed")
+                return False
+            if not probe.ready() or not probe.match_due():
+                return False
+            probe.mark_attempt()
+        else:
+            if self._voice_identity_pcm is None:
+                return False
+            voiced = float(self._voice_identity_voiced_seconds or 0.0)
+            if voiced < min_voiced:
+                return False
+            last = self._voice_identity_last_attempt_voiced
+            if self._voice_identity_attempts > 0 and last is not None and (
+                voiced - last
+            ) < retry_voiced:
+                return False
+            self._voice_identity_last_attempt_voiced = voiced
+        self._voice_identity_attempts += 1
         self._voice_identity_attempted = True
+        self._voice_identity_inflight = True
+        if self._voice_identity_match_t0 is None:
+            self._voice_identity_match_t0 = time.monotonic()
         asyncio.ensure_future(self._voice_identity_match_at_start())
         return True
 
-    async def _voice_identity_match_at_start(self) -> bool:
-        """Probe the joining voice against stored centroids; on a confident
-        match, stage+promote that group's memory through the existing
-        candidate path (the biometric match IS the proof — no vendor-label
-        round-trip needed). Returns True on a promotion."""
-        if not self._voice_identity_ready() or getattr(
-            self, "device_identity_verified", False
+    def _voice_identity_close_window_nowait(self, reason: str) -> None:
+        asyncio.ensure_future(self._voice_identity_close_window(reason))
+
+    async def _voice_identity_close_window(self, reason: str) -> None:
+        """The biometric question CLOSES (rule (c)): the window elapsed, the
+        session ended, or — with no live probe to bring new voiced audio —
+        the one attempt reported. Sets the FINAL outcome honestly
+        (no_match / insufficient_voiced / embedder_unavailable), stamps the
+        Z3 hold, and re-invokes the deferred name-set proposal exactly as
+        the old single no-match branch did."""
+        if self._voice_identity_resolved or self._voice_identity_matched:
+            return
+        self._voice_identity_resolved = True
+        voiced = float(self._voice_identity_voiced_seconds or 0.0)
+        min_voiced = lily_config.voice_min_voiced_seconds()
+        if self._voice_identity_attempts == 0:
+            if voiced < min_voiced:
+                outcome = "insufficient_voiced"
+            elif not lily_voice_embedder.lily_voice_embedder_loaded():
+                outcome = "embedder_unavailable"
+            else:
+                outcome = "no_attempt"
+        else:
+            outcome = self._voice_id_outcome or "no_match"
+            if not str(outcome).startswith(("match:", "failed:")):
+                outcome = "no_match"
+        self._voice_id_outcome = outcome
+        # Z3: no-match / never-ran is not resolution while the name door is
+        # untried — hold memory-characterising speech.
+        if self._voice_identity_no_match_at is None:
+            self._voice_identity_no_match_at = time.time()
+        logger.info(
+            "LILY_VOICE_ID | PROBE_RESOLVED | session=%s outcome=%s reason=%s "
+            "voiced=%.1fs min_voiced=%.1fs attempts=%d best=%s runner_up=%s "
+            "threshold=%.2f gate=%s",
+            self.sk.session_id, outcome, reason, voiced, min_voiced,
+            self._voice_identity_attempts,
+            _fmt_score(self._voice_identity_best_score),
+            _fmt_score(self._voice_identity_runner_up),
+            lily_config.voice_identity_match_threshold(),
+            self._voice_identity_gate_source,
+        )
+        # V7/V1c resolve-before-propose: the enrolled-voice route has now
+        # REPORTED. If the roster is already stable (game started) on a weak
+        # group, resolve_group_identity may have DEFERRED the name-set
+        # proposal waiting on exactly this answer — re-invoke it so the
+        # name-set hash is quarantined now (never ahead of the biometric,
+        # and never minted from a heard name alone).
+        if (
+            getattr(self, "game_started", False)
+            and self.group_id_source not in _STRONG_GROUP_SOURCES
+            and not getattr(self, "device_candidate_group_id", None)
         ):
-            # Not going to run at all — nothing is outstanding.
-            self._voice_identity_resolved = True
-            return False
-        probe = self._voice_identity_audio_probe()
-        if probe is None:
-            return False
+            try:
+                await self.resolve_group_identity("voice_no_match")
+            except Exception as e:
+                logger.warning(
+                    "LILY_MEMORY | GROUP_ID_RESOLVE | "
+                    "voice_no_match re-resolve failed: %s", e,
+                )
+
+    async def _voice_identity_match_at_start(self) -> bool:
+        """ONE match attempt on the voiced probe: embed, rank against the
+        centroid pool, decide against threshold + margin, and LOG THE
+        DECISION WITH ITS NUMBERS (rule (f): best, runner-up, threshold,
+        voiced seconds, gate source). On a confident match, stage+promote
+        that group's memory through the existing candidate path (the
+        biometric match IS the proof). A no-match leaves the window OPEN
+        for a retry on more voiced audio (rule (c)); with no live probe the
+        attempt is final. Returns True on a promotion."""
+        if not self._voice_identity_inflight:
+            # Called directly (tests / a caller bypassing the scheduler):
+            # it is still an attempt and the receipt counts it.
+            self._voice_identity_inflight = True
+            self._voice_identity_attempts += 1
+            self._voice_identity_attempted = True
         try:
+            if not self._voice_identity_ready() or getattr(
+                self, "device_identity_verified", False
+            ):
+                # Not going to run at all — nothing is outstanding.
+                self._voice_identity_resolved = True
+                return False
+            probe = self._voice_identity_audio_probe()
+            if probe is None:
+                return False
+            attempt = self._voice_identity_attempts
             emb = await lily_voice_embedder.lily_extract_embedding_async(probe)
             if emb is None:
+                logger.warning(
+                    "LILY_VOICE_ID | EMBED_NONE | session=%s attempt=%d — "
+                    "the embedder returned nothing; retry on more voiced "
+                    "audio", self.sk.session_id, attempt,
+                )
                 return False
-            # V2 instrumentation: t1 = embedding produced. t0 was stamped in
-            # the frame sink at the first match_ready crossing, so embed_ms
-            # spans utterance-ready -> embedding and folds in any wait on a
-            # still-warming model (a large embed_ms points straight at the
-            # model-load/STT dependency).
+            # V2 instrumentation: t1 = embedding produced. t0 was stamped at
+            # the first scheduled attempt, so embed_ms spans utterance-ready
+            # -> embedding and folds in any wait on a still-warming model.
             t1 = time.monotonic()
             # V2: the centroid pool is preloaded at CONNECT (in-memory, no DB
             # round-trip on the recognition path). Cold-path fallback ONLY
@@ -1432,10 +2000,46 @@ class LilyIdentityMixin:
                     "not ready at first utterance; fetched inline",
                     self.sk.session_id,
                 )
+            threshold = lily_config.voice_identity_match_threshold()
+            margin = lily_config.voice_identity_match_margin()
+            ranked = lily_voice_identity.lily_rank_voice(emb, identities)
+            best_score = ranked[0][0] if ranked else None
+            best_gid = ranked[0][1] if ranked else None
+            runner_up = ranked[1][0] if len(ranked) > 1 else None
             match = lily_voice_identity.lily_match_voice(
-                emb, identities,
-                threshold=lily_config.voice_identity_match_threshold(),
-                margin=lily_config.voice_identity_match_margin(),
+                emb, identities, threshold=threshold, margin=margin,
+            )
+            # The receipt keeps the BEST attempt's numbers (S2: the number
+            # rides every outcome, match or not).
+            if best_score is not None and (
+                self._voice_identity_best_score is None
+                or best_score > self._voice_identity_best_score
+            ):
+                self._voice_identity_best_score = round(best_score, 4)
+                self._voice_identity_best_group = best_gid
+                self._voice_identity_runner_up = (
+                    round(runner_up, 4) if runner_up is not None else None
+                )
+            if match is None:
+                decision = (
+                    "no_candidates" if best_score is None
+                    else "below_threshold" if best_score < threshold
+                    else "ambiguous_margin"
+                )
+            elif match["group_id"] == self.group_id:
+                decision = "match_is_current_group"
+            else:
+                decision = "match"
+            voiced = float(self._voice_identity_voiced_seconds or 0.0)
+            logger.info(
+                "LILY_VOICE_ID | THRESHOLD_DECISION | session=%s attempt=%d "
+                "decision=%s best=%s best_group=%s runner_up=%s threshold=%.2f "
+                "margin=%.3f voiced=%.1fs gate=%s pool=%d tag=%s",
+                self.sk.session_id, attempt, decision,
+                _fmt_score(best_score), str(best_gid)[:16] if best_gid else "-",
+                _fmt_score(runner_up), threshold, margin, voiced,
+                self._voice_identity_gate_source, len(identities),
+                lily_config.voice_identity_model_tag(),
             )
             # V2 instrumentation: t2 = identity resolved. resolve_ms spans
             # embedding -> match decision; a large resolve_ms is the DB
@@ -1451,43 +2055,36 @@ class LilyIdentityMixin:
                     "LILY_VOICE_ID | LATENCY | embed_ms=%s resolve_ms=%s "
                     "session=%s", embed_ms, resolve_ms, self.sk.session_id,
                 )
+            if match is None or match["group_id"] == self.group_id:
+                self._voice_id_outcome = "no_match"
+                if self._voice_identity_no_match_at is None:
+                    self._voice_identity_no_match_at = time.time()
+                # Rule (c): NOT resolved while a live probe can still bring
+                # new voiced audio inside the window. Without a live probe
+                # (injected PCM), this attempt is the only one there is.
+                if self._voice_probe is None or self.voice_probe_window_elapsed():
+                    self._voice_identity_inflight = False
+                    await self._voice_identity_close_window(
+                        "attempt_final" if self._voice_probe is None
+                        else "window_elapsed"
+                    )
+                return False
+            self._voice_identity_matched = True
             self._voice_identity_resolved = True
+            if self._voice_probe is not None:
+                self._voice_probe.mark_matched()
             # Recognition-latency closure (lily-639007: 2.5 min to know a
             # player whose centroid was 2.5h fresh — and nothing persisted
             # said whether the match MISSED or never RAN). The outcome now
             # rides the session report; no log export needed to tell.
             self._voice_id_outcome = (
-                "no_match" if match is None
-                else f"match:{str(match['group_id'])[:16]}:{match['score']:.3f}"
+                f"match:{str(match['group_id'])[:16]}:{match['score']:.3f}"
             )
-            if match is None or match["group_id"] == self.group_id:
-                if match is None:
-                    # Z3: no-match is not resolution while the name door
-                    # is untried — hold memory-characterising speech.
-                    self._voice_identity_no_match_at = time.time()
-                    # V7/V1c resolve-before-propose: the enrolled-voice route
-                    # has now REPORTED (no match). If the roster is already
-                    # stable (game started) on a weak group, resolve_group_
-                    # identity may have DEFERRED the name-set proposal waiting
-                    # on exactly this answer — re-invoke it so the name-set
-                    # hash is quarantined now (never ahead of the biometric,
-                    # and never minted from a heard name alone).
-                    if (
-                        getattr(self, "game_started", False)
-                        and self.group_id_source not in _STRONG_GROUP_SOURCES
-                        and not getattr(self, "device_candidate_group_id", None)
-                    ):
-                        try:
-                            await self.resolve_group_identity("voice_no_match")
-                        except Exception as e:
-                            logger.warning(
-                                "LILY_MEMORY | GROUP_ID_RESOLVE | "
-                                "voice_no_match re-resolve failed: %s", e,
-                            )
-                return False
             logger.info(
-                "LILY_VOICE_ID | MATCH_AT_START | session=%s group=%s score=%.3f",
+                "LILY_VOICE_ID | MATCH_AT_START | session=%s group=%s score=%.3f "
+                "attempt=%d voiced=%.1fs",
                 self.sk.session_id, match["group_id"], match["score"],
+                attempt, voiced,
             )
             staged = await self.stage_device_candidate(
                 match["group_id"], "voice_identity_match"
@@ -1512,6 +2109,7 @@ class LilyIdentityMixin:
                 match["group_id"], "voice_identity_match"
             )
             self.device_identity_verified = True
+            self.identity_confirmed_source = "voice_identity_match"
             self._schedule_fragment_merge(match["group_id"], emb, identities)
             return True
         except Exception as e:
@@ -1521,11 +2119,100 @@ class LilyIdentityMixin:
             self._voice_identity_no_match_at = time.time()
             logger.warning("LILY_VOICE_ID | MATCH_AT_START_FAILED | %s", e)
             return False
+        finally:
+            self._voice_identity_inflight = False
+
+    def _voice_identity_finalize(self) -> None:
+        """Session close: the window closes now if it is still open (the
+        final outcome is written before the receipt)."""
+        if self._voice_identity_resolved or self._voice_identity_matched:
+            return
+        self._sync_voice_probe()
+        # Synchronous close: the re-resolve arm is meaningless at close.
+        self._voice_identity_resolved = True
+        voiced = float(self._voice_identity_voiced_seconds or 0.0)
+        if self._voice_identity_attempts == 0:
+            if voiced < lily_config.voice_min_voiced_seconds():
+                outcome = "insufficient_voiced"
+            elif not lily_config.voice_identity_enabled() or (
+                getattr(self, "supabase", None) is None
+            ):
+                outcome = "disabled"
+            elif not lily_voice_embedder.lily_voice_embedder_loaded():
+                outcome = "embedder_unavailable"
+            else:
+                outcome = "no_attempt"
+        else:
+            outcome = self._voice_id_outcome or "no_match"
+            if not str(outcome).startswith(("match:", "failed:")):
+                outcome = "no_match"
+        self._voice_id_outcome = outcome
+        logger.info(
+            "LILY_VOICE_ID | PROBE_RESOLVED | session=%s outcome=%s "
+            "reason=session_close voiced=%.1fs attempts=%d best=%s",
+            self.sk.session_id, outcome, voiced,
+            self._voice_identity_attempts,
+            _fmt_score(self._voice_identity_best_score),
+        )
+
+    def voice_identity_receipt(self) -> dict:
+        """Rule (f): the receipt that rides lily_sessions.metadata.
+        voice_identity at BOTH write sites (close + 60s heartbeat). Every
+        outcome carries the numbers; `not_attempted`-class values are
+        first-class (S2)."""
+        self._sync_voice_probe()
+        voiced = float(self._voice_identity_voiced_seconds or 0.0)
+        attempts = int(self._voice_identity_attempts or 0)
+        outcome = self._voice_id_outcome
+        if not outcome:
+            if attempts > 0:
+                outcome = "attempted_no_outcome"
+            elif not lily_config.voice_identity_enabled() or (
+                getattr(self, "supabase", None) is None
+            ):
+                outcome = "disabled"
+            elif self._voice_probe is None and self._voice_identity_pcm is None:
+                outcome = "never_ran"
+            elif voiced < lily_config.voice_min_voiced_seconds():
+                outcome = "insufficient_voiced"
+            else:
+                outcome = "pending"
+        probe = self._voice_probe
+        receipt = {
+            "outcome": outcome,
+            "voiced_seconds": round(voiced, 3),
+            "attempts": attempts,
+            "best_score": self._voice_identity_best_score,
+            "best_group": (
+                str(self._voice_identity_best_group)[:16]
+                if self._voice_identity_best_group else None
+            ),
+            "runner_up": self._voice_identity_runner_up,
+            "threshold": lily_config.voice_identity_match_threshold(),
+            "margin": lily_config.voice_identity_match_margin(),
+            "model_tag": lily_config.voice_identity_model_tag(),
+            "gate_source": self._voice_identity_gate_source,
+            "min_voiced_seconds": lily_config.voice_min_voiced_seconds(),
+            "window_seconds": lily_config.voice_probe_window_seconds(),
+            "embed_ms": getattr(self, "_voice_id_embed_ms", None),
+            "resolve_ms": getattr(self, "_voice_id_resolve_ms", None),
+            "enrollment": self._voice_identity_enrollment,
+        }
+        if probe is not None:
+            receipt["probe"] = probe.receipt()
+        return receipt
 
     async def _voice_identity_enroll_at_close(self) -> bool:
-        """Fold this session's captured voice into the group's stored centroid
-        so the next session (any device) recognizes it. Runs at close, off the
-        vocal path; skipped when identity persistence is disallowed (forget).
+        """Fold this session's captured VOICED speech into the group's stored
+        centroid so the next session (any device) recognizes it. Runs at
+        close, off the vocal path; skipped when identity persistence is
+        disallowed (forget).
+
+        VOICE-TRUTH-001 rules (d)/(e): the sample is the UNION of the
+        session's voiced chunks (bounded), never the first 8s of wall-clock
+        audio; a session under min_voiced seconds enrolls NOTHING and the
+        receipt says so ("skipped_insufficient_voiced"); the enrollment
+        quality floor (enroll_min_speech_seconds) still applies above it.
 
         NEVER ENROLLS INTO A THROWAWAY GROUP. This wrote to self.group_id
         unconditionally, and when group resolution had fallen back to the
@@ -1547,12 +2234,46 @@ class LilyIdentityMixin:
         a sample with nowhere real to go is dropped rather than orphaned."""
         if not self._voice_identity_ready() or not self.identity_persistence_allowed():
             return False
-        probe = self._voice_identity_audio_probe()
+        self._sync_voice_probe()
+        voiced = float(self._voice_identity_voiced_seconds or 0.0)
+        min_voiced = lily_config.voice_min_voiced_seconds()
+        gate = self._voice_identity_gate_source
+        if voiced < min_voiced:
+            self._voice_identity_enrollment = {
+                "status": "skipped_insufficient_voiced",
+                "voiced_seconds": round(voiced, 3),
+                "min_voiced_seconds": min_voiced,
+                "gate_source": gate,
+            }
+            logger.info(
+                "LILY_VOICE_ID | ENROLL_SKIPPED_INSUFFICIENT_VOICED | "
+                "session=%s voiced=%.1fs min=%.1fs — nothing is ever enrolled "
+                "under the minimum", self.sk.session_id, voiced, min_voiced,
+            )
+            return False
+        enroll_floor = lily_config.voice_identity_enroll_min_speech_seconds()
+        if voiced < enroll_floor:
+            self._voice_identity_enrollment = {
+                "status": "skipped_below_enroll_floor",
+                "voiced_seconds": round(voiced, 3),
+                "enroll_min_seconds": enroll_floor,
+                "gate_source": gate,
+            }
+            logger.info(
+                "LILY_VOICE_ID | ENROLL_SKIPPED_SHORT | session=%s voiced=%.1fs "
+                "floor=%.1fs", self.sk.session_id, voiced, enroll_floor,
+            )
+            return False
+        probe = self._voice_identity_enroll_probe()
         if probe is None:
             return False
         try:
             emb = await lily_voice_embedder.lily_extract_embedding_async(probe)
             if emb is None:
+                self._voice_identity_enrollment = {
+                    "status": "failed_embedding", "voiced_seconds": round(voiced, 3),
+                    "gate_source": gate,
+                }
                 return False
             tag = lily_config.voice_identity_model_tag()
             existing = await lily_persistence.lily_load_voice_identities(
@@ -1570,6 +2291,7 @@ class LilyIdentityMixin:
             # reinforce its own centroid: 9337B1's bogus `Playing` name-set
             # minted a rival beside the seven-sample canonical Rami row.
             must_match_existing = weak_source or prior_self is None
+            redirect_score = None
             if must_match_existing:
                 candidates = [
                     r for r in existing
@@ -1582,6 +2304,7 @@ class LilyIdentityMixin:
                 )
                 if match is not None:
                     enroll_group = match["group_id"]
+                    redirect_score = round(match["score"], 4)
                     logger.info(
                         "LILY_VOICE_ID | ENROLL_REDIRECTED | session=%s "
                         "from=%s to=%s score=%.3f — folding the sample into "
@@ -1597,6 +2320,10 @@ class LilyIdentityMixin:
                         "reinforcing a rival centroid",
                         self.sk.session_id, self.group_id, source,
                     )
+                    self._voice_identity_enrollment = {
+                        "status": "skipped_orphan_weak_group",
+                        "voiced_seconds": round(voiced, 3), "gate_source": gate,
+                    }
                     return False
                 elif source not in ("participant_metadata", "env_override"):
                     logger.warning(
@@ -1605,6 +2332,10 @@ class LilyIdentityMixin:
                         "match and group provenance cannot found an identity",
                         self.sk.session_id, self.group_id, source,
                     )
+                    self._voice_identity_enrollment = {
+                        "status": "skipped_unverified_group",
+                        "voiced_seconds": round(voiced, 3), "gate_source": gate,
+                    }
                     return False
             prior = next(
                 (r for r in existing if r["group_id"] == enroll_group), None
@@ -1614,13 +2345,45 @@ class LilyIdentityMixin:
                 prior["sample_count"] if prior else 0,
                 emb,
             )
-            return await lily_persistence.lily_upsert_voice_identity(
+            ok = await lily_persistence.lily_upsert_voice_identity(
                 self.supabase, group_id=enroll_group, centroid=centroid,
                 sample_count=count, model_tag=tag,
             )
+            self._voice_identity_enrollment = {
+                "status": "enrolled" if ok else "failed_write",
+                "group_id": enroll_group,
+                "sample_count": count,
+                "voiced_seconds": round(voiced, 3),
+                "gate_source": gate,
+                "model_tag": tag,
+                "redirected_from": (
+                    self.group_id if enroll_group != self.group_id else None
+                ),
+                "redirect_score": redirect_score,
+            }
+            logger.info(
+                "LILY_VOICE_ID | ENROLLED_FROM_VOICED | session=%s group=%s "
+                "n=%d voiced=%.1fs gate=%s tag=%s ok=%s",
+                self.sk.session_id, enroll_group, count, voiced, gate, tag, ok,
+            )
+            return ok
         except Exception as e:
+            self._voice_identity_enrollment = {
+                "status": f"failed:{type(e).__name__}",
+                "voiced_seconds": round(voiced, 3), "gate_source": gate,
+            }
             logger.warning("LILY_VOICE_ID | ENROLL_AT_CLOSE_FAILED | %s", e)
             return False
+
+    def persistence_group_id(self) -> str:
+        """VOICE-TRUTH-001 V2: the ONE group id this session's durable
+        memory AND voiceprints write under. The session memory used to
+        write under the live group (the room name on a cold session) while
+        the voiceprints redirected to the device-stable id — two halves of
+        one night filed under two keys, so the next session staged a device
+        fragment with voices but no memory and the name door short-circuited
+        onto it. Same id, both writers."""
+        return self._effective_enroll_group_id()
 
     async def merge_speakers(
         self, from_label: str, into_player: str, source: str = "operator"
@@ -1700,9 +2463,56 @@ class LilyIdentityMixin:
         if self.supabase is None:
             self.memory_settled.set()  # nothing to load — greeting unblocks
             return
-        await lily_persistence.lily_rekey_group(
-            self.supabase, old, new_group_id, self.sk.session_id
+        # VOICE-TRUTH-001 V4: the rekey and the four reloads (asked history,
+        # known-speaker voiceprints, stored prefs, group memory) are
+        # independent reads/writes — they used to run as five SEQUENTIAL
+        # asyncio.to_thread hops on a sync client that shares its executor
+        # with the ECAPA forward pass (~80s live on 17:51). Gathered now;
+        # the wall-clock is logged (GROUP_ID_UPGRADE_LOADS_MS) and a failed
+        # rekey degrades to a warning instead of killing the door task.
+        async def _none():
+            return None
+
+        loads_t0 = time.monotonic()
+        rekey_res, asked_res, known_res, stored_prefs, memory = (
+            await asyncio.gather(
+                lily_persistence.lily_rekey_group(
+                    self.supabase, old, new_group_id, self.sk.session_id
+                ),
+                lily_bank.lily_load_asked_history(self.supabase, new_group_id),
+                (
+                    lily_persistence.lily_load_voiceprints(
+                        self.supabase, new_group_id
+                    )
+                    if self.stt is not None else _none()
+                ),
+                lily_persistence.lily_load_group_prefs(
+                    self.supabase, new_group_id
+                ),
+                lily_memory.lily_load_group_memory(self.supabase, new_group_id),
+                return_exceptions=True,
+            )
         )
+        logger.info(
+            "LILY_MEMORY | GROUP_ID_UPGRADE_LOADS_MS | session=%s group=%s "
+            "ms=%.0f (rekey + asked + voiceprints + prefs + memory, gathered)",
+            self.sk.session_id, new_group_id,
+            (time.monotonic() - loads_t0) * 1000,
+        )
+        for label_, res in (
+            ("rekey", rekey_res), ("asked_history", asked_res),
+            ("voiceprints", known_res), ("prefs", stored_prefs),
+            ("memory", memory),
+        ):
+            if isinstance(res, BaseException):
+                logger.warning(
+                    "LILY_MEMORY | GROUP_ID_UPGRADE_LOAD_FAILED | session=%s "
+                    "load=%s error=%s", self.sk.session_id, label_, res,
+                )
+        if isinstance(stored_prefs, BaseException):
+            stored_prefs = None
+        if isinstance(memory, BaseException):
+            memory = None
         # RECONCILE-001 (b): heal as we recognize. When a VOICE-VERIFIED match
         # binds this session to an existing group and the old id was the
         # EPHEMERAL room-name orphan this session minted (old == session_id),
@@ -1731,13 +2541,14 @@ class LilyIdentityMixin:
         # Asked history follows the resolved id (rekey moved this
         # session's rows; the reload pulls the group's PRIOR sessions so
         # the no-repeat guard covers rematches immediately).
-        self.asked_history = await lily_bank.lily_load_asked_history(
-            self.supabase, new_group_id
-        )
+        if not isinstance(asked_res, BaseException) and asked_res is not None:
+            self.asked_history = asked_res
         # Refresh known_speakers under the resolved id. 1.6.6 applies this
         # list at stream start, so this primarily protects reconnect paths.
         if self.stt is not None:
             try:
+                if isinstance(known_res, BaseException):
+                    raise known_res
                 # Lazy import (WO-LILY-RECOG-DELIVERY-001): the W3 Cut 3
                 # mixin extraction moved this method here WITHOUT its
                 # lily_agent-module names — SpeakerIdentifier and
@@ -1750,9 +2561,7 @@ class LilyIdentityMixin:
                     SpeakerIdentifier,
                     lily_stt_focus_kwargs,
                 )
-                known_rows = await lily_persistence.lily_load_voiceprints(
-                    self.supabase, new_group_id
-                )
+                known_rows = known_res or []
                 known_speakers = [
                     SpeakerIdentifier(
                         label=row["label"],
@@ -1797,9 +2606,6 @@ class LilyIdentityMixin:
         # the new id (session choices winning); reconcile the in-memory
         # dict the same way — stored keys slot in UNDER this session's
         # spoken choices, opaquely (round_format / media_mode included).
-        stored_prefs = await lily_persistence.lily_load_group_prefs(
-            self.supabase, new_group_id
-        )
         if stored_prefs:
             merged = dict(stored_prefs)
             merged.update(self.prefs or {})
@@ -1809,14 +2615,13 @@ class LilyIdentityMixin:
                 "(post-upgrade)",
                 new_group_id, ",".join(sorted(merged.keys())),
             )
-        memory = await lily_memory.lily_load_group_memory(
-            self.supabase, new_group_id
-        )
         block = lily_memory.lily_build_memory_block(
-            memory, prefs=self.prefs
+            memory, prefs=self.prefs, recognized_by=source
         )
         if block:
             self.memory_block = block  # llm_node injects it next turn
+            if source in _CONFIRMED_IDENTITY_SOURCES:
+                self.identity_confirmed_source = source
             self.memory_total_games = int(
                 (memory or {}).get("total_games") or 0
             )
@@ -1894,61 +2699,75 @@ class LilyIdentityMixin:
         # the door task's own Supabase latency is exactly what the
         # comparison measures.
         self._name_door_entry_seq = self._ctx_snapshot_seq
-        if getattr(self, "device_candidate_group_id", None):
-            # 2026-08-09 amnesia fix: a STAGED device candidate used to slam
-            # this door shut unconditionally — promotion then waited on
-            # voice verification alone, and on a deploy without the ECAPA
-            # deps (or before the vendor labels resolve) that wait was
-            # FOREVER. Absurd ordering: a stated name ALONE opened the door
-            # below, but device-match PLUS the same stated name stayed
-            # quarantined. When the stated name is on the staged file, the
-            # combined evidence (this device's own history + a matching
-            # name) promotes exactly as WEAKLY as the name-only door:
-            # verified=False, so the biometric still runs and still
-            # outranks it (N5 direction preserved). A name NOT on the
-            # staged file keeps the quarantine — a stranger on a shared
-            # device stays a fresh table.
-            staged_names = {
-                str(n).strip().casefold()
-                for n in (
-                    self._device_candidate_memory or {}
-                ).get("player_names") or []
-                if str(n).strip()
-            }
-            if name.casefold() in staged_names:
-                logger.info(
-                    "LILY_MEMORY | NAME_DOOR_DEVICE_MATCH | session=%s "
-                    "name=%s group=%s — stated name is on this device's "
-                    "staged file; promoting weakly (voice still outranks)",
-                    self.sk.session_id, name,
-                    self.device_candidate_group_id,
-                )
-                await self._promote_device_candidate(
-                    "device_plus_name", verified=False
-                )
-                return True
-            return False
+        # VOICE-TRUTH-001 V4: door latency is measured — ts_start here,
+        # ts_resolved when the block becomes visible (identity_promotions).
+        self._name_door_opened_at = time.time()
         if self.group_id_source in _STRONG_GROUP_SOURCES:
             return False
+        # VOICE-TRUTH-001 V2 (Auditor B's fragmentation finding): a STAGED
+        # device candidate used to short-circuit this door to
+        # device_plus_name on the THIN device fragment WITHOUT consulting
+        # the name index — the most-recent rule below never ran, so a
+        # returner whose device had one thin session was re-keyed to that
+        # fragment every night while his 23-session group sat untouched
+        # (Rami: 30 voiceprint groups). The name index is ALWAYS consulted;
+        # when several groups know the stated name, the one with the MOST
+        # HISTORY (sessions, then questions) wins, with the device candidate
+        # as the tie-break and recency as the last resort. The HOTFIX-010
+        # identity boundary holds: a stated name IS verification for this
+        # door (verified=False — the biometric still outranks); a name NOT
+        # on any file promotes nothing.
+        staged = getattr(self, "device_candidate_group_id", None) or None
+        staged_names = {
+            str(n).strip().casefold()
+            for n in (
+                self._device_candidate_memory or {}
+            ).get("player_names") or []
+            if str(n).strip()
+        } if staged else set()
+        name_on_staged = bool(staged) and name.casefold() in staged_names
         try:
             groups = await lily_persistence.lily_groups_for_player_name(
                 self.supabase, name
             )
         except Exception as e:
             logger.warning("LILY_MEMORY | NAME_DOOR_FAILED | %s", e)
-            return False
+            groups = []
         # Z3: the stated-name route has now REPORTED for this table —
         # whatever the result, the identity question is no longer waiting
         # on this door, so the no-match hold may release.
         self._identity_name_door_checked = True
         groups = [g for g in groups if g and g != self.group_id]
         if not groups:
+            if name_on_staged:
+                # The device fragment is the ONLY file that knows this name
+                # (the index query failed or the thin fragment is all
+                # there is): device history + a name ON that history.
+                logger.info(
+                    "LILY_MEMORY | NAME_DOOR_DEVICE_MATCH | session=%s "
+                    "name=%s group=%s — stated name is on this device's "
+                    "staged file and the index names no richer group; "
+                    "promoting weakly (voice still outranks)",
+                    self.sk.session_id, name, staged,
+                )
+                await self._promote_device_candidate(
+                    "device_plus_name", verified=False
+                )
+                return True
             return False
-        if len(groups) == 1:
-            candidate = groups[0]
-        elif len(groups) > _NAME_DOOR_AMBIGUOUS_CEILING:
+        history: dict = {}
+        if len(groups) > 1:
+            try:
+                history = await lily_persistence.lily_group_history(
+                    self.supabase, groups
+                )
+            except Exception as e:
+                logger.warning("LILY_MEMORY | NAME_DOOR_HISTORY_FAILED | %s", e)
+                history = {}
+        if len(groups) > _NAME_DOOR_AMBIGUOUS_CEILING and staged not in groups:
             # Pathological: too many same-name candidates to be one fragmented
-            # person; a wrong guess is likely, so wait for the voice.
+            # person and no device evidence to disambiguate; a wrong guess is
+            # likely, so wait for the voice.
             logger.info(
                 "LILY_MEMORY | NAME_DOOR_AMBIGUOUS | name=%s groups=%d — past "
                 "the ambiguity ceiling (%d); waiting for the voice rather than "
@@ -1956,22 +2775,33 @@ class LilyIdentityMixin:
                 name, len(groups), _NAME_DOOR_AMBIGUOUS_CEILING,
             )
             return False
-        else:
-            # RECONCILE-001 (e): >1 candidate is the COMMON case for a returner
-            # fragmented across groups. Stage the MOST RECENT candidate WEAKLY
-            # (verified=False below) — the ECAPA matcher still runs and still
-            # outranks/rejects it, and a confirmed match then folds the split
-            # groups together via the background merge. lily_groups_for_player_
-            # name returns most-recent-first, so groups[0] is the freshest.
-            candidate = groups[0]
+        candidate = self._pick_name_door_candidate(
+            name, groups, history, staged
+        )
+        if staged and candidate == staged:
             logger.info(
-                "LILY_MEMORY | AMBIGUOUS_PICKED_RECENT | name=%s groups=%d "
-                "picked=%s — staged weakly; the voice matcher still outranks "
-                "and a confirmed match heals the fragments",
-                name, len(groups), candidate,
+                "LILY_MEMORY | NAME_DOOR_DEVICE_MATCH | session=%s "
+                "name=%s group=%s — the index and this device's staged file "
+                "agree; promoting weakly (voice still outranks)",
+                self.sk.session_id, name, staged,
             )
-        staged = await self.stage_device_candidate(candidate, "name_stated")
-        if not staged:
+            await self._promote_device_candidate(
+                "device_plus_name", verified=False
+            )
+            return True
+        if staged and candidate != staged:
+            logger.warning(
+                "LILY_MEMORY | NAME_DOOR_PREFERS_HISTORY | session=%s name=%s "
+                "staged_device=%s (%s) picked=%s (%s) — the device fragment "
+                "is thinner than the group the name index knows; the device "
+                "quarantine is released in favour of the richer group "
+                "(fragment merge is a documented follow-up, not done here)",
+                self.sk.session_id, name, staged,
+                _history_label(history.get(staged)),
+                candidate, _history_label(history.get(candidate)),
+            )
+        staged_ok = await self.stage_device_candidate(candidate, "name_stated")
+        if not staged_ok:
             return False
         logger.info(
             "LILY_MEMORY | NAME_DOOR_OPENED | session=%s name=%s group=%s — "
@@ -1981,6 +2811,31 @@ class LilyIdentityMixin:
         )
         await self._promote_device_candidate("name_stated", verified=False)
         return True
+
+    @staticmethod
+    def _pick_name_door_candidate(name, groups, history, staged):
+        """V2 ranking: most history (sessions, then questions) wins; the
+        staged device candidate breaks ties; recency (the index returns
+        most-recent-first) is the last resort. Pure."""
+        def key(gid):
+            h = history.get(gid) or {}
+            return (int(h.get("sessions") or 0), int(h.get("questions") or 0))
+
+        best = max(key(g) for g in groups)
+        tied = [g for g in groups if key(g) == best]
+        if staged in tied:
+            pick = staged
+        else:
+            pick = tied[0]
+        if len(groups) > 1:
+            logger.info(
+                "LILY_MEMORY | AMBIGUOUS_PICKED_HISTORY | name=%s groups=%d "
+                "picked=%s sessions=%d questions=%d tie_break=%s — staged "
+                "weakly; the voice matcher still outranks",
+                name, len(groups), pick, best[0], best[1],
+                "device" if pick == staged else "recency",
+            )
+        return pick
 
     async def resolve_group_identity(self, trigger: str) -> None:
         """Re-resolve the group id once the roster has stabilized (game

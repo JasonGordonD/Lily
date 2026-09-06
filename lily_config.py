@@ -630,14 +630,91 @@ def voice_identity_enabled() -> bool:
 
 
 def voice_identity_model_tag() -> str:
-    """Provenance tag pinned to the embedding space (model + dim). Matching
-    only ever compares centroids sharing this tag, so a model swap can never
-    compare across incompatible embedding spaces — it starts a fresh pool."""
-    return _get("LILY_VOICE_IDENTITY_MODEL_TAG", "ecapa-192-v1")
+    """Provenance tag pinned to the embedding space (model + dim) AND to the
+    capture discipline. Matching only ever compares centroids sharing this
+    tag, so a model swap can never compare across incompatible embedding
+    spaces — it starts a fresh pool.
+
+    WO-LILY-VOICE-TRUTH-001 V1(d): bumped v1 -> v2. Same ECAPA model, same
+    192 dims — but every v1 centroid was computed from the first 2.5-8s of
+    WALL-CLOCK audio, which in every instrumented session was room tone
+    recorded 20+s before any human spoke (same-device sessions scored 0.99
+    against each other; 0/7 cross-device matches ever; a probe with zero
+    seconds of the player scored 0.70 against his 26-sample centroid). The
+    v2 pool holds only centroids computed from VOICED audio (STT-segment /
+    VAD gated). v1 rows are retained and never consulted; migration 027
+    retires them as the audit trail (never deleted)."""
+    return _get("LILY_VOICE_IDENTITY_MODEL_TAG", "ecapa-192-v2")
+
+
+# -- WO-LILY-VOICE-TRUTH-001 V1: the SPEECH GATE, as stated rules -------------
+#
+# The ECAPA probe used to be wall-clock audio: every frame from
+# track_subscribed fed the buffer, the one match fired at 2.5s of FRAMES, and
+# enrollment read the first 8s. Nothing checked that a human was speaking.
+# The gate below is a stated rule, never "after speech":
+#   (a) voiced signal = frames whose timestamps fall inside a human (non-LILY)
+#       STT segment [segment_start, segment_end] from the transcript events
+#       (primary), OR the framework VAD user_speaking flag when segment
+#       timing is unavailable — the active source is logged and persisted
+#       as gate_source. An energy threshold is never the sole gate.
+#   (b) minimum voiced audio before the FIRST embedding: min_voiced_seconds.
+#   (c) retry a match after each additional retry_voiced_seconds of voiced
+#       audio, until a match or probe_window_seconds of session wall-clock.
+#   (d) enrollment at close uses the UNION of voiced chunks, bounded by
+#       enroll_max_seconds.
+#   (e) a session ending under the minimum persists outcome=
+#       "insufficient_voiced" with voiced_seconds and enrolls NOTHING.
+#   (f) every outcome persists {outcome, voiced_seconds, attempts,
+#       best_score, runner_up, threshold, model_tag, gate_source}.
+
+
+def voice_min_voiced_seconds() -> float:
+    """(b) Cumulative VOICED audio required before the first embedding/match
+    attempt, and the hard floor below which nothing is ever enrolled (e)."""
+    return max(0.5, _get_float("LILY_VOICE_MIN_VOICED_SECONDS", 3.0))
+
+
+def voice_retry_voiced_seconds() -> float:
+    """(c) Additional voiced audio that earns another match attempt after a
+    no-match — recognition is retried on new evidence, never one-shot."""
+    return max(0.25, _get_float("LILY_VOICE_RETRY_VOICED_SECONDS", 2.0))
+
+
+def voice_probe_window_seconds() -> float:
+    """(c) Session wall-clock hold during which match attempts continue.
+    Past it the probe resolves (no_match / insufficient_voiced) and the
+    identity question closes for the biometric route."""
+    return max(1.0, _get_float("LILY_VOICE_PROBE_WINDOW_SECONDS", 60.0))
+
+
+def voice_enroll_max_seconds() -> float:
+    """(d) Upper bound on the voiced union enrolled at close (and the size
+    of the in-memory voiced buffer)."""
+    return max(1.0, _get_float("LILY_VOICE_ENROLL_MAX_SECONDS", 30.0))
+
+
+def voice_gate_source() -> str:
+    """(a) Explicit gate selection: "auto" (default — STT segments, with the
+    VAD flag engaging only when no timed human segment has arrived after
+    VOICE_GATE_VAD_FALLBACK_AFTER_SECONDS of VAD-detected speech), "stt"
+    (segments only), or "vad" (VAD flag only)."""
+    value = (_get("LILY_VOICE_GATE_SOURCE", "auto") or "auto").strip().lower()
+    return value if value in ("auto", "stt", "vad") else "auto"
+
+
+# (a) In "auto" mode the VAD fallback engages only after this much cumulative
+# VAD-detected user speech has passed with ZERO timed human STT segments —
+# i.e. the segment feed is demonstrably unavailable, not merely late.
+VOICE_GATE_VAD_FALLBACK_AFTER_SECONDS = 15.0
 
 
 def voice_identity_match_min_speech_seconds() -> float:
-    """Speech needed before RECOGNITION is attempted — deliberately far
+    """LEGACY (pre VOICE-TRUTH-001): the wall-clock frame floor the old
+    one-shot match fired at. The voiced gate (voice_min_voiced_seconds)
+    supersedes it; kept only so an env override still parses.
+
+    Speech needed before RECOGNITION is attempted — deliberately far
     below the enrollment minimum.
 
     Enrollment folds a sample into a stored centroid and wants a long clean
@@ -676,8 +753,9 @@ def identity_no_match_hold_seconds() -> float:
 
 def voice_identity_enroll_min_speech_seconds() -> float:
     """A player is enrolled at session close only above this much captured
-    speech — short utterances yield noisy embeddings that would blur the
-    centroid."""
+    VOICED speech — short utterances yield noisy embeddings that would blur
+    the centroid. This is the enrollment QUALITY floor; the hard never-
+    enroll floor is voice_min_voiced_seconds (VOICE-TRUTH-001 rule (e))."""
     return _get_float("LILY_VOICE_IDENTITY_ENROLL_MIN_SPEECH_SECONDS", 8.0)
 
 

@@ -128,6 +128,15 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_VOICE_IDENTITY_MATCH_THRESHOLD",
     "LILY_VOICE_IDENTITY_MATCH_MARGIN",
     "LILY_VOICE_IDENTITY_ENROLL_MIN_SPEECH_SECONDS",
+    # WO-LILY-VOICE-TRUTH-001 V1 — the speech-gate rules (a)-(d) ship on
+    # their in-code defaults (min voiced 3.0s, retry 2.0s, window 60s,
+    # enroll max 30s, gate auto); tune via deploy.yml `vars.` only if a
+    # room's STT timing proves unusable.
+    "LILY_VOICE_MIN_VOICED_SECONDS",
+    "LILY_VOICE_RETRY_VOICED_SECONDS",
+    "LILY_VOICE_PROBE_WINDOW_SECONDS",
+    "LILY_VOICE_ENROLL_MAX_SECONDS",
+    "LILY_VOICE_GATE_SOURCE",
     # HOTFIX-008 Z3 — how long a biometric no-match keeps the identity
     # probe open for the stated-name door. Ships on its in-code default
     # (180s); tune via deploy.yml `vars.` if a room needs it.

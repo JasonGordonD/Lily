@@ -219,8 +219,11 @@ def test_late_recognition_fires_once_after_greet():
     assert "MID-SESSION" in ack and "refresher" in ack
     # HOTFIX-010 V1: a GROUP match is not per-person recognition. No voice is
     # matched present (sk.players is empty), so the beat names NO ONE — it must
-    # NOT recite the remembered name from memory_player_names.
-    assert "Rami" not in ack
+    # NOT recite the remembered name from memory_player_names. (The operator's
+    # verbatim PAIR 1 rule carries its own "'welcome back, Rami'" example —
+    # stripped, it is the rule's example, not a recited name.)
+    from lily_agent import _PAIR1_CONFIRMED_VS_GUESSED
+    assert "Rami" not in ack.replace(_PAIR1_CONFIRMED_VS_GUESSED, "")
     assert "ROSTER field is the sole naming authority" in ack
     assert "do not read any roster of names from memory" in ack
     assert game.sk.pacing == "relaxed"  # stored usual honored
@@ -259,18 +262,22 @@ def test_claimed_returner_state_is_deferred_to_first_utterance():
     game._first_human_utterance_seen = True
     text = game.greeting_instructions()
     assert "CLAIMED RETURNER" in text
-    # V1: voice-framing, not card-framing. The old "my table card doesn't have
-    # you tonight" instruction is gone; the card phrasing survives only as a
-    # banned example.
-    assert "I don't recognise the voice yet" in text
+    # WO-LILY-VOICE-TRUTH-001 PAIR 2 (operator decision, verbatim): the gap
+    # is not narrated at all — no card line, no device line, no "I don't
+    # recognize"; the name is asked for as if it's a new table.
+    assert "I don't recognise the voice yet" not in text
     assert "my table card doesn't have you tonight" not in text
+    assert "don't narrate the gap" in text
+    assert "Ask for the name in one light beat as if it's a new table" in text
     assert "refresher" in text
     assert "Never perform vague amnesia" in text
 
 
 def test_prompt_carries_the_claimed_returner_law():
     assert "CLAIMED RETURNER" in PROMPT_NORM
-    assert "my table card doesn't have you tonight" in PROMPT_NORM
+    # PAIR 2: the prompt carries the SAME verbatim rule as the greeting.
+    assert "don't narrate the gap" in PROMPT_NORM
+    assert "my table card doesn't have you tonight" not in PROMPT_NORM
     assert "never claim recognition you don't have" in PROMPT_NORM.lower()
 
 

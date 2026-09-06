@@ -80,6 +80,7 @@ def _game(session_id):
     g.forget_state = None
     g.game_started = False
     g._voice_identity_pcm = [0.1, 0.2, 0.3]
+    g._voice_identity_voiced_seconds = 12.0  # VOICE-TRUTH-001: voiced, gated
     g._voice_identity_attempted = False
     g._voice_identity_resolved = False
     g.stt = None

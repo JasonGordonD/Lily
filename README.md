@@ -19,14 +19,12 @@ Living documentation lives here. Dated work-order and fix entries live in
 Spoken-surface freeze before any speech/delivery extract:
 [docs/voice_inventory.md](docs/voice_inventory.md).
 
-Integration in flight — `integ/wave2` (audit-driven fix wave + refactor Stage 1a):
-W1 delivery truth (`fix/w1-delivery-truth`), W3 evaluation integrity
-(`fix/w3-eval-integrity`), W2 control gates (`fix/w2-control-gates`) and
-`refactor/stage1a` are merged on the staging branch (2864 tests green, 3.11 +
-3.13); W4 voice truth and W5 LLM-usage telemetry land next, then a composition
-review of the merged tree gates the push to `main` (which auto-deploys). Every
-branch is pushed; the dated entries are at the top of [CHANGELOG.md](CHANGELOG.md).
-This block is removed when the wave lands on `main`.
+Integration status — `integ/wave2` fully landed on `main`: W1 delivery truth,
+W3 evaluation integrity, W2 control gates, W4 voice truth, W5 LLM-usage
+telemetry, refactor Stage 1a (2939 tests, 3.11 + 3.13). A second composition
+review of the merged tree is in flight; the dated entries are at the top of
+[CHANGELOG.md](CHANGELOG.md). Live-call receipts (build → session → row) are
+the acceptance for the live-found defects — see each CHANGELOG entry.
 
 ## Live-fire fix classes (WO-LILY-LIVEFIRE-001)
 

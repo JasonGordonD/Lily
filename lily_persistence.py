@@ -1455,10 +1455,18 @@ async def lily_groups_for_player_name(
         return []
     seen: list = []
     try:
-        for variant in dict.fromkeys(
+        # VOICE-TRUTH-001 V4: the four case-variant queries were SEQUENTIAL
+        # asyncio.to_thread hops on a sync client (sharing its executor with
+        # the ECAPA forward pass); gathered now — one round-trip's latency,
+        # not four. Result order is preserved (variant order, then
+        # most-recent-first within a variant) so groups[0] stays the
+        # freshest.
+        variants = list(dict.fromkeys(
             (name, name.lower(), name.capitalize(), name.title())
-        ):
-            rows = await asyncio.to_thread(
+        ))
+        t0 = time.monotonic()
+        results = await asyncio.gather(*[
+            asyncio.to_thread(
                 lambda v=variant: supabase.table("lily_memories")
                 .select("group_id, played_at")
                 .contains("player_names", [v])
@@ -1466,6 +1474,13 @@ async def lily_groups_for_player_name(
                 .limit(20)
                 .execute()
             )
+            for variant in variants
+        ])
+        logger.info(
+            "LILY_MEMORY | NAME_LOOKUP_MS | name=%s variants=%d ms=%.0f",
+            name, len(variants), (time.monotonic() - t0) * 1000,
+        )
+        for rows in results:
             for row in rows.data or []:
                 gid = row.get("group_id")
                 if gid and gid not in seen:
@@ -1476,6 +1491,47 @@ async def lily_groups_for_player_name(
         )
         return []
     return seen
+
+
+async def lily_group_history(supabase: SupabaseClient, group_ids) -> dict:
+    """VOICE-TRUTH-001 V2: how much HISTORY each candidate group carries —
+    {group_id: {sessions, questions, last_played_at}} from lily_memories
+    (one query). The stated-name door prefers the group with the most
+    history over the thinnest recent fragment; the device candidate breaks
+    ties. Returns {} on any failure (the door then falls back to recency
+    order — recognition is never load-bearing)."""
+    ids = [str(g) for g in (group_ids or []) if g]
+    if supabase is None or not ids:
+        return {}
+    try:
+        res = await asyncio.to_thread(
+            lambda: supabase.table("lily_memories")
+            .select("group_id, question_count, played_at")
+            .in_("group_id", ids)
+            .execute()
+        )
+        out: dict = {}
+        for row in res.data or []:
+            if not isinstance(row, dict):
+                continue
+            gid = row.get("group_id")
+            if not gid:
+                continue
+            h = out.setdefault(
+                gid, {"sessions": 0, "questions": 0, "last_played_at": None}
+            )
+            h["sessions"] += 1
+            try:
+                h["questions"] += int(row.get("question_count") or 0)
+            except (TypeError, ValueError):
+                pass
+            played = row.get("played_at")
+            if played and (h["last_played_at"] is None or str(played) > str(h["last_played_at"])):
+                h["last_played_at"] = played
+        return out
+    except Exception as e:
+        logger.warning("LILY_MEMORY | GROUP_HISTORY_FAILED | error=%s", e)
+        return {}
 
 
 async def lily_load_voiceprints_by_players(

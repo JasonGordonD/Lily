@@ -192,12 +192,26 @@ def test_an_already_recognised_table_is_left_alone():
     assert _run(g.maybe_recognize_by_stated_name("Rami")) is False
 
 
-def test_a_pending_device_candidate_is_not_fought_over():
-    """PROTECTED — the device path is mid-verification; two resolvers
-    racing for the same session is how the group id became a throwaway."""
+def test_a_pending_device_candidate_no_longer_slams_the_name_door(monkeypatch):
+    """REVERSED by WO-LILY-VOICE-TRUTH-001 V2 (Auditor B's fragmentation
+    finding). A staged device candidate used to short-circuit this door
+    onto the THIN device fragment without consulting the name index — the
+    most-recent rule never ran and Rami ended up in 30 voiceprint groups
+    while his 23-session group sat untouched. The index is ALWAYS
+    consulted: a stated name that the index knows on a richer group wins
+    over a device fragment that does not carry the name; the door promotes
+    weakly (verified=False, the voice still outranks)."""
     g = _game(groups_for_name=[REAL_TABLE])
     g.device_candidate_group_id = "grp_being_verified"
-    assert _run(g.maybe_recognize_by_stated_name("Rami")) is False
+    g._device_candidate_memory = {"total_games": 1, "player_names": []}
+
+    async def _history(sb, gids):
+        return {REAL_TABLE: {"sessions": 23, "questions": 210}}
+
+    monkeypatch.setattr(lily_persistence, "lily_group_history", _history)
+    assert _run(g.maybe_recognize_by_stated_name("Rami")) is True
+    assert g.upgrades == [(REAL_TABLE, "name_stated")]
+    assert g.device_identity_verified is False
 
 
 def test_no_supabase_no_lookup():
@@ -272,7 +286,9 @@ def test_a_staged_candidate_plus_its_own_stated_name_promotes():
 def test_a_stranger_name_on_a_staged_device_stays_quarantined():
     """A shared device is not an identity: a name NOT on the staged file
     keeps the quarantine — nothing promotes, nothing is fought over."""
-    g = _game(groups_for_name=[REAL_TABLE])
+    # V2: the index is name-aware — it knows no table for "Chris" (the
+    # fake used to return the same list for every name).
+    g = _game(groups_for_name=[])
     g.device_candidate_group_id = REAL_TABLE
     g._device_candidate_memory = {"total_games": 4, "player_names": ["Rami"]}
     promoted = []

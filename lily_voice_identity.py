@@ -76,6 +76,34 @@ def lily_cosine_similarity(a, b) -> Optional[float]:
     return sum(x * y for x, y in zip(na, nb))
 
 
+def lily_rank_voice(probe, candidates) -> list:
+    """Score a probe embedding against every candidate centroid and return
+    [(score, group_id), ...] sorted best-first (stable on ties). Pure; []
+    when nothing is scorable. WO-LILY-VOICE-TRUTH-001 V1(e): the receipt
+    must carry the NUMBER on every outcome — a no-match is "best 0.62 vs
+    threshold 0.75", never a bare None — so the ranking is exposed
+    separately from the threshold decision."""
+    pn = lily_l2_normalize(probe)
+    if pn is None or not candidates:
+        return []
+    scored = []
+    for cand in candidates:
+        try:
+            gid = cand.get("group_id")
+            centroid = cand.get("centroid")
+        except AttributeError:
+            continue
+        if not gid:
+            continue
+        sim = lily_cosine_similarity(pn, centroid)
+        if sim is None:
+            continue
+        scored.append((sim, gid))
+    # Stable sort by score descending (Python's sort is stable; negate to
+    # keep original order on ties).
+    return sorted(scored, key=lambda s: s[0], reverse=True)
+
+
 def lily_match_voice(
     probe,
     candidates,
@@ -93,27 +121,9 @@ def lily_match_voice(
 
     Pure ranking: no I/O, no side effects. Deterministic — ties break on
     the candidates' given order (stable)."""
-    pn = lily_l2_normalize(probe)
-    if pn is None or not candidates:
+    scored_sorted = lily_rank_voice(probe, candidates)
+    if not scored_sorted:
         return None
-    scored = []
-    for cand in candidates:
-        try:
-            gid = cand.get("group_id")
-            centroid = cand.get("centroid")
-        except AttributeError:
-            continue
-        if not gid:
-            continue
-        sim = lily_cosine_similarity(pn, centroid)
-        if sim is None:
-            continue
-        scored.append((sim, gid))
-    if not scored:
-        return None
-    # Stable sort by score descending (Python's sort is stable; negate to
-    # keep original order on ties).
-    scored_sorted = sorted(scored, key=lambda s: s[0], reverse=True)
     best_score, best_gid = scored_sorted[0]
     runner_up = scored_sorted[1][0] if len(scored_sorted) > 1 else None
     if best_score < threshold:

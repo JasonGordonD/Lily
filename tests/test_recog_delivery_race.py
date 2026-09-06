@@ -89,10 +89,15 @@ def _game(**kw):
     game._whats_new_pending = False
     game.persist_prefs = lambda *a, **k: None
     game.dispatches = []
-    game.gated_say = (
-        lambda key, act, instr, source=None, **kwargs:
-        game.dispatches.append((key, act, instr, source)) or True
-    )
+
+    def _gated_say(key, act, instr, source=None, **kwargs):
+        game.dispatches.append((key, act, instr, source))
+        # The real gated_say records the act under the speech handle it
+        # dispatched (lily_speech_delivery); the V3 flight binds to it.
+        game._dispatched_act_by_speech[f"s-{act}-{len(game.dispatches)}"] = act
+        return True
+
+    game.gated_say = _gated_say
     # The 17:51 shape: the cold opener already aired.
     game.say_registry.claim("session_greet", owner="greet-1")
     for k, v in kw.items():
@@ -144,6 +149,19 @@ def _confirm(game, text, speech_id="s-organic", **kw):
 
 def _recog_dispatches(game):
     return [d for d in game.dispatches if d[1] == "late_recognition"]
+
+
+def _play_out_late_beat(game, text="Took me a second — I know this table."):
+    """WO-LILY-VOICE-TRUTH-001 V3: a dispatched late beat stamps nothing at
+    dispatch. Drive its own generation (snapshot under ITS speech id, first
+    frame, confirm) — the only path that may stamp late_recognition_beat."""
+    flight = game._late_recognition_flight
+    assert flight is not None and flight["speech_id"], "no beat in flight"
+    beat_id = flight["speech_id"]
+    game.note_generation_snapshot(speech_id=beat_id)
+    game.note_recognition_playout_started(beat_id)
+    _confirm(game, text, speech_id=beat_id)
+    return beat_id
 
 
 # -- THE RACE: the fixture the original work lacked ---------------------------
@@ -201,6 +219,13 @@ def test_1751_slow_name_door_still_delivers_recognition(monkeypatch):
         "total recognition blackout"
     )
     assert "[RETURNING TABLE]" in recog[0][2]
+    # WO-LILY-VOICE-TRUTH-001 V3 (Auditor D P1-2): the dispatch STAMPS
+    # NOTHING — the pre-fix line here pinned the defect (stamp at dispatch,
+    # keyless: a suppressed beat had already retired every lane). The fact
+    # lands only when the beat's own generation CONFIRMS.
+    assert game.recognition_aired() is None
+    assert game.late_recognition_blocked_reason() == "recognition_beat_inflight"
+    _play_out_late_beat(game)
     fact = game.recognition_aired()
     assert fact is not None and fact["source"] == "late_recognition_beat"
     # And exactly once — the antirepeat guarantee holds.
@@ -228,9 +253,12 @@ def test_fast_name_door_stamps_only_on_confirm(monkeypatch):
     assert game.late_recognition_blocked_reason() == (
         "recognition_carry_inflight"
     )
-    # The organic reply snapshots WITH the block, then plays out in full.
-    game.note_generation_snapshot()
+    # The organic reply snapshots WITH the block (under ITS OWN speech id —
+    # V3), then plays out in full.
+    game.note_generation_snapshot(speech_id="s-organic")
     assert game._name_door_watch["inflight_seq"] is not None
+    assert "s-organic" in game._recognition_carriers
+    game.note_recognition_playout_started("s-organic")
     _confirm(game, "Rami! Eighteen games deep — welcome back.")
     fact = game.recognition_aired()
     assert fact is not None and fact["source"] == "name_door_organic"
@@ -250,14 +278,17 @@ def test_carried_organic_cut_re_arms_the_beat(monkeypatch):
 
     _patch_persistence(monkeypatch, lookup=instant_lookup)
     asyncio.run(game.maybe_recognize_by_stated_name("Rami"))
-    game.note_generation_snapshot()
+    game.note_generation_snapshot(speech_id="s-organic")
+    game.note_recognition_playout_started("s-organic")  # it reached the air
     _confirm(game, "Rami! Welcome—", interrupted=True)
     assert game.recognition_aired() is None
     assert game._late_recognition_pending is True
     assert game._late_recognition_promotion_owed is True
-    # The seam delivers the owed beat.
+    # The seam delivers the owed beat; it stamps on ITS confirm (V3).
     assert game.flush_late_recognition_at_seam() is True
     assert len(_recog_dispatches(game)) == 1
+    assert game.recognition_aired() is None
+    _play_out_late_beat(game)
     assert game.recognition_aired()["source"] == "late_recognition_beat"
 
 
@@ -328,6 +359,7 @@ def test_owed_beat_survives_game_start_and_fires_between_questions(
     assert "compact" in instr
     assert "refresher" not in instr.lower() or "do NOT offer a refresher" in instr
     assert "hand straight back to the game" in instr
+    _play_out_late_beat(game)
     assert game.recognition_aired()["source"] == "late_recognition_beat"
     # Once. The seam cannot double it.
     assert game.flush_late_recognition_at_seam() is False
@@ -359,8 +391,11 @@ def test_game_start_ride_along_stamps_on_confirm():
     game.note_game_start_carries_recognition()
     assert game._late_recognition_pending is False
     assert game.recognition_aired() is None
-    game.note_generation_snapshot()  # the kickoff composite's snapshot
-    _confirm(game, "Welcome back — round one, here we go.")
+    # The kickoff composite's snapshot, under its own speech id (V3).
+    game._dispatched_act_by_speech["s-kickoff"] = "game_start"
+    game.note_generation_snapshot(speech_id="s-kickoff")
+    game.note_recognition_playout_started("s-kickoff")
+    _confirm(game, "Welcome back — round one, here we go.", speech_id="s-kickoff")
     assert game.recognition_aired()["source"] == "game_start_ride_along"
 
 
@@ -370,12 +405,15 @@ def test_game_start_ride_along_cut_re_arms_the_owed_beat():
     game._game_start_committed = True
     game.game_started = True
     game.note_game_start_carries_recognition()
-    game.note_generation_snapshot()
-    _confirm(game, "Welcome ba—", interrupted=True)
+    game._dispatched_act_by_speech["s-kickoff"] = "game_start"
+    game.note_generation_snapshot(speech_id="s-kickoff")
+    game.note_recognition_playout_started("s-kickoff")
+    _confirm(game, "Welcome ba—", speech_id="s-kickoff", interrupted=True)
     assert game.recognition_aired() is None
     assert game._late_recognition_pending is True
     assert game._late_recognition_promotion_owed is True
     assert game.flush_late_recognition_at_seam() is True
+    _play_out_late_beat(game)
     assert game.recognition_aired()["source"] == "late_recognition_beat"
 
 
@@ -437,10 +475,15 @@ def test_identity_promotion_events_carry_the_investigation_fields(
     assert isinstance(ev["ts"], float)
     assert ev["short_circuit_decision"] == "carried_pending_confirm"
     assert ev["carried_memory"] is True
-    # The confirm updates the verdict in place.
-    game.note_generation_snapshot()
+    # V4: the door latency rides the event (ts_start -> ts_resolved).
+    assert isinstance(ev["ts_start"], float) and isinstance(ev["door_ms"], float)
+    assert ev["ts_resolved"] >= ev["ts_start"]
+    # The confirm updates the verdict in place — keyed to the carrier.
+    game.note_generation_snapshot(speech_id="s-organic")
+    game.note_recognition_playout_started("s-organic")
     _confirm(game, "Rami! Welcome back.")
     assert ev["short_circuit_decision"] == "organic_confirmed"
+    assert ev["carrier_speech_id"] == "s-organic"
     assert "confirmed_at" in ev
 
 
