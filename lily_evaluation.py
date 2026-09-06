@@ -360,6 +360,13 @@ def _numbers_named_in(normalized: str) -> set[str]:
         if tok.isdigit():
             out.add(str(int(tok)))
             continue
+        # Review fix (a4b953c P1): "one" inside a phrase is a pronoun far
+        # more often than a count — "no one knows", "which one", "one sec",
+        # "say that one more time" — and every one of those scored against
+        # a canonical of 1. A bare "one" still normalizes to "1" and takes
+        # the E1 path; "the answer is one" goes to the judge.
+        if tok == "one":
+            continue
         value = _small_number([tok])
         if value is not None:
             out.add(str(value))
@@ -1256,9 +1263,11 @@ near-pronunciations, STT manglings, and the right idea in the wrong costume
 all count as correct. A hedge around the right answer is still correct.
 A genuinely different answer is incorrect. A meaningfully incomplete but
 on-target answer is partial.
-The same player may appear more than once: each later attempt is that
-player's revision and supersedes their earlier one, so judge a player on
-their LAST attempt ("eight... sorry, six" is an answer of six).
+The same player may appear more than once. A later attempt that names a
+DIFFERENT answer is a revision and supersedes the earlier one ("eight...
+sorry, six" is an answer of six). A later hedge, hold, apology or filler
+("hang on", "sorry", "I'm not sure") is not a revision — the earlier
+attempt still stands as that player's answer.
 
 Respond with ONLY a JSON object, no markdown fences, exactly this shape:
 {"verdict": "correct" | "incorrect" | "partial",

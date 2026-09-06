@@ -159,7 +159,10 @@ _VOCATIVE_LILY_RE = _re.compile(
 # addressed hold re-armed on each one — the game never advanced. A
 # bracketed diarization tag is never speech; strip every one, anywhere
 # in the final (concatenated finals carry inner tags too).
-_SPEAKER_TAG_RE = _re.compile(r"\[(?:S\d+|[A-Za-z][\w .'’-]{0,47})\]\s*")
+# Review fix (a4b953c P2): the plugin emits exactly "[{speaker_id}] {text}"
+# and nothing else in brackets (lily_stt_tuning.py:80), so any bracketed
+# label is a speaker tag — "[Éric]", "[123]" and long labels included.
+_SPEAKER_TAG_RE = _re.compile(r"\[[^\[\]\n]{1,80}\]\s*")
 
 
 def lily_strip_speaker_tags(text: str) -> str:
