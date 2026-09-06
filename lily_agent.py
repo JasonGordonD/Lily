@@ -380,6 +380,52 @@ def _chat_items(chat_ctx) -> list:
     return items
 
 
+def lily_spawn(coro, name: str, *, game=None):
+    """Fire-and-forget with an exception observer (REFACTOR-STAGE-1B-001
+    P1-5). `asyncio.ensure_future(coro)` alone leaves a raising game
+    coroutine with no consumer: the fault surfaces, if ever, as asyncio's
+    "Task exception was never retrieved" at garbage-collection time, with
+    no session id and no count. This attaches a done-callback that
+    retrieves the exception, logs `LILY_TASK | FAULT | name=<name>` at ERROR
+    with the traceback, and counts on game._task_faults, whose consumer is
+    lily_sessions.metadata.session_metrics.task_faults
+    (lily_session_metadata). Cancellation is not a fault. Returns the task.
+
+    Test seams that replace asyncio.ensure_future (consume-the-coroutine
+    fakes) return non-tasks; those are returned untouched."""
+    task = asyncio.ensure_future(coro)
+    add = getattr(task, "add_done_callback", None)
+    if not callable(add):
+        return task
+
+    def _observe(t) -> None:
+        try:
+            if t.cancelled():
+                return
+            exc = t.exception()
+        except Exception:  # noqa: BLE001 — never raise out of a done-callback
+            return
+        if exc is None:
+            return
+        faults = "?"
+        if game is not None:
+            try:
+                game._task_faults = int(getattr(game, "_task_faults", 0) or 0) + 1
+                faults = game._task_faults
+            except Exception:  # noqa: BLE001 — a fake game must not mask the log line
+                pass
+        logger.error(
+            "LILY_TASK | FAULT | name=%s session=%s faults=%s error_class=%s "
+            "error=%s",
+            name, getattr(getattr(game, "sk", None), "session_id", "?"),
+            faults, type(exc).__name__, str(exc)[:300],
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+    add(_observe)
+    return task
+
+
 def _message_text(msg) -> str:
     content = getattr(msg, "content", None)
     if isinstance(content, list):
@@ -4728,7 +4774,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     open_qnum, reason=f"{source}_breath_no_supply"
                 )
 
-        asyncio.ensure_future(_breathe())
+        lily_spawn(_breathe(), "breathe", game=self)
         return True
 
     # -- WO-LILY-QUESTION-FIRING-001: fusion-clipped delivery --------------
@@ -4767,7 +4813,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 await asyncio.sleep(breath)
             self._fire_owed_fusion_delivery(source="fusion_clip_immediate")
 
-        asyncio.ensure_future(_immediate())
+        lily_spawn(_immediate(), "fusion_clip_immediate", game=self)
         # Fix 2 — watchdog backstop; one task per owed delivery.
         task = self._fusion_delivery_watchdog_task
         if task is None or task.done():
@@ -4933,7 +4979,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 return
             self.open_window(duration=duration, **extra)
 
-        asyncio.ensure_future(_discharge())
+        lily_spawn(_discharge(), "discharge", game=self)
 
     def open_window(
         self,
@@ -8636,7 +8682,7 @@ def _lily_schedule_floor_if_owed(game, reason: str) -> None:
     async def _run() -> None:
         fire(reason)
 
-    asyncio.ensure_future(_run())
+    lily_spawn(_run(), "floor_line", game=game)
 # ---------------------------------------------------------------------------
 # The agent
 # ---------------------------------------------------------------------------
@@ -11167,11 +11213,13 @@ def lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics) -> di
     # handler_faults — lifted session/room handlers that raised (HOTFIX-
     # STT-QUARANTINE-001 guard, LILY_STT | HANDLER_FAULT); divergence_net_
     # faults — HOTFIX-005/006 safety nets that raised inside their own check
-    # (LILY_DIVERGENCE_NET | FAULT). Always present, 0 when nothing fired,
-    # so "no faults" is a stated value.
+    # (LILY_DIVERGENCE_NET | FAULT); task_faults — fire-and-forget game
+    # coroutines that raised (lily_spawn, LILY_TASK | FAULT). Always
+    # present, 0 when nothing fired, so "no faults" is a stated value.
     for key, attr in (
         ("handler_faults", "_stt_handler_faults"),
         ("divergence_net_faults", "_divergence_net_faults"),
+        ("task_faults", "_task_faults"),
     ):
         session_block[key] = int(getattr(game, attr, 0) or 0)
     # P1-3: the telemetry writers' failure counters (addressee log/label,
