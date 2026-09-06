@@ -1,3 +1,12 @@
+# STATUS (WO-LILY-DELIVERY-TRUTH-001 A14): INVESTIGATION NOTES, NOT A RECORD.
+# This file is a self-declared RECONSTRUCTION (see PROVENANCE below). Its
+# timings contradict the real transcript rows of the same call
+# (tests/fixtures/live_20260814_1751_gameflow.txt — lily_transcripts for
+# lily-FD3994-358c0ac8, ordered by created_at). Treat every line below as
+# an investigator's note about the defect classes, never as evidence of
+# what aired when; acceptance tests pin the real-row fixture
+# (tests/test_delivery_truth_001.py) and this file only for its notes.
+#
 # live_20260814_1751_hostloop.txt — WO-LILY-AIRGATE-001 evidence transcript
 # Live call 2026-08-14 17:51 EDT (host-loop airing failures).
 #

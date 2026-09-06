@@ -63,7 +63,24 @@ def test_voice_id_outcome_stamps_exist_in_the_match_path():
     )
     assert '_voice_id_outcome' in src
     assert '"no_match"' in src
-    # And both session-end metadata writes carry the block.
-    module_src = inspect.getsource(lily_agent)
-    assert module_src.count('"voice_identity": {') >= 2
-    assert '"never_ran"' in module_src
+    # And the metadata lane carries the block — WO-LILY-DELIVERY-TRUTH-001
+    # made both write sites (heartbeat + session end) ONE builder, so the
+    # block is driven here instead of source-counted: never-attempted
+    # reads never_ran; a stamped outcome + timings ride through.
+    from lily_scorekeeper import LilyScorekeeper
+
+    game = lily_agent.LilyGame.bare(sk=LilyScorekeeper("lily-voice-id-lane"))
+    payload = lily_agent.lily_session_metadata(game, game.sk, {}, None)
+    assert payload["voice_identity"] == {
+        "outcome": "never_ran", "embed_ms": None, "resolve_ms": None,
+    }
+    game._voice_identity_attempted = True
+    assert lily_agent.lily_session_metadata(game, game.sk, {}, None)[
+        "voice_identity"
+    ]["outcome"] == "attempted_no_outcome"
+    game._voice_id_outcome = "no_match"
+    game._voice_id_embed_ms = 12.5
+    game._voice_id_resolve_ms = 40.0
+    assert lily_agent.lily_session_metadata(game, game.sk, {}, None)[
+        "voice_identity"
+    ] == {"outcome": "no_match", "embed_ms": 12.5, "resolve_ms": 40.0}

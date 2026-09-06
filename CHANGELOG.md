@@ -5,6 +5,202 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — WO-LILY-DELIVERY-TRUTH-001 (W1): the airing stamp binds at the first frame; the brake keeps its own ack; receipts stop lying
+
+Region: `lily_speech_delivery.py`, `tts_node` / `on_agent_speech_finished` /
+`note_playout_started` / `cancel_speech` / `direct_say` / the one-utterance
+ownership pair and both `lily_sessions.metadata` write sites in
+`lily_agent.py`, `handle_stop_primitive` in `lily_floor.py` (plus a
+one-argument touch at `execute_restart`'s purge call, by agreement with W2),
+`purge_game_scoped` in `lily_say_gate.py`. Every defect below was reproduced
+by an independent read-only audit (`scratchpad/audit_repros.py`, R1/R3/R4/
+R5/R6/R7/R8) against main a380531 and re-verified before editing.
+
+### Which prior WO-LILY-AIRGATE-001 / BARGE-RESILIENCE-001 claims were false
+
+* **"the airing stamp binds at the airing itself (tts_node), before the
+  frames yield, so a barge cannot un-stamp what already aired."** False.
+  tts_node is not the airing. For `generate_reply` speeches the framework
+  runs tts_node BEFORE its authorization wait
+  (`agent_activity.pipeline_reply`: `_produce_segments` precedes
+  `_wait_for_authorization`), so a composite interrupted before frame 1 was
+  recorded as aired; the keyed verdict sheet was then gagged on that stamp,
+  its claim CONFIRMED, N+1 released, and the ruling never reached the room
+  (R7: `session.said == []`, claim `confirmed`). **A1 (P0).**
+* **"the dequeue-time airing gate is the LAST content decision before the
+  frames yield, so enqueue-time staleness can no longer reach the air."**
+  False for the same reason — ResultAiredGate/FreshnessGate ran at
+  LLM-stream end, which for `generate_reply` lanes is still enqueue time.
+  **A5.**
+* **"suppression runs adjudicate-style journal/confirm accounting so N+1
+  releases and nothing wedges"** — the `reair_budget_spent` branch
+  confirmed the claim and journaled `narration="" source=result_aired_gate`
+  with NO stamp: a receipt claiming an airing that never happened (R6; S2).
+  **A7.**
+* **"already_acked idempotency makes early provisional (interim) firing
+  safe — the eventual final re-enters the brake and reasserts silently."**
+  False: the brake's cancel loop walked EVERY tracked handle including its
+  own "Stopped." ack, both on the debounced interim re-route and on the
+  final's re-entry, and `already_acked` forbade a replacement — STOP braked
+  and never acknowledged (R1). **A4.** The acceptance test
+  (`test_v_stop_salvo_without_finals_halts_on_the_interim`) could not fail:
+  its fake session never tracked handles, so the brake could not reach the
+  ack in the test while it did live. Fixed in the fake (speech_created is
+  wired) and the test now asserts the ack survives.
+* **"one utterance, one reply: the command handler marks the turn, so the
+  organic lane is owned."** Exact-normalized-text ownership, but
+  `on_user_turn_completed` receives the JOINED turn (all finals of the
+  turn), so a multi-final turn was not owned and the stale mark stayed
+  behind (R5). **A9.**
+* **"S13: the 17:51 evidence transcript is committed with its hash
+  pinned."** The pinned file is a self-declared RECONSTRUCTION whose
+  timings contradict the real rows of the same call
+  (`live_20260814_1751_gameflow.txt`). **A14.**
+* Not previously claimed, found by the audit: `_FRESHNESS_EXEMPT_ACTS` /
+  `_BARGE_FLUSH_EXEMPT_ACTS` lacked the restart/settle/late-recognition acts
+  (R3: the confirm gagged as stale with the pending confirm still armed;
+  R4: the barge flushed it) **A3**; a read flushed under
+  address_unanswered/setup_pending never armed the C3d resume watch
+  **A8**; `purge_game_scoped` left `_stale_retry_counts` behind so game 2's
+  q_1 hit STALE_CLAIM_EXHAUSTED (R8) **A10a**; every airgate decision was
+  logger-only (S1) **A11**.
+
+### What changed
+
+1. **A1 — the stamp is a playout fact.** tts_node writes
+   `note_airing_pending(speech_id, text)` (the text handed to the
+   synthesizer + the result it narrates, resolved while the journal still
+   names the question). `note_playout_started(speech_id)` — THE canonical
+   first-frame hook, signature stable, ordering documented in its
+   docstring, `add_first_frame_hook(fn)` for W4's recognition-carry —
+   consumes it and stamps `_result_aired` keyed by the airing speech; a
+   completed playout that never passed the hook stamps at
+   `on_agent_speech_finished`; a cut/suppressed/failed one never stamps
+   (`LILY_RESULT | NARRATION_DROPPED_BEFORE_AIR`). Every consumer
+   (ResultAiredGate, `reair_cut_verdict`, `_stale_claim_watch`,
+   `_question_barge_resume_still_owed`, the dispute window, the organic
+   ALREADY-RULED context line) reads only that fact.
+2. **A5 — the gate re-decides at the first frame.** `_first_frame_airgate`
+   re-runs result-already-aired and conversational freshness
+   (`conversational_turn_superseded(..., at_playout=True)`; a fresh
+   enqueue-time pass no longer consumes the record) and on a late fail
+   interrupts the handle (force, via `cancel_speech`) with the pipeline's
+   accounting: suppressed-id mark, claim confirm/release inside the
+   decision, floor-owed check, airgate event
+   (`LILY_SAY_SUPPRESSED | reason=late_result_already_aired |
+   late_stale_reply_*`).
+3. **A7 — honest verdict receipts.** `_confirm_verdict_key_as_aired` with no
+   stamp journals the verdict as DROPPED (`verdict_dropped: True`,
+   `narration: None`, `drop_reason`), records `verdict_dropped` on the
+   airgate lane with the ruling, and carries the ruling into the next
+   composite's context as a state note (`LILY_VERDICT | VERDICT_DROPPED`).
+   The claim still confirms — N+1 releases; the record no longer says the
+   room heard it.
+4. **A4 — the brake skips its own ack.** `handle_stop_primitive`'s cancel
+   loop skips handles whose act is in `_STOP_BRAKE_EXEMPT_ACTS`
+   (`stop_ack`, `hold_ack`) — `LILY_STOP | ACK_SURVIVES_BRAKE` — and a
+   reasserted (already_acked) stop no longer calls `session.interrupt()`.
+5. **A6 — code acks are non-interruptible.** `gated_say`'s text lane passes
+   `allow_interruptions=False` (`direct_say` kwarg → `AgentSession.say`)
+   for `_UNINTERRUPTIBLE_ACK_ACTS` (stop/hold/restart/pacing acks).
+   Archaeology: the framework awaits `current_speech.interrupt()` BEFORE
+   `on_user_turn_completed`; with the flag off the non-forced interrupt is
+   refused and the turn-commit path skips the organic reply (which the
+   one-utterance rule wanted). Lily's own brake still reaches them
+   (`cancel_speech` forces). Chosen over dispatching from
+   `on_user_turn_completed` because the transcript-layer dispatch is what
+   makes a sub-2s ack possible.
+6. **A3 — exempt sets + the suppression hook.** `restart_confirm`,
+   `restart_ack`, `restart_declined`, `start_settle_hold`,
+   `late_recognition` added to both exempt sets.
+   `on_dispatch_suppressed(act, speech_id, reason, *, key, qnum, stage,
+   detail)` is THE funnel every Silence (tts_node), cancel/flush
+   (`cancel_speech`) and verdict-drop path runs through; it records the
+   airgate event and notifies `add_dispatch_suppressed_listener(fn)`
+   listeners (W2's pending-confirm unwinding, W4's recognition-carry).
+7. **A8** — a flushed question read calls `note_question_barge_cut(qnum)` so
+   the C3d resume watch is armed even where `expect_delivery` is a no-op.
+8. **A9** — ownership by token-bounded CONTAINMENT of the marked final in
+   the joined turn, inside `_DETERMINISTIC_REPLY_TTL_SECONDS` (20s); stale
+   marks are dropped, never left to own a later turn.
+9. **A10a** — `purge_game_scoped(retry_counts=...)` pops game-scoped
+   `_stale_retry_counts`; `execute_restart` passes the map (one-argument
+   touch inside W2's function, by agreement).
+10. **A11** — `note_airgate_event` → bounded `_airgate_events` (64) with
+    `reason / act / key / speech_id / qnum / stage / detail / ts / mono`,
+    persisted as `lily_sessions.metadata.airgate_events` beside
+    `game_restarts` at BOTH write sites — which are now ONE builder,
+    `lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics)`
+    (heartbeat + session close), so no lane can drift between them again.
+    Two inherited source-count pins on the two sites
+    (`test_recog_delivery_race`, `test_latency_observability`) became
+    behavior drives of the builder.
+11. **A14** — `tests/fixtures/live_20260814_1751_hostloop.txt` header now
+    reads NOTES, NOT A RECORD (sha re-pinned in `test_airgate_001`); the
+    real-row fixture `live_20260814_1751_gameflow.txt` is sha-pinned in
+    `tests/test_delivery_truth_001.py`.
+
+### Live receipts (acceptance is a live-call receipt after deploy)
+
+All airgate receipts: `select metadata->'airgate_events' from lily_sessions
+where id = :session` (also on the 60s heartbeat), correlated by `speech_id`
+with `lily_transcripts` rows and `metadata->'question_timeline'`.
+
+* **A1/A5/A7 — a ruling suppressed pre-frame, then re-aired honestly:** an
+  `airgate_events` entry `{reason: "narration_dropped_before_air", act,
+  speech_id: <the cut composite>, qnum: N, stage: "playout_end",
+  detail: {interrupted: true}}` with NO `LILY_RESULT | AIRED` for that
+  speech, followed by a `lily_transcripts` LILY row carrying the keyed
+  sheet (not marked cut) and `question_timeline[N+1].delivery_confirmed_at`
+  set (N+1 released only after a real airing). A late fail shows
+  `{reason: "late_result_already_aired", act: "verdict", key: "q_N_reveal",
+  speech_id, qnum, stage: "first_frame", detail: {stamped_by: <the speech
+  whose first frame carried it>, aired_text}}` and exactly ONE transcript
+  row for the ruling. A dropped verdict shows `{reason: "verdict_dropped",
+  key, qnum, stage: "playout_end", detail: {reason: "reair_budget_spent",
+  cuts, reairs, answer, winner}}` and the ruling in the NEXT LILY row's
+  words (state-note carry), never a row with an empty narration. Log
+  names: `LILY_RESULT | AIRED` (first frame only), `LILY_RESULT |
+  NARRATION_DROPPED_BEFORE_AIR`, `LILY_SAY_SUPPRESSED | reason=late_*`,
+  `LILY_VERDICT | VERDICT_DROPPED`.
+* **A4/A6 — the STOP is acknowledged:** a `lily_transcripts` LILY row
+  "Stopped. Say the word when you're ready." with `interrupted=False` / no
+  cut marker, AND the pair of `airgate_events` entries on the SAME
+  `speech_id`: `{reason: "ack_survives_brake", act: "stop_ack", stage:
+  "brake"}` then `{reason: "ack_airing", act: "stop_ack", stage:
+  "first_frame"}`. Log names: `LILY_STOP | ACK_SURVIVES_BRAKE`, `LILY_STOP |
+  ACK_AIRING`. A6's flag is not itself logged by the framework; its receipt
+  is the absence of a `LILY_SAY | RELEASED | reason=interrupted` for the
+  ack's speech_id while the trigger turn commits.
+* **A3:** no `airgate_events` entry with `act in {restart_confirm,
+  restart_ack, restart_declined, start_settle_hold, late_recognition}` and
+  `reason in {stale_reply_superseded, stale_reply_expired,
+  user_barge_flush}`; the confirm's transcript row precedes the "yes".
+* **A8:** `{reason: "user_barge_flush", act: "question_delivery"}` followed
+  by a re-read transcript row for the same question (the C3d resume).
+* **A9:** `LILY_REPLY | ORGANIC_SUPPRESSED ... event_owned=True` on a
+  multi-final turn; exactly one LILY row answering it.
+* **A10a:** after `LILY_RESTART | GAME_CLAIMS_PURGED`, no `LILY_SAY |
+  STALE_CLAIM_EXHAUSTED | key=q_1_delivery` in game 2 without game-2
+  dispatches of its own.
+
+### Failing-first evidence
+
+All 22 tests in `tests/test_delivery_truth_001.py` and the re-wired
+`test_v_stop_salvo_without_finals_halts_on_the_interim` FAIL on main
+a380531 (run against a detached checkout) and pass on this branch. Suite:
+2766 → 2788 on both interpreters.
+
+### Not fixed here (out of region), found while testing
+
+`handle_hold_request` enters the hold and then dispatches its "Take your
+time." with `source="hold_request"`, which is not in
+`LilyGame._HOLD_EXEMPT_SOURCES` (that set names `"hold_ack"` as a source
+that no dispatch uses) — `hold_blocks_dispatch` suppresses the hold ack
+under its own hold (`LILY_SAY_SUPPRESSED | reason=hold | act=hold_ack |
+source=hold_request`, reproduced in `_game()` fixtures). W2 owns
+`lily_floor.py` outside the brake; filed here for the integrator.
+
 ## 2026-08-17 — WO-LILY-RESTART-001: restart the game on request — kill the game, keep the people
 
 Operator directive: Lily must be able to RESTART the game on request.

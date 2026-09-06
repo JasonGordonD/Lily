@@ -35,29 +35,58 @@ from test_desync_fixture import (  # noqa: E402
 
 
 class _Handle:
-    def __init__(self, sid):
+    """SpeechHandle-shaped fake. WO-LILY-DELIVERY-TRUTH-001: models the
+    framework's interrupt contract (speech_handle.py: a NON-forced
+    interrupt on a handle with allow_interruptions=False raises
+    RuntimeError; force=True always cancels) so a test can tell "the
+    brake reached it" from "the framework's turn-commit reached it"."""
+
+    def __init__(self, sid, allow_interruptions=True):
         self.id = sid
         self.interrupts = []
+        self.allow_interruptions = allow_interruptions
 
     def interrupt(self, *, force=False):
+        if not force and not self.allow_interruptions:
+            raise RuntimeError(
+                "This generation handle does not allow interruptions"
+            )
         self.interrupts.append(force)
         return self
+
+    @property
+    def interrupted(self):
+        return bool(self.interrupts)
 
 
 class _HandleSession:
     """Fake session whose dispatch lanes return SpeechHandle-shaped objects
     (the AIRGATE freshness meta is keyed by speech_id, so the say/reply
-    lanes must mint ids the way the framework does)."""
+    lanes must mint ids the way the framework does).
 
-    def __init__(self):
+    WO-LILY-DELIVERY-TRUTH-001 ("the mock that cannot fail"): the live
+    framework emits speech_created for every say()/generate_reply(), and
+    Lily's _on_speech_created tracks the handle in _speech_handles — the
+    map the STOP brake's cancel loop walks. The old fake never tracked its
+    handles, so the brake could cancel its own acknowledgment live while
+    test_v_stop_salvo counted dispatches and passed. `game` wires that
+    seam: every minted handle is handed to game.note_speech_handle, and
+    say() records the allow_interruptions the lane asked for."""
+
+    def __init__(self, game=None):
         self.instructions = []
         self.said = []
+        self.say_kwargs = []
         self.interrupted = 0
         self._n = 0
+        self.game = game
 
-    def _handle(self):
+    def _handle(self, allow_interruptions=True):
         self._n += 1
-        return _Handle(f"speech_{self._n}")
+        handle = _Handle(f"speech_{self._n}", allow_interruptions)
+        if self.game is not None:
+            self.game.note_speech_handle(handle)  # speech_created
+        return handle
 
     def generate_reply(self, instructions):
         self.instructions.append(instructions)
@@ -65,7 +94,8 @@ class _HandleSession:
 
     def say(self, text, *a, **k):
         self.said.append(text)
-        return self._handle()
+        self.say_kwargs.append(dict(k))
+        return self._handle(k.get("allow_interruptions", True))
 
     def interrupt(self):
         self.interrupted += 1
@@ -73,7 +103,7 @@ class _HandleSession:
 
 def _game():
     game = _make_game()
-    game.session = _HandleSession()
+    game.session = _HandleSession(game)
     game.publish_attributes_nowait = lambda: None
     return game
 
@@ -358,6 +388,11 @@ def test_v_stop_salvo_without_finals_halts_on_the_interim():
     # Exactly one acknowledgment aired:
     stop_acks = [s for s in game.session.said if "stopped" in s.lower()]
     assert len(stop_acks) == 1
+    # WO-LILY-DELIVERY-TRUTH-001 A4: the ack's handle is tracked the way
+    # the live speech_created hook tracks it — and it must SURVIVE.
+    ack_id = f"speech_{game.session._n}"
+    ack = game._speech_handles[ack_id]
+    assert game._dispatched_act_by_speech[ack_id] == "stop_ack"
     # The still-growing interim of the same utterance is debounced:
     assert game.route_stop_from_interim("Stop. Stop stop stop, Lily") is False
     # And even past the debounce, the brake is idempotent — no second ack:
@@ -365,6 +400,12 @@ def test_v_stop_salvo_without_finals_halts_on_the_interim():
     game.route_stop_from_interim("stop stop stop")
     stop_acks = [s for s in game.session.said if "stopped" in s.lower()]
     assert len(stop_acks) == 1
+    # ...and the ONE ack was not cancelled by the re-entered brake (audit
+    # R1: it used to be interrupted(force) and marked suppressed, so the
+    # STOP braked and never said "Stopped.").
+    assert ack.interrupts == []
+    assert ack_id not in game._suppressed_speech_ids
+    assert ack_id in game._speech_handles
 
 
 def test_v_ordinary_interim_never_trips_the_brake():
@@ -484,8 +525,12 @@ def test_vi_stale_claim_watch_confirms_preaired_verdict_instead_of_reissuing():
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / (
     "live_20260814_1751_hostloop.txt"
 )
+# WO-LILY-DELIVERY-TRUTH-001 A14: re-pinned after the header was marked
+# NOTES, NOT A RECORD (the reconstruction's timings contradict the real
+# rows in live_20260814_1751_gameflow.txt, which test_delivery_truth_001
+# pins as the evidence fixture).
 _FIXTURE_SHA256 = (
-    "0dacdacb44f9b01f390160fa825a3975885219dca5206947a902e725b164b207"
+    "27f6be0ac2115672710e016f5d72576aa95f6b1aaad295c68036274c526c5284"
 )
 
 
@@ -495,6 +540,7 @@ def test_s13_fixture_committed_and_hash_pinned():
     text = data.decode("utf-8")
     # The four defect classes this WO closes are all pinned in the record:
     assert "RECONSTRUCTION" in text  # provenance stated honestly (S2)
+    assert "NOT A RECORD" in text    # DELIVERY-TRUTH-001 A14: notes only
     assert "third statement" in text          # [A] triple verdict
     assert "TWO replies to one utterance" in text  # [B] double reply
     assert "_user_speaking" in text           # [C] floor over the answer

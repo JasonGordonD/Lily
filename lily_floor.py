@@ -23,6 +23,7 @@ import lily_nbest
 import lily_persistence
 import lily_say_gate
 import lily_scorekeeper
+import lily_speech_delivery
 
 import logging
 logger = logging.getLogger("lily_agent")
@@ -676,7 +677,13 @@ class LilyFloorMixin:
                 ",".join(sorted(released)),
             )
         purge = getattr(self.say_registry, "purge_game_scoped", None)
-        purged = purge() if callable(purge) else {}
+        # DELIVERY-TRUTH-001 A10a (W1, one-argument touch inside W2's
+        # function by agreement): the purge also pops the dead game's
+        # stale-retry counts, which share these keys.
+        purged = (
+            purge(retry_counts=getattr(self, "_stale_retry_counts", None))
+            if callable(purge) else {}
+        )
         if purged.get("released") or purged.get("dropped_confirmed"):
             logger.info(
                 "LILY_RESTART | GAME_CLAIMS_PURGED | released=%s "
@@ -1276,8 +1283,27 @@ class LilyFloorMixin:
             self.sk.session_id, (source_text or "")[:60], already_stopped,
             already_acked,
         )
-        # 1. Halt anything airing + cancel every tracked handle.
+        # 1. Halt anything airing + cancel every tracked handle — EXCEPT
+        # the brake's own acknowledgment (DELIVERY-TRUTH-001 A4). The
+        # stop/hold ack is one of the tracked handles; the debounced
+        # interim re-route and the final's re-entry used to cancel it
+        # here, and already_acked below forbids a replacement — so the
+        # STOP braked and never said "Stopped." (audit R1).
+        acts = getattr(self, "_dispatched_act_by_speech", None) or {}
         for speech_id in list(self._speech_handles):
+            act = acts.get(speech_id)
+            if act in lily_speech_delivery._STOP_BRAKE_EXEMPT_ACTS:
+                logger.warning(
+                    "LILY_STOP | ACK_SURVIVES_BRAKE | session=%s speech_id=%s "
+                    "act=%s — the brake skips its own acknowledgment "
+                    "(DELIVERY-TRUTH-001 A4)",
+                    self.sk.session_id, speech_id, act,
+                )
+                self.note_airgate_event(
+                    "ack_survives_brake", act=act, speech_id=speech_id,
+                    stage="brake",
+                )
+                continue
             self.cancel_speech(speech_id, reason="stop_primitive")
         # 2. Kill the delivery watchdog's ability to resurrect the turn.
         released = self.say_registry.release_pending()
@@ -1294,9 +1320,13 @@ class LilyFloorMixin:
         # protect against).
         self._freeze_game_delivery_for_stop()
         # 3. Interrupt the live session speech if the framework holds one.
+        # A4: NOT on a reasserted stop — by then the current speech is the
+        # acknowledgment itself (or nothing), and session.interrupt() was
+        # the second thing killing it. The cancel loop above already
+        # braked every non-ack handle.
         session = getattr(self, "session", None)
         interrupt = getattr(session, "interrupt", None)
-        if callable(interrupt):
+        if callable(interrupt) and not already_acked:
             try:
                 interrupt()
             except Exception as e:

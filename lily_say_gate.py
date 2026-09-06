@@ -911,14 +911,25 @@ class SpeechActRegistry:
         r"^(?:q_\d+_|round_\d+_|finale$|standings$|steal_)"
     )
 
-    def purge_game_scoped(self) -> dict:
+    def purge_game_scoped(self, retry_counts: dict | None = None) -> dict:
         """Drop every game-scoped claim — pending AND confirmed — for a
         game restart (WO-LILY-RESTART-001). The dead game's obligations are
         cancelled WITH ACCOUNTING: the returned {released, dropped_confirmed}
         lists are logged by the caller, pending owners were already
         cancel_speech'd, and any in-flight _stale_claim_watch exits on the
         state(key)-is-not-PENDING read — no watchdog can re-air a
-        dead-game verdict. Never touches session-scoped keys."""
+        dead-game verdict. Never touches session-scoped keys.
+
+        DELIVERY-TRUTH-001 A10a: `retry_counts` is the game's
+        _stale_retry_counts map (key -> watchdog re-dispatches spent).
+        Those counts are keyed by the SAME game-scoped keys (q_N_delivery,
+        q_N_reveal, ...), and question numbering restarts at 0 after a
+        restart — a count that survived the purge pre-spent game 2's q_1
+        watchdog budget (audit R8: the first delivery of the new game hit
+        STALE_CLAIM_EXHAUSTED with zero dispatches of its own). The purge
+        pops them for every GAME-SCOPED key it knows about, claimed or not
+        (a released claim leaves its count behind by design; the restart
+        must not). Returns the popped keys under `retry_counts_cleared`."""
         released: list[str] = []
         dropped_confirmed: list[str] = []
         for key in list(self._acts):
@@ -933,4 +944,14 @@ class SpeechActRegistry:
             self._acts.pop(key, None)
             self._owners.pop(key, None)
             self._claimed_at.pop(key, None)
-        return {"released": released, "dropped_confirmed": dropped_confirmed}
+        cleared: list[str] = []
+        if retry_counts:
+            for key in list(retry_counts):
+                if self._GAME_SCOPED_KEY_RE.match(str(key)):
+                    retry_counts.pop(key, None)
+                    cleared.append(str(key))
+        return {
+            "released": released,
+            "dropped_confirmed": dropped_confirmed,
+            "retry_counts_cleared": cleared,
+        }

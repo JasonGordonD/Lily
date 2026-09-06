@@ -471,11 +471,25 @@ def test_uncarried_promotion_records_the_blackout_shape(monkeypatch):
 
 def test_identity_promotions_ride_both_metadata_sites():
     """Same lane as question_timeline (lily_sessions.metadata via
-    lily_session_end + the heartbeat) — no new table, no new writer path."""
-    src = Path(
-        inspect.getsourcefile(LilyGame)
-    ).read_text(encoding="utf-8")
-    assert src.count('"identity_promotions"') >= 2  # close + heartbeat
+    lily_session_end + the heartbeat) — no new table, no new writer path.
+    WO-LILY-DELIVERY-TRUTH-001 made the two sites ONE builder
+    (lily_session_metadata), so this drives the builder with a game
+    carrying promotion events and reads the lane back — the previous
+    source-count pin is retired."""
+    import lily_agent
+
+    game = LilyGame.bare(sk=LilyScorekeeper("lily-metadata-lane"))
+    game._identity_promotion_events = [{"source": "probe", "decision": "x"}]
+    payload = lily_agent.lily_session_metadata(
+        game, game.sk, {"stt_ms": [10.0, 20.0]}, None
+    )
+    assert payload["identity_promotions"] == [
+        {"source": "probe", "decision": "x"}
+    ]
+    assert payload["question_timeline"] == getattr(
+        game.sk, "question_timeline", {}
+    )
+    assert payload["pipeline_latency"] == {"stt_ms": 15.0}
 
 
 # -- rails: owed content is owed, not banned (deliverable 3) ------------------

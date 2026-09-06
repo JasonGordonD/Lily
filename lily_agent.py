@@ -721,10 +721,24 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._delivery_speech_acts = {}
         self._delivery_stop_sticky = False
         self._deterministic_reply_texts = []
+        # DELIVERY-TRUTH-001 A9: when each handled-turn mark was made
+        # (normalized final -> monotonic), for the containment match's
+        # time bound.
+        self._deterministic_reply_marked_at = {}
         # AIRGATE-001 D2: which act each dispatched handle performs
         # (speech_id -> act), so a deliberate barge can tell an obligation
         # ack from a flushable queued dispatch. Bounded map.
         self._dispatched_act_by_speech = {}
+        # DELIVERY-TRUTH-001 A11 (S1/S16): the airing gate's decisions on
+        # the record — persisted as lily_sessions.metadata.airgate_events
+        # at both metadata write sites (beside game_restarts). Bounded.
+        self._airgate_events = None
+        # DELIVERY-TRUTH-001 A1/A5: per-speech airing record written by
+        # tts_node, consumed at the first frame / playout end. Bounded.
+        self._airing_pending_by_speech = {}
+        self._last_airgate_decision = None
+        self._first_frame_hooks = None
+        self._dispatch_suppressed_listeners = None
         self._device_candidate_memory = None
         self._device_verify_attempts = 0
         self._device_verify_task = None
@@ -1655,9 +1669,15 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._note_speech_dispatch(getattr(handle, "id", None))
         return handle
 
-    def direct_say(self, text: str):
+    def direct_say(self, text: str, *, allow_interruptions: bool | None = None):
         """HOSTLOOP-001 C6 — the DETERMINISTIC speech lane, sibling of
         instructed_reply above.
+
+        DELIVERY-TRUTH-001 A6: `allow_interruptions=False` hands the
+        framework's own flag through (AgentSession.say supports it at
+        1.6.x) for the code acks whose trigger utterance's turn-commit
+        interrupt used to kill them; None keeps the session default. A
+        session whose say() predates the kwarg gets the plain call.
 
         instructed_reply is model-mediated (generate_reply), and the
         measured cost of that is the whole clause: 8–13s from a finished
@@ -1692,7 +1712,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             self.agent.set_preemptive_generation(False)
             self._preemptive_paused = True
         try:
-            handle = say(text)
+            if allow_interruptions is None:
+                handle = say(text)
+            else:
+                try:
+                    handle = say(text, allow_interruptions=allow_interruptions)
+                except TypeError:
+                    handle = say(text)  # a say() lane without the kwarg
             # D2: same dispatch stamp as instructed_reply — deterministic
             # lines are exactly the pre-committed class the post-dating
             # reads exist to discount.
@@ -1827,7 +1853,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
 
 
     def mark_deterministic_reply(self, text: str) -> None:
-        """Mark one user turn as fully handled by deterministic game speech."""
+        """Mark one user turn as fully handled by deterministic game speech.
+        DELIVERY-TRUTH-001 A9: the mark is the normalized FINAL the code
+        lane answered, stamped with its time; consume_deterministic_reply
+        matches it by containment against the whole committed turn."""
         normalized = lily_evaluation.lily_normalize_answer(text or "")
         if not normalized:
             return
@@ -1844,17 +1873,48 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             pending = self._deterministic_reply_texts = []
         pending.append(normalized)
         del pending[:-6]
+        stamps = getattr(self, "_deterministic_reply_marked_at", None)
+        if stamps is None:
+            stamps = self._deterministic_reply_marked_at = {}
+        stamps[normalized] = time.monotonic()
+        for stale in [k for k in stamps if k not in pending]:
+            stamps.pop(stale, None)
 
     def consume_deterministic_reply(self, text: str) -> bool:
-        """Consume an exact handled-turn marker; never suppress a later turn."""
+        """Consume the handled-turn marker that owns this committed turn.
+
+        DELIVERY-TRUTH-001 A9: the code-ack lanes mark the FINAL they
+        answered, but on_user_turn_completed receives the WHOLE turn — the
+        framework joins every final of the turn into one message ("I don't
+        want a timer. it stresses me out"), so an exact-text match missed
+        the turn the mark was made for and the organic lane doubled the ack
+        (audit R5), leaving the stale mark behind to suppress a later,
+        unrelated turn. Ownership is now by CONTAINMENT — the marked final
+        appears whole (token-bounded) inside the normalized turn, or equals
+        it — inside a time bound (_DETERMINISTIC_REPLY_TTL_SECONDS): a mark
+        older than that can own nothing and is dropped. Never suppresses a
+        later turn: one mark, one consume."""
         normalized = lily_evaluation.lily_normalize_answer(text or "")
         pending = self._deterministic_reply_texts or []
-        try:
-            index = pending.index(normalized)
-        except ValueError:
+        if not pending:
             return False
-        del pending[index]
-        return True
+        stamps = getattr(self, "_deterministic_reply_marked_at", None) or {}
+        now = time.monotonic()
+        ttl = lily_speech_delivery._DETERMINISTIC_REPLY_TTL_SECONDS
+        for mark in list(pending):
+            at = stamps.get(mark)
+            if at is not None and now - at > ttl:
+                pending.remove(mark)
+                stamps.pop(mark, None)
+        if not normalized:
+            return False
+        haystack = f" {normalized} "
+        for index, mark in enumerate(pending):
+            if mark == normalized or f" {mark} " in haystack:
+                del pending[index]
+                stamps.pop(mark, None)
+                return True
+        return False
 
     def correct_answer_owns_user_turn(self, text: str) -> bool:
         """True when this finalized turn must be answered only by adjudication.
@@ -3634,6 +3694,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if suppressed is None:
             suppressed = self._suppressed_speech_ids = set()
         suppressed.add(speech_id)
+        # DELIVERY-TRUTH-001 A3/A11: every cancel is a dispatch that will
+        # not reach the air — the one hook records it and tells the lanes
+        # whose state the dispatch armed.
+        try:
+            self.on_dispatch_suppressed(None, speech_id, reason, stage="cancel")
+        except Exception:
+            logger.exception("LILY_AIRGATE | SUPPRESSED_HOOK_FAILED")
         handles = self._speech_handles or {}
         handle = handles.get(speech_id)
         if handle is None:
@@ -3963,6 +4030,44 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # genuinely spoken. Confirmed acts never release (a confirmed act
         # can never be redelivered); only a claimed-but-never-played act
         # releases, on the tts_node playback-failure path.
+        # DELIVERY-TRUTH-001 A1: the airing record tts_node wrote for this
+        # speech, if the first frame never consumed it (no agent_state
+        # "speaking" with this id — current_speech unset, or the speech
+        # died before a frame). A COMPLETED playout is the strongest
+        # airing evidence there is, so it stamps here; a cut/suppressed/
+        # failed one never stamps and goes on the record as dropped.
+        if speech_id:
+            record = self.consume_airing_pending(speech_id)
+            if record is not None:
+                if not (interrupted or suppressed or failed):
+                    if record.get("qnum") is not None:
+                        self.note_result_aired(
+                            int(record["qnum"]), record.get("text") or "",
+                            speech_id=speech_id,
+                        )
+                elif record.get("qnum") is not None:
+                    logger.warning(
+                        "LILY_RESULT | NARRATION_DROPPED_BEFORE_AIR | "
+                        "session=%s q=%s speech_id=%s interrupted=%s "
+                        "suppressed=%s failed=%s — a result narration died "
+                        "before its first frame; NOT stamped as aired "
+                        "(DELIVERY-TRUTH-001 A1)",
+                        self.sk.session_id, record.get("qnum"), speech_id,
+                        interrupted, suppressed, failed,
+                    )
+                    self.note_airgate_event(
+                        "narration_dropped_before_air",
+                        act=(self._dispatched_act_by_speech or {}).get(
+                            speech_id
+                        ),
+                        speech_id=speech_id, qnum=record.get("qnum"),
+                        stage="playout_end",
+                        detail={
+                            "interrupted": bool(interrupted),
+                            "suppressed": bool(suppressed),
+                            "failed": bool(failed),
+                        },
+                    )
         # Stale-claim recovery bookkeeping: this speech's playout lifecycle
         # is over either way — its airing marker and handle are spent.
         if speech_id:
@@ -10093,6 +10198,17 @@ class LilyAgent(Agent):
         )
         outcome = run_say_pipeline(turn)
         if isinstance(outcome, Silence):
+            # DELIVERY-TRUTH-001 A3/A11: every pipeline suppression funnels
+            # through the one hook (airgate record + listeners) — guarded,
+            # fixture fakes predate it.
+            suppressed_hook = getattr(self._game, "on_dispatch_suppressed", None)
+            if callable(suppressed_hook):
+                try:
+                    suppressed_hook(
+                        None, turn.speech_id, outcome.reason, stage="enqueue",
+                    )
+                except Exception:
+                    logger.exception("LILY_AIRGATE | SUPPRESSED_HOOK_FAILED")
             if outcome.schedule is not None:
                 asyncio.ensure_future(outcome.schedule())
             else:
@@ -10110,14 +10226,21 @@ class LilyAgent(Agent):
         # both RTC and durable transcripts.
         self._game.note_post_tts_text(turn.speech_id, full)
 
-        # BARGE-RESILIENCE-001 P1: stamp the "result stated on air" fact at the
-        # airing itself — this is the ONE point every producer of the result
-        # word passes through (organic reveal or keyed verdict SAY), and it is
-        # BEFORE the frames yield, so a barge that cancels the turn mid-playout
-        # cannot defeat the anti-double gate the way it defeats the confirm-time
-        # guards. AIRGATE-001: the stamping speech_id rides the record so the
-        # ResultAiredGate can tell this airing from a later duplicate.
-        self._game.stamp_result_aired_from_turn(full, speech_id=turn.speech_id)
+        # DELIVERY-TRUTH-001 A1: this is NOT the airing. For generate_reply
+        # speeches the framework runs tts_node BEFORE its authorization wait
+        # (agent_activity.pipeline_reply: _produce_segments precedes
+        # _wait_for_authorization), so the "result stated on air" stamp that
+        # used to bind here recorded rulings the room never heard (audit R7).
+        # The record is written here — the text that went to the synthesizer
+        # and the result it narrates, resolved while the journal still names
+        # this question — and STAMPED at the first frame
+        # (note_playout_started) or a completed playout
+        # (on_agent_speech_finished). A mid-playout barge still keeps the
+        # stamp (the first frame was heard); a pre-frame interrupt never
+        # earns one. getattr: fixture fakes predate the record.
+        pending_hook = getattr(self._game, "note_airing_pending", None)
+        if callable(pending_hook):
+            pending_hook(turn.speech_id, full)
 
         async def _replay():
             yield full
@@ -10573,6 +10696,50 @@ def lily_stt_config_applied(stt) -> dict:
         "focus_speakers": len(getattr(opts, "focus_speakers", None) or []),
         "known_speakers": len(getattr(opts, "known_speakers", None) or []),
         "additional_vocab": len(getattr(opts, "additional_vocab", None) or []),
+    }
+
+
+def lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics) -> dict:
+    """THE lily_sessions.metadata payload — one builder for BOTH write
+    sites (the 60s heartbeat's metadata_provider and the session-close
+    lily_session_end), so a telemetry lane added to one can never drift
+    from the other (WO-LILY-DELIVERY-TRUTH-001 A11 made it one function;
+    before, the two literal dicts had to be kept in step by hand).
+
+    Lanes, all read off live state (getattr: harnesses build LilyGame via
+    bare()/__new__):
+      * pipeline_latency — rolling per-stage averages (metrics_raw);
+      * session_metrics — the 1.6.8 metrics block (WO-LILY-UPGRADE-168);
+      * question_timeline — C14b per-question delivery timestamps;
+      * identity_promotions — WO-LILY-RECOG-DELIVERY-001 (S1/S16);
+      * game_restarts — WO-LILY-RESTART-001, the dead game's record;
+      * airgate_events — WO-LILY-DELIVERY-TRUTH-001 A11 (S1/S16): the
+        airing gate's decisions (reason/act/key/speech_id/qnum/stage/
+        detail/ts) so "was that ruling suppressed before its first frame
+        and re-aired?" is a SQL query against the session row;
+      * voice_identity — the voice-ID outcome + stage timings."""
+    return {
+        "pipeline_latency": {
+            k: (round(sum(v) / len(v), 1) if v else None)
+            for k, v in (metrics_raw or {}).items()
+        },
+        "session_metrics": (
+            session_metrics.summary() if session_metrics is not None else {}
+        ),
+        "question_timeline": getattr(scorekeeper, "question_timeline", {}),
+        "identity_promotions": getattr(
+            game, "_identity_promotion_events", None
+        ) or [],
+        "game_restarts": getattr(game, "_game_restart_events", None) or [],
+        "airgate_events": getattr(game, "_airgate_events", None) or [],
+        "voice_identity": {
+            "outcome": getattr(game, "_voice_id_outcome", None)
+            or ("never_ran" if not getattr(
+                game, "_voice_identity_attempted", False
+            ) else "attempted_no_outcome"),
+            "embed_ms": getattr(game, "_voice_id_embed_ms", None),
+            "resolve_ms": getattr(game, "_voice_id_resolve_ms", None),
+        },
     }
 
 
@@ -11568,45 +11735,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     _v = getattr(game, _attr, None)
                     if _v is not None:
                         metrics_raw[_field].append(_v)
-                metadata = {
-                    "pipeline_latency": {
-                        k: (round(sum(v) / len(v), 1) if v else None)
-                        for k, v in metrics_raw.items()
-                    },
-                    # WO-LILY-UPGRADE-168: the full 1.6.8 metrics block —
-                    # tokens (incl. cached), TTS characters, STT audio
-                    # duration, and the whole latency/turn-taking family.
-                    "session_metrics": session_metrics.summary(),
-                    # C14b: per-question delivery timestamps
-                    "question_timeline": getattr(
-                        scorekeeper, "question_timeline", {}
-                    ),
-                    # WO-LILY-RECOG-DELIVERY-001 (S1/S16): identity-promotion
-                    # events — source, group, ts, short-circuit decision,
-                    # carried-memory verdict — so promotion timing never has
-                    # to be reconstructed from prompt-token deltas again.
-                    "identity_promotions": getattr(
-                        game, "_identity_promotion_events", None
-                    ) or [],
-                    # WO-LILY-RESTART-001: restarts on the record — each
-                    # entry carries the dead game's scores/round/timeline,
-                    # so the session row shows game 1 ended by restart.
-                    "game_restarts": getattr(
-                        game, "_game_restart_events", None
-                    ) or [],
-                    # Voice-ID closure: outcome + timing persist so a slow
-                    # or missed recognition explains itself from the DB row.
-                    "voice_identity": {
-                        "outcome": getattr(game, "_voice_id_outcome", None)
-                        or ("never_ran" if not getattr(
-                            game, "_voice_identity_attempted", False
-                        ) else "attempted_no_outcome"),
-                        "embed_ms": getattr(game, "_voice_id_embed_ms", None),
-                        "resolve_ms": getattr(
-                            game, "_voice_id_resolve_ms", None
-                        ),
-                    },
-                }
+                # Session-close write of lily_sessions.metadata: the SAME
+                # builder as the heartbeat (lily_session_metadata) — the
+                # 1.6.8 metrics block, C14b timeline, identity promotions,
+                # game restarts, airgate events, voice-ID closure.
+                metadata = lily_session_metadata(
+                    game, scorekeeper, metrics_raw, session_metrics
+                )
                 await lily_persistence.lily_session_end(
                     supabase, scorekeeper,
                     final_standings=standings, metadata=metadata,
@@ -12024,39 +12159,13 @@ async def entrypoint(ctx: JobContext) -> None:
     asyncio.ensure_future(lily_prewarm_tts_connection())
 
     def _latency_metadata() -> dict:
-        return {
-            "pipeline_latency": {
-                k: (round(sum(v) / len(v), 1) if v else None)
-                for k, v in metrics_raw.items()
-            },
-            # Full 1.6.8 metrics ride the heartbeat too, so "is she lagging /
-            # burning tokens" is a live SQL query mid-game, not a post-mortem.
-            "session_metrics": session_metrics.summary(),
-            # C14b: per-question delivery timestamps
-            "question_timeline": getattr(
-                scorekeeper, "question_timeline", {}
-            ),
-            # WO-LILY-RECOG-DELIVERY-001 (S1/S16): identity-promotion events
-            # ride the heartbeat too, so a live "did the promotion land and
-            # what did it decide" is a mid-call SQL query.
-            "identity_promotions": getattr(
-                game, "_identity_promotion_events", None
-            ) or [],
-            # WO-LILY-RESTART-001: restarts ride the heartbeat too, so
-            # "did the table restart and what did game 1 end at" is a
-            # live mid-call SQL query.
-            "game_restarts": getattr(
-                game, "_game_restart_events", None
-            ) or [],
-            "voice_identity": {
-                "outcome": getattr(game, "_voice_id_outcome", None)
-                or ("never_ran" if not getattr(
-                    game, "_voice_identity_attempted", False
-                ) else "attempted_no_outcome"),
-                "embed_ms": getattr(game, "_voice_id_embed_ms", None),
-                "resolve_ms": getattr(game, "_voice_id_resolve_ms", None),
-            },
-        }
+        # Heartbeat write of lily_sessions.metadata — the SAME builder as
+        # the session-close write, so every lane (metrics, timeline,
+        # identity promotions, game restarts, airgate events, voice-ID) is
+        # a live mid-call SQL query and can never drift between the two.
+        return lily_session_metadata(
+            game, scorekeeper, metrics_raw, session_metrics
+        )
 
     # Heartbeat checkpoint loop (60s) — carries rolling latency averages so
     # "is she lagging" is a SQL query mid-game, not a post-mortem.

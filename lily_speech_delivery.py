@@ -13,6 +13,7 @@ answer. Does not own director pipelines, supply, or identity.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import re
 import time
@@ -185,7 +186,19 @@ _VERDICT_KEY_RE = re.compile(r"^q_(\d+)_(?:verdict|reveal)$")
 # suppressing one here could leave a STOP with no acknowledgment at all;
 # the answer receipt is the sub-2s deterministic lane whose whole point is
 # to land between finals.
-_FRESHNESS_EXEMPT_ACTS = frozenset({"stop_ack", "hold_ack", "answer_receipt"})
+#
+# WO-LILY-DELIVERY-TRUTH-001 A3: the restart lane (confirm / done-ack /
+# declined), the start-settle hold line and the late-recognition beat are
+# the same class — each is THE required reply to a state the code just
+# entered (a pending confirm, a committed reset, a settle hold, a promotion
+# that landed). Gagging one as "stale" left the state armed with its
+# announcement never aired (audit R3: the confirm gagged, the pending
+# confirm survived, and no floor line followed).
+_FRESHNESS_EXEMPT_ACTS = frozenset({
+    "stop_ack", "hold_ack", "answer_receipt",
+    "restart_confirm", "restart_ack", "restart_declined",
+    "start_settle_hold", "late_recognition",
+})
 
 # D1b: how old a dispatched conversational ack may be at playout before it
 # is stale on age alone. Deliberately the SAME deadline the stale-claim
@@ -202,10 +215,61 @@ _RESULT_RENARRATION_WINDOW_SECONDS = 30.0
 
 # D2: acts a deliberate user barge may NEVER flush out of the speech queue —
 # the stop/hold acknowledgments are the reply the barge itself is owed.
-_BARGE_FLUSH_EXEMPT_ACTS = frozenset({"stop_ack", "hold_ack"})
+#
+# DELIVERY-TRUTH-001 A3: the restart / settle / late-recognition acts are
+# obligation acks too (audit R4: a barge flushed the queued restart confirm
+# while the pending-confirm state stayed armed — a question the table never
+# heard, waiting on a "yes").
+_BARGE_FLUSH_EXEMPT_ACTS = frozenset({
+    "stop_ack", "hold_ack",
+    "restart_confirm", "restart_ack", "restart_declined",
+    "start_settle_hold", "late_recognition",
+})
+
+# DELIVERY-TRUTH-001 A4: acts the STOP brake's own cancel loop must skip —
+# the brake's acknowledgment IS one of the tracked handles, and cancelling
+# it (the debounced interim re-route, the final's re-entry) left the STOP
+# braked but never acknowledged (audit R1: "Stopped." interrupted(force),
+# already_acked forbids a replacement).
+_STOP_BRAKE_EXEMPT_ACTS = frozenset({"stop_ack", "hold_ack"})
+
+# DELIVERY-TRUTH-001 A6: code acks dispatched NON-interruptible. Archaeology
+# (livekit-agents agent_activity._user_turn_completed_task): the framework
+# awaits `current_speech.interrupt()` BEFORE on_user_turn_completed, so an
+# ack dispatched synchronously from the transcript layer — the current
+# speech by the time the same utterance's turn commits ms later — was
+# killed by its own trigger. With allow_interruptions=False the framework's
+# non-forced interrupt is refused (SpeechHandle.interrupt raises unless
+# force=True) and the turn-commit path skips the organic reply instead
+# (which the one-utterance-one-reply rule wanted anyway). Lily's own brake
+# still reaches them: cancel_speech interrupts with force=True.
+_UNINTERRUPTIBLE_ACK_ACTS = frozenset({
+    "stop_ack", "hold_ack",
+    "restart_confirm", "restart_ack", "restart_declined",
+    "pacing_set", "pacing_kept", "pacing_confirm", "pace_ack",
+})
 
 # How many freshness/act records ride the bounded dispatch-meta maps.
 _DISPATCH_META_CAP = 32
+
+# DELIVERY-TRUTH-001 A11 (S1/S16): the airing gate's decisions on the record.
+# Every suppression / late-fail / drop / survival the gate decides lands in
+# a bounded per-game list persisted beside game_restarts in
+# lily_sessions.metadata (both write sites) — so "was the ruling suppressed
+# before its first frame and re-aired?" is a SQL query, never a log grep.
+_AIRGATE_EVENTS_CAP = 64
+
+# DELIVERY-TRUTH-001 A1/A5: per-speech airing record written at tts_node
+# (the text that went to the synthesizer + the result it narrates, if any)
+# and CONSUMED at the first frame (note_playout_started) or at playout end
+# (on_agent_speech_finished) — never read as "aired" by anything else.
+_PENDING_AIRING_CAP = 16
+
+# DELIVERY-TRUTH-001 A9: how long a code-ack lane's turn-ownership mark
+# stays valid. The mark is matched by CONTAINMENT against the joined turn
+# the framework hands on_user_turn_completed; the bound keeps a mark from
+# ever owning a later, unrelated turn that happens to contain the words.
+_DETERMINISTIC_REPLY_TTL_SECONDS = 20.0
 
 class LilySpeechDeliveryMixin:
     """Mixin: speech/delivery methods for LilyGame."""
@@ -374,10 +438,22 @@ class LilySpeechDeliveryMixin:
             "LILY_SAY | act=%s | key=%s | source=%s | lane=%s",
             act, key or "-", source, "text" if text is not None else "llm",
         )
-        handle = (
-            self.direct_say(text) if text is not None
-            else self.instructed_reply(instructions)
-        )
+        if text is not None:
+            # DELIVERY-TRUTH-001 A6: code acks air NON-interruptible so the
+            # framework's own turn-commit interrupt (which runs BEFORE
+            # on_user_turn_completed) cannot kill the ack its trigger
+            # utterance is owed. See _UNINTERRUPTIBLE_ACK_ACTS.
+            if act in _UNINTERRUPTIBLE_ACK_ACTS:
+                try:
+                    handle = self.direct_say(text, allow_interruptions=False)
+                except TypeError:
+                    # A harness that replaced direct_say with a one-arg
+                    # fake (the real lane never raises: it catches inside).
+                    handle = self.direct_say(text)
+            else:
+                handle = self.direct_say(text)
+        else:
+            handle = self.instructed_reply(instructions)
         speech_id = getattr(handle, "id", None)
         if speech_id:
             self.say_registry.reassign_owner(reservation, speech_id)
@@ -652,13 +728,20 @@ class LilySpeechDeliveryMixin:
     def stamp_result_aired_from_turn(
         self, text: str, *, speech_id: str | None = None
     ) -> None:
-        """AIRING hook (tts_node): if this outbound turn narrates a result —
-        the open transition's journaled answer, or (stamp-race fallback) the
-        live question's canonical answer, alongside a verdict cue
-        (lily_verdict_narration) — record that the result reached air for
-        that question. Runs at the say gate, before the TTS frames yield, so
-        a barge that cancels the turn mid-playout cannot un-stamp what
-        already aired. Never breaks the audio path."""
+        """Stamp the result-aired fact for the result `text` narrates (the
+        open transition's journaled answer, or the live question's canonical
+        answer, alongside a verdict cue). DELIVERY-TRUTH-001 A1: this is no
+        longer the tts_node hook — a stamp taken before any frame was a LIE
+        for generate_reply speeches, whose tts_node runs before the
+        framework's authorization wait (agent_activity.pipeline_reply:
+        _produce_segments precedes _wait_for_authorization), so a composite
+        interrupted before frame 1 was recorded as aired and the keyed sheet
+        that would have carried the ruling was gagged on its own stamp
+        (audit R7: session.said == [] with the claim CONFIRMED). tts_node
+        now writes note_airing_pending; the stamp is taken at the first
+        frame (note_playout_started) or at a completed playout
+        (on_agent_speech_finished) — never earlier. Kept as the one stamping
+        primitive both of those call. Never breaks the audio path."""
         try:
             qnum = self._resolve_result_narration(text)
             if qnum is None:
@@ -667,43 +750,359 @@ class LilySpeechDeliveryMixin:
         except Exception:
             pass
 
+    # -- DELIVERY-TRUTH-001 A1/A5: the per-speech airing record ---------------
+
+    def note_airing_pending(self, speech_id: str | None, text: str) -> None:
+        """tts_node hook: the exact text handed to the synthesizer for one
+        speech, plus the result it narrates (resolved NOW, while the
+        transition journal still names this question — by first frame
+        adjudicate may already have armed N+1). Nothing reads this as
+        "aired"; note_playout_started consumes it at the first frame and
+        on_agent_speech_finished consumes whatever never got there."""
+        if not speech_id:
+            return
+        pending = getattr(self, "_airing_pending_by_speech", None)
+        if pending is None:
+            pending = self._airing_pending_by_speech = {}
+        qnum = None
+        try:
+            qnum = self._resolve_result_narration(text)
+        except Exception:
+            qnum = None
+        pending[speech_id] = {
+            "text": (text or "").strip(),
+            "qnum": qnum,
+            "at": time.monotonic(),
+        }
+        while len(pending) > _PENDING_AIRING_CAP:
+            pending.pop(next(iter(pending)))
+
+    def consume_airing_pending(self, speech_id: str | None) -> dict | None:
+        """One-shot read of the airing record tts_node wrote for `speech_id`
+        (None when tts_node never ran for it, or it was already consumed)."""
+        if not speech_id:
+            return None
+        pending = getattr(self, "_airing_pending_by_speech", None)
+        if not pending:
+            return None
+        return pending.pop(speech_id, None)
+
+    def _first_frame_airgate(self, speech_id: str, record: dict) -> bool:
+        """DELIVERY-TRUTH-001 A5 — re-run the airing gate's two decisions at
+        the FIRST FRAME. For generate_reply lanes the say pipeline's
+        ResultAiredGate/FreshnessGate ran at LLM-stream end, before the
+        framework's authorization wait — enqueue-time truth again, the very
+        gap AIRGATE-001 claimed closed. A late fail interrupts the handle
+        (force=True, through cancel_speech) with the SAME accounting the
+        pipeline's Silence path runs: suppressed-id mark, claim confirm /
+        release inside the decision, floor-owed check, airgate event.
+        Returns True when the speech was cut here (the caller must not
+        stamp it or mark it as airing)."""
+        text = record.get("text") or ""
+        act = (self._dispatched_act_by_speech or {}).get(speech_id)
+        late_reason = None
+        try:
+            if text and self.result_narration_already_aired(
+                text, speech_id=speech_id
+            ) == "suppress":
+                late_reason = "late_result_already_aired"
+                # the decision left its facts (keys, stamped_by) in
+                # _last_airgate_decision; mark where it was made.
+                last = getattr(self, "_last_airgate_decision", None)
+                if last and last.get("speech_id") == speech_id:
+                    last["stage"] = "first_frame"
+        except Exception:
+            late_reason = None
+        if late_reason is None:
+            try:
+                stale = self.conversational_turn_superseded(
+                    speech_id, at_playout=True
+                )
+            except Exception:
+                stale = None
+            if stale:
+                late_reason = f"late_stale_reply_{stale}"
+                self._last_airgate_decision = {
+                    "speech_id": speech_id,
+                    "key": None,
+                    "qnum": record.get("qnum"),
+                    "stage": "first_frame",
+                    "detail": {
+                        "final_seq": int(getattr(self, "_user_final_seq", 0)),
+                    },
+                }
+                try:
+                    self.say_registry.release_owner(speech_id)
+                except Exception:
+                    pass
+        if late_reason is None:
+            return False
+        logger.warning(
+            "LILY_SAY_SUPPRESSED | reason=%s | session=%s speech=%s act=%s "
+            "text=%r — the gate's enqueue-time pass was stale by the first "
+            "frame; handle interrupted with accounting "
+            "(DELIVERY-TRUTH-001 A5)",
+            late_reason, self.sk.session_id, speech_id, act, text[:80],
+        )
+        # cancel_speech interrupts (force=True) and funnels the ONE
+        # on_dispatch_suppressed call (airgate event + listeners).
+        self.cancel_speech(speech_id, reason=late_reason)
+        owed = getattr(self, "floor_line_owed", None)
+        fire = getattr(self, "fire_floor_line", None)
+        try:
+            if callable(owed) and callable(fire) and owed():
+                fire(late_reason)
+        except Exception:
+            pass
+        return True
+
+    # -- DELIVERY-TRUTH-001 A11 / A3: the airgate record + suppression hook --
+
+    def note_airgate_event(
+        self,
+        reason: str,
+        *,
+        act: str | None = None,
+        key: str | None = None,
+        speech_id: str | None = None,
+        qnum: int | None = None,
+        stage: str | None = None,
+        detail: dict | None = None,
+    ) -> dict:
+        """S1/S16: one airing-gate decision on the record. Bounded list on
+        the game (_airgate_events), persisted as
+        lily_sessions.metadata.airgate_events at both metadata write sites
+        (heartbeat + session end, beside game_restarts). Fields: reason
+        (what the gate decided), act, key (say-registry key if any),
+        speech_id, qnum, stage (where it was decided: enqueue / first_frame
+        / playout_end / brake / flush), detail (decision-specific facts:
+        stamped_by, cuts/reairs, the ruling that was dropped), ts (UTC ISO)
+        and mono (monotonic seconds, orders events inside one session)."""
+        events = getattr(self, "_airgate_events", None)
+        if events is None:
+            events = self._airgate_events = []
+        event = {
+            "reason": str(reason),
+            "act": act,
+            "key": key,
+            "speech_id": speech_id,
+            "qnum": qnum,
+            "stage": stage,
+            "detail": dict(detail or {}),
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "mono": round(time.monotonic(), 3),
+        }
+        events.append(event)
+        del events[:-_AIRGATE_EVENTS_CAP]
+        return event
+
+    def airgate_events(self) -> list:
+        """The bounded airgate record (a copy) — the persistence lane reads
+        this; tests and the report pull receipts from it."""
+        return list(getattr(self, "_airgate_events", None) or [])
+
+    def add_dispatch_suppressed_listener(self, fn) -> None:
+        """Register a callable(act, speech_id, reason, **facts) that runs
+        after every on_dispatch_suppressed (W2's restart-confirm unwinding,
+        W4's recognition-carry). Exceptions in a listener are logged and
+        never reach the speech path."""
+        listeners = getattr(self, "_dispatch_suppressed_listeners", None)
+        if listeners is None:
+            listeners = self._dispatch_suppressed_listeners = []
+        listeners.append(fn)
+
+    def on_dispatch_suppressed(
+        self,
+        act: str | None,
+        speech_id: str | None,
+        reason: str,
+        *,
+        key: str | None = None,
+        qnum: int | None = None,
+        stage: str | None = None,
+        detail: dict | None = None,
+    ) -> None:
+        """THE hook every Silence / flush / cancel path funnels through
+        (DELIVERY-TRUTH-001 A3): a dispatched act did not (or will not)
+        reach the air. Records the airgate event (A11) and notifies the
+        registered listeners, so a lane whose pending STATE was armed by the
+        dispatch (a restart confirm, a carried recognition) can unwind it
+        instead of waiting forever on an announcement nobody heard.
+
+        Signature is the contract: (act, speech_id, reason) positional, the
+        rest keyword facts. Called from: tts_node's Silence branch (every
+        pipeline suppression), cancel_speech (stop brake, barge flush,
+        composite preempt, restart, first-frame late fail) and the
+        verdict-dropped accounting. Never raises."""
+        if speech_id and act is None:
+            act = (self._dispatched_act_by_speech or {}).get(speech_id)
+        # The gate decision that produced this suppression left its facts
+        # (keys, qnum, who stamped the airing) for the record — merge them.
+        last = getattr(self, "_last_airgate_decision", None)
+        if last and speech_id and last.get("speech_id") == speech_id:
+            key = key or last.get("key")
+            qnum = qnum if qnum is not None else last.get("qnum")
+            stage = last.get("stage") or stage
+            detail = {**(last.get("detail") or {}), **(detail or {})}
+            self._last_airgate_decision = None
+        try:
+            self.note_airgate_event(
+                reason, act=act, key=key, speech_id=speech_id, qnum=qnum,
+                stage=stage, detail=detail,
+            )
+        except Exception:
+            logger.exception("LILY_AIRGATE | EVENT_RECORD_FAILED")
+        for fn in list(
+            getattr(self, "_dispatch_suppressed_listeners", None) or []
+        ):
+            try:
+                fn(
+                    act, speech_id, reason,
+                    key=key, qnum=qnum, stage=stage, detail=detail,
+                )
+            except Exception:
+                logger.exception(
+                    "LILY_AIRGATE | SUPPRESSED_LISTENER_FAILED | act=%s "
+                    "reason=%s", act, reason,
+                )
+
     # -- WO-LILY-AIRGATE-001 D1a: the dequeue-time ALREADY-AIRED gate --------
 
     def _confirm_verdict_key_as_aired(
-        self, qnum: int, key: str, aired_text: "str | None" = None
+        self,
+        qnum: int,
+        key: str,
+        aired_text: "str | None" = None,
+        *,
+        drop_reason: "str | None" = None,
+        drop_detail: "dict | None" = None,
     ) -> None:
         """Adjudicate-style bookkeeping (the RESULT_PREAIRED semantics of
-        lily_agent.adjudicate) for a verdict beat that will NOT air because
-        the result is already on the air: the claim CONFIRMS — never
-        releases, a released verdict key wedges N+1 forever behind
-        _transition_holds_next_delivery — and the journal's verdict
-        narration is (re)bound to the words the room actually heard, so the
-        record never names words that were suppressed. Silence-wedge-free
-        by construction; never raises into the caller."""
+        lily_agent.adjudicate) for a verdict beat that will NOT air. The
+        claim CONFIRMS either way — never releases, a released verdict key
+        wedges N+1 forever behind _transition_holds_next_delivery — but the
+        JOURNAL tells the truth about why (S2, receipts never lie):
+
+          * aired_text given (a playout stamp exists — the result reached
+            the air under another speech): the verdict narration is
+            (re)bound to the words the room actually heard;
+          * no aired_text (DELIVERY-TRUTH-001 A7: nothing was ever stamped
+            at a first frame — the re-air budget spent, the room cut the
+            beat twice): the verdict is journaled as DROPPED
+            (`verdict_dropped: True`, narration None, the drop reason), an
+            airgate event records it, and the ruling is carried into the
+            next composite's context as a state note so the table still
+            gets it in her next words. The old path journaled
+            narration="" source=result_aired_gate — a receipt claiming an
+            airing that never happened (audit R6).
+
+        Silence-wedge-free by construction; never raises into the caller."""
         try:
             if self.say_registry.state(key) is None:
                 self.say_registry.claim(key)
             self.say_registry.confirm(key)
         except Exception:
             pass
+        if aired_text:
+            try:
+                entry = self._transition_entry(qnum, "verdict")
+                if entry is None:
+                    self.journal_transition(
+                        qnum, "verdict",
+                        detail={
+                            "key": key,
+                            "narration": aired_text,
+                            "source": "result_aired_gate",
+                        },
+                    )
+                else:
+                    detail = entry.get("detail")
+                    if isinstance(detail, dict):
+                        detail["narration"] = aired_text
+                        detail["narration_source"] = "result_aired_gate"
+            except Exception:
+                pass
+            return
+        self._journal_verdict_dropped(
+            qnum, key, reason=drop_reason or "no_playout_stamp",
+            detail=drop_detail,
+        )
+
+    def _journal_verdict_dropped(
+        self, qnum: int, key: str, *, reason: str, detail: "dict | None"
+    ) -> None:
+        """A7: the honest record for a ruling that never reached the air
+        and will not be re-aired — journal it as dropped (the verdict stage
+        entry still exists so N+1 releases through the existing seam), put
+        it on the airgate record, and hand the ruling to the next composite
+        as a state note so the words still get said, once, in her next
+        turn. Never raises."""
+        ruling = {}
+        try:
+            reveal = self._transition_entry(qnum, "reveal") or {}
+            rdetail = reveal.get("detail") or {}
+            ruling = {
+                "answer": str(rdetail.get("answer") or "").strip() or None,
+                "correct": bool(rdetail.get("correct")),
+                "winner": rdetail.get("winner"),
+            }
+        except Exception:
+            ruling = {}
+        facts = {"reason": reason, **(detail or {}), **ruling}
         try:
             entry = self._transition_entry(qnum, "verdict")
+            dropped_detail = {
+                "key": key,
+                "narration": None,
+                "verdict_dropped": True,
+                "source": "verdict_dropped",
+                "drop_reason": reason,
+            }
             if entry is None:
-                self.journal_transition(
-                    qnum, "verdict",
-                    detail={
-                        "key": key,
-                        "narration": aired_text or "",
-                        "source": "result_aired_gate",
-                    },
-                )
-            elif aired_text:
-                detail = entry.get("detail")
-                if isinstance(detail, dict):
-                    detail["narration"] = aired_text
-                    detail["narration_source"] = "result_aired_gate"
+                self.journal_transition(qnum, "verdict", detail=dropped_detail)
+            else:
+                d = entry.get("detail")
+                if isinstance(d, dict):
+                    d.update(dropped_detail)
         except Exception:
             pass
+        logger.warning(
+            "LILY_VERDICT | VERDICT_DROPPED | session=%s q=%d key=%s "
+            "reason=%s answer=%r winner=%s — the ruling never reached the "
+            "air and is not re-aired; claim confirmed for N+1, journaled "
+            "as dropped, carried to the next turn's context "
+            "(DELIVERY-TRUTH-001 A7)",
+            self.sk.session_id, qnum, key, reason,
+            ruling.get("answer"), ruling.get("winner"),
+        )
+        try:
+            self.on_dispatch_suppressed(
+                "verdict", None, "verdict_dropped",
+                key=key, qnum=qnum, stage="playout_end", detail=facts,
+            )
+        except Exception:
+            pass
+        answer = ruling.get("answer")
+        if answer:
+            if ruling.get("correct") and ruling.get("winner"):
+                line = (
+                    f"the ruling for question {qnum} never reached the "
+                    f"table (they cut it twice): the answer was {answer} "
+                    f"and the point went to {ruling['winner']}"
+                )
+            else:
+                line = (
+                    f"the ruling for question {qnum} never reached the "
+                    f"table (they cut it twice): the answer was {answer}, "
+                    f"nobody scored"
+                )
+            note = (
+                f"[state note: {line} — state it in ONE short clause at "
+                "the top of your next turn, then move on; never as a "
+                "second full reveal]"
+            )
+            existing = getattr(self, "_state_note", None)
+            self._state_note = f"{existing} {note}" if existing else note
 
     def result_narration_already_aired(
         self, text: str, *, speech_id: str | None = None
@@ -757,6 +1156,15 @@ class LilySpeechDeliveryMixin:
         if verdict_keys:
             for k in verdict_keys:
                 self._confirm_verdict_key_as_aired(qnum, k, aired_text)
+            # A11: the facts of this decision ride the airgate event the
+            # suppression funnel (on_dispatch_suppressed) records for this
+            # speech — key(s), qnum and who stamped the airing.
+            self._last_airgate_decision = {
+                "speech_id": speech_id,
+                "key": ",".join(sorted(verdict_keys)),
+                "qnum": qnum,
+                "detail": {"stamped_by": stamped_by, "aired_text": aired_text},
+            }
             logger.warning(
                 "LILY_SAY_SUPPRESSED | reason=result_already_aired | "
                 "session=%s q=%d keys=%s speech=%s stamped_by=%s — the "
@@ -775,6 +1183,12 @@ class LilySpeechDeliveryMixin:
         age = time.monotonic() - float(record.get("at") or 0.0)
         if age > _RESULT_RENARRATION_WINDOW_SECONDS:
             return None
+        self._last_airgate_decision = {
+            "speech_id": speech_id,
+            "key": None,
+            "qnum": qnum,
+            "detail": {"stamped_by": stamped_by, "age_s": round(age, 2)},
+        }
         logger.warning(
             "LILY_SAY_SUPPRESSED | reason=result_already_aired | session=%s "
             "q=%d speech=%s stamped_by=%s age=%.1fs — keyless re-narration "
@@ -818,27 +1232,39 @@ class LilySpeechDeliveryMixin:
             meta.pop(next(iter(meta)))
 
     def conversational_turn_superseded(
-        self, speech_id: "str | None"
+        self, speech_id: "str | None", *, at_playout: bool = False
     ) -> "str | None":
-        """AIRGATE-001 D1b, the playout-time freshness read for one outbound
-        turn. "superseded" — a newer user final committed after this ack was
+        """AIRGATE-001 D1b, the freshness read for one outbound turn.
+        "superseded" — a newer user final committed after this ack was
         dispatched (the room has moved on; airing it now collides with the
         answer); "expired" — the dispatch is older than the module's one
-        too-late-to-air deadline; None — fresh, speak. Consumes the record
-        either way (one decision per dispatch)."""
+        too-late-to-air deadline; None — fresh, speak.
+
+        DELIVERY-TRUTH-001 A5: the say pipeline asks at tts_node (which,
+        for generate_reply lanes, is BEFORE the framework authorizes
+        playout), so a fresh verdict there is not yet the airing-time
+        truth. The record is therefore consumed on a stale verdict, or on
+        the first-frame re-check (`at_playout=True`, note_playout_started)
+        — a fresh enqueue-time pass leaves it in place for that re-check.
+        on_agent_speech_finished drops whatever never reached a frame."""
         if not speech_id:
             return None
         meta = self._conversational_dispatch_meta
         if not meta:
             return None
-        record = meta.pop(speech_id, None)
+        record = meta.get(speech_id)
         if not record:
             return None
+        verdict = None
         if int(getattr(self, "_user_final_seq", 0)) > record["final_seq"]:
-            return "superseded"
-        if time.monotonic() - record["at"] > _CONVERSATIONAL_FRESHNESS_SECONDS:
-            return "expired"
-        return None
+            verdict = "superseded"
+        elif (
+            time.monotonic() - record["at"] > _CONVERSATIONAL_FRESHNESS_SECONDS
+        ):
+            verdict = "expired"
+        if verdict or at_playout:
+            meta.pop(speech_id, None)
+        return verdict
 
     # -- WO-LILY-AIRGATE-001 D2: user-cut discipline --------------------------
 
@@ -918,11 +1344,19 @@ class LilySpeechDeliveryMixin:
             if owed_delivery:
                 self.say_registry.release(delivery_key)
                 self.expect_delivery()
+                # DELIVERY-TRUTH-001 A8: expect_delivery is a NO-OP under
+                # address_unanswered / setup_pending (its P0-G scope), so
+                # a read flushed there re-registered nothing and no C3d
+                # resume watch was ever armed — the question sat
+                # half-aired. The flushed read is a barge-cut delivery in
+                # every sense the direct-cut path means it; mark it the
+                # same way, so the resume watch owns it.
+                self.note_question_barge_cut(self.sk.question_number)
                 logger.warning(
                     "LILY_BARGE | QUEUED_DELIVERY_FLUSHED | session=%s q=%d "
                     "speech=%s — queued question read flushed by a "
-                    "deliberate barge; expect_delivery re-armed so the read "
-                    "re-registers (C3d holds)",
+                    "deliberate barge; expect_delivery re-armed and the "
+                    "C3d resume watch armed so the read re-registers",
                     self.sk.session_id, self.sk.question_number, speech_id,
                 )
         if flushed:
@@ -1110,7 +1544,15 @@ class LilySpeechDeliveryMixin:
             cuts = (self._user_cut_counts or {}).get(key, 0)
             reairs = (self._verdict_reair_counts or {}).get(key, 0)
             if reairs >= 1 or cuts > 1:
-                self._confirm_verdict_key_as_aired(qnum, key, None)
+                # DELIVERY-TRUTH-001 A7: no playout stamp exists here (the
+                # branch above returned on one), so this ruling never
+                # reached the air — journal it DROPPED, carry it to the
+                # next turn's context; the claim still confirms (N+1).
+                self._confirm_verdict_key_as_aired(
+                    qnum, key, None,
+                    drop_reason="reair_budget_spent",
+                    drop_detail={"cuts": cuts, "reairs": reairs},
+                )
                 logger.warning(
                     "LILY_VERDICT | CUT_REAIR_SKIPPED | session=%s q=%d "
                     "key=%s reason=reair_budget_spent cuts=%d reairs=%d — "
@@ -1235,6 +1677,16 @@ class LilySpeechDeliveryMixin:
                     self._confirm_verdict_key_as_aired(
                         int(match.group(1)), key, aired
                     )
+                    self.note_airgate_event(
+                        "stale_claim_preaired_confirmed", act=act, key=key,
+                        speech_id=owner, qnum=int(match.group(1)),
+                        stage="watchdog",
+                        detail={
+                            "stamped_by": (self._result_aired or {}).get(
+                                "speech_id"
+                            ),
+                        },
+                    )
                     logger.warning(
                         "LILY_SAY | STALE_CLAIM_PREAIRED_CONFIRMED | key=%s "
                         "— the result is already on the air; the wedged "
@@ -1271,20 +1723,76 @@ class LilySpeechDeliveryMixin:
             )
             return
 
+    def add_first_frame_hook(self, fn) -> None:
+        """Register a callable(speech_id) that runs inside
+        note_playout_started once a speech has passed the first-frame gate
+        and been marked airing (W4's recognition-carry hooks here).
+        Exceptions are logged and never reach the speech path."""
+        hooks = getattr(self, "_first_frame_hooks", None)
+        if hooks is None:
+            hooks = self._first_frame_hooks = []
+        hooks.append(fn)
+
     def note_playout_started(self, speech_id: str | None) -> None:
-        """Wired from agent_state_changed -> "speaking" (TTS playout
-        actually started, per the 1.6.6 state machine): the current
-        speech is ON THE AIR, so its pending claims are in-flight, never
-        stale. One id per spoken turn; discarded at playout completion."""
+        """THE canonical FIRST-FRAME hook (DELIVERY-TRUTH-001 A1).
+        Signature is the contract — `note_playout_started(speech_id: str |
+        None) -> None` — wired from agent_state_changed -> "speaking" (TTS
+        playout actually started, per the 1.6.6 state machine) with
+        session.current_speech.id. Everything that means "this speech is
+        ON THE AIR" is decided here and nowhere earlier, in this order:
+
+          1. the cut-recovery watchdog stands down (new audio is airing);
+          2. A5 — the airing gate's two decisions (result-already-aired,
+             conversational freshness) re-run against first-frame truth;
+             a late fail interrupts the handle (force) with the pipeline's
+             accounting and RETURNS — nothing below runs for a cut speech;
+          3. A1 — the result-aired stamp is taken from the record tts_node
+             wrote (note_airing_pending): `_result_aired` is written HERE,
+             keyed by this speech_id, and by on_agent_speech_finished for a
+             completed playout that never passed through here. No consumer
+             reads a stamp taken anywhere else;
+          4. the speech is marked airing (_playout_started_ids); latency,
+             transcript-sync, address-latch and delivery-stem bookkeeping;
+          5. the registered first-frame hooks run (add_first_frame_hook).
+
+        One id per spoken turn; discarded at playout completion."""
         # New audio is on the air — any earlier cut's dead-air window is
         # void, so a pending auto-resume watchdog stands down (WS-3).
         self.cancel_cut_recovery()
         if not speech_id:
             return
+        # tts_node's record for this speech (absent only for a speech that
+        # never ran the say pipeline — the gate below then has nothing to
+        # re-decide but the freshness meta, which is keyed by id alone).
+        record = self.consume_airing_pending(speech_id) or {
+            "text": "", "qnum": None,
+        }
+        if self._first_frame_airgate(speech_id, record):
+            return
+        if record.get("qnum") is not None:
+            self.note_result_aired(
+                int(record["qnum"]), record.get("text") or "",
+                speech_id=speech_id,
+            )
         started = self._playout_started_ids
         if started is None:
             started = self._playout_started_ids = set()
         started.add(speech_id)
+        act = (self._dispatched_act_by_speech or {}).get(speech_id)
+        if act in _STOP_BRAKE_EXEMPT_ACTS:
+            # A4/A6 receipt: the acknowledgment the STOP/hold is owed has
+            # reached its first frame — the live-call proof that the brake
+            # did not eat its own ack.
+            logger.warning(
+                "LILY_STOP | ACK_AIRING | session=%s speech_id=%s act=%s — "
+                "the acknowledgment reached its first frame "
+                "(DELIVERY-TRUTH-001 A4/A6)",
+                self.sk.session_id, speech_id, act,
+            )
+            self.note_airgate_event(
+                "ack_airing", act=act, speech_id=speech_id,
+                stage="first_frame",
+            )
         # DISPATCH_TO_AIR (lily-639007: a verdict composite took ~17s from
         # answer to air and nothing said where the time went —
         # COMMIT_TO_DISPATCH_MS read 0, so the whole 17s hid between
@@ -1396,6 +1904,16 @@ class LilySpeechDeliveryMixin:
             except Exception as e:
                 logger.warning(
                     "LILY_STATE | GLASS_AT_AIR_FAILED | %s", e
+                )
+        # 5. the registered first-frame hooks (add_first_frame_hook) — the
+        # speech is on the air with every stamp above already taken.
+        for fn in list(getattr(self, "_first_frame_hooks", None) or []):
+            try:
+                fn(speech_id)
+            except Exception:
+                logger.exception(
+                    "LILY_PLAYOUT | FIRST_FRAME_HOOK_FAILED | speech_id=%s",
+                    speech_id,
                 )
 
     def expect_delivery(self) -> None:
