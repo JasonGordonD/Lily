@@ -155,7 +155,7 @@ def test_session_resolves_false_interruption_contract():
     endpointing = session.options.endpointing
     assert endpointing["mode"] == "fixed"
     assert endpointing["min_delay"] == 0.6
-    assert endpointing["max_delay"] == 6.0
+    assert endpointing["max_delay"] == 2.5  # COMPOSITION-FOLLOWUP-001 L1
 
 
 def test_short_quiz_answers_can_interrupt(monkeypatch):

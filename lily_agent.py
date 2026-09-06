@@ -1957,8 +1957,16 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if stamps is None:
             stamps = self._deterministic_reply_marked_at = {}
         stamps[normalized] = time.monotonic()
+        # COMPOSITION-FOLLOWUP-001 C2: the final sequence the mark was made
+        # under (note_user_final runs at the top of on_transcript_event, so
+        # a mark made inside the event carries its own final's number).
+        seqs = getattr(self, "_deterministic_reply_seq", None)
+        if seqs is None:
+            seqs = self._deterministic_reply_seq = {}
+        seqs[normalized] = int(getattr(self, "_user_final_seq", 0) or 0)
         for stale in [k for k in stamps if k not in pending]:
             stamps.pop(stale, None)
+            seqs.pop(stale, None)
 
     def consume_deterministic_reply(self, text: str) -> bool:
         """Consume the handled-turn marker that owns this committed turn.
@@ -1981,11 +1989,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         stamps = getattr(self, "_deterministic_reply_marked_at", None) or {}
         now = time.monotonic()
         ttl = lily_speech_delivery._DETERMINISTIC_REPLY_TTL_SECONDS
+        seqs = getattr(self, "_deterministic_reply_seq", None) or {}
         for mark in list(pending):
             at = stamps.get(mark)
             if at is not None and now - at > ttl:
                 pending.remove(mark)
                 stamps.pop(mark, None)
+                seqs.pop(mark, None)
         if not normalized:
             return False
         haystack = f" {normalized} "
@@ -1993,6 +2003,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             if mark == normalized or f" {mark} " in haystack:
                 del pending[index]
                 stamps.pop(mark, None)
+                seqs.pop(mark, None)
                 return True
         return False
 
@@ -3203,6 +3214,12 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # PATCH-002 A4: the hold binds every lane. While held, the watchdog
         # itself must not refire/nudge/vamp. It lifts only on the generous
         # timeout (user speech lifts it sooner) — then the tick continues.
+        # COMPOSITION-FOLLOWUP-001 B2: a player-requested PAUSE never lifts
+        # on the clock — only an explicit resume (or an answer landing in
+        # the still-open window) releases it; conversation keeps flowing
+        # (the hold binds gated_say lanes only), so this is not a wedge.
+        if self.pause_sticky():
+            return _WATCH_HALT
         if self.hold_timed_out():
             self.release_hold(reason="timeout")
             return "hold_released"
@@ -5165,6 +5182,89 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         )
         return True
 
+    def hold_window_clock_for_pause(self, *, reason: str) -> bool:
+        """WO-LILY-COMPOSITION-FOLLOWUP-001 B2: a PAUSE holds the open
+        window's clock — the expiry task is cancelled and the deadline
+        lifted (is_window_open keeps admitting answers), the remaining
+        seconds are remembered so the resume re-arms exactly what was
+        left. Returns True when a running clock was held. The window
+        itself, its candidates and the current question all survive (the
+        STOP brake would have wiped them)."""
+        if not getattr(self.sk, "answer_window_open", False):
+            return False
+        timer = self._window_timer
+        deadline = self.sk.answer_window_deadline
+        had_clock = deadline is not None or (
+            timer is not None and not timer.done()
+        )
+        if not had_clock:
+            return False
+        remaining = None
+        if deadline is not None:
+            remaining = max(1.0, float(deadline) - time.time())
+        if (
+            timer is not None
+            and not timer.done()
+            and timer is not asyncio.current_task()
+        ):
+            timer.cancel()
+        self._window_timer = None
+        self.sk.answer_window_deadline = None
+        self._paused_window_remaining = remaining
+        self._paused_window_qnum = self.sk.question_number
+        try:
+            self.sk.note_question_time("window_held_at")
+            self.sk.note_question_mark("window_hold_reason", reason)
+        except Exception:  # pragma: no cover
+            pass
+        logger.warning(
+            "LILY_WINDOW | CLOCK_HELD | session=%s q=%d reason=%s "
+            "remaining=%s — the open window's clock is held under the "
+            "pause; no timeout verdict until the table resumes",
+            self.sk.session_id, self.sk.question_number, reason,
+            f"{remaining:.1f}s" if remaining is not None else "-",
+        )
+        return True
+
+    def resume_window_clock_after_pause(self, *, reason: str) -> bool:
+        """B2: the pause lifted — re-arm the held clock on the SAME open
+        window (the remaining seconds, floored at a few seconds so the
+        table is not timed out on the resume word itself). Relaxed
+        windows never had a clock and get none. Returns True when a clock
+        was re-armed."""
+        remaining = getattr(self, "_paused_window_remaining", None)
+        qnum = getattr(self, "_paused_window_qnum", None)
+        self._paused_window_remaining = None
+        self._paused_window_qnum = None
+        if remaining is None:
+            return False
+        if not getattr(self.sk, "answer_window_open", False):
+            return False
+        if qnum is not None and qnum != self.sk.question_number:
+            return False
+        if self.sk.pacing == "relaxed":
+            return False
+        if self._window_timer is not None and not self._window_timer.done():
+            return False
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        dur = max(5.0, float(remaining))
+        self.sk.answer_window_deadline = time.time() + dur
+        self._arm_window_expiry(dur)
+        try:
+            self.sk.note_question_time("window_resumed_at")
+            self.sk.note_question_mark("window_resume_reason", reason)
+        except Exception:  # pragma: no cover
+            pass
+        logger.info(
+            "LILY_WINDOW | CLOCK_RESUMED | session=%s q=%d dur=%.1fs "
+            "reason=%s — the held clock runs again from the resume",
+            self.sk.session_id, self.sk.question_number, dur, reason,
+        )
+        return True
+
     def _maybe_close_relaxed_beat(self) -> None:
         """HOTFIX-009 W4: with no clock, the relaxed answer beat closes on
         PEOPLE. Once every rostered player has an answer in and no clarify
@@ -5421,12 +5521,17 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 # agree on "Wilde, the" (committed — the answer, then a
                 # stall) exactly as they agree on the live fragment.
                 q = self.sk.current_question or self.armed_question or {}
+                attempt = str(t1.get("attempt_text") or "")
                 return (
                     lily_evaluation.lily_uncommitted_answer_shape(
-                        str(t1.get("attempt_text") or ""),
+                        attempt,
                         expected_answers=lily_evaluation.lily_expected_answers(q),
                     )
                     is not None
+                    # COMPOSITION-FOLLOWUP-001 B1: an unresolved utterance
+                    # on a four-choice card is the clarify's, not the
+                    # receipt's (same read _maybe_fire_clarify makes).
+                    or lily_evaluation.lily_mc_unresolved(attempt, q)
                 )
             return False
         except Exception:
@@ -5655,6 +5760,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             )
 
             question = self.armed_question
+            # COMPOSITION-FOLLOWUP-001 C5: the card a post-verdict contest
+            # is about (contest_multiple_choice_hint reads it once the
+            # live question has moved on).
+            self._last_adjudicated_question = question
             acceptable = question.get("acceptable_answers") or [
                 str(question.get("canonical_answer", "")).lower()
             ]
@@ -6812,6 +6921,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 "LILY_PREFS | APPLIED | session=%s pacing=%s (%s, "
                 "at game start)", self.sk.session_id, pacing, source,
             )
+            # Operator B3 (WO-LILY-COMPOSITION-FOLLOWUP-001): relaxed
+            # pacing KILLS the timer on every path — a stored relaxed
+            # usual applied while a timed window is somehow open converts
+            # it, exactly as the spoken flip does (set_pacing D1a).
+            if pacing == "relaxed" and getattr(
+                self.sk, "answer_window_open", False
+            ):
+                self._convert_window_untimed(reason=f"prefs_applied:{source}")
 
     def _maybe_retry_enrollment(self, player: str | None) -> None:
         """WS-8: re-fire enrollment for a bound player still below the
@@ -10985,6 +11102,20 @@ def _config_snapshot_or_none():
         return None
 
 
+def _voice_identity_receipt_or_failed(game):
+    """WO-LILY-COMPOSITION-FOLLOWUP-001 C8: the voice receipt is one lane
+    of the metadata payload — a raise inside it must not take down BOTH
+    metadata writes (heartbeat + close). Same discipline as
+    _config_snapshot_or_none; the failure is itself the receipt (S2)."""
+    try:
+        return game.voice_identity_receipt()
+    except Exception as e:  # noqa: BLE001 — receipt lane must not break persistence
+        logger.warning(
+            "LILY_VOICE_ID | RECEIPT_FAILED | %s: %s", type(e).__name__, e
+        )
+        return {"outcome": f"receipt_failed:{type(e).__name__}"}
+
+
 def lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics) -> dict:
     """THE lily_sessions.metadata payload — one builder for BOTH write
     sites (the 60s heartbeat's metadata_provider and the session-close
@@ -11027,7 +11158,7 @@ def lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics) -> di
         # voiced_seconds, attempts, best_score, runner_up, threshold,
         # model_tag, gate_source, enrollment, ...}; "never_ran" and
         # "insufficient_voiced" are first-class outcome values (S2).
-        "voice_identity": game.voice_identity_receipt(),
+        "voice_identity": _voice_identity_receipt_or_failed(game),
     }
 
 
@@ -11553,6 +11684,18 @@ async def entrypoint(ctx: JobContext) -> None:
     # debug used-records for the tap to count, with root handlers shielded
     # from the debug flood (log output unchanged).
     session_metrics.enable_preemptive_used_capture()
+    # WO-LILY-COMPOSITION-FOLLOWUP-001 L2: the per-turn end-of-turn receipt
+    # — the framework's "eot prediction" / "user turn committed" DEBUG
+    # records (extras: probability, unlikely_threshold, endpointing_delay,
+    # trigger, from_cache; delay_completed, source) tapped off the SAME
+    # logger, correlated to each user turn's MetricsReport by
+    # last_speaking_time ≈ stopped_speaking_at, persisted under
+    # session_metrics.turn_taking. Independent of the C12 capture above
+    # (it sets DEBUG + its own shield itself).
+    session_metrics.attach_eot_tap()
+    session_metrics.bind_turn_detector(
+        lambda: getattr(session, "turn_detection", None)
+    )
 
     @session.on("session_usage_updated")
     def _on_session_usage(ev) -> None:

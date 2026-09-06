@@ -1,10 +1,17 @@
--- 027_retire_ecapa_v1_room_tone_centroids.sql — WO-LILY-VOICE-TRUTH-001 V1(d)
+-- 028_retire_ecapa_v1_room_tone_centroids.sql — WO-LILY-VOICE-TRUTH-001 V1(d)
+-- (renumbered from 027 by WO-LILY-COMPOSITION-FOLLOWUP-001 C6: it collided
+-- with 027_lily_llm_usage_effort.sql; deploy.yml applies migrations/*.sql in
+-- glob order, and two 027s made that order lexical luck).
 --
--- SCRIPT ONLY. Not applied by the build; the operator applies it by hand
--- after the ecapa-192-v2 build is up. NO destructive writes: nothing is
--- deleted, truncated, or overwritten — the rows below are RETIRED
--- (status='retired', retired_at=now()) and stay in place as the receipt.
---
+-- WHAT THE BUILD DOES WITH THIS FILE: deploy.yml's "Apply migrations to
+-- empty PostgreSQL" step DOES run it — against a fresh, EMPTY database,
+-- where the guarded ALTERs are no-ops and the UPDATE matches zero rows
+-- (harmless; the earlier header's "not applied by the build" claim was
+-- wrong). The LIVE retirement stays operator-run: apply this by hand
+-- against the production catalog after the ecapa-192-v2 build is up.
+-- NO destructive writes: nothing is deleted, truncated, or overwritten —
+-- the rows below are RETIRED (status='retired', retired_at=now()) and
+-- stay in place as the receipt.
 -- WHY. Every 'ecapa-192-v1' centroid was computed by the pre-VOICE-TRUTH
 -- probe, which embedded the first 2.5s (match) / 8s (enroll) of WALL-CLOCK
 -- audio from track_subscribed with no speech gate. In every instrumented

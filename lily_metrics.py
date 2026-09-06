@@ -103,6 +103,34 @@ def _ms(seconds):
     return None if seconds is None else round(seconds * 1000, 1)
 
 
+def _num_or_none(value):
+    """L2 unit rule: the framework's 0–1 decimals persist as numbers,
+    exactly as emitted — never strings, never percentages."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+class _FrameworkDebugShield(logging.Filter):
+    """Keeps the framework's DEBUG flood (created so the taps can count
+    it) out of a root handler: drops `<prefix>.*` records below INFO —
+    output unchanged, only counting changes. Shared by
+    enable_preemptive_used_capture and attach_eot_tap (L2), which
+    installs one only where a handler has none."""
+
+    def __init__(self, prefix: str):
+        super().__init__()
+        self.prefix = prefix
+
+    def filter(self, record):
+        return not (
+            record.name.startswith(self.prefix)
+            and record.levelno < logging.INFO
+        )
+
+
 class LilyMetricsCollector:
     """Folds every per-turn MetricsReport and the latest session-usage
     rollup into one summary. One instance per session."""
@@ -156,6 +184,23 @@ class LilyMetricsCollector:
         self._usage_context = None
         self._usage_rows_scheduled = 0
         self._usage_write_failures = 0
+        # WO-LILY-COMPOSITION-FOLLOWUP-001 L2: the per-USER-turn end-of-turn
+        # receipt. Each user turn's MetricsReport is classified
+        # (commit_reason) and correlated to the framework's own DEBUG
+        # records ("eot prediction" / "user turn committed", tapped off the
+        # livekit.agents logger) by last_speaking_time ≈ stopped_speaking_at.
+        # Bounded ring (oldest dropped); persisted whole under
+        # session_metrics.turn_taking.turns.
+        self._eot_turns = []
+        self._eot_records = {}          # round(last_speaking_time, 3) -> bundle
+        self._eot_last_prediction = None
+        self._eot_tap_attached = False
+        self._eot_tap_level = None
+        self._eot_prediction_timeouts = 0
+        self._eot_cloud_failures = 0
+        self._commit_reasons = {}
+        self._turn_detector_source = None
+        self._endpointing_bounds = None  # zero-arg -> (min_delay, max_delay)
 
     def set_usage_sink(self, sink) -> None:
         """Install a per-call usage sink: a callable taking one fields dict
@@ -348,8 +393,270 @@ class LilyMetricsCollector:
                 if isinstance(v, (int, float)) and v >= 0:
                     bucket.append(v)
             self._turns += 1
+            self._fold_user_turn(g)
         except Exception as e:
             logger.warning("LILY_METRICS | TURN_SKIPPED | %s", e)
+
+    # -- L2: the per-turn end-of-turn receipt --------------------------------
+
+    _EOT_TURNS_CAP = 200
+    _EOT_RECORDS_CAP = 64
+    _EOT_CORRELATION_TOLERANCE_S = 0.25
+
+    def bind_turn_detector(self, source) -> None:
+        """A zero-arg callable returning the session's live turn_detection
+        (a string mode or a model object); its name is stamped on every
+        turn entry (it flips on a cloud→local fallback)."""
+        self._turn_detector_source = source
+
+    def bind_endpointing_bounds(self, source) -> None:
+        """A zero-arg callable returning (min_delay, max_delay) seconds —
+        the commit_reason classifier's bounds. Defaults to lily_config's
+        stt_min/max_endpointing_delay when unbound."""
+        self._endpointing_bounds = source
+
+    def _turn_detector_name(self):
+        src = self._turn_detector_source
+        if not callable(src):
+            return None
+        try:
+            td = src()
+        except Exception:
+            return None
+        if td is None:
+            return None
+        if isinstance(td, str):
+            return td
+        for attr in ("model_name", "model", "name"):
+            v = getattr(td, attr, None)
+            if isinstance(v, str) and v:
+                return v
+        return type(td).__name__
+
+    def _endpointing_bounds_now(self):
+        src = self._endpointing_bounds
+        if callable(src):
+            try:
+                lo, hi = src()
+                return float(lo), float(hi)
+            except Exception:
+                pass
+        try:
+            import lily_config
+            return (
+                float(lily_config.stt_min_endpointing_delay()),
+                float(lily_config.stt_max_endpointing_delay()),
+            )
+        except Exception:
+            return None, None
+
+    def classify_commit_reason(self, end_of_turn_delay, transcription_delay):
+        """WHY the framework committed the turn when it did (operator L2):
+        max_delay (|eot − max| < 0.05 s), stt_final (|eot − transcription_
+        delay| < 0.3 s: the commit rode the STT final), min_delay (|eot −
+        min| < 0.05 s), else other. The order is the operator's."""
+        if not isinstance(end_of_turn_delay, (int, float)):
+            return "other"
+        eot = float(end_of_turn_delay)
+        lo, hi = self._endpointing_bounds_now()
+        if hi is not None and abs(eot - hi) < 0.05:
+            return "max_delay"
+        if isinstance(transcription_delay, (int, float)) and abs(
+            eot - float(transcription_delay)
+        ) < 0.3:
+            return "stt_final"
+        if lo is not None and abs(eot - lo) < 0.05:
+            return "min_delay"
+        return "other"
+
+    def _fold_user_turn(self, g) -> None:
+        """Build one turn entry from a USER-turn MetricsReport (it carries
+        stopped_speaking_at); agent-turn reports fold nothing here. EVERY
+        entry carries eot_probability / eot_threshold / eot_model /
+        eot_source (operator rule) — null + a source name when no debug
+        record was captured for the turn."""
+        stopped = g("stopped_speaking_at")
+        eot = g("end_of_turn_delay")
+        if not isinstance(stopped, (int, float)) or not isinstance(
+            eot, (int, float)
+        ):
+            return
+        td = g("transcription_delay")
+        outc = g("on_user_turn_completed_delay")
+        started = g("started_speaking_at")
+        reason = self.classify_commit_reason(eot, td)
+        entry = {
+            "started_speaking_at": (
+                float(started) if isinstance(started, (int, float)) else None
+            ),
+            "stopped_speaking_at": float(stopped),
+            "vad_end_of_speech_at": float(stopped),
+            "stt_final_at": (
+                float(stopped) + float(td) if isinstance(td, (int, float)) else None
+            ),
+            "commit_at": float(stopped) + float(eot),
+            "transcription_delay_ms": _ms(td) if isinstance(td, (int, float)) else None,
+            "end_of_turn_delay_ms": _ms(eot),
+            "on_user_turn_completed_delay_ms": (
+                _ms(outc) if isinstance(outc, (int, float)) else None
+            ),
+            "commit_reason": reason,
+            # The framework's own numbers — 0–1 decimals exactly as emitted
+            # (probability=0.00569…, unlikely_threshold=0.56), never
+            # percentages, never strings.
+            "eot_probability": None,
+            "eot_threshold": None,
+            "eot_model": self._turn_detector_name(),
+            "eot_source": (
+                "no_debug_record" if self._eot_tap_attached else "tap_not_attached"
+            ),
+            "endpointing_delay": None,
+            "commit_trigger": None,
+            "from_cache": None,
+        }
+        bundle = self._pop_eot_record(float(stopped))
+        if bundle is not None:
+            pred = bundle.get("prediction") or {}
+            commit = bundle.get("commit") or {}
+            prob = pred.get("probability")
+            if prob is None:
+                prob = commit.get("end_of_turn_probability")
+            thr = pred.get("unlikely_threshold")
+            if thr is None:
+                thr = commit.get("unlikely_threshold")
+            entry["eot_probability"] = _num_or_none(prob)
+            entry["eot_threshold"] = _num_or_none(thr)
+            entry["endpointing_delay"] = _num_or_none(pred.get("endpointing_delay"))
+            entry["commit_trigger"] = commit.get("source") or pred.get("trigger")
+            entry["from_cache"] = pred.get("from_cache")
+            if bundle.get("model"):
+                entry["eot_model"] = bundle["model"]
+            if pred.get("timed_out"):
+                entry["eot_source"] = "prediction_timed_out"
+            elif pred:
+                entry["eot_source"] = "debug_record"
+            else:
+                entry["eot_source"] = "commit_record_only"
+        self._commit_reasons[reason] = self._commit_reasons.get(reason, 0) + 1
+        self._eot_turns.append(entry)
+        while len(self._eot_turns) > self._EOT_TURNS_CAP:
+            self._eot_turns.pop(0)
+
+    def _pop_eot_record(self, stopped_speaking_at):
+        best_key, best_gap = None, None
+        for key, bundle in self._eot_records.items():
+            lst = bundle.get("last_speaking_time")
+            if not isinstance(lst, (int, float)):
+                continue
+            gap = abs(float(lst) - float(stopped_speaking_at))
+            if gap <= self._EOT_CORRELATION_TOLERANCE_S and (
+                best_gap is None or gap < best_gap
+            ):
+                best_key, best_gap = key, gap
+        if best_key is None:
+            return None
+        return self._eot_records.pop(best_key)
+
+    def _note_eot_prediction(self, extras: dict) -> None:
+        self._eot_last_prediction = {
+            "probability": extras.get("probability"),
+            "unlikely_threshold": extras.get("unlikely_threshold"),
+            "endpointing_delay": extras.get("endpointing_delay"),
+            "trigger": extras.get("trigger"),
+            "from_cache": extras.get("from_cache"),
+            "language": extras.get("language"),
+        }
+
+    def _note_user_turn_committed(self, extras: dict) -> None:
+        lst = extras.get("last_speaking_time")
+        bundle = {
+            "last_speaking_time": lst,
+            "commit": {
+                "last_speaking_time": lst,
+                "last_final_transcript_time": extras.get("last_final_transcript_time"),
+                "speech_start_time": extras.get("speech_start_time"),
+                "delay_completed": extras.get("delay_completed"),
+                "source": extras.get("source"),
+                "end_of_turn_probability": extras.get("end_of_turn_probability"),
+                "unlikely_threshold": extras.get("unlikely_threshold"),
+            },
+            "prediction": self._eot_last_prediction,
+            "model": self._turn_detector_name(),
+        }
+        self._eot_last_prediction = None
+        key = (
+            round(float(lst), 3) if isinstance(lst, (int, float))
+            else f"unkeyed_{len(self._eot_records)}"
+        )
+        self._eot_records[key] = bundle
+        while len(self._eot_records) > self._EOT_RECORDS_CAP:
+            self._eot_records.pop(next(iter(self._eot_records)))
+
+    def attach_eot_tap(self, logger_name: str = "livekit.agents"):
+        """L2: tap the framework's end-of-turn DEBUG records off the EXACT
+        logger audio_recognition logs through — a logging.Filter on
+        logging.getLogger(logger_name), the attach_preemptive_tap pattern
+        (logger-level filters see records logged on that logger; no
+        private API, nothing monkeypatched). Captures "eot prediction"
+        (probability, unlikely_threshold, endpointing_delay, trigger,
+        from_cache), "user turn committed" (last_speaking_time,
+        delay_completed, source, end_of_turn_probability,
+        unlikely_threshold), and the warnings "eot prediction timed out" /
+        "cloud turn detector failed".
+
+        INDEPENDENT of enable_preemptive_used_capture (operator addendum
+        #2): this sets the logger to DEBUG itself (only ever LOWERS it) and
+        installs its own root-handler shield for livekit.* records below
+        INFO when none is present — the receipt populates even if the C12
+        capture is disabled. The effective level at attach is asserted
+        (isEnabledFor(DEBUG)), logged as LILY_METRICS | EOT_TAP and
+        persisted as eot_tap_level. Returns the filter."""
+        lk = logging.getLogger(logger_name)
+        if lk.level == logging.NOTSET or lk.level > logging.DEBUG:
+            lk.setLevel(logging.DEBUG)
+        prefix = logger_name.split(".")[0]
+        for handler in logging.getLogger().handlers:
+            if not any(
+                isinstance(f, _FrameworkDebugShield) and f.prefix == prefix
+                for f in handler.filters
+            ):
+                handler.addFilter(_FrameworkDebugShield(prefix))
+        collector = self
+
+        class _EotFilter(logging.Filter):
+            def filter(self, record):
+                try:
+                    msg = record.getMessage()
+                    extras = record.__dict__
+                    if msg.startswith("eot prediction timed out"):
+                        collector._eot_prediction_timeouts += 1
+                        collector._eot_last_prediction = {"timed_out": True}
+                    elif msg.startswith("eot prediction"):
+                        collector._note_eot_prediction(extras)
+                    elif msg.startswith("user turn committed"):
+                        collector._note_user_turn_committed(extras)
+                    elif "cloud turn detector failed" in msg:
+                        collector._eot_cloud_failures += 1
+                except Exception:
+                    pass
+                return True
+
+        f = _EotFilter()
+        lk.addFilter(f)
+        enabled = lk.isEnabledFor(logging.DEBUG)
+        self._eot_tap_attached = True
+        self._eot_tap_level = logging.getLevelName(lk.getEffectiveLevel())
+        logger.info(
+            "LILY_METRICS | EOT_TAP | logger=%s level=%s enabled_for_debug=%s "
+            "— per-turn end-of-turn receipt %s (COMPOSITION-FOLLOWUP-001 L2)",
+            logger_name, self._eot_tap_level, enabled,
+            "armed" if enabled else "ATTACHED BUT DEBUG DISABLED",
+        )
+        return f
+
+    def eot_turns(self) -> list:
+        """The bounded per-turn list (a copy) — the L2 receipt."""
+        return [dict(e) for e in self._eot_turns]
 
     def collect_llm_call_soon(self, m, identity=None) -> None:
         """Fold one per-call LLMMetrics, DEFERRED one event-loop tick
@@ -517,15 +824,7 @@ class LilyMetricsCollector:
             lk.setLevel(logging.DEBUG)
 
         prefix = logger_name.split(".")[0]
-
-        class _ShieldFrameworkDebug(logging.Filter):
-            def filter(self, record):
-                return not (
-                    record.name.startswith(prefix)
-                    and record.levelno < logging.INFO
-                )
-
-        shield = _ShieldFrameworkDebug()
+        shield = _FrameworkDebugShield(prefix)
         for handler in logging.getLogger().handlers:
             handler.addFilter(shield)
         return shield
@@ -586,13 +885,30 @@ class LilyMetricsCollector:
             latency["e2e_latency_ms_p95"] = _ms(_pct(self._e2e_latency, 95))
         if latency:
             out["latency"] = latency
+        turn_taking = {}
         if self._transcription_delay or self._end_of_turn_delay or self._on_user_turn_delay:
-            out["turn_taking"] = {
+            turn_taking.update({
                 "transcription_delay_ms_p50": _ms(_pct(self._transcription_delay, 50)),
                 "transcription_delay_ms_p95": _ms(_pct(self._transcription_delay, 95)),
                 "end_of_turn_delay_ms_p50": _ms(_pct(self._end_of_turn_delay, 50)),
+                "end_of_turn_delay_ms_p95": _ms(_pct(self._end_of_turn_delay, 95)),
                 "on_user_turn_completed_delay_ms_p50": _ms(_pct(self._on_user_turn_delay, 50)),
-            }
+            })
+        if self._eot_turns or self._eot_tap_attached:
+            # L2: the per-turn receipt + the instrument's own proof
+            # (eot_tap_attached / eot_tap_level) so the FIRST receipt
+            # call shows whether the tap could see the records.
+            turn_taking.update({
+                "turns": self.eot_turns(),
+                "commit_reasons": dict(self._commit_reasons),
+                "eot_tap_attached": bool(self._eot_tap_attached),
+                "eot_tap_level": self._eot_tap_level,
+                "eot_prediction_timeouts": self._eot_prediction_timeouts,
+                "cloud_turn_detector_failures": self._eot_cloud_failures,
+                "turn_detector": self._turn_detector_name(),
+            })
+        if turn_taking:
+            out["turn_taking"] = turn_taking
         if self._usage is not None:
             out["usage"] = self._usage
         if self._llm_calls:

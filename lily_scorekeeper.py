@@ -389,6 +389,15 @@ _START_GAME_RE = _re.compile(
     r"|dive in"
     r"|begin (?:the )?(?:game|round|quiz)"
     r"|kick (?:it )?off"
+    # Operator B5 (WO-LILY-COMPOSITION-FOLLOWUP-001, live 11:45:40Z → first
+    # question 11:47:05Z): a table announcing readiness IS the start.
+    r"|get (?:the|this) show on the road"
+    r"|let\s?s (?:get (?:started|going|into it)|do (?:this|it)|roll|rock)"
+    r"|(?:i m|im|i am|we re|we are) (?:all )?ready"
+    r"(?! to (?:order|eat|leave|head|go home|call it))"
+    r"|ready when(?:ever)? you are"
+    r"|fire away"
+    r"|bring it on"
     r")\b"
 )
 # S2 whole-utterance guards. NEGATION: "not ready to start", "I don't want
@@ -413,7 +422,9 @@ _START_QUESTION_RE = _re.compile(
 _START_DEFERRAL_RE = _re.compile(
     r"\b(?:later|not yet|in a (?:minute|min|sec|second|bit|moment|while)"
     r"|one sec|one second|just kidding|kidding|joking|sometime|some time"
-    r"|whenever|eventually|after (?:this|that|we|i|the|dinner|lunch)"
+    # B5: "whenever YOU are" is readiness, not a deferral.
+    r"|whenever(?! you (?:are|re|want|like|say|wish|re ready|are ready))"
+    r"|eventually|after (?:this|that|we|i|the|dinner|lunch)"
     r"|once (?:we|i|everyone|they)|when (?:we|i|everyone|they)"
     r"|before (?:we|i|you)"
     r"|(?:a |the |some |our |my )?(?:drink|drinks|food|snack|snacks|bathroom"
@@ -442,7 +453,9 @@ def _start_phrase_blocked(normalized: str) -> bool:
 # filler around it), never as a substring, so "before we start, one
 # question" and "she starts crying every time" can never launch a game.
 _BARE_START_TOKEN_RE = _re.compile(
-    r"^(?:start|starts|begin|begins|kick ?off)$"
+    # B5: a bare "ready" / "ready to start" (a player echoing her own "ready
+    # to start?" prompt) is the start intent when it is the whole utterance.
+    r"^(?:start|starts|begin|begins|kick ?off|ready|ready to (?:start|go|play|begin))$"
 )
 _START_FILLER_TOKENS = frozenset({
     "ok", "okay", "yeah", "yes", "yep", "so", "alright", "right", "now",
@@ -775,6 +788,7 @@ _RESUME_GAME_RE = _re.compile(
     r"|next question"
     r"|start (?:the (?:quiz|game|trivia) )?again"
     r"|let s (?:resume|continue|keep playing)"
+    r"|un ?pause(?: (?:it|the (?:quiz|game|trivia)))?"
     r")(?: please)?$"
 )
 # CLASS 5 (LIVEFIRE-001) 5a/5b — resume is a COMMAND, recognized ANYWHERE in
@@ -798,6 +812,7 @@ _RESUME_INTENT_RE = _re.compile(
     r"|start (?:the (?:quiz|game|trivia) )?(?:again|over)"
     r"|back to (?:the )?(?:quiz|game|trivia|questions)"
     r"|let s (?:resume|continue|keep (?:going|playing)|play (?:on|again))"
+    r"|un ?pause"
     r")\b"
 )
 
@@ -861,6 +876,95 @@ def lily_detect_hold_request(text: str) -> bool:
     if not core:
         return False
     return bool(_HOLD_REQUEST_CORE_RE.fullmatch(" ".join(core)))
+
+
+# WO-LILY-COMPOSITION-FOLLOWUP-001 P0-1 / operator B2 — the PAUSE sentence.
+# Live lily-D11A7E 11:43Z: "I need you to pause the game for a moment"
+# matched no detector (not a STOP word, not the utterance-shaped C13 hold
+# request — the sentence carries an object and a wrapper), Lily said
+# "Paused." organically, nothing held, and the next question fired 6 s
+# later. A pause request is recognized ANYWHERE in the utterance when the
+# pause verb is wrapped in a request/imperative shape ("need you to pause",
+# "can we pause", "pause the game", "pause please", "let's pause", "hit
+# pause"); talk ABOUT pausing ("why pause?", "the pause button") and a
+# negation ("don't pause") never fire; "unpause" is a RESUME.
+_PAUSE_REQUEST_RE = _re.compile(
+    r"\b(?:"
+    r"(?:need|want|like|got|have|ask(?:ing)?) (?:you |us |her )?to pause"
+    r"|(?:can|could|would|will|may|let s|lets|please|just|go ahead and) "
+    r"(?:you |we |us |please )?(?:hit |press |put (?:it |this |the game )?on )?"
+    r"pause"
+    r"|(?:hit|press) pause"
+    r"|pause (?:it|that|this|here|now|please|lily|for (?:a |one )?"
+    r"(?:moment|sec(?:ond)?|minute|bit|while|min))\b"
+    r"|pause (?:the |this |our )?(?:game|quiz|trivia|round|questions?|"
+    r"clock|timer)"
+    r"|(?:the |this )?(?:game|quiz|trivia) (?:is |goes )?on pause"
+    r")"
+)
+_PAUSE_NEGATION_RE = _re.compile(
+    r"\b(?:don t|dont|do not|never|no need to|not|without|why|whether|"
+    r"when do|did you|the pause button|un ?pause)\b[a-z0-9 ']{0,20}\bpause"
+    r"|\bun ?pause\b"
+)
+
+
+def lily_detect_pause_request(text: str) -> bool:
+    """True when the utterance asks Lily to PAUSE the game (P0-1 / B2) —
+    the sentence form the C13 hold-request detector (utterance-shaped
+    only) cannot see. Deterministic, negation- and meta-guarded. A bare
+    "pause" / "pause the game" is still the C13 form (lily_detect_hold_
+    request) — both route to the same sticky pause."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    if _PAUSE_NEGATION_RE.search(normalized):
+        return False
+    if _STOP_META_RE.search(normalized.replace("pause", "stop")):
+        return False
+    return bool(_PAUSE_REQUEST_RE.search(normalized))
+
+
+# Operator B2: a short "go" after a pause — the explicit resume family
+# (lily_detect_resume_game) plus the one-breath forms a paused table says
+# when it comes back ("okay go", "go ahead", "we're back", "ready", "I'm
+# back", "let's go"). Utterance-shaped (≤ 5 tokens) so an answer that
+# happens to start with "okay" never lifts a pause.
+_PAUSE_RELEASE_RE = _re.compile(
+    r"^(?:"
+    r"go(?: ahead| on)?"
+    r"|(?:we re|we are|i m|i am) (?:back|ready|good|all set)"
+    r"|(?:all )?set"
+    r"|ready(?: when you are)?"
+    r"|let s go"
+    r"|carry on"
+    r"|keep going"
+    r"|back"
+    r"|un ?pause"
+    r")$"
+)
+_PAUSE_RELEASE_FILLER = frozenset({
+    "ok", "okay", "alright", "right", "yeah", "yes", "lily", "please",
+    "now", "and", "so", "um", "uh", "cool", "good",
+})
+
+
+def lily_detect_pause_release(text: str) -> bool:
+    """True when a paused table says it is back (B2): the explicit resume
+    command anywhere, or a short utterance-shaped "okay, go" / "we're
+    back" / "ready"."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    if lily_detect_resume_game(normalized):
+        return True
+    tokens = normalized.split()
+    if not tokens or len(tokens) > 5:
+        return False
+    core = [t for t in tokens if t not in _PAUSE_RELEASE_FILLER]
+    if not core:
+        return False
+    return bool(_PAUSE_RELEASE_RE.fullmatch(" ".join(core)))
 
 
 def lily_detect_resume_game(text: str) -> bool:
@@ -972,6 +1076,16 @@ def lily_detect_restart_game(text: str) -> bool:
 # Runs on Lily's OWN outbound text (real casing/punctuation), not user STT,
 # so it is not routed through _normalize_command_text.
 _HOLD_NARRATION_STATE_RE = _re.compile(r"\bstopped\b", _re.IGNORECASE)
+# WO-LILY-COMPOSITION-FOLLOWUP-001 P0-1: an organic "Paused." (live 11:43Z)
+# asserts a pause state as plainly as "Stopped." does — a turn that OPENS
+# with the word (optionally after one ack token) is the narration register
+# and must be backed by a hold. Mid-sentence "paused" ("the clock paused
+# for a second there") is left alone, as "the clock stopped" is.
+_PAUSED_NARRATION_RE = _re.compile(
+    r"^\W*(?:(?:okay|ok|alright|sure|got it|all right|fine|done)\b[\s,.!—–-]*)?"
+    r"(?:game |it s |it is |we re |we are )?paused\b",
+    _re.IGNORECASE,
+)
 # W8 review Finding 3: a bare `\bstill\b` cue tripped on recap/scorekeeping
 # patter ("still tied at two", "still your turn", "still on question four")
 # whenever it shared a turn with a past-tense "stopped", entering a hold on
@@ -1000,6 +1114,8 @@ def lily_detect_hold_narration(text: str) -> bool:
     two"), does not fire."""
     if not text:
         return False
+    if _PAUSED_NARRATION_RE.search(text):
+        return True
     return bool(
         _HOLD_NARRATION_STATE_RE.search(text)
         and _HOLD_NARRATION_CUE_RE.search(text)
@@ -1165,6 +1281,96 @@ def lily_detect_explain_request(text: str) -> bool:
     if not normalized:
         return False
     return bool(_EXPLAIN_REQUEST_RE.search(normalized))
+
+
+# ---------------------------------------------------------------------------
+# Mid-window META REQUEST (WO-LILY-COMPOSITION-FOLLOWUP-001 P0-3 / operator
+# B3-B4). Live lily-D11A7E 11:48:55Z: "can I get some multiple choice
+# answers" was recorded as the ANSWER CANDIDATE, the data-side ownership
+# check then raised StopResponse in on_user_turn_completed, and no lane
+# replied for 45 s. "Let's keep it like it is" (no pacing confirm pending)
+# was bound the same way. A request ABOUT the question — for options, a
+# hint, a repeat, or to keep things as they are — is never an attempt and
+# never owns the turn; it withdraws/never records the candidate and arms a
+# one-line directive so the organic lane (or the choices-on-demand lane)
+# answers NOW. Classes: "choices" | "hint" | "repeat" | "keep".
+# ---------------------------------------------------------------------------
+
+_META_REQUEST_CHOICES_RE = _re.compile(
+    r"\b(?:"
+    r"multi(?:ple)?[\s-]*choice"
+    r"|mcqs?"
+    r"|(?:give|gimme|get|throw|read|list|offer|show|tell) (?:me |us )?"
+    r"(?:some |a few |the |four |4 |your )?(?:options|choices|possibilities|"
+    r"alternatives|answers to (?:pick|choose) from)"
+    r"|(?:can|could|may|would|will) (?:i|we|you) (?:get|have|hear|do) "
+    r"(?:some |a few |the |four |4 )?(?:options|choices|possibilities)"
+    r"|what (?:are|were|was|is) (?:the |my |our )?(?:options|choices|"
+    r"possible answers|four|letters)"
+    r"|(?:any|some) options"
+    r"|(?:make|do) (?:it|this one|this) (?:a )?(?:multiple choice|mc)"
+    r"|options please"
+    r"|choices please"
+    r")\b"
+)
+_META_REQUEST_HINT_RE = _re.compile(
+    r"\b(?:"
+    r"(?:a|any|some|one|another|little|quick|small) hints?"
+    r"|hint (?:please|me)"
+    r"|(?:give|gimme|throw) (?:me |us )?(?:a |another |one more )?(?:hint|clue|nudge)"
+    r"|(?:can|could|may|would) (?:i|we|you) (?:get|have|give) (?:a |any |some )?"
+    r"(?:hint|clue)s?"
+    r"|(?:a|any) clue"
+    r"|help me out"
+    r"|narrow it down"
+    r")\b"
+)
+_META_REQUEST_REPEAT_RE = _re.compile(
+    r"\b(?:"
+    r"(?:repeat|re ?read|read (?:me |us )?(?:back )?|ask) (?:the |that |this )?"
+    r"(?:question|it|that)(?: again| please| back)?"
+    r"|(?:say|read) (?:that|it|the question) (?:again|one more time)"
+    r"|one more time(?: please)?"
+    r"|(?:what|what s) (?:was|is) the question(?: again)?"
+    r"|(?:i )?(?:missed|didn t (?:hear|catch|get)) (?:that|the question|it)"
+    r"|come again"
+    r"|(?:sorry )?(?:what|huh)\s*$"
+    r")"
+)
+_META_REQUEST_KEEP_RE = _re.compile(
+    r"\b(?:"
+    r"(?:keep|leave) (?:it|this|things|everything|the game) "
+    r"(?:like|as|the way|how) (?:it|this|that) (?:is|was|are)"
+    r"|(?:keep|leave) (?:it|this|things|everything) (?:as is|the same|as it is|"
+    r"like it is|like this|like that|as they are|unchanged)"
+    r"|(?:keep|leave) (?:it|things) (?:relaxed|timed)"
+    r"|(?:don t|dont|do not|no need to) change (?:anything|it|a thing)"
+    r"|(?:it s|its|that s|thats) (?:fine|good) (?:as is|as it is|like it is|"
+    r"the way it is|like this)"
+    r"|(?:stay|stick) (?:with|on) (?:what|the way) (?:we have|we ve got|it is)"
+    r"|same as before"
+    r")\b"
+)
+
+
+def lily_detect_meta_request(text: str) -> Optional[str]:
+    """The class of a mid-window META request — "choices" (options / MC
+    for this one), "hint", "repeat" (read it again), "keep" (keep it as it
+    is) — or None. Pure, deterministic. Never fires on an utterance that
+    is itself an explain request (X12 owns that) — callers consult the
+    explain detector first."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return None
+    if _META_REQUEST_CHOICES_RE.search(normalized):
+        return "choices"
+    if _META_REQUEST_KEEP_RE.search(normalized):
+        return "keep"
+    if _META_REQUEST_HINT_RE.search(normalized):
+        return "hint"
+    if _META_REQUEST_REPEAT_RE.search(normalized):
+        return "repeat"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -3857,6 +4063,25 @@ class LilyScorekeeper:
                 seg.speaker_label, non_answer, clean[:60],
             )
             return
+        # WO-LILY-COMPOSITION-FOLLOWUP-001 P0-3 (operator B1/B4): a META
+        # request about the question — options / MC for this one, a hint,
+        # a repeat, "keep it like it is" — is conversation, never a
+        # candidate (live 11:48:55Z "can I get some multiple choice
+        # answers" was recorded as the answer and owned the turn into 45 s
+        # of silence). Runs AFTER the answer-surface override above, so a
+        # fused "give me a hint... no, Paris" still binds on Paris.
+        meta = lily_detect_meta_request(clean)
+        if meta and not lily_detect_explain_request(clean):
+            result["non_answer"] = f"meta_request:{meta}"
+            result["meta_request"] = meta
+            logger.info(
+                "LILY_ANSWER | META_REQUEST | session=%s q=%d label=%s "
+                "class=%s text=%r — a request about the question, never a "
+                "candidate (COMPOSITION-FOLLOWUP-001 P0-3)",
+                self.session_id, self.question_number, seg.speaker_label,
+                meta, clean[:60],
+            )
+            return
         if player:
             key = player
         else:
@@ -3968,6 +4193,25 @@ class LilyScorekeeper:
             # of revising). Adjudication scores the earliest CORRECT
             # attempt across the table, so a revision can win only from
             # its own (later) timestamp.
+            #
+            # Operator B1 (WO-LILY-COMPOSITION-FOLLOWUP-001): on a
+            # multiple-choice card a RESOLVED pick ("I would comfortably
+            # say a", "B", "the second one") CLOSES binding for that
+            # player — a later final that resolves NO choice ("Earth tool",
+            # live 11:47:55Z: STT for "Earth to Lily") cannot revise it.
+            # A later final that IS another resolved pick still revises
+            # ("B... no wait, C" keeps working).
+            if self._mc_pick_locked(existing, clean):
+                result["revision_refused"] = "committed_mc_pick"
+                logger.info(
+                    "LILY_ANSWER | REVISION_REFUSED | session=%s q=%d key=%s "
+                    "kept=%r refused=%r — a resolved MC pick is committed; "
+                    "an unresolved later final never revises it "
+                    "(COMPOSITION-FOLLOWUP-001 B1)",
+                    self.session_id, self.question_number, key,
+                    str(existing.get("text") or "")[:60], clean[:60],
+                )
+                return
             existing["text"] = clean
             existing["utterance_id"] = uid
             existing["timestamp"] = ts
@@ -4008,6 +4252,27 @@ class LilyScorekeeper:
                 "LILY_STATE | ANSWER_REVISED | session=%s q=%d key=%s t=%.3f text=%r",
                 self.session_id, self.question_number, key, seg_start, clean[:80],
             )
+
+    def _mc_pick_locked(self, existing: dict, new_text: str) -> bool:
+        """B1: True when the player's standing candidate resolves one of
+        the live card's four choices and `new_text` resolves none."""
+        question = self.current_question or {}
+        choices = question.get("choices")
+        if not isinstance(choices, list) or len(choices) != 4:
+            return False
+        try:
+            prior = lily_evaluation.lily_tier1_evaluate_mc(
+                str(existing.get("text") or ""), choices,
+                str(question.get("canonical_answer", "")),
+            )
+            if prior.get("selected_index") is None:
+                return False
+            new = lily_evaluation.lily_tier1_evaluate_mc(
+                new_text, choices, str(question.get("canonical_answer", "")),
+            )
+        except Exception:  # pragma: no cover — evaluator is pure
+            return False
+        return new.get("selected_index") is None
 
     def _note_captured_answer(self, uid: Optional[str]) -> None:
         """BARGE-RESILIENCE-001 P0-4: record one captured answer utterance

@@ -256,15 +256,128 @@ class LilyFloorMixin:
 
     def release_hold(self, reason: str) -> bool:
         """Lift the hold (user spoke, a hard game event fired, or the
-        timeout elapsed). Returns True if a hold was actually lifted."""
+        timeout elapsed). Returns True if a hold was actually lifted.
+        Every release also lifts a sticky PAUSE (B2) — the resume path,
+        a restart and the stop/resume machinery all come through here."""
         if not self._hold_active:
             return False
         self._hold_active = False
         self._hold_reason = None
+        was_paused = bool(getattr(self, "_pause_sticky", False))
+        self._pause_sticky = False
         logger.info(
-            "LILY_HOLD | RELEASED | session=%s reason=%s",
+            "LILY_HOLD | RELEASED | session=%s reason=%s paused=%s",
+            self.sk.session_id, reason, was_paused,
+        )
+        if was_paused:
+            resume_clock = getattr(self, "resume_window_clock_after_pause", None)
+            if callable(resume_clock):
+                try:
+                    resume_clock(reason=reason)
+                except Exception:  # pragma: no cover — never take the release down
+                    logger.exception("LILY_PAUSE | CLOCK_RESUME_FAILED")
+        return True
+
+    # -- the PAUSE primitive (WO-LILY-COMPOSITION-FOLLOWUP-001 P0-1 / B2) ----
+    #
+    # Live lily-D11A7E 11:43Z: "I need you to pause the game for a moment"
+    # → "Paused." → the next question 6 s later; at 11:50:36Z "Paused." then
+    # window 3 opened 11:50:43Z and window 4 at 11:51:34Z. Two gaps: the
+    # sentence matched no detector, and the C13 hold it should have entered
+    # is released by the very next user final (the glass's A4 release).
+    # A PAUSE is a STICKY hold on progression: no question window opens, no
+    # reveal fires, no timer runs — until an explicit resume ("resume",
+    # "continue", "go on", "let's keep going", "okay go", "we're back") or an
+    # answer candidate landing in a still-open window (the player is back in
+    # play). The next user final does NOT release it, and neither does the
+    # hold timeout. Archaeology decided AGAINST routing into
+    # handle_stop_primitive as the reviewer named: the STOP brake retires
+    # the open window and wipes its candidates (_freeze_game_delivery_for_
+    # stop), so "hold on a sec" mid-window — the operator's own example —
+    # would have burned the live question; the pause keeps the window and
+    # only holds its clock.
+
+    def pause_sticky(self) -> bool:
+        """True while a player-requested PAUSE holds progression."""
+        return bool(self._hold_active and getattr(self, "_pause_sticky", False))
+
+    def handle_pause_request(self, source_text: str) -> None:
+        """Bind the sticky pause within one utterance: interrupt anything
+        airing, hold the window clock, enter the hold, ONE short
+        acknowledgment. Idempotent — a re-stated pause refreshes the
+        hold and says nothing more."""
+        already = self.pause_sticky()
+        # AIRGATE-001 D4: the code-ack lane owns this utterance.
+        self.mark_deterministic_reply(source_text)
+        logger.warning(
+            "LILY_PAUSE | REQUESTED | session=%s text=%r already_paused=%s — "
+            "sticky pause on progression; released only by an explicit "
+            "resume (COMPOSITION-FOLLOWUP-001 P0-1/B2)",
+            self.sk.session_id, (source_text or "")[:60], already,
+        )
+        session = getattr(self, "session", None)
+        interrupt = getattr(session, "interrupt", None)
+        if callable(interrupt) and not already:
+            try:
+                interrupt()
+            except Exception as e:
+                logger.warning("LILY_PAUSE | session interrupt failed: %s", e)
+        self._pause_sticky = True
+        self.enter_hold(reason="player_pause")
+        hold_clock = getattr(self, "hold_window_clock_for_pause", None)
+        if callable(hold_clock):
+            try:
+                hold_clock(reason="player_pause")
+            except Exception:  # pragma: no cover
+                logger.exception("LILY_PAUSE | CLOCK_HOLD_FAILED")
+        try:
+            self.sk.note_question_mark("paused_by", "player_pause")
+        except Exception:
+            pass
+        if already:
+            return
+        self.gated_say(
+            None,
+            "hold_ack",
+            "The table asked to pause — committed, in code: the game is "
+            "paused until they say go. ONE short acknowledgment ('Paused.') "
+            "and then silence.",
+            # source="hold_ack" is hold-EXEMPT; "hold_request" is not (the
+            # pre-existing C13 finding: the ack was blocked by the hold it
+            # had just entered — fixed on both lanes here).
+            source="hold_ack",
+            text="Paused. Say the word when you're ready.",
+        )
+
+    def resume_from_pause(
+        self, *, reason: str, text: str | None = None
+    ) -> bool:
+        """Lift a sticky pause on an explicit resume. Re-arms the window
+        clock (release_hold → resume_window_clock_after_pause) and, when no
+        window is open and a card is armed, delivers it (that delivery is
+        then the reply to the resume final — `text` is marked so the
+        organic lane does not double it). Returns True when a pause was
+        actually lifted."""
+        if not self.pause_sticky():
+            return False
+        self.release_hold(reason=f"pause_resume:{reason}")
+        logger.warning(
+            "LILY_PAUSE | RESUMED | session=%s reason=%s",
             self.sk.session_id, reason,
         )
+        try:
+            self.sk.note_question_mark("pause_resumed_by", reason)
+        except Exception:
+            pass
+        if (
+            getattr(self, "game_started", False)
+            and not getattr(self, "game_over", False)
+            and not getattr(self.sk, "answer_window_open", False)
+            and getattr(self, "armed_question", None) is not None
+            and not self.game_delivery_stopped()
+        ):
+            if self.dispatch_armed_question(source="pause_resume") and text:
+                self.mark_deterministic_reply(text)
         return True
 
     def hold_timed_out(self, now: float | None = None) -> bool:
@@ -380,6 +493,26 @@ class LilyFloorMixin:
         "exactly why in one line. Never brush it off with 'we're past "
         "that' or 'the board is locked'. One re-check only.]"
     )
+
+    def contest_multiple_choice_hint(self) -> bool | None:
+        """WO-LILY-COMPOSITION-FOLLOWUP-001 C5: the format hint the contest
+        detector's bare "the answer is A" arm needs (EVAL-INTEGRITY E4).
+        Archaeology: no question dict carries a `multiple_choice` key — the
+        reviewer's literal `(current_question).get("multiple_choice")`
+        would read False on every MC card and stand the arm down
+        everywhere. A card IS multiple-choice when it carries four
+        choices; the last-adjudicated card is consulted when no question
+        is live (a contest lands after the verdict). None when no card is
+        known (the pre-WO behaviour: the arm stays)."""
+        for q in (
+            getattr(self.sk, "current_question", None),
+            getattr(self, "_last_adjudicated_question", None),
+            getattr(self, "armed_question", None),
+        ):
+            if isinstance(q, dict) and q:
+                choices = q.get("choices")
+                return bool(isinstance(choices, list) and len(choices) == 4)
+        return None
 
     def arm_contest_note(self, *, reason: str) -> bool:
         """Arm the X12 contest note (one-shot; a live note is kept, not
@@ -516,7 +649,9 @@ class LilyFloorMixin:
         if not getattr(self, "game_started", False):
             return
         try:
-            if not lily_scorekeeper.lily_detect_verdict_contest(text):
+            if not lily_scorekeeper.lily_detect_verdict_contest(
+                text, multiple_choice=self.contest_multiple_choice_hint()
+            ):
                 return
         except Exception:  # pragma: no cover — detector is pure/stdlib
             return
@@ -1071,6 +1206,16 @@ class LilyFloorMixin:
             return  # a stale handle from an earlier attempt
         if pending.get("aired_at"):
             return  # already heard; a later event cannot un-air it
+        if reason in ("stop_primitive", "game_restart"):
+            # WO-LILY-COMPOSITION-FOLLOWUP-001 C1: the confirm was cancelled
+            # by a STOP (or by the reset itself) — the table braked; a
+            # re-asked confirm over the stop is the runaway the brake
+            # exists to end. Drop the ask silently; a later "yes" is not
+            # consent to anything.
+            self._drop_restart_confirm(
+                reason=f"confirm_cancelled:{reason}", say=False
+            )
+            return
         attempts = int(pending.get("attempts") or 1)
         if attempts >= self._RESTART_CONFIRM_MAX_ATTEMPTS:
             self._drop_restart_confirm(
@@ -1684,15 +1829,18 @@ class LilyFloorMixin:
         if lily_scorekeeper.lily_detect_stop(text, solo=solo):
             self.handle_stop_primitive(text)
             return True
-        # HOSTLOOP-001 C13: the softer equivalents ("hold on", "wait",
-        # "pause", "one sec") halt within the SAME utterance, through the
-        # same deterministic consult — but as a HOLD, not the sticky STOP:
-        # no content retirement, no explicit-resume requirement; the
-        # existing hold release paths (player speaks on, timeout) apply.
-        # Utterance-shaped only — "wait, is it Saturn?!" is an answer and
-        # never fires (lily_detect_hold_request).
+        # WO-LILY-COMPOSITION-FOLLOWUP-001 P0-1 / operator B2: the PAUSE
+        # sentence ("I need you to pause the game for a moment", "can we
+        # pause", "pause please") and the C13 hold-equivalents ("hold on a
+        # sec", "wait a minute", "one sec") are ONE class — a sticky pause
+        # on progression, released only by an explicit resume, never by the
+        # next user final. Utterance shape still guards the C13 forms
+        # ("wait, is it Saturn?!" is an answer and never fires).
+        if lily_scorekeeper.lily_detect_pause_request(text):
+            self.handle_pause_request(text)
+            return True
         if lily_scorekeeper.lily_detect_hold_request(text):
-            self.handle_hold_request(text)
+            self.handle_pause_request(text)
             return True
         return False
 
@@ -1764,6 +1912,7 @@ class LilyFloorMixin:
         try:
             return bool(
                 lily_scorekeeper.lily_detect_stop(text, solo=solo)
+                or lily_scorekeeper.lily_detect_pause_request(text)
                 or lily_scorekeeper.lily_detect_hold_request(text)
             )
         except Exception:
@@ -1802,7 +1951,10 @@ class LilyFloorMixin:
             "The table asked for a moment — committed, in code: you are "
             "holding. ONE short warm acknowledgment (a few words, e.g. "
             "'Take your time.') and then silence until they come back.",
-            source="hold_request",
+            # COMPOSITION-FOLLOWUP-001: hold-exempt source (the recorded
+            # DELIVERY-TRUTH-001 finding — "hold_request" was blocked by the
+            # hold this handler had just entered, so the ack never aired).
+            source="hold_ack",
             # REFACTOR W2a: the hold ack is a DETERMINISTIC sheet (direct_say)
             # — one warm line, then silence until they return.
             text="Take your time.",
@@ -2290,6 +2442,14 @@ class LilyFloorMixin:
                 str(cand.get("text") or ""),
                 expected_answers=lily_evaluation.lily_expected_answers(question),
             )
+            if shape is None and lily_evaluation.lily_mc_unresolved(
+                str(cand.get("text") or ""), question
+            ):
+                # WO-LILY-COMPOSITION-FOLLOWUP-001 B1: on a four-choice
+                # card an utterance that resolves NO option ("Earth tool.",
+                # live 11:47:55Z) is not a pick — it goes through the
+                # clarify door and its bind is withdrawn, never judged.
+                shape = lily_evaluation.LILY_SHAPE_MC_UNRESOLVED
             if shape is None:
                 return  # committed shape — the classification stands (B1)
         elif band != lily_evaluation.BAND_CLARIFY:

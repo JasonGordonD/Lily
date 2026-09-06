@@ -409,10 +409,17 @@ def stt_min_endpointing_delay() -> float:
 
 def stt_max_endpointing_delay() -> float:
     """HOTFIX-005 X9: the ceiling on the endpointing wait (LiveKit
-    `TurnHandlingOptions.endpointing.max_delay`, default 6.0s). Pinned explicitly so
-    the min-floor raise above can never be read as also loosening the
-    ceiling; the ceiling is unchanged from the framework default."""
-    return _get_float("LILY_STT_MAX_ENDPOINTING_DELAY", 6.0)
+    `TurnHandlingOptions.endpointing.max_delay`).
+
+    WO-LILY-COMPOSITION-FOLLOWUP-001 L1 (operator decision): default
+    **2.5 s** (was 6.0). The earlier docstring's "framework default 6.0s"
+    claim was WRONG: livekit-agents 1.6.10 voice/turn.py ships max_delay
+    3.0 (2.5 with a streaming turn detector); 6.0 was an X9-era pin, and
+    it let a turn wait six seconds for a final that had already landed.
+    `LILY_STT_MAX_ENDPOINTING_DELAY` still overrides. Speechmatics'
+    end_of_utterance_silence_trigger (stt_tuned.json) is a separate,
+    operator-docketed setting and is untouched."""
+    return _get_float("LILY_STT_MAX_ENDPOINTING_DELAY", 2.5)
 
 
 def cut_recovery_grace() -> float:

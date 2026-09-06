@@ -22,6 +22,7 @@ exactly as before this module existed — recognition simply stays device-
 linked. Nothing here ever raises into a session.
 """
 
+import asyncio
 import collections
 import logging
 import os
@@ -130,6 +131,16 @@ class LilyVoiceProbe:
         self._vad_intervals = []            # closed (start, end) not yet sliced
         self._vad_seconds = 0.0             # cumulative VAD-detected speech
         self._matched = False
+        # COMPOSITION-FOLLOWUP-001 C10: a slice that needs resampling is
+        # resampled OFF the event loop (default executor) when a loop is
+        # running; the union grows when the future lands, and the owner's
+        # `on_voiced_landed(added_seconds)` hook (attach_voice_probe) re-runs
+        # the match check. The reviewer measured the on-loop resample at
+        # 4.8 / 10.4 / 28 ms for 1 / 3 / 8 s slices at 48 kHz.
+        self.on_voiced_landed = None
+        self._pending_slices = 0
+        self._landed_slices = 0
+        self._resample_off_loop = True
 
     # -- properties ---------------------------------------------------------
 
@@ -280,6 +291,30 @@ class LilyVoiceProbe:
         if in_rate != self._rate:
             if self._resampler is None:
                 return 0.0
+            loop = None
+            if self._resample_off_loop:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+            if loop is not None:
+                # C10: off the loop. The seconds are counted when the
+                # audio LANDS (the union and the match check read the same
+                # truth); the return value is the queued estimate so the
+                # caller's logging still sees a non-zero slice.
+                self._pending_slices += 1
+                try:
+                    fut = loop.run_in_executor(
+                        None, self._resampler, out, in_rate
+                    )
+                except Exception as e:  # executor unavailable — fall back
+                    self._pending_slices -= 1
+                    logger.warning(
+                        "LILY_VOICE_ID | RESAMPLE_EXECUTOR_FAILED | %s", e
+                    )
+                else:
+                    fut.add_done_callback(self._land_resampled)
+                    return len(out) / float(in_rate)
             try:
                 out = list(self._resampler(out, in_rate) or [])
             except Exception as e:  # never raise into the session
@@ -287,10 +322,38 @@ class LilyVoiceProbe:
                 return 0.0
         if not out:
             return 0.0
+        return self._land(out)
+
+    def _land(self, out) -> float:
+        """Append resampled 16 kHz samples to the voiced union."""
         self._voiced.extend(out)
         added = len(out) / self._rate
         self._voiced_seconds += added
         return added
+
+    def _land_resampled(self, fut) -> None:
+        """Done-callback for an off-loop resample (runs on the loop)."""
+        self._pending_slices = max(0, self._pending_slices - 1)
+        try:
+            out = list(fut.result() or [])
+        except Exception as e:
+            logger.warning("LILY_VOICE_ID | RESAMPLE_FAILED | %s", e)
+            return
+        if not out:
+            return
+        added = self._land(out)
+        self._landed_slices += 1
+        hook = self.on_voiced_landed
+        if callable(hook):
+            try:
+                hook(added)
+            except Exception as e:  # pragma: no cover
+                logger.warning("LILY_VOICE_ID | LANDED_HOOK_FAILED | %s", e)
+
+    @property
+    def pending_slices(self) -> int:
+        """Voiced slices whose resample has not landed yet (C10)."""
+        return self._pending_slices
 
     # -- match scheduling ---------------------------------------------------
 
@@ -349,6 +412,9 @@ class LilyVoiceProbe:
             "gate_source": self._gate_source,
             "segments_seen": self._segments_seen,
             "vad_seconds": round(self._vad_seconds, 3),
+            # C10: off-loop resample accounting.
+            "pending_slices": self._pending_slices,
+            "landed_slices": self._landed_slices,
         }
 
 

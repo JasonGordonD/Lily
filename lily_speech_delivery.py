@@ -198,6 +198,13 @@ _FRESHNESS_EXEMPT_ACTS = frozenset({
     "stop_ack", "hold_ack", "answer_receipt",
     "restart_confirm", "restart_ack", "restart_declined",
     "start_settle_hold", "late_recognition",
+    # WO-LILY-COMPOSITION-FOLLOWUP-001 C4: the W2 obligation lines — the
+    # dropped-confirm line, the dispute-timeout line and the settle
+    # override — are the same class (the required reply to a state the
+    # code just entered) and were left off both exemption sets.
+    "restart_confirm_dropped", "dispute_timeout_ack", "start_settle_override",
+    # B4: the choices-on-demand re-ask is the reply the request is owed.
+    "question_reask",
 })
 
 # D1b: how old a dispatched conversational ack may be at playout before it
@@ -224,6 +231,9 @@ _BARGE_FLUSH_EXEMPT_ACTS = frozenset({
     "stop_ack", "hold_ack",
     "restart_confirm", "restart_ack", "restart_declined",
     "start_settle_hold", "late_recognition",
+    # COMPOSITION-FOLLOWUP-001 C4 (see _FRESHNESS_EXEMPT_ACTS).
+    "restart_confirm_dropped", "dispute_timeout_ack", "start_settle_override",
+    "question_reask",
 })
 
 # DELIVERY-TRUTH-001 A4: acts the STOP brake's own cancel loop must skip —
@@ -1180,6 +1190,21 @@ class LilySpeechDeliveryMixin:
                 return None  # the beat is over; this is conversation
         except Exception:
             pass
+        if getattr(self, "_contest_note", None) or (
+            getattr(self, "_dispute_hold_since", None) is not None
+        ):
+            # WO-LILY-COMPOSITION-FOLLOWUP-001 C3: a protest is live — the
+            # ADDRESSING turn is licensed to restate the ruling it is
+            # addressing (W2's CHANGELOG claimed a W1 post-protest
+            # exemption here that never existed; the addressing turn was
+            # cut at its first frame and the hold ran to its timeout).
+            logger.info(
+                "LILY_SAY | RESULT_RESTATE_LICENSED | session=%s q=%d "
+                "speech=%s — contest live; the addressing turn may restate "
+                "the ruling (COMPOSITION-FOLLOWUP-001 C3)",
+                self.sk.session_id, qnum, speech_id,
+            )
+            return None
         age = time.monotonic() - float(record.get("at") or 0.0)
         if age > _RESULT_RENARRATION_WINDOW_SECONDS:
             return None
@@ -1208,6 +1233,40 @@ class LilySpeechDeliveryMixin:
         on_transcript_event, so an ack dispatched inside the SAME event
         snapshots a sequence that already includes its own trigger."""
         self._user_final_seq = int(getattr(self, "_user_final_seq", 0)) + 1
+        self._purge_stale_deterministic_marks()
+
+    def _purge_stale_deterministic_marks(self) -> None:
+        """WO-LILY-COMPOSITION-FOLLOWUP-001 C2: a code-ack turn-ownership
+        mark (mark_deterministic_reply, A9) may own only the commit of the
+        final that made it. With the acks dispatched NON-interruptible
+        (A6) the framework SKIPS on_user_turn_completed for the trigger
+        final, so the mark was never consumed and containment let it own a
+        LATER turn ("yes" → "yes let's go again", "no" → "no stop it I know
+        this one" — both suppressed into dead air). Each mark is stamped
+        with the final sequence it was made under; when final N+1 lands,
+        marks from finals OLDER than N are purged. A mark from N itself
+        survives one more final because the framework joins consecutive
+        finals into ONE commit ("I don't want a timer. it stresses me
+        out", audit R5) and that commit lands after N+1's transcript."""
+        pending = getattr(self, "_deterministic_reply_texts", None)
+        if not pending:
+            return
+        seqs = getattr(self, "_deterministic_reply_seq", None) or {}
+        floor = int(getattr(self, "_user_final_seq", 0)) - 1
+        stamps = getattr(self, "_deterministic_reply_marked_at", None) or {}
+        for mark in list(pending):
+            made_at = seqs.get(mark)
+            if made_at is not None and made_at < floor:
+                pending.remove(mark)
+                seqs.pop(mark, None)
+                stamps.pop(mark, None)
+                logger.info(
+                    "LILY_REPLY | MARK_PURGED | session=%s mark=%r made_at="
+                    "final %d now=final %d — an unconsumed code-ack mark "
+                    "cannot own a later turn (COMPOSITION-FOLLOWUP-001 C2)",
+                    getattr(self.sk, "session_id", "?"), mark[:40], made_at,
+                    floor + 1,
+                )
 
     def _note_conversational_dispatch(
         self, speech_id: str, act: str, key: "str | None"
