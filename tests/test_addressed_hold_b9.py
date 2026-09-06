@@ -391,7 +391,9 @@ def test_a_cut_addressed_response_reopens_the_contract(caplog):
         assert state["offer_aired"] is False
         assert _lines(caplog, "LILY_ADDRESSED | RESPONSE_CUT")
 
-        retry_sid, retry = _respond(game, "Kinsey studied human sexuality.")
+        retry_sid, retry = _respond(
+            game, "He later became known for studying human sexuality.",
+        )
         assert retry.endswith(OFFER)
         _air(game, retry_sid, retry)
         assert game.addressed_state()["offer_aired"] is True
