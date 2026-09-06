@@ -33,6 +33,7 @@ import re
 from typing import Awaitable, Callable, Optional
 
 import lily_config
+import lily_persistence
 import lily_reasoning
 
 logger = logging.getLogger("lily_assessment")
@@ -243,9 +244,6 @@ async def lily_wrap_up_report(
     if supabase is None:
         return
     try:
-        # Local import dodges nothing — lily_persistence has no heavy deps —
-        # but keeps the module graph acyclic (persistence never imports us).
-        import lily_persistence
         await lily_persistence.lily_write_session_report(
             supabase,
             session_id=session_id,

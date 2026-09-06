@@ -34,6 +34,7 @@ from typing import Any
 
 import lily_config
 import lily_audeering_consumers
+import lily_room_profile
 
 try:  # pure-logic tests run without aiohttp installed
     import aiohttp
@@ -759,8 +760,6 @@ class LilyAudeeringPipeline:
             return
         self._room_profiled = True
         try:
-            import lily_room_profile
-
             profile = lily_room_profile.lily_estimate_room_profile(
                 wav_bytes[44:], AUDEERING_SAMPLE_RATE
             )

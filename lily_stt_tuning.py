@@ -47,6 +47,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
+import lily_config
+
 logger = logging.getLogger("lily_stt_tuning")
 
 # ---------------------------------------------------------------------------
@@ -350,6 +352,63 @@ def lily_install_stt_tuning_patch(
     except Exception as e:
         logger.warning("LILY_STT_TUNING | patch=failed reason=%s", e)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Session-start STT wiring helpers (moved from lily_agent, REFACTOR Stage 1a)
+# ---------------------------------------------------------------------------
+
+def lily_stt_focus_kwargs(known_speakers) -> dict:
+    """WO-LILY-STT-001 Q0: the Speechmatics focus kwargs. Returns
+    focus_speakers + focus_mode=IGNORE ONLY when focus is enabled AND the
+    enrolled set has usable labels; {} otherwise. The non-empty guard is the
+    safety invariant — focus_mode=IGNORE with no focus set drops every voice,
+    muting the whole table, so it is withheld (loudly) rather than risked."""
+    if lily_config.stt_focus_mode() != "ignore":
+        return {}
+    # Lazy: keeps this module importable without the speechmatics plugin
+    # (eval/ scripts); the enum is only needed on the enabled path.
+    from livekit.plugins.speechmatics import SpeakerFocusMode
+
+    labels = [s.label for s in (known_speakers or []) if getattr(s, "label", None)]
+    if not labels:
+        logger.warning(
+            "LILY_STT_FOCUS | WITHHELD | reason=no_enrolled_speakers — "
+            "focus_mode=IGNORE never enabled on an empty set (would mute the "
+            "table)"
+        )
+        return {}
+    return {"focus_speakers": labels, "focus_mode": SpeakerFocusMode.IGNORE}
+
+
+def lily_stt_config_applied(stt) -> dict:
+    """WO-LILY-STT-001 Q3: the EFFECTIVE Speechmatics config, read off the
+    constructed STT's _stt_options (what the wire will actually carry) — not
+    what we intended to set. Logged at session start and asserted
+    intended==applied by test, so the audit's claimed-but-unwired class (the
+    max_speakers=7 ghost that was never wired to roster) reads red at build
+    time instead of hiding live. Defensive: returns {} if the options object
+    isn't present (test stubs)."""
+    opts = getattr(stt, "_stt_options", None)
+    if opts is None:
+        return {}
+
+    def _name(v):
+        return getattr(v, "value", None) or getattr(v, "name", None) or str(v)
+
+    return {
+        "model": str(getattr(stt, "model", "enhanced")),
+        "turn_detection_mode": _name(getattr(opts, "turn_detection_mode", None)),
+        "max_delay": getattr(opts, "max_delay", None),
+        "speaker_sensitivity": getattr(opts, "speaker_sensitivity", None),
+        "max_speakers": getattr(opts, "max_speakers", None),
+        "prefer_current_speaker": getattr(opts, "prefer_current_speaker", None),
+        "enable_diarization": getattr(opts, "enable_diarization", None),
+        "focus_mode": _name(getattr(opts, "focus_mode", None)),
+        "focus_speakers": len(getattr(opts, "focus_speakers", None) or []),
+        "known_speakers": len(getattr(opts, "known_speakers", None) or []),
+        "additional_vocab": len(getattr(opts, "additional_vocab", None) or []),
+    }
 
 
 # ---------------------------------------------------------------------------
