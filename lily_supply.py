@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 
+import lily_acts
 import lily_arsenal
 import lily_bank
 import lily_config
@@ -590,7 +591,7 @@ class LilySupplyMixin:
                         self.expect_delivery()
                         self.gated_say(
                             None,
-                            "question_nudge",
+                            lily_acts.ACT_QUESTION_NUDGE,
                             (
                                 "The next question just landed in the state "
                                 "block. Bridge in one short beat and ask it "
@@ -719,7 +720,7 @@ class LilySupplyMixin:
             self.expect_delivery()
             self.gated_say(
                 None,
-                "question_nudge",
+                lily_acts.ACT_QUESTION_NUDGE,
                 (
                     "The next question just landed in the state block from "
                     "the curated bank. Bridge in one short beat and ask it "

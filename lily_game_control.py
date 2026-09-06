@@ -30,6 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+import lily_acts
+
 
 class Phase(Enum):
     LOBBY = "lobby"
@@ -55,15 +57,11 @@ DELIVERY_STATES = frozenset({"none", "pending", "active", "confirmed"})
 # Live game-lane payloads (mirror of LilyGame._GAME_LANE_ACTS). None of these
 # may air without a live game; a STOP freezes them all. Kept here so may() and
 # the legacy game_payload_blocked share ONE taxonomy.
-GAME_LANE_ACTS = frozenset({
-    "question_delivery", "question_nudge", "verdict", "reveal",
-    "reveal_flourish", "reveal_scores", "reveal_finale", "steal_window",
-    "answer_receipt",
-})
+GAME_LANE_ACTS = lily_acts.GAME_LANE_ACTS
 
 # The adjudication commit is not a gated_say act — it is the reveal/verdict
 # transition's own entry gate (LilyGame.adjudicate).
-ADJUDICATE_ACT = "adjudicate"
+ADJUDICATE_ACT = lily_acts.ACT_ADJUDICATE
 
 # The kickoff act. Its refusal ladder is LilyGame.start_blocked_reason() — the
 # single choke already on main (game_stopped / recognition_dispute /
@@ -72,7 +70,7 @@ ADJUDICATE_ACT = "adjudicate"
 # (game_stopped); the rest are DELEGATED to start_blocked_reason and will be
 # subsumed when the lily_begin_round site is wired (later wave). may() must not
 # duplicate that ladder here — it would drift.
-BEGIN_ROUND_ACT = "begin_round"
+BEGIN_ROUND_ACT = lily_acts.ACT_BEGIN_ROUND
 
 
 class IllegalControlState(ValueError):
