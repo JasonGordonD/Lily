@@ -110,6 +110,10 @@ LILY_LOCAL_ONLY_ENV = {
     "LILY_RELAXED_BREATH_MULTIPLIER",
     "LILY_RELAXED_SETTLE_SECONDS",
     "LILY_VERDICT_DISPUTE_WINDOW_SECONDS",
+    # WO-LILY-CONTROL-GATES-001 gate tunables — ship on in-code defaults
+    # (restart confirm TTL 20s, setup start-flag TTL 120s).
+    "LILY_RESTART_CONFIRM_TTL_SECONDS",
+    "LILY_SETUP_START_INTENT_TTL_SECONDS",
     # PATCH-002 A4 solo-vamping hold tunables — ship on in-code defaults.
     "LILY_HOLD_TIMEOUT_SECONDS",
     "LILY_PARAPHRASE_REPEAT_THRESHOLD",

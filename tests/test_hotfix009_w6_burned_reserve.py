@@ -49,7 +49,6 @@ Same import boundary note as test_hotfix006_transitions.py.
 """
 
 import asyncio
-import inspect
 import sys
 import time
 from pathlib import Path
@@ -261,19 +260,31 @@ def _verdict_beats(game: LilyGame) -> list[str]:
 # ===========================================================================
 
 
-def test_source_needles_timer_topology_and_self_cancel_guard():
-    open_window_src = inspect.getsource(LilyGame.open_window)
-    # _expire awaits adjudicate INSIDE the task bound to _window_timer —
-    # the topology the mirrored timer in these tests reproduces.
-    assert "await self.adjudicate(steal_allowed=not steal)" in open_window_src
-    assert "self._window_timer = asyncio.ensure_future(_expire())" in (
-        open_window_src
-    )
-    adjudicate_src = inspect.getsource(LilyGame.adjudicate)
-    assert "is not asyncio.current_task()" in adjudicate_src
-    # The steal-branch replacement site carries the same guard: open_window
-    # runs from adjudicate INSIDE the timer task it replaces.
-    assert "is not asyncio.current_task()" in open_window_src
+def test_timer_topology_adjudicate_runs_inside_the_window_timer_task():
+    """The topology the mirrored timer in these tests reproduces, proven
+    on the real open_window (WO-LILY-CONTROL-GATES-001 replaced the
+    source-needle here): a TIMED window's expiry awaits adjudicate INSIDE
+    the task bound to _window_timer, with steal_allowed = not steal. The
+    self-cancel guard's behavior is test_timeout_adjudication_survives_
+    its_own_timer below."""
+    game = _make_game()
+    _arm_incident_q4(game)
+    seen = []
+
+    async def _record(steal_allowed=True, reclaim_transition=False):
+        seen.append((asyncio.current_task() is game._window_timer, steal_allowed))
+
+    game.adjudicate = _record
+
+    async def _go():
+        game.sk.close_answer_window()
+        game.open_window(duration=0.02)
+        timer = game._window_timer
+        assert isinstance(timer, asyncio.Task) and not timer.done()
+        await asyncio.sleep(0.08)
+
+    _run(lambda: _go())
+    assert seen == [(True, True)]
 
 
 # ===========================================================================

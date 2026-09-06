@@ -651,6 +651,17 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     _player_restart_intent: dict | None = None
     _pending_restart_confirm: dict | None = None
     _game_restart_events: list | None = None
+    # WO-LILY-CONTROL-GATES-001 (class defaults for __new__ harnesses):
+    # the game generation token (R2), the deferred-start exhaustion latch
+    # (S3), the setup start-flag stamp (S2), the contest-note sequence and
+    # per-speech context stamps (D2), the address-stamp final seq (S1).
+    _game_generation: int = 0
+    _start_settle_exhausted: bool = False
+    _setup_start_requested_at: float = 0.0
+    _contest_note_seq: int = 0
+    _speech_contest_seq: dict | None = None
+    _speech_lane: dict | None = None
+    _address_stamp_seq: int = -1
     # CLASS 7 (LIVEFIRE-001) 7a: latched True when start_game commits. After
     # the round has started, recognition speech ("welcome back, want relaxed
     # pacing?") is FORBIDDEN — the live beat aired as act=game_start and stole
@@ -811,6 +822,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._player_restart_intent = None
         self._pending_restart_confirm = None
         self._game_restart_events = None
+        # WO-LILY-CONTROL-GATES-001: see the class-attribute block above.
+        self._game_generation = 0
+        self._start_settle_exhausted = False
+        self._setup_start_requested_at = 0.0
+        self._contest_note_seq = 0
+        self._speech_contest_seq = {}
+        self._speech_lane = {}
+        self._address_stamp_seq = -1
         self._phase_hold = None
         self._playout_started_ids = set()
         self._post_tts_text_by_speech_id = {}
@@ -1652,7 +1671,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # WO-LILY-BIND-DISPUTE-001 D2: dispatch time rides the handle so
         # the protest/debt discharge reads can tell a turn dispatched AFTER
         # a protest from a pre-committed one merely airing after it.
-        self._note_speech_dispatch(getattr(handle, "id", None))
+        # WO-LILY-CONTROL-GATES-001 D2: lane=llm — a generated turn CAN
+        # carry the contest note and address a dispute.
+        self._note_speech_dispatch(getattr(handle, "id", None), lane="llm")
         return handle
 
     def direct_say(self, text: str):
@@ -1695,8 +1716,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             handle = say(text)
             # D2: same dispatch stamp as instructed_reply — deterministic
             # lines are exactly the pre-committed class the post-dating
-            # reads exist to discount.
-            self._note_speech_dispatch(getattr(handle, "id", None))
+            # reads exist to discount. WO-LILY-CONTROL-GATES-001 D2:
+            # lane=text — fixed words can never address a contest, so this
+            # handle can never discharge a dispute-hold.
+            self._note_speech_dispatch(getattr(handle, "id", None), lane="text")
             return handle
         except Exception as e:
             logger.warning("LILY_SAY | DIRECT_SAY_FAILED | %s", e)
@@ -2478,7 +2501,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             pending = self._setup_pending
 
         if intents["start"]:
+            # S2 (WO-LILY-CONTROL-GATES-001): the parser already refuses a
+            # pacing/setup sentence; the flag is STAMPED so it can expire
+            # (start_intent_present reads the TTL).
             self._setup_start_requested = True
+            self._setup_start_requested_at = time.time()
         if intents["voice"]:
             requested.add("voice")
             pending.add("voice")
@@ -3785,6 +3812,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         handles[speech_id] = handle
         while len(handles) > 16:
             handles.pop(next(iter(handles)))
+        # WO-LILY-CONTROL-GATES-001 D2 seam: every handle (organic replies
+        # included — they never pass instructed_reply/direct_say) is
+        # stamped with the contest-note sequence live at creation.
+        self._stamp_speech_context(speech_id)
 
     def air_dup_guard(self, full: str, delivery: str | None) -> bool:
         """T3 air-path guard: True = this outbound turn is a verbatim
@@ -3965,6 +3996,18 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # releases, on the tts_node playback-failure path.
         # Stale-claim recovery bookkeeping: this speech's playout lifecycle
         # is over either way — its airing marker and handle are spent.
+        # WO-LILY-CONTROL-GATES-001 seam: the act this handle performed is
+        # read BEFORE the map is popped — the restart-confirm lifecycle
+        # (R1: aired / lost) and the dispute discharge read (D2: a game
+        # payload cannot address a contest) both key on it.
+        dispatched_act = (
+            (self._dispatched_act_by_speech or {}).get(speech_id)
+            if speech_id else None
+        )
+        self.note_dispatch_playout(
+            dispatched_act, speech_id,
+            interrupted=interrupted, suppressed=suppressed, failed=failed,
+        )
         if speech_id:
             self._playout_started_ids.discard(speech_id)
             (self._speech_handles or {}).pop(speech_id, None)
@@ -4211,16 +4254,15 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # dispatched AFTER the protest can have serviced the contest — a
         # pre-committed reveal/verdict line queued before the protest and
         # merely airing after it cleared the note on the live 08-14 call
-        # while the protest went unanswered. The same post-dating confirm
-        # is the dispute-hold's designed release.
-        if self.speech_dispatch_postdates(
-            speech_id, getattr(self, "_last_protest_at", 0.0)
-        ):
-            self._contest_note = None
-            # This branch only runs for a CONFIRMED playout (the
-            # interrupted/suppressed arm returned above), so a post-protest
-            # turn confirming on air is exactly this line.
-            self.release_dispute_hold(reason="post_protest_turn_confirmed")
+        # while the protest went unanswered.
+        # WO-LILY-CONTROL-GATES-001 D2: ...and only a turn that could have
+        # ADDRESSED it — generated with the contest note in context, not a
+        # deterministic line ("Take your time.", a pacing ack) and not a
+        # game payload (the N+1 delivery). This branch only runs for a
+        # CONFIRMED playout (the interrupted/suppressed arm returned
+        # above); a cut addressing reply leaves the hold for the next
+        # generated turn or the timeout line.
+        self.discharge_contest_on_confirm(speech_id, dispatched_act)
         # HOTFIX-006 N9: the late-answer announcement rode this turn. Also
         # one-shot — the miss is stated once, warmly, and does not become a
         # thing she keeps bringing up.
@@ -4447,6 +4489,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         except RuntimeError:
             return self.dispatch_armed_question(source=source)
         qnum = self.sk.question_number
+        generation = self._game_generation  # R2: stand down across a restart
         logger.info(
             "LILY_PACING | INTER_QUESTION_BREATH | session=%s q=%d breath=%.2fs "
             "pacing=%s source=%s",
@@ -4486,6 +4529,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     if (
                         getattr(self, "game_over", False)
                         or self.sk.question_number != qnum
+                        or self._game_generation != generation
                     ):
                         return
                     blocked = _relaxed_floor_blocked()
@@ -4501,6 +4545,8 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     waited += 1.0
             if getattr(self, "game_over", False):
                 return
+            if self._game_generation != generation:
+                return  # R2: the game this breath belonged to was restarted
             if self.sk.question_number != qnum:
                 return  # the beat advanced by another path during the breath
             if self.dispatch_armed_question(source=source):
@@ -4878,16 +4924,94 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         if relaxed_untimed:
             self._window_timer = None
         else:
-            async def _expire() -> None:
-                await asyncio.sleep(dur)
-                if self.sk.answer_window_open and not self._adjudicating:
-                    await self.adjudicate(steal_allowed=not steal)
-
-            self._window_timer = asyncio.ensure_future(_expire())
+            self._arm_window_expiry(dur, steal=steal)
         # Early-buzz replay (fixture Q5): answers spoken during the
         # delivery playout become candidates NOW that the window is live.
         if not steal:
             self._replay_pre_window_answers()
+
+    def _arm_window_expiry(self, dur: float, *, steal: bool = False) -> None:
+        """The timed window's expiry task (the open_window `_expire`
+        closure, lifted so set_pacing can re-arm a clock on a window that
+        went untimed and back). WO-LILY-CONTROL-GATES-001 D1b: after the
+        clock runs out the close WAITS while a dispute-hold binds this
+        window — a protest inside the window anchors the hold to the
+        window itself (note_protest_final), and the hold self-releases (the
+        addressing turn, or the hard timeout line), so this can never
+        wedge. R2: a restart during the wait stands the task down."""
+        generation = self._game_generation
+
+        async def _expire() -> None:
+            await asyncio.sleep(dur)
+            while (
+                self.sk.answer_window_open
+                and self._game_generation == generation
+                and self.dispute_hold_active()
+            ):
+                await asyncio.sleep(0.5)
+            if self._game_generation != generation:
+                return
+            if self.sk.answer_window_open and not self._adjudicating:
+                await self.adjudicate(steal_allowed=not steal)
+
+        self._window_timer = asyncio.ensure_future(_expire())
+
+    def hold_window_expiry(self, *, reason: str) -> None:
+        """WO-LILY-CONTROL-GATES-001 D1b: bind an OPEN window's close to
+        the dispute-hold — the deadline is lifted (the table is not timed
+        out under a protest; is_window_open keeps admitting answers) and
+        the expiry task, if any, waits on the hold before closing. The
+        timeline records it (window_held_at / window_hold_reason)."""
+        if not self.sk.answer_window_open:
+            return
+        if self.sk.answer_window_deadline is not None:
+            self.sk.answer_window_deadline = None
+        try:
+            self.sk.note_question_time("window_held_at")
+            self.sk.note_question_mark("window_hold_reason", reason)
+        except Exception:  # pragma: no cover
+            pass
+        logger.warning(
+            "LILY_WINDOW | EXPIRY_HELD | session=%s q=%d reason=%s — the "
+            "open window's close waits on the dispute-hold; no timeout "
+            "verdict under a protest (WO-LILY-CONTROL-GATES-001 D1b)",
+            self.sk.session_id, self.sk.question_number, reason,
+        )
+
+    def _convert_window_untimed(self, *, reason: str) -> bool:
+        """WO-LILY-CONTROL-GATES-001 D1a: a TIMED open window becomes an
+        UNTIMED one — the expiry task is cancelled, the deadline lifted,
+        and the beat closes on the roster / settle path from here. Returns
+        True when a conversion happened. Receipt: question_timeline gains
+        window_untimed_at + window_untimed_reason."""
+        if not self.sk.answer_window_open:
+            return False
+        timer = self._window_timer
+        had_clock = self.sk.answer_window_deadline is not None or (
+            timer is not None and not timer.done()
+        )
+        if not had_clock:
+            return False
+        if (
+            timer is not None
+            and not timer.done()
+            and timer is not asyncio.current_task()
+        ):
+            timer.cancel()
+        self._window_timer = None
+        self.sk.answer_window_deadline = None
+        try:
+            self.sk.note_question_time("window_untimed_at")
+            self.sk.note_question_mark("window_untimed_reason", reason)
+        except Exception:  # pragma: no cover
+            pass
+        logger.warning(
+            "LILY_WINDOW | CONVERTED_UNTIMED | session=%s q=%d reason=%s — "
+            "the running clock is cancelled; the beat closes on the roster "
+            "(WO-LILY-CONTROL-GATES-001 D1a)",
+            self.sk.session_id, self.sk.question_number, reason,
+        )
+        return True
 
     def _maybe_close_relaxed_beat(self) -> None:
         """HOTFIX-009 W4: with no clock, the relaxed answer beat closes on
@@ -4981,12 +5105,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         releasing condition blocks it. Stands down silently the moment the
         beat is no longer this watcher's to close."""
         poll = min(1.0, settle)
+        generation = self._game_generation  # R2
         try:
             await asyncio.sleep(settle)
             while True:
                 if (
                     getattr(self, "game_over", False)
                     or self._delivery_stop_sticky
+                    or self._game_generation != generation
                     or self.sk.question_number != qnum
                     or not self.sk.answer_window_open
                     or self._adjudicating
@@ -5305,6 +5431,26 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             )
             return
         self._adjudicating = True
+        # WO-LILY-CONTROL-GATES-001 R2: the generation this adjudication
+        # belongs to. Re-read after EVERY await below — an untracked
+        # ensure_future(adjudicate) that survives execute_restart must
+        # never commit a dead game's verdict into game 2 (the pre-WO
+        # post-await guard read only _delivery_stop_sticky, which the
+        # reset itself clears).
+        generation = self._game_generation
+
+        def _abandoned(where: str) -> bool:
+            if self._game_generation == generation:
+                return False
+            logger.warning(
+                "LILY_REVEAL | ADJUDICATION_ABANDONED | session=%s q=%d "
+                "where=%s generation=%d->%d — the game was restarted "
+                "mid-adjudication; nothing commits (WO-LILY-CONTROL-GATES-001 R2)",
+                self.sk.session_id, self.sk.question_number, where,
+                generation, self._game_generation,
+            )
+            return True
+
         # T2 (PATCH-001): answer_heard — adjudication starting means this
         # question was answered; every outstanding delivery attempt for it
         # is invalidated NOW, in-flight playout included (the fixture
@@ -5585,6 +5731,8 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                         )
                     except (asyncio.TimeoutError, Exception):
                         verdict = None
+                    if _abandoned("speculative_judge"):
+                        return
                     consumed_speculative = True
                     if verdict and verdict["verdict"] in ("correct", "partial"):
                         eval_tier = 2
@@ -5628,6 +5776,8 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     except Exception as e:
                         logger.error("LILY_JUDGE | call failed: %s", e)
                         verdict = None
+                    if _abandoned("tier2_judge"):
+                        return
                     if verdict and verdict["verdict"] in ("correct", "partial"):
                         eval_tier = 2
                         judge_reason = verdict.get("reason", "")
@@ -5650,6 +5800,8 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     "STOP landed before score commit",
                     self.sk.session_id, self.sk.question_number,
                 )
+                return
+            if _abandoned("pre_commit"):
                 return
 
             # Commit — scores land in the scorekeeper BEFORE Lily speaks.
@@ -6115,6 +6267,8 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     ),
                     self.publish_attributes(),
                 )
+                if _abandoned("reveal_publish"):
+                    return
                 # T4 dispatch point: AFTER the score/reveal publishes (desync-E:
                 # the committed score reaches the glass before the verdict
                 # speaks) but before all remaining bookkeeping — the budget is
@@ -6247,6 +6401,8 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             was_final = self.sk.round > self.rounds_total
             if was_final:
                 await self.finish_game()
+                if _abandoned("finish_game"):
+                    return
                 reveal_instr = self._reveal_instructions(
                     question, winner, winner_candidate, judge_reason,
                     points, final=True,
@@ -6404,6 +6560,41 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # A live this-session write — the confirmation beat may now truthfully
         # say the table chose this pacing this session (MEDIUM-2 provenance).
         self._pacing_stated_this_session = True
+        # WO-LILY-CONTROL-GATES-001 D1a: a pacing flip MID-WINDOW changes
+        # the window. Pre-WO set_pacing never touched _window_timer, so the
+        # 08-15 "no timer" request landed on a TIMED window whose clock
+        # kept running and burned the question under the protest. Relaxed
+        # cancels the expiry and converts the open window to untimed; timed
+        # on an untimed open window (steal excluded — it keeps its own
+        # clock) arms a fresh full clock from now.
+        if changed and getattr(self, "sk", None) is not None and getattr(
+            self.sk, "answer_window_open", False
+        ):
+            if pacing == "relaxed":
+                self._convert_window_untimed(reason=f"pacing_flip:{source}")
+            elif (
+                self.sk.answer_window_deadline is None
+                and not getattr(self, "_steal_window", False)
+            ):
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+                else:
+                    dur = self._answer_window_duration()
+                    self.sk.answer_window_deadline = time.time() + dur
+                    self._arm_window_expiry(dur)
+                    try:
+                        self.sk.note_question_time("window_retimed_at")
+                    except Exception:  # pragma: no cover
+                        pass
+                    logger.info(
+                        "LILY_WINDOW | RETIMED | session=%s q=%d dur=%.1fs "
+                        "source=%s — timed pacing chosen mid-window; a fresh "
+                        "clock runs from now",
+                        self.sk.session_id, self.sk.question_number, dur,
+                        source,
+                    )
         logger.info(
             "LILY_PREFS | PACING | session=%s group=%s pacing=%s source=%s "
             "changed=%s",
@@ -6532,17 +6723,45 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 self.sk.session_id, source,
             )
             return
+        forced = False
         if gate is not None and gate.startswith("lobby_unsettled"):
-            # Start intent IS present — the table asked. One line, then the
-            # start dispatches itself when the lobby settles (every
-            # unsettled arm self-clears; the watcher is bounded).
-            logger.info(
-                "LILY_STATE | START_DEFERRED | session=%s source=%s "
-                "reason=%s — start request honored after settle",
-                self.sk.session_id, source, gate,
-            )
-            self._defer_start_until_settled(source)
-            return
+            if source in ("voice", "rpc") and getattr(
+                self, "_start_settle_exhausted", False
+            ):
+                # WO-LILY-CONTROL-GATES-001 S3: the bounded fallback. The
+                # deferred-start watcher already ran its whole budget on
+                # an earlier request and the lobby never settled; the
+                # per-final auto-start net cannot rescue a SOLO table (it
+                # needs auto_start_min_players). A RESTATED player start
+                # now starts regardless of settle, with one line saying
+                # the table is being locked as it stands — a spoken start
+                # is never stranded twice.
+                forced = True
+                logger.warning(
+                    "LILY_STATE | START_FORCED_AFTER_SETTLE_EXHAUSTED | "
+                    "session=%s source=%s unsettled=%s — restated start "
+                    "after the settle watcher exhausted; starting as the "
+                    "table stands (WO-LILY-CONTROL-GATES-001 S3)",
+                    self.sk.session_id, source, gate,
+                )
+                self.gated_say(
+                    None,
+                    "start_settle_override",
+                    "[deterministic start: locking the table as it stands]",
+                    source=f"start_hold_{source}",
+                    text="Locking the table as it stands — here we go.",
+                )
+            else:
+                # Start intent IS present — the table asked. One line, then
+                # the start dispatches itself when the lobby settles (every
+                # unsettled arm self-clears; the watcher is bounded).
+                logger.info(
+                    "LILY_STATE | START_DEFERRED | session=%s source=%s "
+                    "reason=%s — start request honored after settle",
+                    self.sk.session_id, source, gate,
+                )
+                self._defer_start_until_settled(source)
+                return
         blocked = self.start_blocked_reason()
         if blocked:
             logger.info(
@@ -6551,7 +6770,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 self.sk.session_id, source, blocked,
             )
             return
-        if self.intake_roundrobin_active():
+        if self.intake_roundrobin_active() and not forced:
             # WS-1: every begin_round path (tool, voice, UI, auto-start)
             # converges here — while the intake round-robin is still
             # growing the start DEFERS, so no question can arm against a
@@ -6573,6 +6792,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # C7: the start owns the lobby regardless of source (voice, tool,
         # RPC, auto) — no recovery may re-greet past this point.
         self._start_intent_heard = True
+        self._start_settle_exhausted = False
         logger.info("LILY_STATE | GAME_START | session=%s source=%s",
                     self.sk.session_id, source)
         # G1: speculative user-turn runs are dead weight during rounds
@@ -6700,20 +6920,31 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         except RuntimeError:
             return  # unit context — the caller drives start_game directly
 
+        generation = self._game_generation  # R2
+
         async def _watch_settled_start() -> None:
             for _ in range(120):  # bounded: ~2 minutes of 1s polls
                 await asyncio.sleep(1.0)
                 if self.game_started or getattr(self, "game_over", False):
                     return
+                if self._game_generation != generation:
+                    return  # R2: a restart re-arms its own start gate
                 if self._delivery_stop_sticky:
                     return  # STOP owns the lobby; resume owns the restart
                 if self.lobby_unsettled_reason() is None:
                     await self.start_game(source=f"{source}_settled")
                     return
+            # WO-LILY-CONTROL-GATES-001 S3: the exhaustion is LATCHED so
+            # the next restated player start bypasses the settle gate
+            # (start_game's bounded fallback) — the auto-start net alone
+            # cannot rescue a solo table.
+            self._start_settle_exhausted = True
             logger.warning(
                 "LILY_STATE | START_SETTLE_EXHAUSTED | session=%s "
                 "source=%s — lobby never settled inside the watcher "
-                "budget; the per-final auto-start net owns recovery",
+                "budget; the next restated start fires regardless of "
+                "settle (S3), and the per-final auto-start net still "
+                "owns multi-player recovery",
                 self.sk.session_id, source,
             )
 
@@ -8673,7 +8904,7 @@ class LilyAgent(Agent):
                 "over', 'new game') — the detector records it and this "
                 "tool will pass."
             )
-        if getattr(g, "_pending_restart_confirm", None) is not None:
+        if g.restart_confirm_pending():
             return (
                 "NOT RESTARTED (confirm_pending) — the deterministic "
                 "confirm ('Restart from scratch — scores gone. Sure?') is "

@@ -888,41 +888,29 @@ class LilyGlassMixin:
             and not self._contest_note
             and lily_scorekeeper.lily_detect_verdict_contest(text)
         ):
-            self._contest_note = (
-                "[verdict contest — a player says they were misheard, that "
-                "their answer was right, or that a rule was misapplied. Give "
-                "them ONE honest re-check against the committed record (the "
-                "SCORES field and the last ruling) and the recorded utterance. "
-                "If the ruling was wrong — a correct answer denied, an answer "
-                "misheard, a rule misapplied (a clock on a relaxed round), or "
-                "a call made outside its own window — put it right with "
-                "lily_correct_verdict (grounds = answer_denied / misheard / "
-                "wrong_rule / out_of_window). That tool APPENDS an audited "
-                "correction and restores the point; it will refuse if there is "
-                "no committed verdict to amend, so you can never invent a "
-                "point. Say what you're fixing and why ('that one was yours — "
-                "putting the point back'). If the ruling stands, tell them "
-                "exactly why in one line. Never brush it off with 'we're past "
-                "that' or 'the board is locked'. One re-check only.]"
-            )
+            # WO-LILY-CONTROL-GATES-001 D2: arming lives in the floor
+            # mixin (arm_contest_note) so the note carries a sequence
+            # number every outbound handle is stamped against — only a
+            # turn generated WITH this note in context can discharge the
+            # dispute-hold. The note text is _CONTEST_NOTE_TEXT there.
+            self.arm_contest_note(reason="x12_final")
             logger.info(
                 "LILY_CONTEST | REQUEST | session=%s player=%s text=%r",
                 self.sk.session_id, player, str(text)[:120],
             )
 
         # WO-LILY-RESTART-001: a pending restart confirm resolves
-        # DETERMINISTICALLY on the next parseable final from a player —
-        # yes executes the reset, no drops it (and the intent fact with
-        # it), anything ambiguous stays pending and does nothing
-        # destructive. Runs before command dispatch (the forget-flow
-        # pattern) so "yes" resolves the confirm rather than reading as
-        # anything else; a re-stated restart command falls through to the
-        # command branch, where request_restart reads it as the
-        # affirmative.
-        if (
-            self._pending_restart_confirm is not None
-            and command != "restart_game"
-        ):
+        # DETERMINISTICALLY on a parseable final — a no from any player
+        # drops it (and the intent fact with it); a yes executes the reset
+        # ONLY from the requester and ONLY after the confirm aired
+        # (WO-LILY-CONTROL-GATES-001 R1: TTL, requester bind, aired gate,
+        # narrow yes-parser — restart_confirm_pending() reads the TTL);
+        # anything else is not consumed and continues as ordinary table
+        # talk / an answer. Runs before command dispatch (the forget-flow
+        # pattern); a re-stated restart command falls through to the
+        # command branch, where request_restart applies the same
+        # requester + aired gates.
+        if self.restart_confirm_pending() and command != "restart_game":
             if self.resolve_restart_confirm(text, player or speaker_label):
                 return
 
@@ -1112,7 +1100,10 @@ class LilyGlassMixin:
             # a bare lobby resets immediately. The code ack (confirm line
             # or done line) owns this utterance (AIRGATE-001 D4).
             self.mark_deterministic_reply(text)
-            self.note_player_restart_intent(source="voice_command", text=text)
+            self.note_player_restart_intent(
+                source="voice_command", text=text,
+                requester=player or speaker_label,
+            )
             self.request_restart(
                 source="voice_command",
                 requester=player or speaker_label,
@@ -1129,6 +1120,12 @@ class LilyGlassMixin:
                 # (Session A: "Starts." -> 13s dead -> false re-greet off a
                 # stale same-room checkpoint).
                 self._start_intent_heard = True
+                # WO-LILY-CONTROL-GATES-001 S1: release the address debt
+                # THIS final minted (the start phrase is host-directed —
+                # classify_addressee ran above and would otherwise defer
+                # the start off its own trigger), re-arm the hold-line
+                # latch per request, and let the code lane own the reply.
+                self.note_spoken_start_request(text)
                 asyncio.ensure_future(self.start_game(source="voice"))
             return
 

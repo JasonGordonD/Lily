@@ -201,6 +201,60 @@ _CONFIRM_YES_RE = _re.compile("|".join(_CONFIRM_YES_PATTERNS))
 _CONFIRM_NO_RE = _re.compile("|".join(_CONFIRM_NO_PATTERNS))
 
 
+# WO-LILY-CONTROL-GATES-001 R1: the RESTART confirm reads a NARROWER yes
+# than the forget flow. The forget yes-set matches "yeah"/"sure" anywhere
+# in an utterance — right for a flow whose confirm question was just asked
+# and whose cost of a false yes is bounded by its own second gate, wrong
+# for a scoreboard wipe: live R2 bound "Yeah it's the femur" (a trivia
+# ANSWER from a different player, ten minutes later) as the affirmative.
+# A restart yes must BE the utterance: after dropping filler and the yes
+# words themselves, nothing may remain but the restart vocabulary. Any
+# other payload ("yeah it's the femur", "yes but wait") reads as
+# ambiguous — nothing destructive happens. The NO side keeps the forget
+# no-set: a no from anyone drops the ask (the non-destructive direction).
+_RESTART_YES_ALLOWED_TOKENS = frozenset({
+    # the yes words (already matched) and their fillers
+    "yes", "yeah", "yep", "yup", "sure", "absolutely", "definitely",
+    "totally", "ok", "okay", "alright", "fine", "please", "lily", "so",
+    "then", "well", "right", "now", "uh", "um", "hey", "yea", "ya",
+    "confirm", "confirmed", "sure", "positive",
+    # "do it" / "go ahead" / "i'm sure" / "we're sure"
+    "do", "it", "go", "ahead", "i", "m", "am", "we", "re", "are",
+    # the restart vocabulary
+    "restart", "start", "over", "again", "fresh", "from", "scratch",
+    "the", "top", "new", "game", "wipe", "clear", "scores", "score",
+    "board", "let", "s", "a", "and", "reset", "everything", "all",
+    "for", "real", "want", "to", "that", "this", "one", "of", "course",
+})
+
+
+def lily_parse_restart_confirmation(text: str) -> Optional[str]:
+    """Parse a reply to the RESTART confirm ("Restart from scratch — scores
+    gone. Sure?") into "yes", "no", or None. "no" is the forget flow's
+    no-set (any negation drops the ask — the safe direction). "yes"
+    requires an utterance that IS a yes: a yes pattern hit, no no-pattern
+    hit, and every remaining token drawn from the restart vocabulary. A
+    yes carrying other payload ("yeah it's the femur") is None — pending,
+    destroys nothing."""
+    normalized = _normalize(text)
+    if not normalized:
+        return None
+    no = _CONFIRM_NO_RE.search(normalized) is not None
+    yes = _CONFIRM_YES_RE.search(normalized) is not None
+    if no and not yes:
+        return "no"
+    if no and yes:
+        return None
+    if not yes:
+        return None
+    tokens = normalized.split()
+    if len(tokens) > 8:
+        return None
+    if all(tok in _RESTART_YES_ALLOWED_TOKENS for tok in tokens):
+        return "yes"
+    return None
+
+
 def lily_parse_forget_confirmation(text: str) -> Optional[str]:
     """Parse a reply to the forget confirmation question ("everything —
     voices, games, facts — gone for good; tonight's game keeps going —
