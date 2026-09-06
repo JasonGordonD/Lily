@@ -274,8 +274,11 @@ class LilyTTSRuntimeTests(unittest.TestCase):
                 return self
 
             async def __anext__(self):
+                if getattr(self, "_done", False):
+                    raise StopAsyncIteration
                 ev = await self._q.get()
                 if ev is None:
+                    self._done = True
                     raise StopAsyncIteration
                 return ev
 
@@ -312,11 +315,21 @@ class LilyTTSRuntimeTests(unittest.TestCase):
             def flush(self):
                 self.flushed = True
 
+        from livekit.agents.utils import aio
+
         async def _go(tokens):
-            stream = LilySynthesizeStream(tts=tts, conn_options=DEFAULT_API_CONNECT_OPTIONS)
+            # Built via __new__: the base SynthesizeStream constructor starts
+            # its own _main_task (which would race this direct _run for the
+            # input channel — the 3.13 CI runner lost that race).
+            stream = LilySynthesizeStream.__new__(LilySynthesizeStream)
+            stream._lily = tts
+            stream._conn_options = DEFAULT_API_CONNECT_OPTIONS
+            stream._input_ch = aio.Chan()
             for t in tokens:
-                stream.push_text(t)
-            stream.end_input()
+                stream._input_ch.send_nowait(t)
+            # what the real end_input() sends: a flush sentinel, then close
+            stream._input_ch.send_nowait(LilySynthesizeStream._FlushSentinel())
+            stream._input_ch.close()
             em = _Emitter()
             await stream._run(em)
             return em
