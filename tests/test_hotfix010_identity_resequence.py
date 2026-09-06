@@ -23,6 +23,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import lily_config
 from test_hotfix006_n1_identity_race import _game
 from test_recognition_variety import _make_game
+from lily_agent import _PAIR1_CONFIRMED_VS_GUESSED
+
+
+def _without_operator_rule(text: str) -> str:
+    """WO-LILY-VOICE-TRUTH-001 PAIR 1: the operator's VERBATIM rule carries
+    the literal example "'welcome back, Rami' is allowed here and only
+    here" — it is the rule's own example, never a recited remembered name.
+    Strip it so these pins keep testing what they always tested."""
+    return text.replace(_PAIR1_CONFIRMED_VS_GUESSED, "")
 
 FOUR = ["Rami", "Rhonda", "Chris", "Miranda"]
 
@@ -89,7 +98,7 @@ def test_the_rami_rhonda_chris_miranda_greeting_is_unreproducible(monkeypatch):
         g = _game(resolved=True, memory_block="[RETURNING TABLE] Rami — 4 wins",
                   spoken=spoken)
         g.memory_player_names = list(FOUR)
-        text = g.greeting_instructions()
+        text = _without_operator_rule(g.greeting_instructions())
         for name in FOUR:
             assert name not in text, f"{name!r} recited at spoken={spoken}"
 
@@ -100,7 +109,7 @@ def test_the_rami_rhonda_chris_miranda_greeting_is_unreproducible(monkeypatch):
     game.memory_player_names = list(FOUR)
     game.maybe_fire_late_recognition()
     assert len(game.instructed_replies) == 1
-    ack = game.instructed_replies[0]
+    ack = _without_operator_rule(game.instructed_replies[0])
     for name in FOUR:
         assert name not in ack, f"{name!r} recited in the late-recognition beat"
 
@@ -115,7 +124,7 @@ def test_no_name_is_spoken_without_a_present_voice_match(monkeypatch):
     game.memory_player_names = ["Rami"]
     game.maybe_fire_late_recognition()
     ack = game.instructed_replies[0]
-    assert "Rami" not in ack
+    assert "Rami" not in _without_operator_rule(ack)
     assert "ROSTER field is the sole naming authority" in ack
     assert "do not read any roster of names from memory" in ack
 

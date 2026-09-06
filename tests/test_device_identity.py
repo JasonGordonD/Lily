@@ -181,7 +181,7 @@ def test_stage_device_candidate_never_activates_loaded_data(monkeypatch):
     monkeypatch.setattr(
         lily_agent.lily_memory,
         "lily_build_memory_block",
-        lambda memory, prefs=None: "[RETURNING TABLE]\nsecret",
+        lambda memory, prefs=None, **kw: "[RETURNING TABLE]\nsecret",
     )
 
     staged = asyncio.run(

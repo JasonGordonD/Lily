@@ -5,6 +5,228 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — WO-LILY-VOICE-TRUTH-001: the ECAPA probe hears a voice, recognition carry is keyed by speech id, one group id per night
+
+Auditor B (SQL + executed probes `carry_probe.py` / `roster_probe.py`) and
+Auditor D found that the voice-identity stack was measuring the wrong thing
+and receipting the wrong event. Seven defects, all fixed here as behavior with
+behavior-driving tests (`tests/test_voice_truth_wo.py`, 30 tests, 26 failing
+on a380531; `tests/test_voice_probe.py` rewritten, 13 tests, all failing on
+a380531 — the old probe had no gate to test).
+
+**PRIOR CLAIMS THAT WERE FALSE (named, per the WO):**
+- WO-LILY-RECOG-DELIVERY-001 (WO-2, 2026-08-17) claimed "the stamp lands on
+  the carrying turn's playout CONFIRM ... the greet-leg discipline extended".
+  FALSE as executed: the watch was keyed by ORDER, not by speech id —
+  `resolve_recognition_carry(confirmed=True)` ran on EVERY finished speech
+  (lily_agent.py:4257 on a380531) and `note_generation_snapshot` marked the
+  NEXT generation, preemptive ones included (:9625, preemptive ON at :1746).
+  I1: greeting in flight when the fast door armed → confirmed first →
+  "uncarried" → the organic reply carried the welcome-back unobserved → the
+  seam beat aired a SECOND one. I2: a preemptive generation marked inflight,
+  an unrelated deterministic line confirmed → recognition stamped by a speech
+  that never carried it → the real reply cut → PERMANENT blackout.
+- WO-2 also claimed "every mis-resolution degrades to the late beat
+  delivering ... never to a silent blackout". FALSE: I2 is a silent blackout.
+- WO-LILY-VOICE-IDENTITY-001 / HOTFIX-006/008/010 presented the ECAPA match
+  as a voice match. It was a ROOM-TONE match: the probe embedded the first
+  2.5s of wall-clock FRAMES from track_subscribed with no speech gate, and
+  enrollment read the same first 8s. Every instrumented session's 2.5s mark
+  fell 20+s before any human spoke (same-device sessions 0.99 vs each other;
+  0/7 cross-device matches ever; a probe carrying zero seconds of the player
+  scored 0.70 against his 26-sample centroid).
+- `tests/test_recog_delivery_race.py:205` (WO-2) PINNED Auditor D's P1-2
+  defect (late beat stamping at DISPATCH, keyless); rewritten to assert
+  confirm-time stamping.
+
+### V1 (P0) — the speech gate, as STATED RULES (operator addendum #2)
+
+| rule | statement | where |
+|---|---|---|
+| (a) voiced signal | a frame is VOICED only when its wall-clock span falls inside a human (non-LILY) STT final `[segment_start, segment_end]` from the transcript events (PRIMARY, deterministic, persisted) — `LilyVoiceProbe.note_voiced_segment`, fed by the one-line seam in the transcript handler (`game.note_voiced_segment(seg_start_ts, seg_end_ts, speaker_label)`, after the WS-10 quarantine gate). FALLBACK: the framework VAD `user_speaking` flag (`note_vad_state`, polled per frame by the sink) — engages only when `LILY_VOICE_GATE_SOURCE=vad`, or in `auto` after `VOICE_GATE_VAD_FALLBACK_AFTER_SECONDS` (15s, constant) of VAD-detected speech with ZERO timed human segment. The active source is `gate_source` ∈ {`stt_segments`, `vad`}, logged as `LILY_VOICE_ID | GATE_SOURCE` and persisted. An energy threshold is NEVER a gate. | `lily_voice_embedder.LilyVoiceProbe`, `lily_identity.note_voiced_segment` / `note_voice_probe_vad`, `lily_agent._lily_voice_probe_fork` |
+| (b) first embedding | `LILY_VOICE_MIN_VOICED_SECONDS` (default **3.0 s** cumulative voiced) before the first match attempt | `lily_config.voice_min_voiced_seconds`, `LilyVoiceProbe.match_due`, `maybe_start_voice_identity_match` |
+| (c) retry | a new attempt after each additional `LILY_VOICE_RETRY_VOICED_SECONDS` (default **2.0 s**) of voiced audio, until a match or `LILY_VOICE_PROBE_WINDOW_SECONDS` (default **60 s** of session wall-clock from the fork) elapses; window expiry resolves `no_match` (or `insufficient_voiced`) and re-invokes the deferred name-set proposal exactly as the old single no-match branch did | `LilyVoiceProbe.mark_attempt`, `_voice_identity_match_at_start`, `_voice_identity_close_window` |
+| (d) enrollment | at close, the UNION of the session's voiced chunks, bounded by `LILY_VOICE_ENROLL_MAX_SECONDS` (default **30 s**); the raw ring holds 30 s of UNRESAMPLED frames (STT finals land 1-3 s late) and a slice is resampled once per voiced interval — nothing is resampled per frame any more | `LilyVoiceProbe.enroll_pcm`, `_voice_identity_enroll_at_close`, `lily_agent._lily_resample_to_16k` |
+| (e) under the minimum | session ends with voiced < min → `outcome="insufficient_voiced"` with `voiced_seconds`, enrollment receipt `skipped_insufficient_voiced`, NO write; above the minimum the existing quality floor `LILY_VOICE_IDENTITY_ENROLL_MIN_SPEECH_SECONDS` (8 s) still applies (`skipped_below_enroll_floor`) | `_voice_identity_finalize`, `_voice_identity_enroll_at_close` |
+| (f) receipt | EVERY outcome persists `lily_sessions.metadata.voice_identity = {outcome, voiced_seconds, attempts, best_score, best_group, runner_up, threshold, margin, model_tag, gate_source, min_voiced_seconds, window_seconds, embed_ms, resolve_ms, enrollment{status, group_id, sample_count, voiced_seconds, gate_source, model_tag, redirected_from, redirect_score}, probe{...}}` at BOTH write sites (session close — enrollment now runs BEFORE the metadata write so its result is in the receipt — and the 60 s heartbeat). Outcome values: `match:<group>:<score>`, `no_match`, `insufficient_voiced`, `embedder_unavailable`, `disabled`, `never_ran`, `pending`, `failed:<Exc>`. Every attempt logs `LILY_VOICE_ID | THRESHOLD_DECISION | attempt= decision= best= best_group= runner_up= threshold= margin= voiced= gate= pool= tag=`; the window close logs `PROBE_RESOLVED`. | `voice_identity_receipt`, `lily_voice_identity.lily_rank_voice` |
+
+Threshold stays **0.75** (`LILY_VOICE_IDENTITY_MATCH_THRESHOLD`, already config), margin 0.06. RE-TUNING NEEDS REAL CROSS-DEVICE PAIRS: no v2 centroid exists yet, so no number in this repo says where the voiced-audio threshold should sit; the receipt's `best_score`/`runner_up` on real cross-device sessions is the data to tune from.
+
+`model_tag` bumped `ecapa-192-v1` → **`ecapa-192-v2`** (same model, same 192 dims — the tag pins the CAPTURE discipline). The matcher and enrollment read/write v2 only; v1 rows are never consulted. **NO destructive writes** (operator addendum #1): `migrations/027_retire_ecapa_v1_room_tone_centroids.sql` is a SCRIPT ONLY (not applied by the build, not executed from this session) that RETIRES — `status='retired', retired_at=now()`, rows left in place as the receipt — exactly these `lily_voice_identity` rows (SELECT read-only 2026-09-06): `194ad75c-5b50-4832-8789-b0b8408f7bee` (grp_0b07f989…, n=26), `d3a5ce9c-3ad9-412f-83e0-7bbb915b4efb` (lily-A8D30C-c9474149, n=1), `3806b687-618d-48a9-a422-3d4ef28e43cf` (lily-1D27C8-974ff7ce, n=1); `a665f656-8326-47ee-9892-659913b8b441` is already retired (2026-08-09) and is untouched. Reason: every v1 centroid was computed from un-gated wall-clock audio (room tone). No RLS/policy changes (addendum #1 (4): the live catalog has RLS enabled service-role-only on every lily_* table by design).
+
+### V2 (P0) — fragmentation: the name door always consults the index; one group id per night
+
+`maybe_recognize_by_stated_name` no longer short-circuits to `device_plus_name`
+on a staged device fragment: the name index (`lily_groups_for_player_name`,
+its four case-variant queries now `asyncio.gather`ed) is ALWAYS consulted;
+when several groups know the name, `lily_group_history` (one `in_` query over
+`lily_memories`: sessions, questions, last_played_at) ranks them — most
+history wins, the staged device candidate breaks ties, recency is the last
+resort (`_pick_name_door_candidate`, logged `AMBIGUOUS_PICKED_HISTORY`); a
+device fragment thinner than the index's pick is released in favour of the
+richer group (`NAME_DOOR_PREFERS_HISTORY`). The HOTFIX-010 identity boundary
+holds (a stated name IS verification for this door; verified=False, the voice
+still outranks; a name on no file promotes nothing). Memory, the session
+report and the voiceprints now file under ONE id — `persistence_group_id()`
+(= `_effective_enroll_group_id`, the device-stable id on a cold room-name
+session) — at the session-close write, the `finish_game` write and the
+wrap-up report, instead of memory under the room name and voices under the
+device id (the split that minted the next session's voices-but-no-memory
+fragment). The empty-group refusal in `stage_device_candidate` is kept
+deliberately (V1c: a name or a fresh UUID never mints a group).
+
+FOLLOW-UP (documented, NOT implemented): the fragment MERGE. Rami holds ~30
+voiceprint groups; V2 stops new fragments and routes returners to the richest
+group, it does not fold the existing ones. Design: (1) candidate pairs from
+the name index (same normalized name, both single-player) plus a v2 voice
+link (both centroids ≥ threshold against the same live embedding, or against
+each other once both hold ≥ 3 voiced samples); (2) canonical = the group with
+the most sessions; (3) `lily_merge_groups(canonical, [fragments],
+reason="voice_truth_fragment_merge")` already rekeys every table and retires
+the loser's centroid (never averages); (4) dry-run mode first — write the
+proposed merges to `lily_sessions.metadata.identity_promotions` as
+`merge_proposed` for a week of live receipts, then enable; (5) never merge on
+a name alone (RECONCILE-001's safety bar stands); (6) the operator's
+re-enrollment pass (below) must precede it so v2 centroids exist to link on.
+
+### V3 (P0) — recognition carry keyed by SPEECH ID
+
+Replaces WO-2's order-keyed watch with a carrier registry
+(`_recognition_carriers: {speech_id: {source, seq, at, aired_at}}`):
+`note_generation_snapshot(speech_id=)` registers a generation as a carrier
+only when a recognition lane is owed/armed AND the memory block is in THAT
+snapshot, under the framework SpeechHandle id llm_node reads from
+`_SpeechHandleContextVar` (a deterministic `say` never passes llm_node and
+can never be a carrier; an unkeyed snapshot is logged `RECOGNITION_CARRY_
+UNKEYED` and never counts). `resolve_recognition_carry(confirmed=,
+speech_id=, suppressed=)` stamps ONLY when a carrier's own id confirms; a
+carrier cut after reaching the air, or suppressed, re-arms the beat as OWED;
+a carrier that never aired and was not suppressed is an invalidated
+preemptive — dropped silently, the real reply registers itself; an unrelated
+speech confirming says nothing. I1 and I2 pinned. The late beat
+(`maybe_fire_late_recognition`, both branches) no longer stamps at dispatch:
+it arms a FLIGHT (`_late_recognition_flight`, bound to the dispatch record's
+speech id) and stamps `late_recognition_beat` on ITS carrier's confirm;
+`note_recognition_dispatch_suppressed` / the `on_dispatch_suppressed` seam
+re-arm it owed; a flight or watch that never reaches the air inside 30 s
+(`_RECOG_FLIGHT_STALE_SECONDS`) re-arms instead of holding the seam forever.
+The blocked reasons are `recognition_carry_inflight` (carriers/watch) and
+`recognition_beat_inflight` (flight). Seams consumed from W1 (marked `SEAM`):
+`note_recognition_playout_started(speech_id)` wired one line after
+`note_playout_started` in the agent_state_changed handler; the two
+`resolve_recognition_carry` calls in `on_agent_speech_finished` now pass
+`speech_id`/`suppressed`; `on_dispatch_suppressed(act, speech_id, reason)`
+is defined on `LilyIdentityMixin` as a stub that consumes the suppression
+and chains to `super()` (W1's hook, when it lands behind this mixin in the
+MRO, is reached; if W1 fires the hook from its gates it reaches this
+override first).
+
+### V4 (P1) — name-door latency
+
+`_promote_device_candidate` injects the staged memory block and decides the
+carried/uncarried tail BEFORE awaiting `upgrade_group_id`; `upgrade_group_id`
+runs the rekey and the four reloads (asked history, known-speaker
+voiceprints, prefs, memory) under one `asyncio.gather` (logged
+`GROUP_ID_UPGRADE_LOADS_MS`; a failed rekey degrades to a warning instead of
+killing the door task). Door latency persists on the promotion event:
+`identity_promotions[].{ts_start, ts_resolved, door_ms}`. No new RPC.
+
+### V5 (P1) — prompt contradictions (operator decision, wording VERBATIM)
+
+The three pairs carry the operator's exact text on BOTH sides (the module
+constants `_PAIR1_CONFIRMED_VS_GUESSED` / `_PAIR2_DONT_NARRATE_THE_GAP` /
+`_PAIR3_NAME_QUESTION_ALONE` in lily_agent.py, the prompt, and — for PAIR 1 —
+lily_identity's late-recognition acks; byte-identity pinned). PAIR 1's
+CONFIRMED/GUESSED is MECHANICALLY BOUND: `identity_confirmed_source` is set
+only by a promotion whose source ∈ {voice_identity_match, voiceprint_match,
+name_stated, device_plus_name}; `identity_status_line()` ("IDENTITY STATUS
+(from state, not judgment): CONFIRMED — …" / "GUESSED — …") precedes the
+verbatim rule in the greeting memory branch and both late-recognition acks;
+the memory block's provenance line (`lily_memory.lily_recognition_provenance_
+line`, appended after the cap so it cannot be truncated) states the true door
+("You recognized this table by VOICE MATCH / a STATED NAME this session / this
+DEVICE plus a STATED NAME this session — identity CONFIRMED" or "by <source>
+only — identity GUESSED: … no name and no 'welcome back'"), and the
+names-only branch no longer claims "Voice recognition matched". PAIR 3
+REVERSES the 2026-08-14 one-question-'or' rule (69186bf); its pins
+(`test_greeting_single_question.py`) are rewritten; the "who's at the mic
+tonight" orienting phrase is kept (its pins untouched). The device-candidate
+PART TWO branch carried the same 'or'-join clause and received the same PAIR 3
+text (reported as the seventh site). The continuity rail's "first
+welcome-back … never a repeat" is left as-is: the replaced PAIR 1 text itself
+states the CONFIRMED-only qualifier. RESIDUAL (flagged, not touched):
+`<continuity>` rail 3 still says "Fold related asks into a single question
+joined with 'or'" — it conflicts with PAIR 3 for the three lobby asks; the
+operator's instruction scoped the edits to the six sites. Prompt prefix stays
+byte-stable across turns (precall-cache + prompt-structure suites green).
+
+### V6 (P2) — roster re-key ghost and the solo clamp
+
+`bind_speaker`: when exactly one placeholder seat exists under a GENERIC
+diarizer label (S<n>/UU) that was actually heard (sightings/talk/score), and
+the bind arrives under the engine's NAMED label (label == name, the
+known_speakers re-label of the same voice) with the generic label not heard
+after the named one first appeared (`label_sightings`, recorded per final),
+the placeholder's history migrates into the name and the ghost retires with a
+`migrate` roster event (`rekeyed_from`) — the glass airs a rename, never a
+second chip. A second person under a generic label ("S2" → Chris) is never
+absorbed. `clamp_roster_solo` retires EMPTY placeholders only — a seat that
+has scored or answered is kept (`SOLO_CLAMP_KEPT_SCORED`).
+
+### V7 (P2) — the NameError guard
+
+`test_v7_every_free_name_in_lily_identity_resolves` walks every function in
+lily_identity.py (nested scopes and lambdas included) and asserts each loaded
+name is bound locally, in an enclosing scope, on the module, or in builtins —
+the class of defect that silently downgraded live for two days; the guard's
+own sensitivity is pinned on a synthetic module.
+
+### Receipts an operator pulls after deploy (per fix)
+
+- V1: `select metadata->'voice_identity' from lily_sessions where session_id=…`
+  → `outcome`, `voiced_seconds`, `attempts`, `best_score`, `runner_up`,
+  `gate_source`, `enrollment`; log lines `LILY_VOICE_ID | GATE_SOURCE`,
+  `THRESHOLD_DECISION`, `PROBE_RESOLVED`, `ENROLLED_FROM_VOICED`;
+  `lily_voice_identity` rows with `model_tag='ecapa-192-v2'` exist ONLY from
+  voiced-gated enrollment (the v1 tag is retired by 027).
+- V2: `LILY_MEMORY | NAME_DOOR_PREFERS_HISTORY` / `AMBIGUOUS_PICKED_HISTORY`
+  / `NAME_DOOR_DEVICE_MATCH`; `lily_memories.group_id` and
+  `lily_speaker_voiceprints.group_id` for the session agree.
+- V3: `LILY_MEMORY | RECOGNITION_CARRY_INFLIGHT | … speech=<id>`,
+  `RECOGNITION_AIRED | source=`, `RECOGNITION_CARRY_UNRESOLVED | reason=`,
+  `LATE_RECOGNITION_DISPATCHED`; `metadata.identity_promotions[].carrier_speech_id`.
+- V4: `metadata.identity_promotions[].door_ms`; `GROUP_ID_UPGRADE_LOADS_MS`;
+  `NAME_LOOKUP_MS`.
+- V6: `LILY_STATE | PLACEHOLDER_REKEYED` / `SOLO_CLAMP_KEPT_SCORED`; the
+  roster event `migrate` with `rekeyed_from`.
+
+Operator re-enrollment (per device, once the v2 build is up): speak ≥ 8 s of
+natural talk to Lily during the session (≥ 3 s starts matching; 8 s is the
+enrollment floor; up to 30 s is folded), state your name once; expect
+`outcome` = `no_match` on the first session per person (no v2 centroid yet)
+and `enrollment.status='enrolled'` with `gate_source='stt_segments'` and
+`voiced_seconds ≥ 8`; from the second session — any device — expect
+`outcome` = `match:<group>:<score>` with `best_score` in the receipt. The row
+that proves enrollment came from voiced audio: `lily_voice_identity` with
+`model_tag='ecapa-192-v2'` plus the same session's
+`metadata.voice_identity.enrollment` (`voiced_seconds`, `gate_source`).
+
+Tests: full suite **2805** green on python3.11 and venv313 (baseline 2766).
+New: `tests/test_voice_truth_wo.py` (30), `tests/test_voice_probe.py` (13,
+rewritten). Updated: recog_delivery_race (speech-id keyed; :205 rewritten),
+antirepeat_protocol, name_stated_recognition (V2 rule), greeting_single_
+question (PAIR 3), recognition_variety + hotfix006_n1 (PAIR 2 pins),
+hotfix010_identity_resequence (the verbatim rule's own "'welcome back, Rami'"
+example is stripped before the no-recited-name check), memory (provenance),
+latency_observability, voice_identity_wiring / hotfix010_v2 / v7 fixtures
+(voiced seconds recorded), env_deploy_lint (five new tunables ship on
+defaults), voice_identity_persistence (v2 tag), device_identity (fake
+builder accepts `recognized_by`).
+
+Deliberately NOT done: the fragment merge (design above); a single
+PostgREST `or`-query for the name variants (kept as gathered queries — not
+testable against live here); any live-DB write (027 is a script).
+
 ## 2026-08-17 — WO-LILY-RESTART-001: restart the game on request — kill the game, keep the people
 
 Operator directive: Lily must be able to RESTART the game on request.

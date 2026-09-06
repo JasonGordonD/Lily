@@ -402,17 +402,57 @@ def lily_prefs_summary(prefs) -> str:
 # The [RETURNING TABLE] block (pure)
 # ---------------------------------------------------------------------------
 
+# WO-LILY-VOICE-TRUTH-001 V5 (S2): the block states the TRUE door the table
+# was recognized through, and the operator's PAIR 1 case (CONFIRMED /
+# GUESSED) derived from it — never "voice recognition matched" for a
+# name-door promotion. Keys are promotion sources (lily_identity).
+_PROVENANCE_LINES = {
+    "voice_identity_match": (
+        "You recognized this table by VOICE MATCH — identity CONFIRMED."
+    ),
+    "voiceprint_match": (
+        "You recognized this table by VOICE MATCH — identity CONFIRMED."
+    ),
+    "name_stated": (
+        "You recognized this table by a STATED NAME this session — identity "
+        "CONFIRMED."
+    ),
+    "device_plus_name": (
+        "You recognized this table by this DEVICE plus a STATED NAME this "
+        "session — identity CONFIRMED."
+    ),
+}
+
+
+def lily_recognition_provenance_line(recognized_by: Optional[str]) -> str:
+    """One line naming how the table was recognized and whether that
+    CONFIRMS identity (PAIR 1). Unknown/weak sources render as GUESSED."""
+    line = _PROVENANCE_LINES.get(str(recognized_by or "").strip())
+    if line:
+        return line
+    how = str(recognized_by or "").strip() or "an unverified source"
+    return (
+        f"You recognized this table by {how} only — identity GUESSED: no "
+        "voice match and no name stated this session; use no name and no "
+        "'welcome back'."
+    )
+
+
 def lily_build_memory_block(
     memory: Optional[dict],
     prefs: Optional[dict] = None,
     max_chars: int = MEMORY_BLOCK_MAX_CHARS,
+    recognized_by: Optional[str] = None,
 ) -> str:
     """Compact system-context block for a returning table: who they are, who
     won last time, running bits, total games — written so Lily greets
     returning players by name and uses callbacks naturally. `prefs` (the
     stored lily_group_prefs dict) adds one compact "usual" line ("usual:
-    relaxed pacing") for the ask-once preferences flow. Returns "" for
-    empty/None memory. Capped at ~600 chars."""
+    relaxed pacing") for the ask-once preferences flow. `recognized_by`
+    (the promotion source) adds the provenance line — the true door and
+    the CONFIRMED/GUESSED case. Returns "" for empty/None memory. Capped
+    at ~600 chars (the provenance line is appended after the cap so it can
+    never be truncated away)."""
     if not memory:
         return ""
     sessions = memory.get("sessions") or []
@@ -429,11 +469,12 @@ def lily_build_memory_block(
             "rematch energy."
         )
     else:
-        # Voiceprint-only recognition can predate a qualifying game-memory
-        # row (short lobby/tune-up sessions). Preserve the known names without
-        # inventing a prior score, winner, or game count.
+        # Name-only recognition can predate a qualifying game-memory row
+        # (short lobby/tune-up sessions). Preserve the known names without
+        # inventing a prior score, winner, or game count — and without
+        # claiming a VOICE matched them (the provenance line says how).
         lines.append(
-            "Voice recognition matched people you have met before; no prior "
+            "Recognition matched people you have met before; no prior "
             "game result is on the table card."
         )
     if names:
@@ -474,6 +515,8 @@ def lily_build_memory_block(
     block = "\n".join(lines)
     if len(block) > max_chars:
         block = block[: max_chars - 1].rstrip() + "…"
+    if recognized_by is not None:
+        block += "\n" + lily_recognition_provenance_line(recognized_by)
     return block
 
 

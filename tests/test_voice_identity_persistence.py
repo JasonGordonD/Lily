@@ -156,7 +156,9 @@ def test_config_defaults():
     ]:
         os.environ.pop(k, None)
     assert lily_config.voice_identity_enabled() is True
-    assert lily_config.voice_identity_model_tag() == "ecapa-192-v1"
+    # WO-LILY-VOICE-TRUTH-001 V1(d): v2 = voiced-gated centroids only; the
+    # v1 room-tone pool is never consulted again.
+    assert lily_config.voice_identity_model_tag() == "ecapa-192-v2"
     assert lily_config.voice_identity_match_threshold() == 0.75
     assert lily_config.voice_identity_match_margin() == 0.06
     assert lily_config.voice_identity_enroll_min_speech_seconds() == 8.0

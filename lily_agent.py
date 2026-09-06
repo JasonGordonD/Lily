@@ -601,6 +601,30 @@ class WatchPolicy:
 # SFX dispatch, state publication, checkpointing triggers.
 # ---------------------------------------------------------------------------
 
+# WO-LILY-VOICE-TRUTH-001 — OPERATOR DECISION wording, VERBATIM (both sides of
+# each contradicting pair carry the SAME text: prompts/lily_system.txt and the
+# greeting/late-recognition instructions here). Do not paraphrase.
+_PAIR1_CONFIRMED_VS_GUESSED = (
+    "If identity is CONFIRMED (voice match, or the player gave their name "
+    "this session), greet the returner by name ONCE, one beat, then move on "
+    "— 'welcome back, Rami' is allowed here and only here. If identity is "
+    "only GUESSED (known device, partial history), do NOT use a name and do "
+    "NOT say 'welcome back'; open as a fresh table. Never list prior "
+    "players, winners, or newcomers by name off the record. The continuity "
+    "rail's 'first welcome-back is owed' applies only to the CONFIRMED case."
+)
+_PAIR2_DONT_NARRATE_THE_GAP = (
+    "If you don't have the table, don't narrate the gap. No 'my table card "
+    "doesn't have you', no 'new device', no 'I don't recognize'. Ask for the "
+    "name in one light beat as if it's a new table."
+)
+_PAIR3_NAME_QUESTION_ALONE = (
+    "The name question stands alone on its own turn. Who-else-is-here and "
+    "the fun fact are separate beats on later turns. Never fold two of them "
+    "into one breath, and never join them with 'or'."
+)
+
+
 class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin, lily_identity.LilyIdentityMixin, lily_floor.LilyFloorMixin, lily_glass.LilyGlassMixin, lily_speech_delivery.LilySpeechDeliveryMixin):
     # Class-level defaults so __new__-built test fixtures (and any partially
     # constructed instance) read sane state; __init__ re-declares them with
@@ -644,6 +668,16 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
     _name_door_watch: dict | None = None
     _late_recognition_promotion_owed: bool = False
     _identity_promotion_events: list | None = None
+    # WO-LILY-VOICE-TRUTH-001 V3/V4 (class defaults for __new__ harnesses):
+    # the speech-id-keyed carrier registry, the dispatched late-beat
+    # flight, the name-door entry wall-clock, and the CONFIRMED-identity
+    # source (PAIR 1 binding: a name is spoken only under a confirmed
+    # source).
+    _recognition_carriers: dict | None = None
+    _late_recognition_flight: dict | None = None
+    _owed_recognition_source: str | None = None
+    _name_door_opened_at: float | None = None
+    identity_confirmed_source: str | None = None
     # WO-LILY-RESTART-001 (class defaults for __new__ harnesses; full
     # contract comments in _init_all_game_state and lily_floor.py): the
     # deterministic restart-intent fact, the pending confirm, and the
@@ -862,6 +896,19 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._name_door_watch = None
         self._late_recognition_promotion_owed = False
         self._identity_promotion_events = None
+        # WO-LILY-VOICE-TRUTH-001 V3: carriers keyed by SPEECH ID
+        # ({speech_id: {source, seq, at, aired_at}}) — a generation that
+        # snapshotted WITH the memory block while a recognition lane was
+        # owed/armed; only that id's confirm stamps. The late beat's
+        # dispatched flight ({source, speech_id, at, aired_at}) stamps on
+        # ITS confirm, never at dispatch. V4: the door's entry wall-clock.
+        # PAIR 1 binding: identity_confirmed_source is set ONLY by a
+        # confirmed promotion (voice / name_stated / device_plus_name).
+        self._recognition_carriers = None
+        self._late_recognition_flight = None
+        self._owed_recognition_source = None
+        self._name_door_opened_at = None
+        self.identity_confirmed_source = None
         self._recognition_dispute = False
         self._recognition_dispute_why_answered = False
         self._recognition_why_note = None
@@ -909,6 +956,24 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._voice_identity_pool_loaded = False
         self._voice_identity_pool_loading = False
         self._voice_identity_resolved = False
+        # WO-LILY-VOICE-TRUTH-001 V1: the speech-gated probe lifecycle
+        # (see lily_identity.py "the speech-gated probe lifecycle").
+        self._voice_probe = None
+        self._voice_identity_voiced_seconds = 0.0
+        self._voice_identity_gate_source = None
+        self._voice_identity_attempts = 0
+        self._voice_identity_last_attempt_voiced = None
+        self._voice_identity_inflight = False
+        self._voice_identity_matched = False
+        self._voice_identity_window_started_at = None
+        self._voice_identity_best_score = None
+        self._voice_identity_best_group = None
+        self._voice_identity_runner_up = None
+        self._voice_identity_enroll_pcm = None
+        self._voice_identity_enrollment = None
+        self._voice_id_outcome = None
+        self._voice_id_embed_ms = None
+        self._voice_id_resolve_ms = None
         self._watch_policy_table = None
         self._watchdog_task = None
         self._watchdog_tick = 0
@@ -2659,9 +2724,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             parts.append(
                 "PART TWO — the DEVICE looks familiar, but no current voice "
                 "has been verified. Say only that the device looks familiar "
-                "and ask who is playing tonight — ONE question only; if you "
-                "want a name, join it into that same question with 'or', "
-                "never as a second stacked question. Do NOT say welcome back, "
+                "and ask who is playing tonight — ONE question only. "
+                # OPERATOR DECISION (PAIR 3, verbatim — the device branch
+                # carried the same 'or'-join clause):
+                + _PAIR3_NAME_QUESTION_ALONE +
+                " Do NOT say welcome back, "
                 "do NOT call anyone a returner, and do NOT mention prior "
                 "names, winners, counts, dates, preferences, or facts. "
                 "Different people may share a device; voice verification "
@@ -2670,12 +2737,11 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         else:
             parts.append(
                 "PART TWO — one light orienting beat: ask who's at the mic "
-                "tonight, then STOP and let them speak. If you also want a "
-                "name, fold it into that SAME single question joined with "
-                "'or' — 'who's at the mic tonight — or, what should I call "
-                "you?' — improvise the wording freely, but never stack two "
-                "separate questions ('...tonight? And what should I call "
-                "you?' is two asks; one question mark total). Do NOT recite "
+                "tonight, then STOP and let them speak. "
+                # OPERATOR DECISION (WO-LILY-VOICE-TRUTH-001 PAIR 3, verbatim;
+                # reverses the 2026-08-14 one-question-'or' rule, 69186bf):
+                + _PAIR3_NAME_QUESTION_ALONE +
+                " Do NOT recite "
                 "names, winners, counts, dates, or history, and do NOT "
                 "announce whether it's their first time — no voice has been "
                 "matched present yet, so there is no one to name."
@@ -2722,9 +2788,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     "a present person. If no voice is matched present yet, "
                     "name no one and ask who's at the mic. Do NOT ask if "
                     "it's their first time — your memory already answers "
-                    "that. Lean into the rematch, but do NOT say 'welcome "
-                    "back, <name>', and do NOT list prior players, winners, "
-                    "or newcomers by name off the record. Returners get no "
+                    "that. "
+                    # MECHANICAL BINDING (WO-LILY-VOICE-TRUTH-001 PAIR 1):
+                    # CONFIRMED vs GUESSED comes from state (the promotion
+                    # source), never from model judgment.
+                    + self.identity_status_line() + " "
+                    # OPERATOR DECISION (PAIR 1, verbatim):
+                    + _PAIR1_CONFIRMED_VS_GUESSED +
+                    " Returners get no "
                     "walkthrough — offer "
                     "ONCE, 'want a refresher on the options, or straight in?', "
                     "and respect the answer. The walkthrough or refresher "
@@ -2746,16 +2817,14 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     "FOR block — conversational, folded into the banter, "
                     "never a feature list read aloud. CLAIMED RETURNER — they "
                     "say it's NOT their first time but your memory has "
-                    "nothing: BELIEVE THEM and name the gap plainly in ONE "
-                    "light beat, WITHOUT diagnosing a cause — 'I don't "
-                    "recognise the voice yet, and I don't know why' — never "
-                    "'my table card doesn't have you', never 'new device', "
-                    "never 'cleared browser', never anything on their end "
-                    "(you cannot see which link dropped, and a confident "
-                    "wrong cause blames a player for a backend fault) and IN "
-                    "THE SAME TURN offer the refresher exactly as a "
-                    "recognized returner would get it — 'want a refresher on "
-                    "the options, or straight in?' — and respect the answer. "
+                    "nothing: BELIEVE THEM. "
+                    # OPERATOR DECISION (WO-LILY-VOICE-TRUTH-001 PAIR 2,
+                    # verbatim):
+                    + _PAIR2_DONT_NARRATE_THE_GAP +
+                    " Once the name has landed, offer the refresher exactly "
+                    "as a recognized returner would get it — 'want a "
+                    "refresher on the options, or straight in?' — and respect "
+                    "the answer. "
                     "Never perform vague amnesia you could explain, never "
                     "claim recognition you don't have, and never argue with "
                     "their memory of you. If recognition catches up mid-game "
@@ -3986,7 +4055,10 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # stamp recognition — if a carried-recognition watch was riding
             # this flight, resolve_recognition_carry re-arms the beat as
             # OWED (the seam delivers it), instead of the airing being lost.
-            self.resolve_recognition_carry(confirmed=False)
+            # SEAM (W4 VOICE-TRUTH-001 V3): resolved BY SPEECH ID.
+            self.resolve_recognition_carry(
+                confirmed=False, speech_id=speech_id, suppressed=suppressed
+            )
             released = (
                 self.say_registry.release_owner(speech_id)
                 if speech_id
@@ -4254,7 +4326,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         # memory-blind turn finishing first re-arms the beat instead. This
         # is the greet-leg discipline extended to the promotion lanes: the
         # stamp lands at CONFIRM, never at the promotion tail.
-        self.resolve_recognition_carry(confirmed=True)
+        # SEAM (W4 VOICE-TRUTH-001 V3): resolved BY SPEECH ID — only the
+        # speech whose own snapshot carried the block may stamp.
+        self.resolve_recognition_carry(confirmed=True, speech_id=speech_id)
         if self._pending_reveal_event is not None:
             # Reveal speech finished without a speaking-start hook having
             # fired the packet (safety net) — emit now so the UI never hangs.
@@ -6782,7 +6856,9 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # Session memory — idempotent (session_id upsert), so the
             # shutdown callback writing again is safe.
             asyncio.ensure_future(lily_memory.lily_write_session_memory(
-                self.supabase, self.group_id, self.sk.session_id,
+                # VOICE-TRUTH-001 V2: memory and voiceprints file under
+                # the SAME id (persistence_group_id), never split.
+                self.supabase, self.persistence_group_id(), self.sk.session_id,
                 # CLASS 3 (LIVEFIRE-001): delivered count, not the armed
                 # cursor — a burned/never-asked q6 must not read as played.
                 standings, self.questions_asked_count(), self.highlights,
@@ -6794,7 +6870,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # Idempotent with the close-path write (upsert on session_id;
             # the assessment fill is pending-guarded).
             asyncio.ensure_future(lily_assessment.lily_wrap_up_report(
-                self.supabase, self.sk.session_id, self.group_id,
+                self.supabase, self.sk.session_id, self.persistence_group_id(),
                 transcript=list(self.sk.transcript_buffer),
                 game_stats=self.build_game_stats(standings),
             ))
@@ -9300,7 +9376,13 @@ class LilyAgent(Agent):
             # marker.
             note = getattr(self._game, "note_generation_snapshot", None)
             if note is not None:
-                note()
+                # WO-LILY-VOICE-TRUTH-001 V3: the snapshot is keyed to the
+                # framework SpeechHandle this generation belongs to (the
+                # pipeline task runs under _SpeechHandleContextVar), so a
+                # carrier is identified by ITS OWN speech id — a preemptive
+                # generation that is later invalidated carries its own
+                # (cancelled) id and can never stamp for another speech.
+                note(speech_id=_current_speech_id())
         items = _chat_items(chat_ctx)
         # BEHIND the agent's own instructions, never in front of them. Both
         # blocks used to insert(0, ...), which puts them ahead of the
@@ -10408,77 +10490,92 @@ async def _resolve_initial_group_id(ctx: JobContext, room_name: str) -> tuple[st
 
 
 async def _lily_voice_probe_fork(track, game) -> None:
-    """Background frame sink for durable voice identity: read a participant's
-    audio track, resample to 16 kHz mono, and keep a rolling PCM probe on the
-    game for the embedder (match-at-start / enroll-at-close read it). Never
-    on the vocal path, never raises into the session — a failure just leaves
-    the probe empty and the feature stays inert. The one live-infra seam the
-    unit tests can't exercise (no live audio); the buffer/gate it feeds is
-    tested via LilyVoiceProbe."""
+    """Background frame sink for durable voice identity (WO-LILY-VOICE-
+    TRUTH-001 V1). Reads a participant's audio track into the SPEECH-GATED
+    probe: raw frames are held UNRESAMPLED in a timestamped ring; the
+    transcript handler's `note_voiced_segment` seam slices the frames inside
+    each human STT segment into the voiced union (rule (a), primary); the
+    VAD user_speaking flag is polled per frame for the fallback. Nothing is
+    resampled per frame any more (the old sink resampled every frame on the
+    event loop for 8s — the VAD-lag cost) and nothing outside a voiced
+    interval is ever embedded or enrolled.
+
+    The sink closes when the biometric question is closed AND the
+    enrollment union is full (voice_probe_sink_should_close) — never at a
+    fixed 8s of wall-clock. Never on the vocal path, never raises into the
+    session. The one live-infra seam the unit tests can't exercise (no live
+    audio); the buffer/gate it feeds is tested via LilyVoiceProbe."""
     try:
         probe = lily_voice_embedder.LilyVoiceProbe(
-            target_seconds=lily_config.voice_identity_enroll_min_speech_seconds(),
-            match_seconds=lily_config.voice_identity_match_min_speech_seconds(),
+            min_voiced_seconds=lily_config.voice_min_voiced_seconds(),
+            retry_voiced_seconds=lily_config.voice_retry_voiced_seconds(),
+            enroll_max_seconds=lily_config.voice_enroll_max_seconds(),
+            gate_source=lily_config.voice_gate_source(),
+            vad_fallback_after_seconds=(
+                lily_config.VOICE_GATE_VAD_FALLBACK_AFTER_SECONDS
+            ),
+            resampler=_lily_resample_to_16k,
         )
-        resampler = None
+        game.attach_voice_probe(probe)
+        logger.info(
+            "LILY_VOICE_ID | PROBE_FORKED | session=%s gate=%s min_voiced=%.1fs "
+            "retry=%.1fs window=%.0fs enroll_max=%.0fs — speech-gated; wall-"
+            "clock frames are never embedded",
+            game.sk.session_id, lily_config.voice_gate_source(),
+            lily_config.voice_min_voiced_seconds(),
+            lily_config.voice_retry_voiced_seconds(),
+            lily_config.voice_probe_window_seconds(),
+            lily_config.voice_enroll_max_seconds(),
+        )
         stream = rtc.AudioStream(track)
         async for ev in stream:
             frame = getattr(ev, "frame", None) or ev
             in_rate = getattr(frame, "sample_rate", lily_voice_embedder.ECAPA_SAMPLE_RATE)
-            if in_rate != lily_voice_embedder.ECAPA_SAMPLE_RATE:
-                if resampler is None:
-                    resampler = rtc.AudioResampler(
-                        input_rate=in_rate,
-                        output_rate=lily_voice_embedder.ECAPA_SAMPLE_RATE,
-                        num_channels=1,
-                    )
-                for out in resampler.push(frame):
-                    probe.add_samples(_frame_int16(out))
-            else:
-                probe.add_samples(_frame_int16(frame))
-            if probe.match_ready() and not getattr(
-                game, "_voice_identity_attempted", False
-            ):
-                # RECOGNITION at the low bar (~2.5s). Waiting for an
-                # enrollment-grade sample put the match minutes into the
-                # night: live 2026-08-08 it landed correctly at 3m36s,
-                # long after the greeting had called a four-win regular a
-                # blank slate.
-                # V2 instrumentation: t0 = the FIRST match_ready crossing,
-                # stamped once. embed_ms is measured from here, so a model
-                # still warming when the voice arrives shows up in that delta
-                # instead of hiding. Never re-stamped (the pipeline that reads
-                # it wants the earliest ready-instant).
-                if getattr(game, "_voice_identity_match_t0", None) is None:
-                    game._voice_identity_match_t0 = time.monotonic()
-                game._voice_identity_pcm = probe.match_pcm()
-                game.maybe_start_voice_identity_match()
-            if probe.ready():
-                game._voice_identity_pcm = probe.pcm()
-                game.maybe_start_voice_identity_match()
-                # STOP. The probe needs ~8 seconds; this loop was running for
-                # the WHOLE SESSION, resampling every frame and doing two
-                # full copies of it (bytes(frame.data) -> array) on the
-                # event loop, per participant, forever — for audio nothing
-                # would ever read again. Enrollment at close reads the
-                # captured PCM above, not the live stream.
-                #
-                # That waste is not free: it is on the same event loop as
-                # the Silero VAD, and VAD is what drives barge-in and turn
-                # commit. Live 2026-08-08 measured the VAD 24.9s behind
-                # realtime, with TTS tail chunks undelivered and turns dying
-                # mid-sentence — the choppiness. Holding the loop open past
-                # the point of usefulness was buying nothing and costing
-                # exactly the thing the agent cannot afford to lose.
+            probe.add_frame(_frame_int16(frame), sample_rate=in_rate)
+            # Rule (a) fallback + the window tick. Cheap: one edge check.
+            game.note_voice_probe_vad(bool(getattr(game, "_user_speaking", False)))
+            if game.voice_probe_sink_should_close():
                 logger.info(
-                    "LILY_VOICE_ID | PROBE_COMPLETE | captured=%.1fs — "
-                    "closing the frame sink; it has what enrollment needs "
-                    "and every further frame is loop time the VAD needs",
-                    lily_config.voice_identity_enroll_min_speech_seconds(),
+                    "LILY_VOICE_ID | PROBE_COMPLETE | session=%s voiced=%.1fs "
+                    "union=%.1fs attempts=%d gate=%s — the biometric question "
+                    "is closed and the enrollment union is full; closing the "
+                    "frame sink",
+                    game.sk.session_id, probe.voiced_seconds,
+                    probe.union_seconds, probe.attempts, probe.gate_source,
                 )
                 break
     except Exception as e:
         logger.warning("LILY_VOICE_ID | PROBE_FORK_ENDED | %s", e)
+
+
+def _lily_resample_to_16k(samples, in_rate: int):
+    """Resample one voiced SLICE (int16 mono at `in_rate`) to 16 kHz with
+    the rtc resampler — called per voiced interval, never per frame."""
+    try:
+        import array
+        if int(in_rate) == lily_voice_embedder.ECAPA_SAMPLE_RATE:
+            return samples
+        buf = array.array("h", samples)
+        frame = rtc.AudioFrame(
+            data=buf.tobytes(),
+            sample_rate=int(in_rate),
+            num_channels=1,
+            samples_per_channel=len(buf),
+        )
+        resampler = rtc.AudioResampler(
+            input_rate=int(in_rate),
+            output_rate=lily_voice_embedder.ECAPA_SAMPLE_RATE,
+            num_channels=1,
+        )
+        out = array.array("h")
+        for piece in resampler.push(frame):
+            out.extend(_frame_int16(piece))
+        for piece in resampler.flush():
+            out.extend(_frame_int16(piece))
+        return out
+    except Exception as e:
+        logger.warning("LILY_VOICE_ID | RESAMPLE_SLICE_FAILED | %s", e)
+        return []
 
 
 def _frame_int16(frame):
@@ -10754,7 +10851,11 @@ async def entrypoint(ctx: JobContext) -> None:
             supabase, group_id
         )
         game.memory_block = lily_memory.lily_build_memory_block(
-            group_memory, prefs=game.prefs
+            group_memory, prefs=game.prefs,
+            # VOICE-TRUTH-001 V5: the block states its provenance (a
+            # trusted-at-connect id is GUESSED until a voice or a stated
+            # name confirms it).
+            recognized_by=game.group_id_source,
         )
         game.memory_player_names = list(
             (group_memory or {}).get("player_names") or []
@@ -11341,6 +11442,11 @@ async def entrypoint(ctx: JobContext) -> None:
                 segment_end=seg_end_ts,
             )
             return
+        # SEAM (W4 VOICE-TRUTH-001 V1 rule (a)): a sane human STT final is
+        # the PRIMARY voiced signal for the ECAPA probe — the frames inside
+        # [seg_start, seg_end] join the voiced union; nothing outside a
+        # human segment is ever embedded or enrolled.
+        game.note_voiced_segment(seg_start_ts, seg_end_ts, speaker_label)
         # Fragment accumulator (name extraction) sits BELOW the gate —
         # quarantined stale text never feeds intake name guesses.
         combined_name_fragments = game.fragments.add(
@@ -11506,6 +11612,10 @@ async def entrypoint(ctx: JobContext) -> None:
             # speech so its pending claims read as in-flight, not wedged.
             current = getattr(session, "current_speech", None)
             game.note_playout_started(getattr(current, "id", None))
+            # SEAM (W4 VOICE-TRUTH-001 V3): recognition consumes W1's
+            # canonical first-frame hook — a carrier/late beat is now ON
+            # THE AIR under this speech id.
+            game.note_recognition_playout_started(getattr(current, "id", None))
         if ev.new_state == "speaking" and game._pending_reveal_event is not None:
             # Reveal packet keyed to TTS PLAYBACK start of the reveal turn
             # (visuals may lead audio; never keyed to LLM generation).
@@ -11559,6 +11669,22 @@ async def entrypoint(ctx: JobContext) -> None:
                 standings = sorted(
                     game._players_payload(), key=lambda p: -p["score"]
                 )
+                # WO-LILY-VOICE-TRUTH-001 rules (d)-(f): the biometric
+                # window closes NOW (final outcome), and enrollment from the
+                # VOICED union runs BEFORE the metadata write so the receipt
+                # carries the enrollment result (group, sample_count,
+                # voiced_seconds, gate_source). Bounded so a slow forward
+                # pass can never hold the shutdown gate; it checks
+                # identity_persistence_allowed() itself (forget).
+                game._voice_identity_finalize()
+                try:
+                    await asyncio.wait_for(
+                        game._voice_identity_enroll_at_close(), timeout=10.0
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "LILY_VOICE_ID | ENROLL_AT_CLOSE_BOUNDED | %r", e
+                    )
                 # V2: fold the session's single voice-identity stage timings
                 # into pipeline_latency (stamped on the game during the match).
                 for _field, _attr in (
@@ -11596,16 +11722,12 @@ async def entrypoint(ctx: JobContext) -> None:
                     ) or [],
                     # Voice-ID closure: outcome + timing persist so a slow
                     # or missed recognition explains itself from the DB row.
-                    "voice_identity": {
-                        "outcome": getattr(game, "_voice_id_outcome", None)
-                        or ("never_ran" if not getattr(
-                            game, "_voice_identity_attempted", False
-                        ) else "attempted_no_outcome"),
-                        "embed_ms": getattr(game, "_voice_id_embed_ms", None),
-                        "resolve_ms": getattr(
-                            game, "_voice_id_resolve_ms", None
-                        ),
-                    },
+                    # WO-LILY-VOICE-TRUTH-001 rule (f): the full receipt —
+                    # {outcome, voiced_seconds, attempts, best_score,
+                    # runner_up, threshold, model_tag, gate_source,
+                    # enrollment, ...}; "never_ran" and
+                    # "insufficient_voiced" are first-class values (S2).
+                    "voice_identity": game.voice_identity_receipt(),
                 }
                 await lily_persistence.lily_session_end(
                     supabase, scorekeeper,
@@ -11623,8 +11745,13 @@ async def entrypoint(ctx: JobContext) -> None:
                 # that end without reaching the final question.
                 # game.group_id (not the entrypoint local): a mid-session
                 # upgrade may have re-keyed the group.
+                # VOICE-TRUTH-001 V2: memory, the session report and the
+                # voiceprints all file under ONE id (persistence_group_id —
+                # the device-stable id on a cold room-name session), never
+                # the room name for memory and the device id for voices.
+                persist_group = game.persistence_group_id()
                 await lily_memory.lily_write_session_memory(
-                    supabase, game.group_id, scorekeeper.session_id,
+                    supabase, persist_group, scorekeeper.session_id,
                     # CLASS 3 (LIVEFIRE-001): delivered count, not the armed
                     # cursor — mirrors the finish_game write.
                     standings, game.questions_asked_count(), game.highlights,
@@ -11637,7 +11764,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 await lily_persistence.lily_write_session_report(
                     supabase,
                     session_id=scorekeeper.session_id,
-                    group_id=game.group_id,
+                    group_id=persist_group,
                     transcript=list(scorekeeper.transcript_buffer),
                     game_stats=game.build_game_stats(standings),
                 )
@@ -11645,14 +11772,11 @@ async def entrypoint(ctx: JobContext) -> None:
                 # fire-and-forget) so the shutdown gate can't tear the
                 # process down mid-write; failures log LILY_ENROLL | FAILED.
                 await lily_persistence.lily_enroll_voiceprints(
-                    stt, supabase, game._effective_enroll_group_id, scorekeeper,
+                    stt, supabase, game.persistence_group_id, scorekeeper,
                     trigger="session_close",
                 )
-                # Durable voice-identity enrollment (device-independent
-                # recognition) — folds this session's voice into the group's
-                # centroid. Inert unless the embedder + captured audio are
-                # present; awaited on the same shutdown gate.
-                await game._voice_identity_enroll_at_close()
+                # (Durable voice-identity enrollment ran ABOVE, before the
+                # metadata write, so the receipt carries its result.)
             except Exception as e:
                 logger.error("SESSION_CLOSE | persistence error: %s", e)
             finally:
@@ -12048,14 +12172,12 @@ async def entrypoint(ctx: JobContext) -> None:
             "game_restarts": getattr(
                 game, "_game_restart_events", None
             ) or [],
-            "voice_identity": {
-                "outcome": getattr(game, "_voice_id_outcome", None)
-                or ("never_ran" if not getattr(
-                    game, "_voice_identity_attempted", False
-                ) else "attempted_no_outcome"),
-                "embed_ms": getattr(game, "_voice_id_embed_ms", None),
-                "resolve_ms": getattr(game, "_voice_id_resolve_ms", None),
-            },
+            # WO-LILY-VOICE-TRUTH-001 rule (f): the voice-identity receipt
+            # — {outcome, voiced_seconds, attempts, best_score, runner_up,
+            # threshold, model_tag, gate_source, ...} — rides the heartbeat
+            # so "is the probe gated and has it tried" is a live query.
+            # ("never_ran" stays a first-class outcome value.)
+            "voice_identity": game.voice_identity_receipt(),
         }
 
     # Heartbeat checkpoint loop (60s) — carries rolling latency averages so

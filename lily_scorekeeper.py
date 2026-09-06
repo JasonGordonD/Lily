@@ -2143,6 +2143,12 @@ class LilyScorekeeper:
         # seats keyed to OTHER labels are retired and refused. Cleared by a
         # real bind on a different label (multiplayer stays intact).
         self.solo_voice_label: Optional[str] = None
+        # WO-LILY-VOICE-TRUTH-001 V6: first/last wall-clock sighting per
+        # diarization label (finals only). The evidence that a generic
+        # label (S1/UU) went SILENT when the engine's biometric label
+        # ("Rami", after a known_speakers refresh) started — i.e. the same
+        # voice was re-keyed, not a second person arriving.
+        self.label_sightings: dict[str, dict] = {}
 
         # WS-8 ghost-label posture: rolling (t, normalized_text, player) of
         # bound-player finals, pruned to the ghost-fold window. An unbound
@@ -2300,6 +2306,40 @@ class LilyScorekeeper:
                     "LILY_STATE | LABEL_REBOUND | session=%s label=%s from=%s to=%s",
                     self.session_id, speaker_label, other_name, name,
                 )
+        # WO-LILY-VOICE-TRUTH-001 V6 (Auditor B F8b): the diarizer minted
+        # the present voice's placeholder under a generic label ("S1"),
+        # then a known_speakers refresh re-labelled the SAME voice with its
+        # enrolled name ("Rami"); the bind arrived under the named label,
+        # the loop above found no seat on it, and a NEW seat "Rami" was
+        # created beside a ghost "S1" keeping the points. When the engine
+        # has re-keyed the voice, migrate the placeholder's history into
+        # the name and retire the ghost with a roster event.
+        if not migrated_this_bind and name not in self.players:
+            ghost = self._rekeyed_placeholder_for(speaker_label, name)
+            if ghost is not None:
+                migrated = self.players.pop(ghost)
+                for entry in self.score_ledger:
+                    if entry.get("player") == ghost:
+                        entry["player"] = name
+                migrated.pop("placeholder", None)
+                migrated["speaker_label"] = None
+                self.players[name] = migrated
+                migrated_this_bind = True
+                self._roster_mutation(
+                    "migrate",
+                    old_key=ghost,
+                    old_surfaced=surfaced_before.get(ghost, ghost),
+                    new=name,
+                    label=speaker_label,
+                    rekeyed_from=ghost,
+                )
+                logger.info(
+                    "LILY_STATE | PLACEHOLDER_REKEYED | session=%s ghost=%s "
+                    "new_label=%s name=%s score=%s — the engine re-labelled "
+                    "the same voice; history migrated, ghost retired",
+                    self.session_id, ghost, speaker_label, name,
+                    migrated.get("score"),
+                )
         player = self.players.setdefault(name, {
             "speaker_label": None,
             "speaker_id": None,
@@ -2353,6 +2393,55 @@ class LilyScorekeeper:
             self.session_id, speaker_label, name,
         )
         return player
+
+    def _rekeyed_placeholder_for(
+        self, speaker_label: Optional[str], name: str
+    ) -> Optional[str]:
+        """V6: the placeholder seat the engine has re-mapped to this bind,
+        or None. Conditions (all mechanical):
+          * exactly ONE placeholder seat exists (the one-placeholder-max
+            invariant: it IS the present unnamed voice);
+          * its label is a GENERIC diarizer label (S<n> / UU), and the bind
+            arrives under the engine's NAMED label (label == name — the
+            biometric_named_label path, which only a known_speakers match
+            produces);
+          * when sightings are recorded, the generic label was NOT heard
+            after the named label first appeared (a second real person
+            keeps being heard under their own label; a re-keyed voice goes
+            silent under the old one).
+        A real second voice binding under a generic label ("S2" -> Chris)
+        never matches, so its seat and score are never taken."""
+        label = (speaker_label or "").strip()
+        if not label or label != (name or "").strip():
+            return None
+        if _re.fullmatch(r"S\d+|UU", label):
+            return None
+        placeholders = [
+            (key, state) for key, state in self.players.items()
+            if state.get("placeholder")
+        ]
+        if len(placeholders) != 1:
+            return None
+        ghost, state = placeholders[0]
+        ghost_label = str(state.get("speaker_label") or ghost)
+        if not _re.fullmatch(r"S\d+|UU", ghost_label):
+            return None
+        heard = (
+            ghost_label in self.label_sightings
+            or float(state.get("talk_time_s") or 0.0) > 0.0
+            or int(state.get("score") or 0) > 0
+            or int(state.get("answers_attempted") or 0) > 0
+        )
+        if not heard:
+            # A phantom nobody ever heard (the pre-WO-1 "UU" default) is
+            # not a re-keyed voice; it stays for the solo clamp / bind
+            # paths that already own it.
+            return None
+        named = self.label_sightings.get(label)
+        seen = self.label_sightings.get(ghost_label)
+        if named and seen and seen.get("last", 0.0) > named.get("first", 0.0):
+            return None  # the generic label kept talking: a second voice
+        return ghost
 
     def set_lobby_fact(self, player_name: str, fact: str) -> None:
         if player_name in self.players:
@@ -2488,6 +2577,21 @@ class LilyScorekeeper:
             if not state.get("placeholder"):
                 continue
             if (state.get("speaker_label") or "") == label or name == label:
+                continue
+            if int(state.get("score") or 0) > 0 or int(
+                state.get("answers_attempted") or 0
+            ) > 0:
+                # WO-LILY-VOICE-TRUTH-001 V6 (Auditor B F8c): a placeholder
+                # that has SCORED or ANSWERED is a real second voice with a
+                # record, not a phantom — a joking "just me" never destroys
+                # its points. Only EMPTY placeholders retire here.
+                logger.info(
+                    "LILY_STATE | SOLO_CLAMP_KEPT_SCORED | session=%s seat=%s "
+                    "score=%s attempted=%s solo_label=%s — a seat with a "
+                    "record is never retired by a solo assertion",
+                    self.session_id, name, state.get("score"),
+                    state.get("answers_attempted"), label,
+                )
                 continue
             self.players.pop(name)
             self._roster_mutation(
@@ -3210,6 +3314,12 @@ class LilyScorekeeper:
             return result
 
         clean = seg.text.strip()
+
+        if seg.speaker_label:
+            sighting = self.label_sightings.setdefault(
+                seg.speaker_label, {"first": t, "last": t}
+            )
+            sighting["last"] = max(sighting.get("last", t), t)
 
         if self._handle_quarantine(seg, result, clean, t, ts):
             return result

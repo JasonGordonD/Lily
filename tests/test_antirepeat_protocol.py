@@ -67,10 +67,15 @@ def _game(**kw):
     game._whats_new_pending = False
     game.persist_prefs = lambda *a, **k: None
     game.dispatches = []
-    game.gated_say = (
-        lambda key, act, instr, source=None, **kwargs:
-        game.dispatches.append((key, act, instr, source)) or True
-    )
+
+    def _gated_say(key, act, instr, source=None, **kwargs):
+        game.dispatches.append((key, act, instr, source))
+        # The real gated_say records the act under the speech handle it
+        # dispatched (lily_speech_delivery); the V3 flight binds to it.
+        game._dispatched_act_by_speech[f"s-{act}-{len(game.dispatches)}"] = act
+        return True
+
+    game.gated_say = _gated_say
 
     async def _upgrade(new_group_id, source):
         game.group_id = new_group_id
@@ -132,7 +137,7 @@ def test_1131_name_door_promotion_fires_no_late_beat():
     assert game.flush_late_recognition_at_seam() is False
     assert _late_beats(game) == []
     # The organic reply snapshots WITH the block and plays out in full.
-    game.note_generation_snapshot()
+    game.note_generation_snapshot(speech_id="s-organic")
     _confirm(game, "Rami! Eighteen games deep — welcome back.")
     fact = game.recognition_aired()
     assert fact is not None and fact["source"] == "name_door_organic"
@@ -153,7 +158,7 @@ def test_device_plus_name_promotion_short_circuits_too():
     )
     assert _late_beats(game) == []
     assert game.recognition_aired() is None  # confirm still owed
-    game.note_generation_snapshot()
+    game.note_generation_snapshot(speech_id="s-organic")
     _confirm(game, "Rami! Welcome back.")
     assert game.recognition_aired()["source"] == "name_door_organic"
     assert _late_beats(game) == []
@@ -167,6 +172,15 @@ def test_voice_identity_promotion_still_fires_the_beat_once():
     _stage(game, "grp_rami")
     asyncio.run(game._promote_device_candidate("voice_identity_match"))
     assert len(_late_beats(game)) == 1
+    # WO-LILY-VOICE-TRUTH-001 V3: the dispatch arms a FLIGHT; the durable
+    # fact stamps only when the beat's own generation plays out.
+    assert game.recognition_aired() is None
+    assert game._late_recognition_flight is not None
+    beat_id = game._late_recognition_flight["speech_id"]
+    assert beat_id is not None
+    game.note_generation_snapshot(speech_id=beat_id)
+    game.note_recognition_playout_started(beat_id)
+    _confirm(game, "Took me a second — I know this table.", speech_id=beat_id)
     fact = game.recognition_aired()
     assert fact is not None and fact["source"] == "late_recognition_beat"
     # A second promotion of any kind airs nothing more.
@@ -230,7 +244,7 @@ def test_voice_match_after_name_door_airs_nothing():
     assert game.dispatches == []  # nothing else aired either
     # The organic turn confirms; its stamp is the record of what the room
     # heard, and it retires every later lane.
-    game.note_generation_snapshot()
+    game.note_generation_snapshot(speech_id="s-organic")
     _confirm(game, "Rami! Welcome back.")
     assert game.recognition_aired()["source"] == "name_door_organic"
     assert game.dispatches == []
@@ -353,5 +367,7 @@ def test_lane_specific_reinforcements_survive():
     lobby ONE-ASK rule, the beat's own anti-reprise clause)."""
     game = _game()
     game.say_registry = lily_say_gate.SpeechActRegistry()
-    assert "never stack two" in game.greeting_instructions()
+    # (WO-LILY-VOICE-TRUTH-001 PAIR 3 replaced the 'or'-fold rule with the
+    # operator's "name question stands alone" rule — same reinforcement slot.)
+    assert "never join them with 'or'" in game.greeting_instructions()
     assert "ONE ASK PER TURN" in LILY_SYSTEM_PROMPT

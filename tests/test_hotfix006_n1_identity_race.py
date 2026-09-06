@@ -94,9 +94,10 @@ def test_the_gap_naming_beat_is_suppressed_while_the_probe_is_out(monkeypatch):
     # The gap-naming beat may still appear in the base text, but the
     # override that forbids speaking it must come after it. (HOTFIX-010 V1:
     # the gap beat is now voice-framed.)
-    assert out.index("MEMORY IS UNRESOLVED") > out.index(
-        "I don't recognise the voice yet"
-    )
+    # (WO-LILY-VOICE-TRUTH-001 PAIR 2: the gap is no longer narrated at
+    # all — the override must still come after the claimed-returner beat.)
+    assert out.index("MEMORY IS UNRESOLVED") > out.index("CLAIMED RETURNER")
+    assert "I don't recognise the voice yet" not in out
 
 
 def test_a_resolved_probe_may_speak_the_gap(monkeypatch):

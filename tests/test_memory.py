@@ -97,7 +97,11 @@ def test_block_voiceprint_names_only_recognizes_without_inventing_history():
     })
     assert block.startswith(MEMORY_BLOCK_MARKER)
     assert "Rami" in block and "Sarah" in block
-    assert "Voice recognition matched" in block
+    # WO-LILY-VOICE-TRUTH-001 V5 (S2): the block no longer claims a VOICE
+    # matched these names when the caller did not say so — provenance is
+    # the recognized_by line, and its absence renders no claim at all.
+    assert "Recognition matched people you have met before" in block
+    assert "Voice recognition matched" not in block
     assert "no prior game result" in block
     assert "won last time" not in block
 

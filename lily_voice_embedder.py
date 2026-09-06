@@ -26,6 +26,7 @@ import collections
 import logging
 import os
 import threading
+import time
 from typing import Optional
 
 logger = logging.getLogger("lily_voice_embedder")
@@ -54,78 +55,302 @@ ECAPA_SAMPLE_RATE = 16000
 
 
 class LilyVoiceProbe:
-    """Bounded accumulator for a session's captured speech, fed 16 kHz mono
-    int16 samples by the track frame sink and read as normalized float PCM
-    for embedding. Rate-agnostic (assumes the sink already resampled to
-    ECAPA_SAMPLE_RATE); keeps at most `target_seconds` of the MOST RECENT
-    audio (a ring buffer) so a long session doesn't grow unbounded and the
-    probe reflects current, in-room voice.
+    """The SPEECH-GATED probe buffer (WO-LILY-VOICE-TRUTH-001 V1).
 
-    Pure/stdlib — the livekit AudioStream iteration and resampling live in
-    the agent wiring; this is the fully-testable buffer + gate."""
+    The old probe was wall-clock audio: every frame from track_subscribed
+    went into one 8-second ring, the match fired at 2.5s of FRAMES, and
+    enrollment read the same first 8s. In every instrumented session that
+    2.5s mark was 20+s before any human spoke, so the centroids encoded
+    room tone (same-device sessions 0.99 vs each other; 0/7 cross-device
+    matches ever; zero seconds of the player scored 0.70 against his
+    26-sample centroid).
 
-    def __init__(self, target_seconds: float = 8.0,
-                 sample_rate: int = ECAPA_SAMPLE_RATE,
-                 match_seconds: float = 2.5):
-        self._target = max(1, int(target_seconds * sample_rate))
-        # A floor below which an embedding is too noisy to ENROLL.
-        self._floor = max(1, int(0.5 * self._target))
-        # MATCHING is a different job from enrolling and wants a different
-        # bar. Enrollment folds a sample into a stored centroid, so it wants
-        # a long clean take. Recognition only has to clear a cosine
-        # threshold, which ECAPA does on a couple of seconds of speech.
-        # Sharing one 4-second floor meant recognition waited for an
-        # enrollment-grade sample before it could even try — and on a
-        # congested loop that is minutes of wall clock, not seconds. Live
-        # 2026-08-08: the match landed correctly ("NOW I've got you:
-        # reigning champion, four wins") 3m36s into the session, long after
-        # the greeting had already called the player a blank slate.
-        self._match_floor = max(1, int(match_seconds * sample_rate))
-        self._buf = collections.deque(maxlen=self._target)
+    THE GATE, AS A STATED RULE (lily_config, rules (a)-(f)):
+      (a) a frame is VOICED only when its wall-clock span falls inside a
+          human (non-LILY) STT segment [segment_start, segment_end] fed by
+          the transcript events — `note_voiced_segment` — or, when the
+          segment feed is unavailable, inside a VAD user-speaking interval
+          — `note_vad_state`. Which source is active is `gate_source`
+          ("stt_segments" | "vad"), decided once, logged and persisted.
+          Energy is never the gate.
+      (b) `match_due()` is False until `voiced_seconds` >= min_voiced.
+      (c) after an attempt (`mark_attempt`), it is False again until a
+          further retry_voiced seconds of voiced audio has accrued.
+      (d) `enroll_pcm()` is the UNION of voiced chunks, bounded to the most
+          recent enroll_max seconds.
+      (e)/(f) live on the game side (lily_identity: outcome + receipt).
 
-    def add_samples(self, samples) -> None:
-        """Append 16 kHz mono int16 samples (any iterable of ints).
+    Mechanics: raw frames are kept UNRESAMPLED in a timestamped ring of
+    `raw_window_seconds` (STT finals land ~1-3s after the audio, so the
+    ring must outlast that lag). A voiced interval slices the ring, the
+    slice is resampled once (the injected `resampler`), and the 16 kHz
+    samples join the voiced union. Nothing is resampled per frame any
+    more — the per-frame work is one deque append.
 
-        deque.extend, NOT a per-sample Python loop. The old form ran
-        `for s in samples: append(int(s))` — sixteen thousand interpreter
-        iterations per second per participant, on the EVENT LOOP, for audio
-        that is already int16 so the int() was a no-op anyway. The sink
-        feeding the probe was itself congesting the loop it shares with the
-        Silero VAD, which is why recognition was slowest exactly when it
-        most needed to be fast. extend() does the same work in C."""
+    Pure/stdlib: the livekit AudioStream iteration and the resampler live
+    in the agent wiring; this is the fully-testable buffer + gate."""
+
+    def __init__(
+        self,
+        *,
+        min_voiced_seconds: float = 3.0,
+        retry_voiced_seconds: float = 2.0,
+        enroll_max_seconds: float = 30.0,
+        raw_window_seconds: float = 30.0,
+        match_window_seconds: float = 15.0,
+        sample_rate: int = ECAPA_SAMPLE_RATE,
+        gate_source: str = "auto",
+        vad_fallback_after_seconds: float = 15.0,
+        resampler=None,
+        clock=None,
+    ):
+        self._rate = int(sample_rate)
+        self._min_voiced = max(0.0, float(min_voiced_seconds))
+        self._retry_voiced = max(0.0, float(retry_voiced_seconds))
+        self._enroll_max = max(0.1, float(enroll_max_seconds))
+        self._raw_window = max(1.0, float(raw_window_seconds))
+        self._match_window = max(0.5, float(match_window_seconds))
+        self._mode = gate_source if gate_source in ("auto", "stt", "vad") else "auto"
+        self._vad_fallback_after = max(0.0, float(vad_fallback_after_seconds))
+        self._resampler = resampler
+        self._clock = clock or time.time
+        # Raw ring: (t_start, t_end, in_rate, samples) in arrival order.
+        self._raw = collections.deque()
+        self._raw_span = 0.0
+        # Voiced union at self._rate, bounded to enroll_max seconds.
+        self._voiced = collections.deque(maxlen=max(1, int(self._enroll_max * self._rate)))
+        self._voiced_seconds = 0.0          # cumulative, uncapped
+        self._attempts = 0
+        self._last_attempt_voiced = None
+        self._gate_source = None            # "stt_segments" | "vad" | None
+        self._segments_seen = 0
+        # VAD interval bookkeeping (for "vad" mode and the "auto" fallback).
+        self._vad_speaking = False
+        self._vad_started_at = None
+        self._vad_intervals = []            # closed (start, end) not yet sliced
+        self._vad_seconds = 0.0             # cumulative VAD-detected speech
+        self._matched = False
+
+    # -- properties ---------------------------------------------------------
+
+    @property
+    def voiced_seconds(self) -> float:
+        """Cumulative voiced audio seen (uncapped)."""
+        return round(self._voiced_seconds, 3)
+
+    @property
+    def union_seconds(self) -> float:
+        """Voiced audio currently held for enrollment (capped)."""
+        return round(len(self._voiced) / self._rate, 3)
+
+    @property
+    def attempts(self) -> int:
+        return self._attempts
+
+    @property
+    def gate_source(self) -> Optional[str]:
+        return self._gate_source
+
+    @property
+    def min_voiced_seconds(self) -> float:
+        return self._min_voiced
+
+    def __len__(self) -> int:
+        return len(self._voiced)
+
+    # -- raw frames ---------------------------------------------------------
+
+    def add_frame(self, samples, sample_rate: int = ECAPA_SAMPLE_RATE, at=None) -> None:
+        """Append one raw frame (int16 samples at `sample_rate`) stamped
+        with its arrival wall-clock `at` (default now). Frames are held
+        unresampled in the timestamped ring; nothing here is voiced yet."""
         if samples is None:
             return
         try:
-            self._buf.extend(samples)
+            n = len(samples)
         except TypeError:
             return
+        if n <= 0:
+            return
+        rate = int(sample_rate) if sample_rate else self._rate
+        t_end = float(at) if at is not None else self._clock()
+        t_start = t_end - (n / rate)
+        self._raw.append((t_start, t_end, rate, samples))
+        self._raw_span = t_end - self._raw[0][0]
+        while self._raw and (t_end - self._raw[0][1]) > self._raw_window:
+            self._raw.popleft()
 
-    def __len__(self) -> int:
-        return len(self._buf)
+    # -- the gate -----------------------------------------------------------
+
+    def note_voiced_segment(self, start, end) -> float:
+        """(a) PRIMARY: a human STT segment [start, end] (wall-clock) has
+        landed — slice the matching raw audio into the voiced union.
+        Returns the voiced seconds added (0.0 when nothing overlapped, or
+        when the gate is pinned to VAD)."""
+        if self._mode == "vad":
+            return 0.0
+        try:
+            start = float(start)
+            end = float(end)
+        except (TypeError, ValueError):
+            return 0.0
+        if end <= start:
+            return 0.0
+        self._segments_seen += 1
+        if self._gate_source is None:
+            self._gate_source = "stt_segments"
+            logger.info(
+                "LILY_VOICE_ID | GATE_SOURCE | source=stt_segments — voiced "
+                "audio is frames inside human STT segments"
+            )
+        return self._slice_into_voiced(start, end)
+
+    def note_vad_state(self, speaking: bool, at=None) -> float:
+        """(a) FALLBACK: the framework VAD user-speaking flag, polled per
+        frame. Records speaking intervals; in "vad" mode (or once the
+        "auto" fallback has engaged) a closed interval is sliced into the
+        voiced union. Returns voiced seconds added."""
+        now = float(at) if at is not None else self._clock()
+        speaking = bool(speaking)
+        added = 0.0
+        if speaking and not self._vad_speaking:
+            self._vad_speaking = True
+            self._vad_started_at = now
+        elif not speaking and self._vad_speaking:
+            self._vad_speaking = False
+            start = self._vad_started_at if self._vad_started_at is not None else now
+            self._vad_started_at = None
+            if now > start:
+                self._vad_seconds += now - start
+                self._vad_intervals.append((start, now))
+        if self._mode == "stt":
+            self._vad_intervals.clear()
+            return 0.0
+        if self._gate_source is None:
+            if self._mode == "vad":
+                self._gate_source = "vad"
+                logger.info(
+                    "LILY_VOICE_ID | GATE_SOURCE | source=vad — pinned by "
+                    "config; voiced audio is frames inside VAD intervals"
+                )
+            elif (
+                self._segments_seen == 0
+                and self._vad_seconds >= self._vad_fallback_after > 0
+            ):
+                self._gate_source = "vad"
+                logger.warning(
+                    "LILY_VOICE_ID | GATE_SOURCE | source=vad reason="
+                    "no_timed_stt_segment_after_%.1fs_of_vad_speech — the "
+                    "segment feed is unavailable; falling back to the VAD flag",
+                    self._vad_seconds,
+                )
+        if self._gate_source == "vad":
+            pending, self._vad_intervals = self._vad_intervals, []
+            for s, e in pending:
+                added += self._slice_into_voiced(s, e)
+        else:
+            # Keep only what the raw ring can still serve if the fallback
+            # engages later.
+            while self._vad_intervals and (
+                now - self._vad_intervals[0][1] > self._raw_window
+            ):
+                self._vad_intervals.pop(0)
+        return added
+
+    def _slice_into_voiced(self, start: float, end: float) -> float:
+        pieces = []
+        in_rate = None
+        for t0, t1, rate, samples in self._raw:
+            if t1 <= start or t0 >= end:
+                continue
+            if in_rate is None:
+                in_rate = rate
+            elif rate != in_rate:
+                continue  # a rate change mid-slice: skip the odd frame
+            n = len(samples)
+            lo = 0 if t0 >= start else int((start - t0) / (t1 - t0) * n)
+            hi = n if t1 <= end else int((end - t0) / (t1 - t0) * n)
+            if hi > lo:
+                pieces.append(samples[lo:hi])
+        if not pieces or in_rate is None:
+            return 0.0
+        out = []
+        for piece in pieces:
+            out.extend(piece)
+        if in_rate != self._rate:
+            if self._resampler is None:
+                return 0.0
+            try:
+                out = list(self._resampler(out, in_rate) or [])
+            except Exception as e:  # never raise into the session
+                logger.warning("LILY_VOICE_ID | RESAMPLE_FAILED | %s", e)
+                return 0.0
+        if not out:
+            return 0.0
+        self._voiced.extend(out)
+        added = len(out) / self._rate
+        self._voiced_seconds += added
+        return added
+
+    # -- match scheduling ---------------------------------------------------
+
+    def match_due(self) -> bool:
+        """(b)/(c): enough NEW voiced audio for a (re)attempt."""
+        if self._matched:
+            return False
+        if self._voiced_seconds < self._min_voiced:
+            return False
+        if self._attempts == 0 or self._last_attempt_voiced is None:
+            return True
+        return (self._voiced_seconds - self._last_attempt_voiced) >= self._retry_voiced
+
+    def mark_attempt(self) -> int:
+        self._attempts += 1
+        self._last_attempt_voiced = self._voiced_seconds
+        return self._attempts
+
+    def mark_matched(self) -> None:
+        self._matched = True
 
     def ready(self) -> bool:
-        """Enough speech accrued to ENROLL a usable centroid."""
-        return len(self._buf) >= self._floor
+        """Enough VOICED speech accrued to enroll (the hard floor)."""
+        return self._voiced_seconds >= self._min_voiced and len(self._voiced) > 0
 
     def match_ready(self) -> bool:
-        """Enough speech accrued to attempt RECOGNITION — a lower bar than
-        enrollment, so a returning voice is placed near the door instead of
-        several minutes into the night."""
-        return len(self._buf) >= self._match_floor
+        return self.match_due()
 
     def match_pcm(self) -> Optional[list]:
-        """Normalized float PCM for a RECOGNITION attempt — same buffer,
-        the lower floor."""
-        if len(self._buf) < self._match_floor:
+        """Normalized float PCM of the most recent match_window seconds of
+        VOICED audio, or None under the minimum."""
+        if not self.ready():
             return None
-        return [s / 32768.0 for s in self._buf]
+        n = int(self._match_window * self._rate)
+        buf = self._voiced
+        if len(buf) > n:
+            buf = list(buf)[-n:]
+        return [s / 32768.0 for s in buf]
+
+    def enroll_pcm(self) -> Optional[list]:
+        """(d) Normalized float PCM of the whole voiced union (bounded), or
+        None under the minimum — never a byte of un-voiced audio."""
+        if not self.ready():
+            return None
+        return [s / 32768.0 for s in self._voiced]
 
     def pcm(self) -> Optional[list]:
-        """Normalized float PCM in [-1, 1], or None below the floor. int16
-        is scaled by 1/32768."""
-        if len(self._buf) < self._floor:
-            return None
-        return [s / 32768.0 for s in self._buf]
+        return self.enroll_pcm()
+
+    def receipt(self) -> dict:
+        """The probe's half of the (f) receipt."""
+        return {
+            "voiced_seconds": self.voiced_seconds,
+            "union_seconds": self.union_seconds,
+            "attempts": self._attempts,
+            "gate_source": self._gate_source,
+            "segments_seen": self._segments_seen,
+            "vad_seconds": round(self._vad_seconds, 3),
+        }
+
 
 _model = None
 _load_attempted = False
@@ -193,6 +418,13 @@ def lily_extract_embedding(
     if model is None or samples is None:
         return None
     try:
+        if callable(samples):
+            # VOICE-TRUTH-001: the probe hands over a BUILDER so the float
+            # list (up to enroll_max seconds) is materialized here, inside
+            # the embedder thread, never on the event loop.
+            samples = samples()
+            if samples is None:
+                return None
         import torch
         if not isinstance(samples, torch.Tensor):
             wav = torch.as_tensor(samples, dtype=torch.float32)

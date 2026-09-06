@@ -82,6 +82,7 @@ def _game(sb):
     g.device_identity_verified = False
     g.forget_state = None
     g._voice_identity_pcm = [0.1, 0.2, 0.3]  # injected probe
+    g._voice_identity_voiced_seconds = 12.0  # VOICE-TRUTH-001: voiced, gated
     return g
 
 
