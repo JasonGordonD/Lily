@@ -151,8 +151,28 @@ _VOCATIVE_LILY_RE = _re.compile(
 )
 
 
+# HOTFIX-SPEAKER-PREFIX-001 (live 2026-09-06 17:33-17:36Z, lily-38C562):
+# Speechmatics prefixes every final with the KNOWN-SPEAKER label — "[Rami]
+# Yes!" — not only the engine's "[S1]". Only "[S<n>]" was stripped, so
+# every acceptance / affirmative / release detector saw "rami yes" and
+# failed: the table said "Go ahead", "Let's go", "Sure", "Yes!" and the
+# addressed hold re-armed on each one — the game never advanced. A
+# bracketed diarization tag is never speech; strip every one, anywhere
+# in the final (concatenated finals carry inner tags too).
+_SPEAKER_TAG_RE = _re.compile(r"\[(?:S\d+|[A-Za-z][\w .'’-]{0,47})\]\s*")
+
+
+def lily_strip_speaker_tags(text: str) -> str:
+    """Remove every bracketed diarization/known-speaker tag ("[S1]",
+    "[Rami]", "[Rami] … [Rami] …") from a transcript. The speaker travels
+    separately (speaker_label); the tag is never part of what was said."""
+    if not text:
+        return ""
+    return _re.sub(r"\s+", " ", _SPEAKER_TAG_RE.sub("", text)).strip()
+
+
 def _strip_diarization_tag(text: str) -> str:
-    return _re.sub(r"^\s*\[S\d+\]\s*", "", text).strip()
+    return lily_strip_speaker_tags(text)
 
 
 def lily_is_system_directed(text: str) -> tuple[bool, Optional[str]]:
