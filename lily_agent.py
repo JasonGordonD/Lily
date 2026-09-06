@@ -5245,9 +5245,15 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             if band == lily_evaluation.BAND_CLARIFY:
                 return True
             if band == lily_evaluation.BAND_REJECT:
+                # WO-LILY-EVAL-INTEGRITY-001 E2: the same expected-answer
+                # context _maybe_fire_clarify reads, so receipt and clarify
+                # agree on "Wilde, the" (committed — the answer, then a
+                # stall) exactly as they agree on the live fragment.
+                q = self.sk.current_question or self.armed_question or {}
                 return (
                     lily_evaluation.lily_uncommitted_answer_shape(
-                        str(t1.get("attempt_text") or "")
+                        str(t1.get("attempt_text") or ""),
+                        expected_answers=lily_evaluation.lily_expected_answers(q),
                     )
                     is not None
                 )
@@ -6302,6 +6308,8 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                         winner=winner,
                         winner_scored=winner_candidate is not None,
                         receipt_aired=bool(receipt),
+                        # E6: a table of one never hears "Nobody landed it".
+                        solo=len(self.sk.players) == 1,
                     )
                     self.gated_say(
                         verdict_key, "verdict", verdict_instr,
@@ -8929,13 +8937,53 @@ class LilyAgent(Agent):
         # Other grounds ignore these kwargs.
         canonical = None
         corroborating_attempt = None
-        if ground == "answer_denied":
-            denied = sk.ledger_row_for(name, None)
-            qid = denied.get("question_id") if denied else None
-            for h in reversed(self._game.asked_history):
-                if h.get("question_id") == qid:
-                    canonical = h.get("canonical_answer")
-                    break
+        denied = sk.ledger_row_for(name, None)
+        qid = denied.get("question_id") if denied else None
+        for h in reversed(self._game.asked_history):
+            if h.get("question_id") == qid:
+                canonical = h.get("canonical_answer")
+                break
+        if ground == "misheard":
+            # WO-LILY-EVAL-INTEGRITY-001 E5: a mishearing is CORROBORATED
+            # by a transcript spoken inside that question's window that
+            # resembles the answer (lily_misheard_corroborates). Sources,
+            # in order: the denied row's own transcript, the player's
+            # in-window transcript-buffer lines for that question, and the
+            # addressee-log in-window fuzzy matches. The best-resembling
+            # line goes to the scorekeeper; nothing resembling ⇒ refused.
+            candidates: list[str] = []
+            if denied and denied.get("transcript"):
+                candidates.append(str(denied.get("transcript")))
+            try:
+                candidates.extend(
+                    sk.in_window_transcripts_for(
+                        name, denied.get("question_index") if denied else None
+                    )
+                )
+            except Exception:
+                pass
+            if canonical and self._game.supabase is not None:
+                try:
+                    candidates.extend(
+                        await lily_persistence
+                        .lily_fetch_inwindow_fuzzy_transcripts(
+                            self._game.supabase, sk.session_id
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "LILY_SCORE | VERDICT_CORRECTION_DB_UNREACHABLE | "
+                        "session=%s player=%s grounds=misheard — in-session "
+                        "sources only (%s)", sk.session_id, name, e,
+                    )
+            if canonical:
+                for t in candidates:
+                    if lily_evaluation.lily_misheard_corroborates(t, canonical):
+                        corroborating_attempt = t
+                        break
+            if corroborating_attempt is None and candidates:
+                corroborating_attempt = candidates[0]
+        elif ground == "answer_denied":
             in_session = denied.get("transcript") if denied else None
             if canonical and self._answer_matches(in_session, canonical):
                 corroborating_attempt = in_session
@@ -8971,14 +9019,36 @@ class LilyAgent(Agent):
             corroborating_attempt=corroborating_attempt,
         )
         if entry is None:
-            # Refused: no prior verdict to amend, unknown grounds, or already
-            # corrected. Tell the LLM plainly so it states why it stands
-            # rather than inventing a point.
+            # Refused: no prior verdict to amend, unknown grounds, already
+            # corrected, or (E5) uncorroborated grounds. Tell the LLM
+            # plainly WHY so it states why the ruling stands rather than
+            # inventing a point — and write the verdict back to the contest
+            # note (S6 closed loop) so the reply can say it.
+            refusal = getattr(sk, "last_correction_refusal", None) or {}
+            reason = refusal.get("reason") or "no_matching_verdict"
+            detail = refusal.get("detail") or (
+                "there's no matching committed verdict to amend on those "
+                "grounds, or it was already corrected"
+            )
+            logger.warning(
+                "LILY_SCORE | VERDICT_CORRECTION_REFUSED | session=%s "
+                "player=%s grounds=%s reason=%s detail=%r",
+                sk.session_id, name, ground, reason, detail,
+            )
+            note = (
+                f"[verdict contest — RE-CHECK DONE for {name}: the "
+                f"correction on grounds={ground} was REFUSED ({reason}: "
+                f"{detail}). The ruling STANDS. Tell them exactly that, "
+                "in one plain line, and do not re-check again this contest.]"
+            )
+            try:
+                self._game._contest_note = note
+            except Exception:
+                pass
             return (
-                f"No correction made for {name} — there's no matching committed "
-                "verdict to amend on those grounds, or it was already "
-                "corrected. If the ruling stands, say so plainly and why; "
-                "never invent a point."
+                f"No correction made for {name} — grounds={ground} refused: "
+                f"{detail} ({reason}). The ruling stands; say so plainly and "
+                "why; never invent a point."
             )
         supabase = self._game.supabase
         if supabase is not None:

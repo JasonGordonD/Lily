@@ -145,8 +145,18 @@ def test_diamond_correction_restores_the_point_via_misheard():
     assert original["correct"] is False and original["points"] == 0
     assert original["transcript"] == DIAMOND_SCORED_UTTERANCE  # the filler
 
+    # WO-LILY-EVAL-INTEGRITY-001 E5: misheard is CORROBORATED — the filler
+    # row alone restores nothing; the true in-window utterance (id=819)
+    # is the corroboration the tool supplies from the transcript log.
+    assert sk.correct_verdict(
+        "Rami", grounds="misheard", actor="player_contest", delta=1,
+        canonical_answer=DIAMOND_ANSWER,
+    ) is None
+    assert sk.players["Rami"]["score"] == 2
     entry = sk.correct_verdict(
-        "Rami", grounds="misheard", actor="player_contest", delta=1
+        "Rami", grounds="misheard", actor="player_contest", delta=1,
+        canonical_answer=DIAMOND_ANSWER,
+        corroborating_attempt=DIAMOND_TRUE_UTTERANCE,
     )
     assert entry is not None
     # Append-only: the original denial row is untouched.
@@ -211,7 +221,10 @@ def test_f1_rightly_denied_wrong_answer_cannot_be_restored_via_answer_denied():
 
 def test_standings_equal_ledger_plus_corrections_and_reconcile_clean():
     sk = _rami_on_two_diamond_denied()
-    sk.correct_verdict("Rami", grounds="misheard", delta=1)
+    sk.correct_verdict(
+        "Rami", grounds="misheard", delta=1, canonical_answer=DIAMOND_ANSWER,
+        corroborating_attempt=DIAMOND_TRUE_UTTERANCE,
+    )
     assert sk.ledger_scores()["Rami"] == 3
     assert sk.players["Rami"]["score"] == 3
     # The counter and the ledger-including-corrections never diverge.
@@ -572,9 +585,16 @@ def test_tool_persists_the_correction_audit_row(monkeypatch):
 def test_contest_note_points_at_the_correction_tool():
     # The wiring: a detected contest arms a directive that names the real
     # correction tool and its grounds (pre-W1 it pointed at a capability
-    # that did not exist).
-    import inspect
-    from lily_agent import LilyGame
-    src = inspect.getsource(LilyGame.on_transcript_event)
-    assert "lily_correct_verdict" in src
-    assert "answer_denied" in src and "wrong_rule" in src
+    # that did not exist). Driven through the live final path
+    # (WO-LILY-EVAL-INTEGRITY-001: behavior, not source text).
+    import time
+    from test_bind_dispute_p0 import _arm_wilde, _final, _make_game, _run
+
+    game = _make_game("lily-contest-note")
+    now = _arm_wilde(game)
+    game.sk.set_pacing("relaxed")
+    _run(lambda: _final(game, "you misheard me", now + 2))
+    note = game._contest_note or ""
+    assert "lily_correct_verdict" in note
+    assert "answer_denied" in note and "wrong_rule" in note
+    assert "misheard" in note and "out_of_window" in note

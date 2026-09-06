@@ -571,6 +571,17 @@ class LilyTransitionMixin:
                 "and you are?' Get the name, call lily_bind_speaker, and the "
                 "point lands automatically once bound."
             )
+        elif len(self.sk.players) == 1:
+            # Solo table (WO-LILY-EVAL-INTEGRITY-001 E6): "nobody" implies a
+            # crowd that missed. Name the one player; never "nobody".
+            who = next(iter(self.sk.players))
+            parts.append(
+                f"{who} didn't land this one (or didn't commit an answer). "
+                f"It's just {who} tonight — never say 'nobody', 'no one', "
+                "or anything implying other answerers. Reveal with "
+                f"suspense: the answer is {answer!r}. Make the miss warm "
+                "and funny, never mean. No score changes were committed."
+            )
         else:
             parts.append(
                 "Nobody got it (or nobody committed an answer). Reveal with "

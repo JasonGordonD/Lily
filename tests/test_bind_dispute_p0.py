@@ -251,7 +251,14 @@ def test_committed_answers_keep_answer_shape():
 
 
 def test_disfluency_and_fragment_tails_detected():
+    # WO-LILY-EVAL-INTEGRITY-001 E2(a): the trailing "Um." is stripped
+    # BEFORE classification, so what is classified is "It was the." — a
+    # fragment tail. Still uncommitted, still clarifies; only the class
+    # name moved. A pure-filler utterance is the disfluency-tail class.
     assert lily_evaluation.lily_uncommitted_answer_shape("It was the. Um.") == (
+        lily_evaluation.LILY_SHAPE_FRAGMENT_TAIL
+    )
+    assert lily_evaluation.lily_uncommitted_answer_shape("Uh. Um.") == (
         lily_evaluation.LILY_SHAPE_DISFLUENCY_TAIL
     )
     assert lily_evaluation.lily_uncommitted_answer_shape("it's the. the.") == (
