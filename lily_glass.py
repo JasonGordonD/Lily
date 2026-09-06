@@ -633,7 +633,7 @@ class LilyGlassMixin:
         # trigger, and only a LATER final can supersede it.
         # OPERATOR-MODS-001 B8: the final's text rides along (the silence
         # budget names the utterance it answers for).
-        self.note_user_final(text)
+        self.note_user_final(text, player=result.get("player"))
 
         # PATCH-002 A5/T12 — STOP primitive, at the very top so it bypasses
         # the LLM and can never be answered by a re-aired question. The

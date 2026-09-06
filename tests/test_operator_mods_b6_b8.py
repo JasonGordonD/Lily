@@ -226,7 +226,7 @@ def test_operator_claim_from_the_confirmed_operator_acks_and_holds(
         assert game.pause_sticky() is True
         assert game.progression_paused_reason() == "hold"
         assert game.dispatch_armed_question(source="test") is False
-        assert _said(game, "operator")
+        assert _said(game, "Got it, Rami — done.")
         assert game.stop_or_hold_owns_turn(LIVE_CLAIM) is True
         assert any(
             "LILY_OPERATOR | CLAIM" in r.getMessage() and "accepted=True"
@@ -276,7 +276,7 @@ def test_operator_claim_with_a_question_keeps_the_organic_lane(monkeypatch):
     def _go():
         _final(game, text, at)
         assert game.pause_sticky() is True
-        assert _said(game, "operator")
+        assert _said(game, "Got it, Rami — done.")
         assert game.stop_or_hold_owns_turn(text) is False
         assert game.maybe_route_stop(text) is False
         note = game._explain_request_note or ""

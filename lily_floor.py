@@ -1983,9 +1983,16 @@ class LilyFloorMixin:
     # (lily_identity.operator_identity: a voice door on the operator group)
     # — the transcript alone asserts nothing.
 
-    # OPERATOR-WORDING-PENDING: the spoken acknowledgment of the operator is
-    # a persona decision the spec does not supply. Shortest neutral line.
-    _OPERATOR_ACK_LINE = "Operator acknowledged — the game's held."
+    # OPERATOR DECISION, VERBATIM (the whole register; "One sentence, names
+    # the operator, confirms or owns. The worker may not extend either."):
+    # the success line names the operator the voice door confirmed
+    # (operator_display_name — the bound roster player, never a literal;
+    # "Rami" in the operator's text is that name); the failure line airs
+    # when the routed action fails (handle_operator_claim's action block —
+    # the sticky hold — raised). A REFUSED claim (no voice door) airs
+    # neither: it is not an operator action that failed.
+    _OPERATOR_ACK_SUCCESS = "Got it, {name} — done."
+    _OPERATOR_ACK_FAILURE = "Tried, and it didn't take — that's on my side."
 
     def _operator_directive(self, text: str) -> str:
         ident = self.operator_identity()
@@ -2028,31 +2035,56 @@ class LilyFloorMixin:
             ident.get("membership"), question, already,
             (source_text or "")[:60],
         )
-        if not question:
-            # AIRGATE-001 D4: the code-ack lane owns a bare claim.
+        name = self.operator_display_name()
+        if not question and name:
+            # AIRGATE-001 D4: the code-ack lane owns a bare claim it can
+            # answer in the operator's register (which requires the name).
             self.mark_deterministic_reply(source_text)
         else:
             self._explain_request_note = self._operator_directive(source_text)
-        self._pause_sticky = True
-        self.enter_hold(reason="operator_hold")
-        hold_clock = getattr(self, "hold_window_clock_for_pause", None)
-        if callable(hold_clock):
-            try:
+        # The routed ACTION: the sticky hold. A failure here is the
+        # operator's failure line, not silence and not the success line.
+        action_ok = True
+        try:
+            self._pause_sticky = True
+            self.enter_hold(reason="operator_hold")
+            hold_clock = getattr(self, "hold_window_clock_for_pause", None)
+            if callable(hold_clock):
                 hold_clock(reason="operator_hold")
-            except Exception:  # pragma: no cover
-                logger.exception("LILY_OPERATOR | CLOCK_HOLD_FAILED")
+        except Exception as e:
+            action_ok = False
+            logger.warning(
+                "LILY_OPERATOR | ACTION_FAILED | session=%s action=hold "
+                "error=%r — the claim stands; airing the failure line (B6)",
+                self.sk.session_id, e,
+            )
         try:
             self.sk.note_question_mark("paused_by", "operator")
         except Exception:
             pass
-        if not already:
+        if not action_ok:
             self.gated_say(
-                None,
-                "operator_ack",
-                "",
-                source="hold_ack",  # hold-exempt, like the pause ack
-                text=self._OPERATOR_ACK_LINE,
+                None, "operator_ack", "", source="hold_ack",
+                text=self._OPERATOR_ACK_FAILURE,
             )
+            return True
+        if already:
+            return True
+        if not name:
+            logger.warning(
+                "LILY_OPERATOR | ACK_NAME_UNRESOLVED | session=%s door=%s — "
+                "the register names the operator and no bound name is behind "
+                "the door; no code ack, the organic lane answers (B6)",
+                self.sk.session_id, ident.get("door"),
+            )
+            return True
+        self.gated_say(
+            None,
+            "operator_ack",
+            "",
+            source="hold_ack",  # hold-exempt, like the pause ack
+            text=self._OPERATOR_ACK_SUCCESS.format(name=name),
+        )
         return True
 
     def note_operator_meta_question(self, text: str) -> bool:

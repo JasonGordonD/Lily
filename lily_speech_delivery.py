@@ -359,6 +359,7 @@ class LilySpeechDeliveryMixin:
     _silence_budget_fired_seq: int = 0
     _last_user_final_text: str = ""
     _last_user_final_mono: "float | None" = None
+    _last_user_final_player: "str | None" = None
 
     def gated_say(
         self,
@@ -1306,7 +1307,9 @@ class LilySpeechDeliveryMixin:
 
     # -- WO-LILY-AIRGATE-001 D1b: conversational freshness/supersession ------
 
-    def note_user_final(self, text: "str | None" = None) -> None:
+    def note_user_final(
+        self, text: "str | None" = None, player: "str | None" = None,
+    ) -> None:
         """One committed user final reached the transcript layer. The
         monotone sequence is the supersession clock for conversational
         acks: an ack dispatched against final N is stale once final N+1
@@ -1324,6 +1327,9 @@ class LilySpeechDeliveryMixin:
         self._last_user_final_mono = time.monotonic()
         if text is not None:
             self._last_user_final_text = str(text)
+        # OPERATOR-MODS-001 ack lines: the roster player this final is
+        # bound to (the name the voice door's label carries), or None.
+        self._last_user_final_player = str(player).strip() if player else None
         self._purge_stale_deterministic_marks()
 
     def _purge_stale_deterministic_marks(self) -> None:

@@ -426,10 +426,39 @@ slow-but-alive reply). Docketed, not done.
 Optional` (the StateView dataclass used it under `from __future__
 import annotations` only). GUARD_MAP.md addendum: mechs. 60-62.
 
-**Lines that need the operator's wording** (`# OPERATOR-WORDING-PENDING`
-at the definition): `lily_floor.LilyFloorMixin._OPERATOR_ACK_LINE` =
-"Operator acknowledged — the game's held." (B6). The B8 holding line
-reuses the existing floor lines and needs none.
+**Addendum (same day) — the operator's wording for the B6 ack, VERBATIM,
+the whole register** (`fix/w7b-ack-lines` on integ/next b463dc1;
+`tests/test_operator_mods_b6_b8_ack_lines.py`, 5 tests, **4 red on
+b463dc1** (4 failed, 1 passed — the refused-claim silence pin already
+held), green after; the two W7 pins on the placeholder wording updated to
+the register): Success: "Got it, Rami — done." Failure: "Tried, and it
+didn't take — that's on my side." Rule: "One sentence, names the operator,
+confirms or owns. The worker may not extend either." Implemented as
+`lily_floor.LilyFloorMixin._OPERATOR_ACK_SUCCESS` ("Got it, {name} —
+done.") and `_OPERATOR_ACK_FAILURE`; the OPERATOR-WORDING-PENDING marker
+is gone. THE NAME is the one the operator door confirmed, never a
+literal: `lily_identity.operator_display_name()` — the bound roster
+player the claim's own final is bound to (for `voiceprint_match` the
+Speechmatics known-speaker label on the utterance IS that name; carried
+per final by `note_user_final(text, player=result["player"])` from the
+glass), else the roster's single bound player, else the group memory's
+single player name; None when nothing on file names them — then no code
+ack is invented (`LILY_OPERATOR | ACK_NAME_UNRESOLVED`, the organic lane
+answers under the directive). WHERE EACH LINE AIRS: the success line at
+the end of `handle_operator_claim` once the routed action (the sticky
+hold: `_pause_sticky`, `enter_hold`, `hold_window_clock_for_pause`)
+completed; the failure line in the same method's new failed-action branch
+— that action block raising (`LILY_OPERATOR | ACTION_FAILED |
+action=hold error=`) airs the failure line INSTEAD of the success line,
+the claim still counted as accepted. There was no failed-action branch
+before (the clock failure was swallowed with logger.exception). A REFUSED
+claim (no voice door) airs neither — it is not an operator action that
+failed; the prompt rail answers. `note_operator_meta_question` routes no
+action, so it carries no failure line. Both lines ride
+`gated_say(act="operator_ack", source="hold_ack", text=…)`.
+
+**Lines that need the operator's wording**: none remaining after the
+addendum. The B8 holding line reuses the existing floor lines.
 
 **Deliberately NOT done**: fighting the framework's commit interrupt on
 a question read (see B7); a holding line for slow-but-dispatched replies

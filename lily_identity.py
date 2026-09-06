@@ -296,6 +296,37 @@ class LilyIdentityMixin:
         receipt["claims_refused"] = int(self._operator_claims_refused or 0)
         return receipt
 
+    def operator_display_name(self) -> "str | None":
+        """The name behind the operator door — the bound roster player the
+        voice door confirmed, never a literal. Order: the roster name the
+        claim's own final is bound to (for voiceprint_match the Speechmatics
+        known-speaker label IS that name — the label the door put on the
+        utterance); else the roster's single bound player; else the group
+        memory's single player name. None when nothing on file names them
+        (the register requires a name, so no code ack is invented)."""
+        if not self.operator_group_confirmed():
+            return None
+        players = {}
+        try:
+            players = dict(getattr(self.sk, "players", None) or {})
+        except Exception:
+            players = {}
+        placeholder = None
+        try:
+            placeholder = self.sk.present_placeholder_label()
+        except Exception:
+            placeholder = None
+        bound = [n for n in players if n and n != placeholder]
+        spoken = getattr(self, "_last_user_final_player", None)
+        if spoken and spoken in bound:
+            return spoken
+        if len(bound) == 1:
+            return bound[0]
+        names = [n for n in (self.memory_player_names or []) if n]
+        if len(names) == 1:
+            return str(names[0])
+        return None
+
     def _carriers(self) -> dict:
         carriers = self._recognition_carriers
         if carriers is None:
