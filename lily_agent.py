@@ -11674,8 +11674,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         bucket.pop(0)
 
     # --- Transcript-event layer: scorekeeper + deterministic enforcement ---
-    @session.on("user_input_transcribed")
-    def _on_transcribed(ev: UserInputTranscribedEvent) -> None:
+    def _on_transcribed_body(ev: UserInputTranscribedEvent) -> None:
         speaker_label = getattr(ev, "speaker_id", None)
         text = re.sub(r"^\s*\[S\d+\]\s*", "", ev.transcript or "").strip()
         if not text:
@@ -11786,6 +11785,7 @@ async def entrypoint(ctx: JobContext) -> None:
             transcripts.add(
                 text,
                 speaker_label=speaker_label,
+                speaker_name=result.get("player"),
                 segment_start=seg_start_ts,
                 segment_end=seg_end_ts,
             )
@@ -11849,6 +11849,17 @@ async def entrypoint(ctx: JobContext) -> None:
         game.on_transcript_event(
             result, text, speaker_label=speaker_label, segment_ts=seg_start_ts,
             nbest=nbest,
+        )
+
+    # HOTFIX-STT-QUARANTINE-001: the framework's EventEmitter re-raises a
+    # TypeError out of a handler (every other exception it logs), and the
+    # raise propagates through AgentSession → AudioRecognition into the
+    # `_stt_consumer` loop, which dies — no restart, deaf for the rest of
+    # the call. A Lily-side handler fault costs one final, never the ear.
+    @session.on("user_input_transcribed")
+    def _on_transcribed(ev: UserInputTranscribedEvent) -> None:
+        lily_stt_tuning.lily_run_stt_handler(
+            _on_transcribed_body, ev, game=game, name="user_input_transcribed",
         )
 
     # --- Answer window opens on TTS playback completion (per-utterance

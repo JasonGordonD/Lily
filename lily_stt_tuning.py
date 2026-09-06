@@ -158,6 +158,36 @@ def lily_tuned_stt_kwargs(
     return kwargs
 
 
+def lily_run_stt_handler(handler, ev, *, game=None, name: str = "stt") -> None:
+    """Run a Lily-side STT event handler so that a fault in it can never
+    take the framework's STT consumer down (HOTFIX-STT-QUARANTINE-001).
+
+    livekit.rtc.EventEmitter.emit re-raises TypeError out of a handler (it
+    logs every other exception); AgentSession emits `user_input_transcribed`
+    from inside AudioRecognition's `_stt_consumer` loop, so that TypeError
+    kills the consumer and the session is deaf until it ends. The framework
+    already swallows-and-logs the other exception classes, so this guard
+    only changes what happens to a TypeError: the final is dropped, the
+    fault is an ERROR with traceback, and the ear stays open. Consumer of
+    the record: the worker log line (LILY_STT | HANDLER_FAULT) and the
+    per-session counter `game._stt_handler_faults`.
+    """
+    try:
+        handler(ev)
+    except Exception:
+        if game is not None:
+            try:
+                game._stt_handler_faults = int(
+                    getattr(game, "_stt_handler_faults", 0) or 0
+                ) + 1
+            except Exception:
+                pass
+        logger.exception(
+            "LILY_STT | HANDLER_FAULT | handler=%s — this final is dropped; "
+            "the STT consumer stays alive", name,
+        )
+
+
 _ENGINE_SPEAKER_LABEL_RE = re.compile(r"[Ss]\d+")
 
 

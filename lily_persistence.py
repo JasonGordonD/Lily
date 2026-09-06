@@ -360,10 +360,13 @@ class LilyTranscriptBatcher:
         self,
         text: str,
         speaker_label: Optional[str],
-        speaker_name: Optional[str],
+        speaker_name: Optional[str] = None,
         segment_start: Optional[float] = None,
         segment_end: Optional[float] = None,
     ) -> None:
+        # speaker_name defaults to None: a quarantined final has no bound
+        # player, and the writer must accept that shape rather than raise
+        # inside the framework's STT event handler (HOTFIX-STT-QUARANTINE-001).
         if self._disabled:
             return
         self._batch.append({

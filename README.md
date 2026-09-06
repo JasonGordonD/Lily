@@ -25,8 +25,10 @@ telemetry, refactor Stage 1a, plus two live-found hotfixes from the first
 calls on the wave — HOTFIX-BARGE-FLUSH-001 (the reply to the human's own
 utterance is never flushed as a barge) and HOTFIX-ENGINE-LABEL-001 (a
 voiceprint row under an engine label `S<n>` or with a null `player_name` is
-never injected as a known speaker; the write path never persists one) —
-2947 tests, 3.11 + 3.13. The W6 follow-up (composition-review P0s, operator
+never injected as a known speaker; the write path never persists one) — and
+one from the broken-code sweep, HOTFIX-STT-QUARANTINE-001 (a quarantined
+final no longer raises inside the framework's STT consumer; a Lily-side
+handler fault costs one final, never the ear) — 2950 tests, 3.11 + 3.13. The W6 follow-up (composition-review P0s, operator
 behavior mods B1–B5, the 2.5 s endpointing cap with a per-turn receipt) is in
 flight; the dated entries are at the top of [CHANGELOG.md](CHANGELOG.md).
 Live-call receipts (build → session → row) are the acceptance for the

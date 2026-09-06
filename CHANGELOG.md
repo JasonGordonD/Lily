@@ -5,6 +5,45 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — HOTFIX-STT-QUARANTINE-001: a quarantined final crashed the framework's STT consumer (broken-code sweep P0-1)
+
+Found by the read-only broken-code sweep of d4d79e3, verified by executed
+repro, not yet seen live. The WS-10 quarantine branch of the
+`user_input_transcribed` handler (an "insane" final — span or finalization
+lag beyond the sanity gate; the thresholds cite 104 s / 206 s spans and a
+3.5-minute-late final from real sessions) stored the text with
+`transcripts.add(text, speaker_label=…, segment_start=…, segment_end=…)`,
+and `LilyTranscriptBatcher.add` required `speaker_name` positionally:
+`TypeError: … missing 1 required positional argument: 'speaker_name'`.
+`livekit.rtc.EventEmitter.emit` re-raises TypeError out of a handler (it
+logs every other class — executed); AgentSession emits the event from
+inside AudioRecognition's `_stt_consumer` loop, so the raise killed the
+consumer with no restart — deaf for the rest of the call. No test ever
+invoked the handler (it is a closure inside the entrypoint).
+
+- `LilyTranscriptBatcher.add`: `speaker_name` defaults to None; the
+  quarantine call passes `speaker_name=result.get("player")` like its
+  sibling.
+- The handler body is now `_on_transcribed_body`; the registered handler
+  runs it through `lily_stt_tuning.lily_run_stt_handler`, which turns a
+  Lily-side fault into `LILY_STT | HANDLER_FAULT | handler=…` (ERROR with
+  traceback) plus `game._stt_handler_faults`, and returns — one final is
+  dropped, the ear stays open. It only changes what happens to a TypeError;
+  the framework already swallows-and-logs every other class.
+
+Failing-first: tests/test_hotfix_stt_quarantine_crash.py (3 tests, 3 red on
+2f58d8a — the write shape raising TypeError, the guard missing, the fault
+counter missing). The guard test registers through the real
+`rtc.EventEmitter` and shows the unguarded raise and the guarded return.
+Suite 2950/2950 on 3.11 and 3.13.
+
+Docketed from the same sweep (not in this hotfix): lifting the eight
+`@session.on` closures to testable module functions (the mechanism that hid
+this); the divergence safety nets and telemetry writers that swallow their
+own failure at DEBUG; the fire-and-forget game coroutines with no
+exception observer; the `proposed_category` consumer with no producer;
+`ev.created_at` treated as a datetime (it is a float in 1.6.10).
+
 ## 2026-09-06 — HOTFIX-ENGINE-LABEL-001: STT never started (live 12:20–12:22 UTC, three deaf sessions on d4d79e3)
 
 Live receipt: sessions lily-A2930D-8b4c61db, lily-879368-f7c030f1,
