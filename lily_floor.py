@@ -202,6 +202,13 @@ class LilyFloorMixin:
             # game kept playing under a pending wipe). Self-releasing: the
             # confirm carries a TTL and every answer path clears it.
             return "restart_confirm_pending"
+        if self.dispute_hold_active():
+            # WO-LILY-BIND-DISPUTE-001 D2b (moved above `addressed` in B9b):
+            # a protest is both a dispute and an address — both holds
+            # stand; the reason names the more specific D2 state while it
+            # lasts, and reads `addressed` after the dispute discharges.
+            # The D2 rationale is on the second check below.
+            return "dispute_hold"
         if self.addressed_active():
             # WO-LILY-ADDRESSED-001 (B9): "Progression yields to the table."
             # A player addressed her (FL-1 host_directed, not an answer
@@ -2805,6 +2812,18 @@ class LilyFloorMixin:
         except Exception:
             register = None
 
+        # WO-LILY-ADDRESSED-001 B9b: the operator's three hard rules ride
+        # the existing hard-rule path as two more signals — "solo" is a
+        # roster of exactly one BOUND player (placeholders excluded), and
+        # "question_shaped" is the scorekeeper's question-shape helper.
+        try:
+            solo = self.sk.roster_size(include_placeholder=False) == 1
+        except Exception:
+            solo = False
+        try:
+            question_shaped = lily_scorekeeper.lily_is_question_shaped(text)
+        except Exception:
+            question_shaped = False
         judgment = classifier.classify(
             lily_addressee_classifier.LilyUtteranceSignals(
                 text=text,
@@ -2818,6 +2837,8 @@ class LilyFloorMixin:
                     or result.get("system_directed")
                 ),
                 register=register,
+                solo=solo,
+                question_shaped=question_shaped,
             )
         )
         self.last_addressee_judgment = judgment
@@ -2846,10 +2867,25 @@ class LilyFloorMixin:
             )
         except Exception:  # pragma: no cover — sensor must never take
             logger.exception("LILY_DISPUTE | SENSOR_FAILED")  # the turn down
-        logger.info(
-            "LILY_ADDRESSEE | CLASSIFIED | session=%s %s",
-            self.sk.session_id, judgment.log_json(),
+        # B9b receipt: which deterministic rule (if any) made the call —
+        # on the classification line itself, so one grep reads both.
+        hard_rule = (
+            judgment.reason
+            if judgment.reason in ("solo", "name", "interrogative")
+            else None
         )
+        if hard_rule:
+            logger.info(
+                "LILY_ADDRESSEE | CLASSIFIED | session=%s %s | HARD_RULE | "
+                "rule=%s text=%r",
+                self.sk.session_id, judgment.log_json(), hard_rule,
+                (text or "")[:60],
+            )
+        else:
+            logger.info(
+                "LILY_ADDRESSEE | CLASSIFIED | session=%s %s",
+                self.sk.session_id, judgment.log_json(),
+            )
         return judgment
 
     # -- addressee-label corpus (B1) ----------------------------------------------
