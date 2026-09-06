@@ -1656,6 +1656,8 @@ migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
 migrations/021_lily_voice_identity.sql  RLS-protected ECAPA group centroids
                                         for device-independent recognition
+migrations/029_lily_bank_lane_health.sql  per-lane replenishment health
+                                        (S1 reads, S2 writes; null until S2)
 tests/               1450+ tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.6 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
@@ -2359,6 +2361,116 @@ session.
   was likely client-side, before any wire — server-side tuning cannot
   recover it, which is one more reason `volume_threshold` stays 0.0 until
   calibrated.
+
+## Bank-first question supply (WO-LILY-SUPPLY-001 S1)
+
+Operator ruling, 2026-09-06: **"the bank serves, the author replenishes.
+Live question authoring never sits on the delivery path again."**
+Evidence: grok-4.5 authoring measured 20-39 s to the FIRST content token on
+every call (WO-LILY-STREAMING-REASONING-001 stopped it dying, not being
+slow), while `lily_questions` held 448 active rows.
+
+**What changed.** The supply line used to ask the AUTHOR first for every
+lane except an operator topic and reach the bank only as insurance, after
+authoring had already failed. That ordering is inverted: `_bank_draw` is
+asked first, and `_author_draw` runs only when the lane is dry for this
+table. Every author call left on the supply line is counted into
+`session_metrics.supply.generation_calls_on_delivery_path`, which is
+expected to be **0** — a non-zero value is a bank-health defect (the lane
+named in `bank_dry_lanes` ran out), not the design.
+
+**The three axes of a draw** (`lily_fetch_bank_question`):
+
+| axis | column | source |
+|---|---|---|
+| **deck** | `adult` | `_deck_for_supply()` — the session's `availability_flags["adult_deck"]`. `"adult"` serves `adult=true` (the unified standard deck of WO-PRMPT-LILY-REFACTOR-001); `"general"` serves `adult=false`. Passing no deck keeps the legacy adult-only filter for pre-WO callers. |
+| **lane** | `category` | `lily_bank.lily_lane_categories(family, deck)` — the rotation family mapped onto the bank's own vocabulary, tried in declared order. |
+| **register** | `difficulty_tier` | `_difficulty_for_round`. The SOFT axis: tier relaxes across the whole lane before the lane is left. |
+
+**The lane map** (`lily_bank.LANE_BANK_CATEGORIES`). The rotation's family
+names were never the bank's category vocabulary, and the draw compared them
+with an exact `.eq("category", family)`:
+
+| family | bank reality before | now maps to (general) |
+|---|---|---|
+| `academic` | 148 rows, HIT | academic, science, history, geography, nature, mythology |
+| `wordplay` | 40 rows, HIT | wordplay, literature |
+| `pop culture` | 6 rows labelled `pop culture` while 38 sat under `pop_culture` — MISS | pop_culture, pop culture, music, sports |
+| `lifestyle-potpourri` | 0 rows — the bank stores `lifestyle` — MISS | lifestyle, art, Greece, potpourri |
+
+Two of four lanes could therefore only ever be served by the any-category
+fallback stage. `lily_lane_for_category` is the declared inverse and the
+grouping key of the health readout; anything unlisted is potpourri.
+
+**Multiple choice.** Distractor synthesis (`ensure_choices`) is a
+reasoning-lane call, so it is no longer awaited on the supply line. An MC
+round prefers a banked row that already carries `choices` inside its lane
+and degrades honestly to freeform when the lane has none
+(`LILY_SUPPLY | MC_DEGRADED`).
+
+**Receipts.** Per draw: `LILY_SUPPLY | BANK_DRAW | session= q= id= deck=
+lane= excluded= pool_remaining= category= stage= trigger=`; a dry lane logs
+`BANK_DRY` and an awaited author logs `AUTHOR_ON_DELIVERY_PATH`. Per
+question: `lily_sessions.metadata.question_timeline[n].source` (`bank` /
+`author`) and `.bank_id`. Per session:
+`lily_sessions.metadata.session_metrics.supply` =
+`{bank_draws, author_draws, generation_calls_on_delivery_path,
+pool_remaining_min, bank_dry_lanes, mc_degraded}`.
+
+### Per-lane bank health
+
+`lily_bank.lily_bank_health(supabase)` returns
+`{lane: {ready, burned, last_replenished_at, rejection_rate}}` for all four
+lanes — always all four, so an empty lane is a stated zero rather than a
+missing key. `last_replenished_at` and `rejection_rate` come from
+`lily_bank_lane_health` (migration 029, written by the S2 replenisher) and
+are `null` — never 0 — until S2 lands.
+
+The same readout as SQL:
+
+```sql
+-- Per-lane bank health. The lane map lives in
+-- lily_bank.LANE_BANK_CATEGORIES; this CASE is its SQL twin, so a change
+-- to one is a change owed to the other.
+with laned as (
+  select
+    case
+      when category in ('academic','science','history','geography',
+                        'nature','mythology','adult_science',
+                        'adult_history')            then 'academic'
+      when category in ('pop_culture','pop culture','music','sports',
+                        'adult_popculture')          then 'pop culture'
+      when category in ('wordplay','literature',
+                        'adult_wordplay')            then 'wordplay'
+      else 'lifestyle-potpourri'
+    end                                              as lane,
+    adult,
+    status
+  from lily_questions
+)
+select
+  l.lane,
+  count(*) filter (where l.status = 'active' and not l.adult) as ready_general,
+  count(*) filter (where l.status = 'active' and     l.adult) as ready_adult,
+  count(*) filter (where l.status = 'burned')                 as burned,
+  h.last_replenished_at,
+  h.rejection_rate
+from laned l
+left join lily_bank_lane_health h on h.lane = l.lane
+group by l.lane, h.last_replenished_at, h.rejection_rate
+order by count(*) filter (where l.status = 'active');
+```
+
+Ordering by the smallest pool first is deliberate: the lane at the top of
+that result is the one that will make a table wait on an author. Live
+output, 2026-09-06 (before any S2 replenishment):
+
+| lane | ready_general | ready_adult | burned |
+|---|---|---|---|
+| wordplay | 43 | 16 | 0 |
+| pop culture | 47 | 16 | 9 |
+| lifestyle-potpourri | 48 | 76 | 30 |
+| academic | 169 | 33 | 42 |
 
 ## Bank curation loop (WO-LILY-OMNIBUS-002 D/E/F)
 

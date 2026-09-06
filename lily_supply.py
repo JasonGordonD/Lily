@@ -22,7 +22,203 @@ import logging
 logger = logging.getLogger("lily_agent")
 
 
+# Bank-draw wall. The sync supabase client has no HTTP timeout of its own,
+# so every draw is bounded; unchanged from the pre-WO call sites, named
+# once now that four of them share one helper.
+BANK_DRAW_TIMEOUT_SECONDS = 20.0
+
+
 class LilySupplyMixin:
+    # -- bank-first supply (WO-LILY-SUPPLY-001 S1) -----------------------------
+    #
+    # Operator ruling, 2026-09-06: "the bank serves, the author replenishes.
+    # Live question authoring never sits on the delivery path again."
+    #
+    # What was here before: for every lane except an operator topic, the
+    # supply line asked the AUTHOR first and reached the bank only as
+    # insurance, AFTER authoring had already failed
+    # (`LILY_PREFETCH | INSURANCE_BANK_HIT`). With grok-4.5 measured at
+    # 20-39 s to the first content token on every call, that ordering put
+    # the table's whole wait on a model round-trip and made the 448-row
+    # bank a crash mat. The ordering is now inverted: the bank is asked
+    # first, in the lane, on the deck, in the register; the author runs
+    # only when the lane is DRY, and every such call is counted and named
+    # in the receipt, because with a stocked bank there should be none.
+    #
+    # The delivery path awaits nothing else: MC distractor synthesis (a
+    # reasoning-lane call) is replaced by an MC-capable draw preference
+    # plus an honest freeform degrade.
+
+    def _supply_counters(self) -> dict:
+        """The per-session supply receipt (fleet S1: no sensor without a
+        consumer — `supply_receipt` is the consumer and
+        lily_sessions.metadata.session_metrics.supply is where it lands).
+        getattr: harnesses build LilyGame via bare()/__new__."""
+        counters = getattr(self, "_supply_receipt_counters", None)
+        if counters is None:
+            counters = self._supply_receipt_counters = {
+                "bank_draws": 0,
+                "author_draws": 0,
+                "generation_calls_on_delivery_path": 0,
+                "pool_remaining_min": None,
+                "bank_dry_lanes": [],
+                "mc_degraded": 0,
+            }
+        return counters
+
+    def supply_receipt(self) -> dict:
+        """The session's supply summary, for
+        `lily_sessions.metadata.session_metrics.supply`.
+
+        `generation_calls_on_delivery_path` MUST be 0: it counts the times
+        the game AWAITED an author while it had no question in hand. A
+        non-zero value is not a design failure, it is a BANK-HEALTH
+        failure — the lane named in `bank_dry_lanes` ran out and S2's
+        replenisher did not refill it — and it is reported rather than
+        absorbed, so the operator can see the day the bank stopped
+        covering the game. `pool_remaining_min` is the smallest post-serve
+        lane pool any draw saw this session; None means no draw happened."""
+        counters = dict(self._supply_counters())
+        counters["bank_dry_lanes"] = sorted(set(counters["bank_dry_lanes"]))
+        return counters
+
+    def _deck_for_supply(self) -> str:
+        """Which deck the bank draw serves from — the `adult` column on
+        lily_questions.
+
+        WO-PRMPT-LILY-REFACTOR-001 removed the content-mode gate and made
+        the adult register the unified standard deck, and the draw's
+        hard-wired `.eq("adult", True)` has meant "adult or nothing" for
+        every caller since. That is right while the adult deck is
+        available and wrong the moment it is not: the session's own
+        availability flag says whether adult material may be served
+        tonight (`adult_deck_gate_mode()`, the acoustic pipeline, or
+        architect mode), and when it says no, the 307 active general rows
+        are the deck — not an empty bank."""
+        flags = getattr(self, "availability_flags", None) or {}
+        return "adult" if flags.get("adult_deck", True) else "general"
+
+    async def _bank_draw(
+        self, *, category: str, tier: int, strict: bool, mc: bool,
+        trigger: str,
+    ) -> dict | None:
+        """ONE curated-bank draw, with the receipt. The single door into
+        `lily_fetch_bank_question` for the whole supply line — prefetch,
+        the Z2 recovery ladder and the WS-6 fallback all come through here
+        so the deck/lane/register filters, the exclusion union and the
+        receipt can never drift apart between call sites (the drift that
+        left `_bank_to_supply` drawing burned questions).
+
+        Exclusions are `_no_repeat_exclusion()` — the group's asked
+        history (migration 010/017/023), this session's already-drawn set
+        (G2) and the burned/revealed sets (WS-4) — plus the group's played
+        ANSWERS (PATCH-001 T7). Returns the §4.2 question shape or None
+        when the lane is dry for this table."""
+        if getattr(self, "supabase", None) is None:
+            return None
+        counters = self._supply_counters()
+        deck = self._deck_for_supply()
+        # A topic the table NAMED draws strictly under its own label and
+        # gets no lane neighbours (HOTFIX-006 N2): "anything nearby" is how
+        # Psycho ended up in a Cape Cod round.
+        lane_categories = (
+            [category] if strict
+            else lily_bank.lily_lane_categories(category, deck=deck)
+        )
+        exclude_ids, exclude_hashes = self._no_repeat_exclusion()
+        exclude_answers = set(
+            lily_bank.lily_history_answers(self.asked_history)
+        )
+        stats: dict = {}
+        question = await asyncio.wait_for(
+            lily_persistence.lily_fetch_bank_question(
+                self.supabase, category, tier, self.used_prompts,
+                exclude_ids=exclude_ids,
+                exclude_hashes=exclude_hashes,
+                exclude_answers=exclude_answers,
+                strict_category=strict,
+                deck=deck,
+                lane_categories=lane_categories,
+                prefer_choices=mc,
+                stats=stats,
+            ),
+            timeout=BANK_DRAW_TIMEOUT_SECONDS,
+        )
+        if question is None:
+            counters["bank_dry_lanes"].append(f"{deck}:{category}")
+            logger.warning(
+                "LILY_SUPPLY | BANK_DRY | session=%s q=%d deck=%s lane=%s "
+                "excluded=%d trigger=%s — no eligible row for this table; "
+                "the author has to serve",
+                self.sk.session_id, self.sk.question_number, deck, category,
+                int(stats.get("excluded") or 0), trigger,
+            )
+            return None
+        counters["bank_draws"] += 1
+        remaining = int(stats.get("pool_remaining") or 0)
+        current = counters["pool_remaining_min"]
+        counters["pool_remaining_min"] = (
+            remaining if current is None else min(current, remaining)
+        )
+        if mc and not question.get("choices"):
+            # An MC round on a lane with no MC-capable row. The old path
+            # awaited distractor synthesis here; the delivery path does not
+            # await the author any more, so the question runs freeform and
+            # says so. S2 contract: rows banked for an MC-capable lane
+            # should carry `choices`.
+            counters["mc_degraded"] += 1
+            logger.warning(
+                "LILY_SUPPLY | MC_DEGRADED | session=%s q=%d id=%s lane=%s "
+                "— multiple-choice round, no banked row with choices; "
+                "serving it freeform rather than waiting on synthesis",
+                self.sk.session_id, self.sk.question_number,
+                question.get("id"), category,
+            )
+        logger.info(
+            "LILY_SUPPLY | BANK_DRAW | session=%s q=%d id=%s deck=%s lane=%s "
+            "excluded=%d pool_remaining=%d category=%s stage=%s trigger=%s",
+            self.sk.session_id, self.sk.question_number, question.get("id"),
+            deck, category, int(stats.get("excluded") or 0), remaining,
+            stats.get("lane_category"), stats.get("stage"), trigger,
+        )
+        return question
+
+    async def _author_draw(
+        self, *, category: str, tier: int, mc: bool, strict: bool,
+        avoid_answers: list, effort, trigger: str,
+    ) -> dict | None:
+        """The author, as REPLENISHER of last resort — the only awaited
+        authoring call left on the supply line, reached only when the bank
+        had no eligible row for this table's lane.
+
+        Every call is counted into `generation_calls_on_delivery_path`,
+        which the receipt states must be 0: this is the one place the
+        table can still end up waiting 20-39 s on a model, and it is now a
+        measured bank-health event rather than the design."""
+        counters = self._supply_counters()
+        counters["generation_calls_on_delivery_path"] += 1
+        logger.error(
+            "LILY_SUPPLY | AUTHOR_ON_DELIVERY_PATH | session=%s q=%d "
+            "deck=%s lane=%s trigger=%s — the bank is dry for this table; "
+            "the game is now waiting on an author (bank-health defect, not "
+            "the design)",
+            self.sk.session_id, self.sk.question_number,
+            self._deck_for_supply(), category, trigger,
+        )
+        question = await self.reasoning.prefetch_question(
+            self.sk,
+            category=category,
+            difficulty_tier=tier,
+            avoid_questions=self.used_prompts,
+            from_bank=None,
+            multiple_choice=mc,
+            avoid_answers=avoid_answers,
+            effort=effort,
+        )
+        if question is not None:
+            counters["author_draws"] += 1
+        return question
+
     def next_question_ready(self) -> bool:
         """WS-6 seam predicate (published as the `next_question_ready`
         attribute). True when a deliverable question is in hand — armed
@@ -355,66 +551,55 @@ class LilySupplyMixin:
                         exclude_ids=history_ids, exclude_hashes=history_hashes,
                     )
 
-            # Runbook fallback: LILY_KB_ONLY flips supply to the curated
-            # bank; bank questions bypass verification (§4.5). Text supply
-            # only runs when no picture question landed above.
+            # THE BANK SERVES (WO-LILY-SUPPLY-001 S1). Text supply only
+            # runs when no picture question landed above.
+            #
+            # RETIRED HERE: the `prefer_bank` preference (operator topics
+            # only), the generate-first ordering for the fixed family
+            # rotation, and the `from_bank=` hand-off into
+            # reasoning.prefetch_question (which existed to let the author
+            # decide whether to use the bank row — the author no longer
+            # gets that vote). The bank is asked FIRST for every lane, and
+            # `LILY_KB_ONLY` now means only "and never fall through to the
+            # author", not "the only way to reach the bank".
             if question is None:
-                from_bank = None
-                # Operator-requested topics prefer the bank: serve a
-                # previously-generated question for this topic before
-                # regenerating, and only generate (and bank a fresh one)
-                # when the bank runs dry — the arsenal compounds per topic.
-                # The fixed family rotation still generates-first (freshness).
-                prefer_bank = (
-                    self._is_operator_category(category)
-                    and self.supabase is not None
-                    and self.sk.media_mode != "pictures"
-                )
                 # HOTFIX-006 N2: a topic the table NAMED draws strictly.
-                # This preference is what turned "build me a Cape Cod round"
-                # into "serve me anything" in session lily-16A9AE — the bank
-                # had no Cape Cod rows, so the any-category fallback stage
-                # handed back Psycho and the round ran generic under the
-                # narration. Strict here means the bank either has that
-                # topic or gets out of the generator's way.
+                # In session lily-16A9AE the any-category fallback handed
+                # back Psycho for a Cape Cod round while Lily narrated the
+                # custom round over the top. Strict means the bank either
+                # has that topic or gets out of the way.
                 strict = self._is_operator_category(category)
-                if (lily_config.kb_only() or prefer_bank) and (
-                    self.supabase is not None
-                ):
-                    # Bounded: the sync client has no HTTP timeout of its
-                    # own — an unbounded hang here wedges the supply line.
-                    from_bank = await asyncio.wait_for(
-                        lily_persistence.lily_fetch_bank_question(
-                            self.supabase, category, tier, self.used_prompts,
-                            exclude_ids=history_ids,
-                            exclude_hashes=history_hashes,
-                            exclude_answers=set(history_answers),
-                            strict_category=strict,
-                        ),
-                        timeout=20.0,
+                question = await self._bank_draw(
+                    category=category, tier=tier, strict=strict, mc=mc,
+                    trigger="prefetch",
+                )
+                if question is not None:
+                    self.sk.clear_status_notes()
+                elif lily_config.kb_only():
+                    # Runbook fallback: LILY_KB_ONLY is bank-or-nothing.
+                    logger.error(
+                        "LILY_PREFETCH | KB_ONLY_BANK_DRY | session=%s q=%d "
+                        "category=%r — kb_only is set and the bank has no "
+                        "eligible row; not calling the author",
+                        self.sk.session_id, self.sk.question_number, category,
                     )
-                if self._skip_live_pregen_when_stocked():
-                    # WO-LILY-QUESTION-FIRING-001 Fix 3: a deliverable is already
-                    # in hand — the live generation is pure waste (times out
-                    # ~100% at prefetch_timeout_seconds; the curated bank covers
-                    # the draw anyway). Skip it and fall through to the bank.
+                elif self._skip_live_pregen_when_stocked():
+                    # WO-LILY-QUESTION-FIRING-001 Fix 3: a deliverable is
+                    # already in hand and the bank could not top the hand
+                    # up — an authoring call for a slot nobody is waiting
+                    # on is pure waste. Leave the slot empty; the next arm
+                    # re-prefetches.
                     logger.info(
                         "LILY_PREFETCH | SKIP_LIVE_PREGEN | session=%s q=%d "
-                        "— stock in hand; drawing from the bank instead of a "
-                        "live generation",
+                        "— stock in hand and the bank is dry for this lane; "
+                        "not spending an authoring call on the spare slot",
                         self.sk.session_id, self.sk.question_number,
                     )
-                    question = None
                 else:
-                    question = await self.reasoning.prefetch_question(
-                        self.sk,
-                        category=category,
-                        difficulty_tier=tier,
-                        avoid_questions=self.used_prompts,
-                        from_bank=from_bank,
-                        multiple_choice=mc,
-                        avoid_answers=history_answers,
-                        effort=effort,
+                    question = await self._author_draw(
+                        category=category, tier=tier, mc=mc, strict=strict,
+                        avoid_answers=history_answers, effort=effort,
+                        trigger="prefetch",
                     )
                 if question is not None and not str(
                     question.get("id", "")
@@ -434,56 +619,16 @@ class LilySupplyMixin:
                     question = self._curate_generated_question(
                         question, category, history_hashes
                     )
-            if question is None and self.supabase is not None:
-                # Generation failed — curated bank is the insurance policy.
-                # Bounded for the same reason as above: the insurance line
-                # must never hang the supply task. N2: the insurance draw is
-                # the OTHER door the generic round came through — for a
-                # named topic it stays strict, so a failed build surfaces as
-                # a refusal instead of a stranger's question wearing the
-                # topic's name. Z2 (HOTFIX-008): the draw logs its outcome —
-                # the 2260354c RCA found this leg ran inside a dead task and
-                # left zero telemetry about what it did — and a failure here
-                # no longer kills the whole task (the recovery ladder in the
-                # wrapper owns what happens next).
-                try:
-                    question = await asyncio.wait_for(
-                        lily_persistence.lily_fetch_bank_question(
-                            self.supabase, category, tier, self.used_prompts,
-                            exclude_ids=history_ids, exclude_hashes=history_hashes,
-                            exclude_answers=set(history_answers),
-                            strict_category=strict,
-                        ),
-                        timeout=20.0,
-                    )
-                except Exception:
-                    logger.exception(
-                        "LILY_PREFETCH | INSURANCE_BANK_ERROR | session=%s "
-                        "q=%d category=%r — generation failed and the "
-                        "insurance draw itself failed",
-                        self.sk.session_id, self.sk.question_number, category,
-                    )
-                    question = None
-                if question is not None:
-                    logger.warning(
-                        "LILY_PREFETCH | INSURANCE_BANK_HIT | session=%s q=%d "
-                        "id=%s — generation failed; the curated bank covered "
-                        "the draw",
-                        self.sk.session_id, self.sk.question_number,
-                        question.get("id"),
-                    )
-                    self.sk.clear_status_notes()
-                    if mc:
-                        # Bank rows carry no choices — synthesize here too.
-                        await self.reasoning.ensure_choices(question)
-                else:
-                    logger.error(
-                        "LILY_PREFETCH | INSURANCE_BANK_EMPTY | session=%s "
-                        "q=%d category=%r — generation failed and "
-                        "the curated bank has no eligible row (supply low)",
-                        self.sk.session_id, self.sk.question_number,
-                        category,
-                    )
+            # RETIRED (WO-LILY-SUPPLY-001 S1): the insurance-bank leg —
+            # `INSURANCE_BANK_HIT` / `INSURANCE_BANK_EMPTY` /
+            # `INSURANCE_BANK_ERROR`, HOTFIX-008 Z2's telemetry on it, and
+            # its awaited `ensure_choices` MC synthesis. It ran the SAME
+            # `lily_fetch_bank_question` with the SAME arguments the draw
+            # above has now already run, so after the inversion it could
+            # only ever repeat a miss. Its whole reason for existing —
+            # "generation failed, cover the draw" — is now the ordering
+            # itself: the bank is asked first and the author is the
+            # insurance, not the other way round.
             if question is None:
                 # Z2: nothing landed from generation, pictures, or the
                 # insurance bank — a genuine supply failure (the discard
@@ -895,36 +1040,32 @@ class LilySupplyMixin:
         if self._drawn_ids is None:
             self._drawn_ids = set()
             self._drawn_hashes = set()
-        history_ids = (
-            lily_bank.lily_history_question_ids(self.asked_history)
-            | self._drawn_ids
-        )
-        history_hashes = (
-            lily_bank.lily_history_hashes(self.asked_history)
-            | self._drawn_hashes
-        )
         # PATCH-001 T7: the group's cross-session answers also exclude —
         # a differently-worded bank question with a played answer repeats.
         history_answers = set(lily_bank.lily_history_answers(self.asked_history))
+        history_hashes = lily_bank.lily_history_hashes(
+            self.asked_history
+        ) | self._drawn_hashes
         released_note = None
         try:
-            # Bounded: the sync client has no HTTP timeout of its own — an
-            # unbounded hang here would wedge the very watchdog that is
-            # supposed to be un-wedging the game.
-            question = await asyncio.wait_for(
-                lily_persistence.lily_fetch_bank_question(
-                    self.supabase, category, tier, self.used_prompts,
-                    exclude_ids=history_ids, exclude_hashes=history_hashes,
-                    exclude_answers=history_answers,
-                    # HOTFIX-006 N2: the third door into the generic round.
-                    # This fallback exists to break a supply stall, and for
-                    # the fixed families "anything" is exactly right — but
-                    # inside a round the table NAMED it is how Psycho ends up
-                    # in a Cape Cod round ("what does that have to do with
-                    # Cape Cod?").
-                    strict_category=self._is_operator_category(category),
-                ),
-                timeout=20.0,
+            # WO-LILY-SUPPLY-001 S1: through the SHARED draw. This method
+            # used to build its own exclusion union — history | drawn — and
+            # left the WS-4 burned sets out, so the recovery ladder could
+            # draw a question whose answer had already gone to air; nothing
+            # caught it until REARM_BLOCKED discarded it at arm, one wasted
+            # slot per stall. `_bank_draw` uses `_no_repeat_exclusion()`,
+            # the same union every other draw path uses, and carries the
+            # deck/lane/register filters and the BANK_DRAW receipt with it.
+            question = await self._bank_draw(
+                category=category, tier=tier, mc=mc,
+                # HOTFIX-006 N2: the third door into the generic round.
+                # This fallback exists to break a supply stall, and for
+                # the fixed families "anything" is exactly right — but
+                # inside a round the table NAMED it is how Psycho ends up
+                # in a Cape Cod round ("what does that have to do with
+                # Cape Cod?").
+                strict=self._is_operator_category(category),
+                trigger=trigger,
             )
             if question is None and self._is_operator_category(category):
                 # CLASS 6 (LIVEFIRE-001) 6b/6c: a dry bank is a SUPPLY DEFECT,
@@ -936,16 +1077,12 @@ class LilySupplyMixin:
                 gen = None
                 try:
                     gen = await asyncio.wait_for(
-                        self.reasoning.prefetch_question(
-                            self.sk,
-                            category=category,
-                            difficulty_tier=tier,
-                            avoid_questions=self.used_prompts,
-                            from_bank=None,
-                            multiple_choice=mc,
+                        self._author_draw(
+                            category=category, tier=tier, mc=mc, strict=True,
                             avoid_answers=sorted(history_answers),
+                            effort=None, trigger=f"topic_backfill:{trigger}",
                         ),
-                        timeout=20.0,
+                        timeout=BANK_DRAW_TIMEOUT_SECONDS,
                     )
                 except Exception:
                     gen = None
@@ -1001,14 +1138,9 @@ class LilySupplyMixin:
                 # note here so the announcement survives the early return.
                 self.sk.set_status_note(released_note)
                 category = self._category_for_round(rnd)
-                question = await asyncio.wait_for(
-                    lily_persistence.lily_fetch_bank_question(
-                        self.supabase, category, tier, self.used_prompts,
-                        exclude_ids=history_ids,
-                        exclude_hashes=history_hashes,
-                        exclude_answers=history_answers,
-                    ),
-                    timeout=20.0,
+                question = await self._bank_draw(
+                    category=category, tier=tier, mc=mc, strict=False,
+                    trigger=f"topic_released:{trigger}",
                 )
         except Exception:
             logger.exception(
@@ -1029,16 +1161,13 @@ class LilySupplyMixin:
         # duplicate — discard rather than serve it twice.
         if not self._register_draw(question):
             return "empty"
-        if mc and not question.get("choices"):
-            # Bank rows outside the adult MC deck carry no choices —
-            # synthesize them the same way the insurance path does.
-            try:
-                await self.reasoning.ensure_choices(question)
-            except Exception:
-                logger.exception(
-                    "LILY_WATCHDOG | SUPPLY_FALLBACK_CHOICES | session=%s",
-                    self.sk.session_id,
-                )
+        # RETIRED (WO-LILY-SUPPLY-001 S1): the awaited `ensure_choices`
+        # MC synthesis. Distractor synthesis is a reasoning-lane call, and
+        # this is the recovery ladder — the one path that runs BECAUSE the
+        # supply line is already late. `_bank_draw` prefers an MC-capable
+        # row inside the lane and logs `MC_DEGRADED` when the lane has
+        # none; the question then runs freeform rather than making a
+        # stalled table wait on a model.
         if self.sk.media_mode != "pictures":
             # Voice-only never rides a bank row's cached image (sub-agent K).
             question.pop("image_url", None)
@@ -1145,6 +1274,18 @@ class LilySupplyMixin:
         self._promote_reserve()
         self.start_prefetch()
         self.sk.start_question(self.armed_question)
+        # WO-LILY-SUPPLY-001 S1 receipt: WHERE this question came from,
+        # stamped on the persisted per-question timeline
+        # (lily_sessions.metadata.question_timeline) the instant the
+        # question number becomes this one. The id shape IS the
+        # provenance — `kb_<row id>` is a lily_questions row and nothing
+        # else mints that prefix — so the mark cannot drift from the
+        # source the way a separately-tracked flag could.
+        _armed_id = str(self.armed_question.get("id") or "")
+        _from_bank = _armed_id.startswith("kb_")
+        self.sk.note_question_mark("source", "bank" if _from_bank else "author")
+        if _from_bank:
+            self.sk.note_question_mark("bank_id", _armed_id)
         self.sk.round = self._round_for_next_question()
         # Correct for start_question incrementing question_number first:
         self.sk.round = min(
