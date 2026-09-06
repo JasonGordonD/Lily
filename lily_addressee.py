@@ -60,7 +60,10 @@ _ROOM_READ_TO_ACOUSTIC_CONFIDENCE = {
 }
 
 
-def _clamp_confidence(value) -> Optional[float]:
+def lily_clamp_confidence(value) -> Optional[float]:
+    """Coerce a confidence-like value to a float in [0, 1] rounded to 3
+    places; None when it is not a number. Shared clamp (Stage 1a) — the
+    scorekeeper still carries its own copy until Stage 1b."""
     try:
         v = float(value)
     except (TypeError, ValueError):
@@ -84,12 +87,12 @@ def lily_extract_diarization_confidence(event) -> Optional[float]:
         return None
     for field in _DIARIZATION_CONF_FIELDS:
         val = getattr(event, field, None)
-        conf = _clamp_confidence(val)
+        conf = lily_clamp_confidence(val)
         if conf is not None:
             return conf
     if isinstance(event, dict):
         for field in _DIARIZATION_CONF_FIELDS:
-            conf = _clamp_confidence(event.get(field))
+            conf = lily_clamp_confidence(event.get(field))
             if conf is not None:
                 return conf
     return None
@@ -145,8 +148,8 @@ def lily_fuse_addressee_confidence(
     The score remains additive to existing overlap logic: callers feed this
     into thresholding; they do not replace overlap/state priors with it.
     """
-    diar = _clamp_confidence(diarization_confidence)
-    acu = _clamp_confidence(acoustic_confidence)
+    diar = lily_clamp_confidence(diarization_confidence)
+    acu = lily_clamp_confidence(acoustic_confidence)
     if diar is None and acu is None:
         return None
     if diar is None:
@@ -207,12 +210,22 @@ def lily_acoustic_sample_aligned(
 # -----------------------------------------------------------------------------
 
 _PUNCT_RE = _re.compile(r"[^a-z0-9\s']+")
+_PUNCT_RE_NO_APOSTROPHE = _re.compile(r"[^a-z0-9\s]+")
+
+
+def lily_normalize_reply(text: str, *, keep_apostrophes: bool = True) -> str:
+    """Strip a leading [S<n>] speaker tag, lower-case, replace punctuation
+    with spaces and collapse whitespace. Shared by the clarify-reply parser
+    here (apostrophes kept, so "it's" survives) and lily_forget's yes/no
+    confirmation parser (apostrophes stripped — its historical regex)."""
+    stripped = _re.sub(r"^\s*\[S\d+\]\s*", "", text or "").strip()
+    punct = _PUNCT_RE if keep_apostrophes else _PUNCT_RE_NO_APOSTROPHE
+    lowered = punct.sub(" ", stripped.lower())
+    return _re.sub(r"\s+", " ", lowered).strip()
 
 
 def _normalize(text: str) -> str:
-    stripped = _re.sub(r"^\s*\[S\d+\]\s*", "", text or "").strip()
-    lowered = _PUNCT_RE.sub(" ", stripped.lower())
-    return _re.sub(r"\s+", " ", lowered).strip()
+    return lily_normalize_reply(text, keep_apostrophes=True)
 
 
 # Affirmative: "that was my answer" / "yes" / "final answer" / "lock it in".

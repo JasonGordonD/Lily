@@ -623,16 +623,11 @@ async def lily_build_real_entity_picture_question(
             return None
         image_bytes, content_type = fetched
         if approve is not None:
-            approved, gate_reason = await approve(
-                image_bytes, content_type, entity
-            )
-            if not approved:
-                await lily_images.lily_record_image_attempt(
-                    supabase, session_id=session_id,
-                    question_id=f"pic_{index:04d}", source="web",
-                    prompt=entity, status=lily_images.ATTEMPT_REJECTED,
-                    failure_reason=f"content gate: {gate_reason}"[:500],
-                )
+            if not await lily_images.lily_gate_fetched_image(
+                supabase, approve=approve, image_bytes=image_bytes,
+                content_type=content_type, entity=entity,
+                session_id=session_id, question_id=f"pic_{index:04d}",
+            ):
                 return None
         else:
             logger.warning(

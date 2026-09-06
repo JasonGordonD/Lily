@@ -78,6 +78,14 @@ PARTITIONS: Final[tuple[str, ...]] = (
 BINDING_IMAGE_FIRST: Final[str] = "image_first"
 BINDING_QUESTION_FIRST: Final[str] = "question_first"
 
+# The "imagined" verdict's spoken manglings, shared by every real_or_imagined
+# exemplar (each entry materializes its own fresh list from this tuple).
+_IMAGINED_ACCEPTABLE_ANSWERS: Final[tuple[str, ...]] = (
+    "imagined", "imagine", "fake", "a fake", "generated",
+    "ai", "ai generated", "made up", "not real", "imaginary",
+    "invented", "it's fake",
+)
+
 # Answer styles. 'freeform' goes to the Tier-1 fuzzy/phonetic matcher;
 # 'multiple_choice' goes to the option resolver in lily_evaluation.
 ANSWER_FREEFORM: Final[str] = "freeform"
@@ -586,11 +594,7 @@ EXEMPLARS: tuple[dict, ...] = (
         "difficulty_tier": 1,
         "question_text": "Look at the bridge in the middle of that photograph.",
         "canonical_answer": "imagined",
-        "acceptable_answers": [
-            "imagined", "imagine", "fake", "a fake", "generated",
-            "ai", "ai generated", "made up", "not real", "imaginary",
-            "invented", "it's fake", "that's fake",
-        ],
+        "acceptable_answers": [*_IMAGINED_ACCEPTABLE_ANSWERS, "that's fake"],
         "options": None,
         "reveal_color": (
             "Imagined — and look where it goes. That bridge crosses the "
@@ -778,11 +782,7 @@ EXEMPLARS: tuple[dict, ...] = (
             "garage for eleven years — or nobody ever did."
         ),
         "canonical_answer": "imagined",
-        "acceptable_answers": [
-            "imagined", "imagine", "fake", "a fake", "generated",
-            "ai", "ai generated", "made up", "not real", "imaginary",
-            "invented", "it's fake",
-        ],
+        "acceptable_answers": list(_IMAGINED_ACCEPTABLE_ANSWERS),
         "options": None,
         "reveal_color": (
             "Imagined. Right era, right pose, right shade of red, right "
@@ -967,11 +967,7 @@ EXEMPLARS: tuple[dict, ...] = (
             "did."
         ),
         "canonical_answer": "imagined",
-        "acceptable_answers": [
-            "imagined", "imagine", "fake", "a fake", "generated",
-            "ai", "ai generated", "made up", "not real", "imaginary",
-            "invented", "it's fake",
-        ],
+        "acceptable_answers": list(_IMAGINED_ACCEPTABLE_ANSWERS),
         "options": None,
         "reveal_color": (
             "Imagined — every letter of it. The cinema, the title, the "

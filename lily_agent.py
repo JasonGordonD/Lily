@@ -9729,35 +9729,55 @@ class LilyAgent(Agent):
         vocal_depth = vocal_depth or {}
         text_chars = 0
         tool_calls = 0
-        try:
-            async for chunk in self._vocal_llm_stream(
-                chat_ctx, tools, model_settings, vocal_depth
-            ):
-                t_n, tc_n = lily_llm_chunk_signal(chunk)
-                text_chars += t_n
-                tool_calls += tc_n
-                yield chunk
-        except APIStatusError as exc:
-            if not lily_is_prohibited_content_error(exc):
+        sheet_aired = False
+
+        async def _attempt(attempt: int):
+            """One streamed attempt. Counts text/tool signal into the
+            enclosing counters; a prohibited-content refusal with a vetted
+            delivery sheet yields the sheet and sets `sheet_aired` so the
+            caller returns (the historical attempt-1 / retry bodies were
+            identical except for this log's wording)."""
+            nonlocal text_chars, tool_calls, sheet_aired
+            try:
+                async for chunk in self._vocal_llm_stream(
+                    chat_ctx, tools, model_settings, vocal_depth
+                ):
+                    t_n, tc_n = lily_llm_chunk_signal(chunk)
+                    text_chars += t_n
+                    tool_calls += tc_n
+                    yield chunk
+            except APIStatusError as exc:
+                if not lily_is_prohibited_content_error(exc):
+                    raise
+                self._log_prohibited_content(exc, chat_ctx, tools)
+                sheet = self._blocked_delivery_sheet()
+                if sheet:
+                    logger.error(
+                        "LILY_LLM | PROHIBITED_CONTENT_SHEET | session=%s "
+                        "q=%d chars=%d — %s",
+                        self._game.sk.session_id,
+                        self._game.sk.question_number,
+                        len(sheet),
+                        (
+                            "bypassing blocked model with vetted "
+                            "deterministic delivery"
+                            if attempt == 1
+                            else "deterministic delivery after retry block"
+                        ),
+                    )
+                    self._game.expect_delivery()
+                    sheet_aired = True
+                    yield sheet
+                    return
+                # Non-delivery conversation has no deterministic truth sheet.
+                # Preserve the provider's non-retryable failure so the speech
+                # handle releases/suppresses; never retry into a storm.
                 raise
-            self._log_prohibited_content(exc, chat_ctx, tools)
-            sheet = self._blocked_delivery_sheet()
-            if sheet:
-                logger.error(
-                    "LILY_LLM | PROHIBITED_CONTENT_SHEET | session=%s "
-                    "q=%d chars=%d — bypassing blocked model with vetted "
-                    "deterministic delivery",
-                    self._game.sk.session_id,
-                    self._game.sk.question_number,
-                    len(sheet),
-                )
-                self._game.expect_delivery()
-                yield sheet
-                return
-            # Non-delivery conversation has no deterministic truth sheet.
-            # Preserve the provider's non-retryable failure so the speech
-            # handle releases/suppresses; never retry into a storm.
-            raise
+
+        async for chunk in _attempt(1):
+            yield chunk
+        if sheet_aired:
+            return
 
         if not lily_llm_stream_is_empty_stop(text_chars, tool_calls):
             return
@@ -9769,31 +9789,10 @@ class LilyAgent(Agent):
         )
         text_chars = 0
         tool_calls = 0
-        try:
-            async for chunk in self._vocal_llm_stream(
-                chat_ctx, tools, model_settings, vocal_depth
-            ):
-                t_n, tc_n = lily_llm_chunk_signal(chunk)
-                text_chars += t_n
-                tool_calls += tc_n
-                yield chunk
-        except APIStatusError as exc:
-            if not lily_is_prohibited_content_error(exc):
-                raise
-            self._log_prohibited_content(exc, chat_ctx, tools)
-            sheet = self._blocked_delivery_sheet()
-            if sheet:
-                logger.error(
-                    "LILY_LLM | PROHIBITED_CONTENT_SHEET | session=%s "
-                    "q=%d chars=%d — deterministic delivery after retry block",
-                    self._game.sk.session_id,
-                    self._game.sk.question_number,
-                    len(sheet),
-                )
-                self._game.expect_delivery()
-                yield sheet
-                return
-            raise
+        async for chunk in _attempt(2):
+            yield chunk
+        if sheet_aired:
+            return
 
         if not lily_llm_stream_is_empty_stop(text_chars, tool_calls):
             logger.info(

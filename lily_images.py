@@ -66,6 +66,54 @@ def lily_image_storage_path(source: str, data: bytes, ext: str) -> str:
     return f"{source}/{hashlib.sha1(data).hexdigest()}.{ext}"
 
 
+async def _storage_upload_dedup(
+    storage, path: str, data: bytes, content_type: str, *, log_prefix: str
+) -> None:
+    """Upload content-addressed bytes to `storage` (a supabase bucket
+    handle). An already-exists / duplicate conflict IS a cache hit — the
+    exact bytes are already in the bucket — and is logged, not raised; any
+    other error propagates to the caller's failure path. Shared by the
+    public-image and private-arsenal uploaders (Stage 1a)."""
+    try:
+        await asyncio.to_thread(
+            lambda: storage.upload(
+                path, data,
+                {"content-type": content_type, "upsert": "true"},
+            )
+        )
+    except Exception as e:
+        if "exist" not in str(e).lower() and "duplicate" not in str(e).lower():
+            raise
+        logger.info("%s | UPLOAD_DEDUP | path=%s already stored", log_prefix, path)
+
+
+async def lily_gate_fetched_image(
+    supabase,
+    *,
+    approve,
+    image_bytes: bytes,
+    content_type: str,
+    entity: str,
+    session_id: str,
+    question_id: str,
+) -> bool:
+    """Run the content gate on fetched web bytes. `approve` is the async
+    (bytes, content_type, entity) -> (approved, reason) approver. On a
+    rejection an ATTEMPT_REJECTED row is written (source='web') and False is
+    returned so the builder falls back; True means proceed to store. Shared
+    by lily_search and lily_imagegen's real-photo branches (Stage 1a)."""
+    approved, gate_reason = await approve(image_bytes, content_type, entity)
+    if not approved:
+        await lily_record_image_attempt(
+            supabase, session_id=session_id,
+            question_id=question_id, source="web",
+            prompt=entity, status=ATTEMPT_REJECTED,
+            failure_reason=f"content gate: {gate_reason}"[:500],
+        )
+        return False
+    return True
+
+
 async def lily_upload_image_bytes(
     supabase,
     data: bytes,
@@ -94,19 +142,9 @@ async def lily_upload_image_bytes(
     path = lily_image_storage_path(source, data, ext)
     try:
         storage = supabase.storage.from_(LILY_IMAGES_BUCKET)
-        try:
-            await asyncio.to_thread(
-                lambda: storage.upload(
-                    path, data,
-                    {"content-type": content_type, "upsert": "true"},
-                )
-            )
-        except Exception as e:
-            # Content-addressed path: an already-exists conflict IS a cache
-            # hit — the exact bytes are already in the bucket.
-            if "exist" not in str(e).lower() and "duplicate" not in str(e).lower():
-                raise
-            logger.info("LILY_IMAGES | UPLOAD_DEDUP | path=%s already stored", path)
+        await _storage_upload_dedup(
+            storage, path, data, content_type, log_prefix="LILY_IMAGES"
+        )
         url = await asyncio.to_thread(lambda: storage.get_public_url(path))
         url = str(url or "").strip().rstrip("?")
         if not url:
@@ -369,21 +407,9 @@ async def lily_upload_arsenal_image(
     path = f"{partition}/{hashlib.sha1(data).hexdigest()}.{ext}"
     try:
         storage = supabase.storage.from_(LILY_ARSENAL_BUCKET)
-        try:
-            await asyncio.to_thread(
-                lambda: storage.upload(
-                    path, data,
-                    {"content-type": content_type, "upsert": "true"},
-                )
-            )
-        except Exception as e:
-            # Content-addressed path: an already-exists conflict IS a cache
-            # hit — the exact bytes are already in the bucket.
-            if "exist" not in str(e).lower() and "duplicate" not in str(e).lower():
-                raise
-            logger.info(
-                "LILY_ARSENAL_IMG | UPLOAD_DEDUP | path=%s already stored", path
-            )
+        await _storage_upload_dedup(
+            storage, path, data, content_type, log_prefix="LILY_ARSENAL_IMG"
+        )
         logger.info(
             "LILY_ARSENAL_IMG | UPLOADED | path=%s bytes=%d", path, len(data)
         )

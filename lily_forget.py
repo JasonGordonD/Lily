@@ -30,6 +30,8 @@ import hashlib
 import re as _re
 from typing import Optional
 
+from lily_addressee import lily_normalize_reply
+
 # ---------------------------------------------------------------------------
 # Tombstone — operational records survive without linkable identity
 # ---------------------------------------------------------------------------
@@ -151,13 +153,10 @@ def lily_is_absent_table_error(message: str) -> bool:
 # Deterministic yes/no confirmation parsing (pending-confirm state)
 # ---------------------------------------------------------------------------
 
-_PUNCT_RE = _re.compile(r"[^a-z0-9\s]+")
-
-
 def _normalize(text: str) -> str:
-    stripped = _re.sub(r"^\s*\[S\d+\]\s*", "", text or "").strip()
-    lowered = _PUNCT_RE.sub(" ", stripped.lower())
-    return _re.sub(r"\s+", " ", lowered).strip()
+    # Apostrophes stripped (this parser's historical regex, [^a-z0-9\s]+);
+    # the shared helper lives in lily_addressee.
+    return lily_normalize_reply(text, keep_apostrophes=False)
 
 
 _CONFIRM_YES_PATTERNS = (
