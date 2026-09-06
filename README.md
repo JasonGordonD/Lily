@@ -2335,8 +2335,12 @@ moves log `LILY_TUNE | TIER_DOWN/TIER_UP/RETIRE | ...`.
 
 ### Gated category proposals (F, migration 011)
 
-Generation may return `proposed_category` (reserved field in the question
-schema). Each proposal upserts `lily_category_candidates` (use_count +
+Generation may return `proposed_category` — since REFACTOR-STAGE-1B-001
+P1-6 the generation shape (`_GROK_QUESTION_SHAPE_ADDENDUM`) asks for it as
+an optional field and `_shape_question` keeps a stripped string, dropping
+anything else; before that the field was reserved but never requested, so
+no generated question ever carried one and this ladder could not populate
+from gameplay. Each proposal upserts `lily_category_candidates` (use_count +
 distinct proposing groups), but the question SERVES under its round FAMILY
 until the candidate is **promoted: use_count >= 10 AND >= 3 distinct
 groups**. Promoted extras appear as one lobby state-block line; Lily never
