@@ -790,6 +790,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._last_airgate_decision = None
         self._first_frame_hooks = None
         self._dispatch_suppressed_listeners = None
+        self._speech_created_at = None
         # Consumers of the suppression hook register here (reset above, so a
         # restart's re-init never doubles them): W2's restart-confirm unwind.
         self.add_dispatch_suppressed_listener(self._restart_on_dispatch_suppressed)
@@ -979,6 +980,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         self._undelivered_ticks = 0
         self._user_speaking = False
         self._user_speech_ended_at = None
+        self._user_speech_started_at = None
         # AIRGATE-001 D2: per-content-key USER-CUT counter (say-registry key
         # -> deliberate VAD-positive cuts), written at the barge
         # classification; caps the verdict re-air at one per key.
@@ -3896,6 +3898,16 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
         handles[speech_id] = handle
         while len(handles) > 16:
             handles.pop(next(iter(handles)))
+        # HOTFIX-BARGE-FLUSH-001: remember which user final this handle was
+        # created after, so a barge flush can tell "stale composite queued
+        # before the human spoke" (flush) from "the reply to what they just
+        # said" (never flush).
+        created = self._speech_created_at
+        if created is None:
+            created = self._speech_created_at = {}
+        created[speech_id] = time.monotonic()
+        while len(created) > 64:
+            created.pop(next(iter(created)))
         # WO-LILY-CONTROL-GATES-001 D2 seam: every handle (organic replies
         # included — they never pass instructed_reply/direct_say) is
         # stamped with the contest-note sequence live at creation.
@@ -4129,6 +4141,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             dispatched_act, speech_id,
             interrupted=interrupted, suppressed=suppressed, failed=failed,
         )
+        # HOTFIX-BARGE-FLUSH-001: read "did this speech ever reach the air"
+        # BEFORE the discard below — a cut speech that never started playout
+        # (a preemptive generation cancelled at turn commit) was not barged
+        # by anyone, so it must not flush the queue or count a user cut.
+        cut_had_aired = bool(speech_id) and (
+            speech_id in (self._playout_started_ids or set())
+        )
         if speech_id:
             self._playout_started_ids.discard(speech_id)
             (self._speech_handles or {}).pop(speech_id, None)
@@ -4209,13 +4228,20 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
             # ONLY (Y7's slow-STT corner): the counter caps re-airs, so it
             # must count a human voice at the cut, never a transcript that
             # committed late.
-            if barge_in and released and self.cut_had_vad_evidence():
+            if (
+                barge_in and released and cut_had_aired
+                and self.cut_had_vad_evidence()
+            ):
                 self.note_user_cut_keys(released)
             # AIRGATE-001 D2: a deliberate barge also flushes QUEUED
             # non-obligation dispatches — the human took the floor; a stack
             # of stale composites must not play out over them. A flushed
             # question read re-arms expect_delivery inside the flush (C3d).
-            if barge_in and interrupted:
+            # HOTFIX-BARGE-FLUSH-001: only a barge on speech that actually
+            # AIRED flushes — live 11:59:33 the framework's turn-commit
+            # cancellation of a never-aired preemptive carrier read as a
+            # barge and flushed the reply to the human's own utterance.
+            if barge_in and interrupted and cut_had_aired:
                 self.flush_queued_dispatches_on_barge(cut_speech_id=speech_id)
             # Regeneration gate (WS-3): the act just cut/suppressed will
             # re-dispatch — arm the gate so the retry is spoken fresh, not

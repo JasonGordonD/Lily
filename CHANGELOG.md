@@ -5,6 +5,32 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — HOTFIX-BARGE-FLUSH-001: silence after the name (live 11:59 UTC, first call on the wave)
+
+Live receipt: session lily-FCE88B-7a2b83e1, OTel bundle. After "Hi, this is
+Rami" the framework's turn commit cancelled the never-aired late-recognition
+PREEMPTIVE generation; Y7's cut classifier read that cancellation as a
+deliberate human barge (the human had just spoken), and AIRGATE-001 D2's
+queue flush cancelled the organic reply to that very utterance, dispatched
+30 ms earlier (`LILY_SPEECH | CANCELLED speech_5a02dd… reason=user_barge_flush`,
+"yielding the floor (no auto-resume, no re-air, no regeneration)"). Every
+later "Hello" repeated it. A composition defect of W1 × preemptive
+generation × W4's carrier that neither the suite nor the composition review
+reached (runtime interleaving).
+
+Two guards: (1) a cut speech that never STARTED playout cannot have been
+barged — `on_agent_speech_finished` reads "did it air" before the playout-id
+discard and gates the flush and the user-cut counter on it; (2) the flush
+never cancels a handle created after the VAD rising edge
+(`_user_speech_started_at`, stamped in `note_user_speech_state`;
+`_speech_created_at` stamped in `note_speech_handle`) — a dispatch made for
+what the human is saying is owed, only composites queued before they spoke
+are stale. Keyed on the rising edge, not the final, so a slow STT cannot
+re-open the wedge. Failing-first: tests/test_hotfix_barge_flush_wedge.py
+(2/2 red on 9cff7a9). Live receipt to pull: a reply after the name with no
+`QUEUE_FLUSHED` line naming it; `airgate_events` carries no
+`user_barge_flush` for a speech created after `user_speaking` began.
+
 ## 2026-09-06 — WO-LILY-VOICE-TRUTH-001: the ECAPA probe hears a voice, recognition carry is keyed by speech id, one group id per night
 
 Auditor B (SQL + executed probes `carry_probe.py` / `roster_probe.py`) and

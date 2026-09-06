@@ -1329,10 +1329,22 @@ class LilySpeechDeliveryMixin:
         started = self._playout_started_ids or set()
         acts = self._dispatched_act_by_speech or {}
         delivery_key = f"q_{self.sk.question_number}_delivery"
+        barge_started_at = getattr(self, "_user_speech_started_at", None)
+        created_at = getattr(self, "_speech_created_at", None) or {}
         for speech_id in list(handles):
             if speech_id == cut_speech_id or speech_id in started:
                 continue
             if acts.get(speech_id) in _BARGE_FLUSH_EXEMPT_ACTS:
+                continue
+            # HOTFIX-BARGE-FLUSH-001: a handle created AFTER the human
+            # started talking is a dispatch for what they said (the reply
+            # to the barging turn, or its carrier) — the one thing the room
+            # is owed. Only composites queued BEFORE the barge began are
+            # stale. Keyed on the VAD rising edge, not the final, so a slow
+            # STT (Y7's corner) cannot re-open the wedge.
+            if barge_started_at is not None and (
+                created_at.get(speech_id, 0.0) >= barge_started_at
+            ):
                 continue
             held = self.say_registry.keys_for_owner(speech_id)
             non_delivery_keys = [k for k in held if k != delivery_key]
@@ -2103,6 +2115,12 @@ class LilySpeechDeliveryMixin:
         dropped, so the timestamp is the only surviving evidence."""
         if not speaking and self._user_speaking:
             self._user_speech_ended_at = time.monotonic()
+        # HOTFIX-BARGE-FLUSH-001: the RISING edge too — the moment the human
+        # started talking is what separates a composite queued BEFORE they
+        # spoke (stale, flushable) from a dispatch created for what they
+        # said (owed, never flushed). Independent of when the final lands.
+        if speaking and not self._user_speaking:
+            self._user_speech_started_at = time.monotonic()
         self._user_speaking = bool(speaking)
 
     def cut_was_deliberate_barge_in(self) -> bool:
