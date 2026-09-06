@@ -110,7 +110,9 @@ prefetch WALLS; this WO owns the ORDER.
 | `_bank_to_supply` routed through the shared draw, so it uses `_no_repeat_exclusion()` (lily_supply.py:1055–1069) | **LOGICAL** — deletes a divergent copy of an existing union |
 | MC: prefer a banked row with `choices`, degrade to freeform, never await synthesis (lily_persistence.py:1114–1128; `MC_DEGRADED` lily_supply.py:167) | **BEHAVIOURAL** — an MC round on a lane with no MC-capable row now runs freeform instead of waiting on a model |
 | Receipts: `BANK_DRAW`/`BANK_DRY`/`AUTHOR_ON_DELIVERY_PATH`, `question_timeline[n].source`/`bank_id` (lily_supply.py:1280–1288), `supply_receipt()` (:69) | **TECHNICAL** |
-| `lily_bank_health` + migration 029 (lily_bank.py:451; migrations/029) | **TECHNICAL** |
+| `lily_bank_health` — per-lane ready/active/servable/burned + S2's replenishment stamp and run receipts (lily_bank.py) | **TECHNICAL** |
+| Servable status widened to `('active', 'ready')`, queried in that order, with `burned`/`retired` still unservable (lily_bank.py; lily_persistence.py) | **LOGICAL** — the S2 seam; 'ready' is the arsenal's own promotion vocabulary |
+| Each lane's category list ends with its own family name (`lifestyle-potpourri` etc.), because S2's lanes are `<deck>:<family>` (lily_bank.py) | **BEHAVIOURAL** — without it every potpourri row S2 authors is undrawable |
 | `lily_record_asked` returns True/False and logs a recoverable payload on failure (lily_bank.py:365) | **TECHNICAL** — fleet S2 |
 
 ### Deletions
@@ -131,28 +133,59 @@ prefetch WALLS; this WO owns the ORDER.
   re-pointed at `BANK_DRAW`/`BANK_DRY` (Z2's requirement — this draw is
   never untelemetered — is carried, not dropped).
 
-### Guard-map deltas
+### The S1 <-> S2 seam (reconciled against S2 @ 71cf80d, fixture-pinned)
 
-`docs/GUARD_MAP.md`, amendment 2026-09-06: mech. **90** added (bank-first
-supply draw); the insurance leg RETIRED and struck from mech. 79's row;
-mechs. 79 and 32 amended to note they now reach the bank through mech. 90.
-Count 89 → 90.
+S1 was first written against an assumed contract (`status='active'` as
+S2's last write, plus an S1-owned `lily_bank_lane_health` table on
+migration 029). S2 landed a different and better one, and S1 was rewritten
+to it: **S2 owns migration 029; S1 adds no migration at all.** What S1 now
+codes against, each half pinned by a test:
 
-### Contract for S2 (coded against, fixture-pinned)
-
-- S2 makes `status='active'` its **last** write on a row
-  (`lily_bank.BANK_SERVABLE_STATUS`): a row is servable the instant it
-  carries that value, so anything still being authored, verified or
-  moderated carries anything else until it is fit to speak.
-- S2 upserts one `lily_bank_lane_health` row per lane (migration 029),
-  keyed by `lane` ∈ `LANE_BANK_CATEGORIES`, with `last_replenished_at`
-  (moved only by a run that banked ≥ 1 row for that lane) and
-  `rejection_rate` (0.0–1.0 over the last completed run). S1 never writes
-  it and treats absent table/row as `null`, never 0 —
-  `test_bank_health_reads_the_s2_lane_health_rows_when_they_exist` pins
-  both halves.
-- S2 should author `choices` for rows it banks into MC-capable lanes;
-  until then `LILY_SUPPLY | MC_DEGRADED` counts what freeform-degraded.
+- **Servable status is `('active', 'ready')`, queried in that order.**
+  S2 lands verified/deduped/moderation-passed rows at `'ready'` and never
+  writes or reinterprets `'active'`. `'active'` is offered first so the
+  448-row standing bank drains before the replenished reserve.
+  `'burned'` (WS-4) and `'retired'` (the E tuning job) stay unservable —
+  server-side filter plus a client-side belt.
+  (`test_a_ready_row_from_the_replenisher_is_servable`,
+  `test_the_standing_bank_drains_before_the_replenished_reserve`,
+  `test_a_retired_row_is_never_servable`.)
+- **The draw does NOT filter on S2's `lane` column.** It is NULL on all
+  448 pre-existing rows; a draw that required it would have served only
+  what S2 had authored. The draw's own deck+category pair IS that key —
+  S2 says so itself ("back-reads a lane's depth by (mode, adult,
+  category) so legacy rows count toward depth without being rewritten")
+  — and `lily_bank.lily_lane_key` mirrors S2's `lily_lane_id` so the
+  receipt and the health readout speak S2's spelling.
+  (`test_the_draw_never_requires_the_s2_lane_column`,
+  `test_the_lane_key_matches_the_replenishers_lane_id`,
+  `test_the_draw_receipt_carries_the_s2_lane_id`.)
+- **Every lane's category list ends with its own family name.** S2's
+  lanes are `<deck>:<family>`, so it writes `category='pop culture'` and
+  `category='lifestyle-potpourri'` — the second of which no pre-WO bank
+  row carries. Without the family name in the lane map, every potpourri
+  row S2 authored would be undrawable.
+  (`test_the_replenishers_own_family_categories_are_drawable`.)
+- **Health reads S2's real surfaces, never writes them.**
+  `last_replenished_at` = newest `lily_questions.replenished_at` in the
+  lane; `rejection_rate` = (skipped_duplicate + rejected_verify +
+  rejected_moderation) / authored_count over the most recent COMPLETED
+  `lily_bank_replenish_runs` row per S2 lane. Absent column / absent
+  table / no completed run = `null`, never 0.
+  (`test_bank_health_counts_the_replenishers_ready_rows_separately`,
+  `test_bank_health_derives_the_rejection_rate_from_the_s2_run_receipt`.)
+- **Open ask of S2:** author `choices` for rows banked into MC-capable
+  lanes; until then `LILY_SUPPLY | MC_DEGRADED` counts what
+  freeform-degraded.
+- **Seam risk to flag, not a defect:** S2's adult lanes are
+  `adult:adult_couples` and `adult:adult_kink` (`ADULT_CATEGORY_FAMILIES`),
+  while `_category_for_round` rotates `CATEGORY_FAMILIES` for every
+  session. On the adult deck that means only the potpourri lane is
+  replenished; the academic / pop culture / wordplay adult lanes drain
+  the standing 141 rows with nothing topping them up. Pre-existing
+  (the adult rotation was already unused since
+  WO-PRMPT-LILY-REFACTOR-001), out of S1's region, and visible in the
+  health readout the day it starts to bite.
 
 ### Left for S5
 
@@ -169,15 +202,27 @@ a dry lane, and it is counted.
 
 ### The four numbers
 
-- **lines added: 1681** (code + tests + migration + docs; of which 669 are
-  the new test file, 45 the migration, and 319 the CHANGELOG/README/
-  GUARD_MAP prose. Code and tests alone: 1317 added.)
-- **lines deleted: 187**
-- **failing-first tests: 24** (`tests/test_supply_001_s1.py`, 24 failed /
-  2 passed on `wo/supply-001` before any implementation; 26 pass after)
+### Guard-map deltas (restated after the S2 reconciliation)
+
+Mech. **90** added (bank-first supply draw, now including the
+`('active','ready')` status axis); the insurance leg RETIRED and struck
+from mech. 79's row; mechs. 79 and 32 amended. No S1 migration. Count
+89 → 90.
+
+### The four numbers
+
+- **lines added: 1980** (of which 802 are the new test file and 397 are
+  CHANGELOG/README/GUARD_MAP prose; production code + existing-test
+  fixups: 781)
+- **lines deleted: 189** (177 of them production code — the insurance
+  leg, the awaited MC synthesis, the `prefer_bank`/`from_bank`
+  hand-off, and `_bank_to_supply`'s private exclusion union)
+- **failing-first tests: 28** (`tests/test_supply_001_s1.py` as shipped,
+  run against `wo/supply-001` with no implementation: 28 failed / 6
+  passed; 34 pass after)
 - **mechanisms retired: 1** (the insurance-bank leg of mech. 79)
 
-Suites: 3274 pass (3248 baseline + 26), on `python3` and on the 3.13 venv.
+Suites: 3282 pass (3248 baseline + 34), on `python3` and on the 3.13 venv.
 `python3 -W error -c "import lily_agent"` clean.
 
 ## 2026-09-06 — WO-LILY-ADDRESSED-001 (B9): progression yields to the table

@@ -83,12 +83,23 @@ already been asked, so on a stocked bank the ladder rarely reaches an author at 
 **AMENDED, mech. 32 (WS-6 supply-stall fallback):** unchanged in its guards; its draw half now carries
 the deck/lane/register filters and the `BANK_DRAW` receipt because it shares mech. 90.
 
-**Not a guard, but load-bearing and new:** `lily_bank.lily_bank_health(supabase)` +
-`lily_bank_lane_health` (migration 029) — the per-lane readout that makes "which lane will make a
-table wait on an author?" a query. Fleet S1 (no sensor without a consumer): its consumer is the
-operator readout in README, and `bank_dry_lanes` in the session receipt is the same fact from the
-session's side. **New mechanism count: 90 (89 + mech. 90, − the retired insurance leg, which was a
-sub-leg of mech. 79 rather than a numbered mechanism, so the count moves by +1).**
+**Not a guard, but load-bearing and new:** `lily_bank.lily_bank_health(supabase)` — the per-lane
+readout that makes "which lane will make a table wait on an author?" a query, counting
+ready/active/servable/burned off `lily_questions` and folding in S2's `replenished_at` stamp and
+`lily_bank_replenish_runs` receipts (migration 029, S2's). S1 adds NO migration of its own and writes
+neither surface. Fleet S1 (no sensor without a consumer): its consumer is the operator readout in
+README, and `bank_dry_lanes` in the session receipt is the same fact from the session's side.
+
+**The status seam with S2:** `lily_bank.BANK_SERVABLE_STATUSES = ('active', 'ready')`. Migration 009's
+'active' is the standing 448-row bank; S2's background author lands verified/deduped/moderated rows at
+'ready' and never writes 'active'. Mech. 90 queries them in that order — the standing bank drains
+before the replenished reserve — and 'burned' (mech. 66) and 'retired' (the E tuning job) remain
+unservable, guarded both server-side and by a client-side belt. Mech. 90 deliberately does NOT filter
+on S2's `lane` column: it is NULL on all 448 pre-existing rows, and the draw's own deck+category pair
+is that same key (`lily_bank.lily_lane_key` mirrors S2's `lily_lane_id`).
+
+**New mechanism count: 90 (89 + mech. 90, − the retired insurance leg, which was a sub-leg of mech. 79
+rather than a numbered mechanism, so the count moves by +1).**
 
 ---
 

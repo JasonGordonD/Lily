@@ -145,12 +145,15 @@ class LilySupplyMixin:
             timeout=BANK_DRAW_TIMEOUT_SECONDS,
         )
         if question is None:
-            counters["bank_dry_lanes"].append(f"{deck}:{category}")
+            counters["bank_dry_lanes"].append(
+                lily_bank.lily_lane_key(deck, category)
+            )
             logger.warning(
                 "LILY_SUPPLY | BANK_DRY | session=%s q=%d deck=%s lane=%s "
                 "excluded=%d trigger=%s — no eligible row for this table; "
                 "the author has to serve",
-                self.sk.session_id, self.sk.question_number, deck, category,
+                self.sk.session_id, self.sk.question_number, deck,
+                lily_bank.lily_lane_key(deck, category),
                 int(stats.get("excluded") or 0), trigger,
             )
             return None
@@ -176,10 +179,17 @@ class LilySupplyMixin:
             )
         logger.info(
             "LILY_SUPPLY | BANK_DRAW | session=%s q=%d id=%s deck=%s lane=%s "
-            "excluded=%d pool_remaining=%d category=%s stage=%s trigger=%s",
+            "excluded=%d pool_remaining=%d category=%s status=%s stage=%s "
+            "trigger=%s",
             self.sk.session_id, self.sk.question_number, question.get("id"),
-            deck, category, int(stats.get("excluded") or 0), remaining,
-            stats.get("lane_category"), stats.get("stage"), trigger,
+            deck,
+            # The S2 lane id (`<deck>:<category>`) of the stage that
+            # actually served, so a BANK_DRAW line joins straight to a
+            # replenishment run receipt.
+            stats.get("lane") or lily_bank.lily_lane_key(deck, category),
+            int(stats.get("excluded") or 0), remaining,
+            stats.get("lane_category"), stats.get("status"),
+            stats.get("stage"), trigger,
         )
         return question
 

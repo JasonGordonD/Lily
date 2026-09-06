@@ -1004,8 +1004,18 @@ async def lily_fetch_bank_question(
                  (HOTFIX-006 N2's rule, now applied per lane rather than
                  only inside a strict draw).
 
+    Servable status (the S1<->S2 seam): `lily_bank.BANK_SERVABLE_STATUSES`
+    = ('active', 'ready'). Migration 009's 'active' is the standing bank;
+    S2's background author lands verified, deduped, moderation-passed rows
+    at 'ready' and never touches 'active'. Both serve, 'active' first, so
+    the standing bank drains before the replenished reserve. 'burned'
+    (WS-4) and 'retired' (the E tuning job) never serve. The draw does NOT
+    filter on S2's `lane` column: it is NULL on all 448 pre-existing rows,
+    and this draw's own deck+category pair is that same key
+    (`lily_bank.lily_lane_key`).
+
     `stats`, when passed, is filled with the receipt the caller logs:
-    {deck, lane_category, stage, pool_remaining, excluded} —
+    {deck, lane, lane_category, status, stage, pool_remaining, excluded} —
     `pool_remaining` is how many rows the winning stage could still have
     served AFTER exclusions (so "the lane is nearly dry" is a number, not
     an inference), `excluded` is how many candidates the group's history /
@@ -1045,6 +1055,8 @@ async def lily_fetch_bank_question(
         stats.update({
             "deck": deck_key or "adult",
             "lane_category": None,
+            "lane": None,
+            "status": None,
             "stage": None,
             "pool_remaining": 0,
             "excluded": 0,
@@ -1053,11 +1065,12 @@ async def lily_fetch_bank_question(
         def _query_stage(
             stage_category: Optional[str],
             stage_tier: Optional[int],
+            stage_status: str,
         ):
             query = (
                 supabase.table("lily_questions")
                 .select("*")
-                .eq("status", lily_bank.BANK_SERVABLE_STATUS)
+                .eq("status", stage_status)
             )
             # Deck. `None` is the legacy unified-adult filter, kept byte-
             # identical so every pre-WO caller (and the adult-identity
@@ -1080,21 +1093,36 @@ async def lily_fetch_bank_question(
         # WHOLE lane is dry does the any-category stage run, and a strict
         # draw (a topic the table NAMED) does not get that stage at all.
         lane = [c for c in (lane_categories or []) if c] or [category]
-        stages = [(c, difficulty_tier) for c in lane]
-        stages += [(c, None) for c in lane]
+        # Status is the innermost axis and it is a PREFERENCE, not a
+        # filter: inside one lane category at one tier, the standing bank's
+        # 'active' rows are offered before the S2 replenisher's 'ready'
+        # reserve, so the 448 curated rows drain before the rows a job
+        # wrote last night. It is queried rather than filtered client-side
+        # because `status` is the leading column of migration 016's draw
+        # index and of S2's partial ready index — an `in`-list would need a
+        # postgrest operator every bank fake in the suite would have to
+        # grow, for a stage that almost always hits on its first query.
+        statuses = list(lily_bank.BANK_SERVABLE_STATUSES)
+        stages = [
+            (c, difficulty_tier, st) for c in lane for st in statuses
+        ]
+        stages += [(c, None, st) for c in lane for st in statuses]
         if not strict_category:
-            stages.append((None, None))
+            stages += [(None, None, st) for st in statuses]
         row = None
-        for stage_category, stage_tier in stages:
+        for stage_category, stage_tier, stage_status in stages:
             rows = await asyncio.to_thread(
-                _query_stage, stage_category, stage_tier
+                _query_stage, stage_category, stage_tier, stage_status
             )
             pool = lily_memory.lily_bank_mode_filter(rows.data or [])
             servable = [
                 r for r in pool
                 if r.get("question") and r["question"] not in exclude_prompts
-                and (r.get("status") or lily_bank.BANK_SERVABLE_STATUS)
-                == lily_bank.BANK_SERVABLE_STATUS
+                # Belt over the server-side filter: 'burned' (WS-4) and
+                # 'retired' (the E tuning job) are never servable, however
+                # a row reached this list.
+                and (r.get("status") or "active")
+                in lily_bank.BANK_SERVABLE_STATUSES
             ]
             candidates = [
                 r for r in servable
@@ -1129,6 +1157,10 @@ async def lily_fetch_bank_question(
                 row = random.choice(candidates)
                 if stats is not None:
                     stats["lane_category"] = stage_category
+                    stats["status"] = stage_status
+                    stats["lane"] = lily_bank.lily_lane_key(
+                        stats["deck"], stage_category or category
+                    )
                     stats["stage"] = (
                         "any" if stage_category is None
                         else ("lane" if stage_tier is None else "lane+tier")

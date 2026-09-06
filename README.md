@@ -1656,8 +1656,6 @@ migrations/015_lily_transcript_event_id.sql  idempotent transcript retry keys
 migrations/016_lily_question_draw_index.sql  bounded bank-draw composite index
 migrations/021_lily_voice_identity.sql  RLS-protected ECAPA group centroids
                                         for device-independent recognition
-migrations/029_lily_bank_lane_health.sql  per-lane replenishment health
-                                        (S1 reads, S2 writes; null until S2)
 tests/               1450+ tests, run with `python -m pytest tests/` — no network; needs
                      livekit-agents 1.6.6 + google-genai installed
                      (test_award_gate.py / test_context_blocks.py /
@@ -2386,6 +2384,19 @@ named in `bank_dry_lanes` ran out), not the design.
 | **deck** | `adult` | `_deck_for_supply()` — the session's `availability_flags["adult_deck"]`. `"adult"` serves `adult=true` (the unified standard deck of WO-PRMPT-LILY-REFACTOR-001); `"general"` serves `adult=false`. Passing no deck keeps the legacy adult-only filter for pre-WO callers. |
 | **lane** | `category` | `lily_bank.lily_lane_categories(family, deck)` — the rotation family mapped onto the bank's own vocabulary, tried in declared order. |
 | **register** | `difficulty_tier` | `_difficulty_for_round`. The SOFT axis: tier relaxes across the whole lane before the lane is left. |
+| **status** | `status` | `lily_bank.BANK_SERVABLE_STATUSES = ('active', 'ready')`. A preference, not a filter: inside one lane category at one tier, the standing bank's `active` rows are offered before the S2 replenisher's `ready` reserve, so the 448 curated rows drain first. `burned` (WS-4) and `retired` (the E tuning job) never serve. |
+
+**The S1 <-> S2 seam.** The background replenisher (S2, `lily_bank_replenish.py`,
+migration 029) lands verified, deduped, moderation-passed rows at
+`status='ready'` and never writes or reinterprets `active`; it stamps
+`lane` (`<deck>:<category>`), `question_text_sha256`, `replenished_at` and
+`replenish_run_id`. **The draw does not filter on `lane`** — it is NULL on
+all 448 pre-existing rows, so a draw that required it would serve only what
+S2 had authored — and the draw's own deck+category pair is that same key
+(`lily_bank.lily_lane_key`, which mirrors S2's `lily_lane_id`). S2's lanes
+are `<deck>:<family>`, so it writes `category='lifestyle-potpourri'`, a
+value no pre-WO row carries: every lane's category list therefore ends with
+its own family name, or the rows S2 authored for it would be undrawable.
 
 **The lane map** (`lily_bank.LANE_BANK_CATEGORIES`). The rotation's family
 names were never the bank's category vocabulary, and the draw compared them
@@ -2420,13 +2431,19 @@ pool_remaining_min, bank_dry_lanes, mc_degraded}`.
 ### Per-lane bank health
 
 `lily_bank.lily_bank_health(supabase)` returns
-`{lane: {ready, burned, last_replenished_at, rejection_rate}}` for all four
-lanes — always all four, so an empty lane is a stated zero rather than a
-missing key. `last_replenished_at` and `rejection_rate` come from
-`lily_bank_lane_health` (migration 029, written by the S2 replenisher) and
-are `null` — never 0 — until S2 lands.
+`{lane: {ready, active, servable, burned, last_replenished_at,
+rejection_rate}}` for all four lanes — always all four, so an empty lane is
+a stated zero rather than a missing key. `ready` is what the S2 replenisher
+banked and nobody has served, `active` is the standing bank, `servable` is
+their sum (what the draw can reach). `last_replenished_at` is the newest
+`lily_questions.replenished_at` in the lane and `rejection_rate` is
+`(skipped_duplicate + rejected_verify + rejected_moderation) /
+authored_count` over the most recent COMPLETED run per S2 lane
+(`lily_bank_replenish_runs`, migration 029). Both stay `null` — never 0 —
+until S2 has actually run: "not measured" and "measured as zero" are
+different claims. S1 never writes either surface.
 
-The same readout as SQL:
+The same readout as SQL (`replenished_at` needs migration 029 applied; drop that column from the projection to run it against a pre-029 database):
 
 ```sql
 -- Per-lane bank health. The lane map lives in
@@ -2445,32 +2462,39 @@ with laned as (
       else 'lifestyle-potpourri'
     end                                              as lane,
     adult,
-    status
+    status,
+    status in ('active', 'ready')                    as servable,
+    replenished_at
   from lily_questions
 )
 select
   l.lane,
-  count(*) filter (where l.status = 'active' and not l.adult) as ready_general,
-  count(*) filter (where l.status = 'active' and     l.adult) as ready_adult,
-  count(*) filter (where l.status = 'burned')                 as burned,
-  h.last_replenished_at,
-  h.rejection_rate
+  count(*) filter (where l.servable and not l.adult)  as servable_general,
+  count(*) filter (where l.servable and     l.adult)  as servable_adult,
+  count(*) filter (where l.status = 'ready')          as ready_reserve,
+  count(*) filter (where l.status = 'burned')         as burned,
+  max(l.replenished_at)                               as last_replenished_at
 from laned l
-left join lily_bank_lane_health h on h.lane = l.lane
-group by l.lane, h.last_replenished_at, h.rejection_rate
-order by count(*) filter (where l.status = 'active');
+group by l.lane
+order by count(*) filter (where l.servable);
 ```
 
 Ordering by the smallest pool first is deliberate: the lane at the top of
 that result is the one that will make a table wait on an author. Live
-output, 2026-09-06 (before any S2 replenishment):
+output, 2026-09-06 (before any S2 replenishment — every row is `active`,
+so `ready_reserve` is 0 and `last_replenished_at` is null throughout):
 
-| lane | ready_general | ready_adult | burned |
+| lane | servable_general | servable_adult | burned |
 |---|---|---|---|
 | wordplay | 43 | 16 | 0 |
 | pop culture | 47 | 16 | 9 |
 | lifestyle-potpourri | 48 | 76 | 30 |
 | academic | 169 | 33 | 42 |
+
+The rejection rate is the run receipt's, not this query's: `select lane,
+(skipped_duplicate + rejected_verify + rejected_moderation)::numeric /
+nullif(authored_count, 0) as rejection_rate from lily_bank_replenish_runs
+where status = 'completed' order by started_at desc;`
 
 ## Bank curation loop (WO-LILY-OMNIBUS-002 D/E/F)
 

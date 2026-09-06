@@ -637,33 +637,166 @@ def test_the_recovery_bank_draw_excludes_burned_questions():
 # 6. Per-lane bank health
 # ---------------------------------------------------------------------------
 
-def test_bank_health_reports_ready_and_burned_per_lane():
+def test_bank_health_reports_servable_and_burned_per_lane():
     db = _db_with_bank()
     health = _run(lily_bank.lily_bank_health(db))
     assert set(health) == set(CATEGORY_FAMILIES)
     for lane, row in health.items():
-        assert row["ready"] > 0, lane
+        assert row["servable"] > 0, lane
+        assert row["servable"] == row["ready"] + row["active"]
         assert row["burned"] >= 0
-        # S2 owns these two; until it lands they are honestly null, not 0.
+        # S2 owns these two; until it has run they are honestly null, not 0.
         assert row["last_replenished_at"] is None
         assert row["rejection_rate"] is None
     assert health["academic"]["burned"] == 1
 
 
-def test_bank_health_reads_the_s2_lane_health_rows_when_they_exist():
-    """The S2 contract, coded against a fixture: S2 writes one
-    `lily_bank_lane_health` row per lane and S1 reads it verbatim."""
+def test_bank_health_counts_the_replenishers_ready_rows_separately():
+    """The S2 seam: a row the replenisher banked is servable and counted,
+    and it is distinguishable from the standing bank's own rows."""
     db = _db_with_bank()
-    db.tables["lily_bank_lane_health"] = [
+    db.tables["lily_questions"].append(
+        _row(9001, "lifestyle-potpourri", False, tier=1, status="ready",
+             lane="general:lifestyle-potpourri",
+             replenished_at="2026-09-06T09:00:00+00:00")
+    )
+    health = _run(lily_bank.lily_bank_health(db))
+    potpourri = health["lifestyle-potpourri"]
+    assert potpourri["ready"] == 1
+    assert potpourri["active"] == potpourri["servable"] - 1
+    assert potpourri["last_replenished_at"] == "2026-09-06T09:00:00+00:00"
+
+
+def test_bank_health_derives_the_rejection_rate_from_the_s2_run_receipt():
+    """S2 writes `lily_bank_replenish_runs`; S1 reads the most recent
+    COMPLETED run per S2 lane and folds it into the rotation lane."""
+    db = _db_with_bank()
+    db.tables["lily_bank_replenish_runs"] = [
         {
-            "lane": "academic",
-            "last_replenished_at": "2026-09-06T10:00:00+00:00",
-            "rejection_rate": 0.25,
+            "lane": "general:academic", "status": "completed",
+            "authored_count": 10, "accepted_count": 6,
+            "skipped_duplicate": 2, "rejected_verify": 1,
+            "rejected_moderation": 1,
+            "started_at": "2026-09-05T09:00:00+00:00",
+        },
+        {
+            # A newer run for the same lane wins.
+            "lane": "general:academic", "status": "completed",
+            "authored_count": 4, "accepted_count": 4,
+            "skipped_duplicate": 0, "rejected_verify": 0,
+            "rejected_moderation": 0,
+            "started_at": "2026-09-06T09:00:00+00:00",
+        },
+        {
+            # A run still in flight is not a measurement.
+            "lane": "general:wordplay", "status": "running",
+            "authored_count": 3, "accepted_count": 0,
+            "skipped_duplicate": 3, "rejected_verify": 0,
+            "rejected_moderation": 0,
+            "started_at": "2026-09-06T10:00:00+00:00",
         },
     ]
     health = _run(lily_bank.lily_bank_health(db))
-    assert health["academic"]["last_replenished_at"] == (
-        "2026-09-06T10:00:00+00:00"
+    assert health["academic"]["rejection_rate"] == 0.0
+    assert health["wordplay"]["rejection_rate"] is None
+
+
+# ---------------------------------------------------------------------------
+# 7. The S1 <-> S2 seam
+# ---------------------------------------------------------------------------
+
+def test_the_lane_key_matches_the_replenishers_lane_id():
+    assert lily_bank.lily_lane_key("general", "academic") == (
+        "general:academic"
     )
-    assert health["academic"]["rejection_rate"] == 0.25
-    assert health["wordplay"]["last_replenished_at"] is None
+    assert lily_bank.lily_lane_key("adult", "adult_kink") == (
+        "adult:adult_kink"
+    )
+
+
+def test_a_ready_row_from_the_replenisher_is_servable():
+    """S2 lands verified rows at status='ready' and never writes 'active'.
+    A draw that only accepted 'active' would leave the whole replenished
+    reserve on the shelf."""
+    db = FakeSupabase()
+    db.tables["lily_questions"] = [
+        _row(1, "academic", False, tier=1, status="ready",
+             lane="general:academic"),
+    ]
+    q = _run(lily_persistence.lily_fetch_bank_question(
+        db, "academic", 1, [], deck="general",
+        lane_categories=lily_bank.lily_lane_categories(
+            "academic", deck="general"
+        ),
+    ))
+    assert q is not None and q["id"] == "kb_1"
+
+
+def test_the_standing_bank_drains_before_the_replenished_reserve():
+    db = FakeSupabase()
+    db.tables["lily_questions"] = [
+        _row(1, "academic", False, tier=1, status="ready"),
+        _row(2, "academic", False, tier=1, status="active"),
+    ]
+    q = _run(lily_persistence.lily_fetch_bank_question(
+        db, "academic", 1, [], deck="general", lane_categories=["academic"],
+    ))
+    assert q is not None and q["id"] == "kb_2"
+
+
+def test_a_retired_row_is_never_servable():
+    """The E tuning job retires a question by status; 'ready' widening the
+    servable set must not have widened it to everything-but-burned."""
+    db = FakeSupabase()
+    db.tables["lily_questions"] = [
+        _row(1, "academic", False, tier=1, status="retired"),
+    ]
+    assert _run(lily_persistence.lily_fetch_bank_question(
+        db, "academic", 1, [], deck="general", lane_categories=["academic"],
+    )) is None
+
+
+def test_the_replenishers_own_family_categories_are_drawable():
+    """S2's lanes are `<deck>:<family>`, so it writes category='pop culture'
+    and category='lifestyle-potpourri' — the second of which no pre-WO bank
+    row has ever carried. A lane map that omitted it would have made every
+    potpourri row S2 authored undrawable."""
+    for family in CATEGORY_FAMILIES:
+        assert family in lily_bank.lily_lane_categories(
+            family, deck="general"
+        ), family
+    db = FakeSupabase()
+    db.tables["lily_questions"] = [
+        _row(1, "lifestyle-potpourri", False, tier=1, status="ready",
+             lane="general:lifestyle-potpourri"),
+    ]
+    q = _run(lily_persistence.lily_fetch_bank_question(
+        db, "lifestyle-potpourri", 1, [], deck="general",
+        lane_categories=lily_bank.lily_lane_categories(
+            "lifestyle-potpourri", deck="general"
+        ),
+    ))
+    assert q is not None and q["id"] == "kb_1"
+
+
+def test_the_draw_never_requires_the_s2_lane_column():
+    """All 448 pre-existing rows carry lane=NULL. A draw that filtered on
+    S2's lane column would have served only what S2 had authored."""
+    db = FakeSupabase()
+    db.tables["lily_questions"] = [_row(1, "academic", False, tier=1)]
+    assert db.tables["lily_questions"][0].get("lane") is None
+    q = _run(lily_persistence.lily_fetch_bank_question(
+        db, "academic", 1, [], deck="general", lane_categories=["academic"],
+    ))
+    assert q is not None and q["id"] == "kb_1"
+
+
+def test_the_draw_receipt_carries_the_s2_lane_id():
+    db = _db_with_bank()
+    stats: dict = {}
+    _run(lily_persistence.lily_fetch_bank_question(
+        db, "academic", 1, [], deck="general", lane_categories=["academic"],
+        stats=stats,
+    ))
+    assert stats["lane"] == "general:academic"
+    assert stats["status"] == "active"
