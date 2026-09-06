@@ -1551,6 +1551,142 @@ def arsenal_moderation_retries() -> int:
     return max(0, _get_int("LILY_ARSENAL_MODERATION_RETRIES", 2))
 
 
+def _bank_lane_env_suffix(lane: Optional[str]) -> str:
+    """`general:academic` -> `GENERAL_ACADEMIC`. Lane ids carry a colon and
+    a hyphen (`adult:lifestyle-potpourri`); neither is legal in an env var
+    name, so both fold to underscore."""
+    raw = str(lane or "").strip().upper()
+    out = []
+    for ch in raw:
+        out.append(ch if (ch.isalnum() or ch == "_") else "_")
+    return "".join(out).strip("_")
+
+
+def bank_replenish_enabled() -> bool:
+    """Whether the IN-SESSION background bank author runs
+    (WO-LILY-SUPPLY-001 S2).
+
+    DEFAULT OFF, deliberately. The replenisher is a live spend against the
+    xAI account on every session it runs in, and turning that on for every
+    room is an operator decision, not an implementation detail. The
+    out-of-session runner (`python3 scripts/bank_replenish.py`) tops the
+    bank from CI/cron with no session at all and needs no flag. Flip the
+    in-session job on with:
+
+      LILY_BANK_REPLENISH_ENABLED=1
+
+    Off, nothing is spawned at all: no task, no watermark read, no cost."""
+    return _get_bool("LILY_BANK_REPLENISH_ENABLED", False)
+
+
+def bank_target_depth(lane: Optional[str] = None) -> int:
+    """Servable rows the question bank holds PER LANE (a lane is one
+    deck×category slot of the rotation — see lily_bank_replenish.LANES).
+
+    Default 40. The measured bank on 2026-09-06 held 307 general and 141
+    adult active rows across 6 rotation lanes plus a long tail of legacy
+    categories, so 40 is roughly "the shallowest healthy lane, rounded" —
+    deep enough that a night of play cannot exhaust one lane, shallow
+    enough that topping every lane is a bounded authoring bill.
+
+    A per-lane override wins over the global one, so a lane the table
+    actually plays can run deep while a rarely-drawn one runs shallow:
+
+      LILY_BANK_TARGET_DEPTH=40
+      LILY_BANK_TARGET_DEPTH_ADULT_ADULT_KINK=20
+
+    Floors at 1 — a zero-depth lane is the empty shelf with a number on it."""
+    if lane:
+        suffix = _bank_lane_env_suffix(lane)
+        if suffix:
+            specific = _get_int(f"LILY_BANK_TARGET_DEPTH_{suffix}", -1)
+            if specific > 0:
+                return specific
+    return max(1, _get_int("LILY_BANK_TARGET_DEPTH", 40))
+
+
+def bank_replenish_ratio() -> float:
+    """Fraction of a lane's target depth that must be CONSUMED before the
+    background author fires for that lane — 0.40, the SAME watermark the
+    picture arsenal uses (arsenal_replenish_ratio), tracked per lane
+    independently.
+
+    A ratio rather than a count for the same reason it is a ratio there: a
+    hardcoded "fire at 16" silently becomes "fire when the lane is 80%
+    gone" the moment the operator halves the depth. Clamped to (0, 1]."""
+    raw = _get_float("LILY_BANK_REPLENISH_RATIO", 0.40)
+    if raw <= 0.0 or raw > 1.0:
+        return 0.40
+    return raw
+
+
+def bank_replenish_effort() -> Optional[str]:
+    """Reasoning effort for the BACKGROUND bank author (S2).
+
+    Deliberately a SEPARATE knob from adult_reasoning_effort(), which is
+    the live delivery-path tier and stays pinned at "medium" until the
+    operator rules otherwise. This one exists because the background
+    author is off the critical path: nobody is waiting on it, so effort is
+    a QUALITY dial here, not a latency dial.
+
+    It ships on the same value the live path uses ("medium") so this WO
+    changes no model behaviour on its own. THE REVERT PATH the operator
+    asked for is one variable:
+
+      LILY_BANK_REPLENISH_EFFORT=high
+
+    which raises the background author only — the live prefetch keeps
+    medium and the 20-39s first-token evidence that forced it there stays
+    irrelevant to a job no table is waiting on."""
+    raw = (_get("LILY_BANK_REPLENISH_EFFORT") or "").strip().lower()
+    if raw in ("low", "medium", "high"):
+        return raw
+    return adult_reasoning_effort()
+
+
+def bank_replenish_backoff_seconds() -> float:
+    """Base delay of the background author's exponential backoff, in
+    seconds (attempt N waits base * 2^(N-1)). Default 5s. A failing
+    provider must cost the bank a slow retry, never a hot loop — and never
+    anything at all on the delivery path, which does not await this job."""
+    return max(0.0, _get_float("LILY_BANK_REPLENISH_BACKOFF_SECONDS", 5.0))
+
+
+def bank_replenish_max_attempts() -> int:
+    """How many times one lane's authoring attempt is retried (with
+    backoff) before the lane is left for the next sweep. Default 3.
+    Floors at 1: zero attempts is a job that never runs."""
+    return max(1, _get_int("LILY_BANK_REPLENISH_MAX_ATTEMPTS", 3))
+
+
+def bank_replenish_interval_seconds() -> float:
+    """Seconds between watermark sweeps of the in-session background
+    author. Default 180s — slow on purpose: the bank is measured in
+    hundreds of rows and a sweep that fires every few seconds would spend
+    its life re-reading counts that cannot have moved."""
+    return max(5.0, _get_float("LILY_BANK_REPLENISH_INTERVAL_SECONDS", 180.0))
+
+
+def bank_replenish_max_new_per_run() -> int:
+    """Cap on rows one lane may bank in a single replenishment run.
+    Default 5. The cap is what keeps a lane that is far below target from
+    turning one watermark crossing into a hundred authoring calls; the
+    next sweep continues where this one stopped."""
+    return max(1, _get_int("LILY_BANK_REPLENISH_MAX_NEW", 5))
+
+
+def bank_replenish_dup_ratio() -> float:
+    """difflib ratio at which a freshly authored question counts as a
+    near-duplicate of an existing lane row (ARSENAL-SEED A5's check,
+    applied to text). Default 0.87 — lily_bank.DUP_FUZZY_RATIO, the
+    standing bank's own number, so the replenisher and the curation gate
+    agree on what "the same question" means. Clamped to (0, 1]."""
+    raw = _get_float("LILY_BANK_REPLENISH_DUP_RATIO", 0.87)
+    if raw <= 0.0 or raw > 1.0:
+        return 0.87
+    return raw
+
+
 def arsenal_real_images_enabled() -> bool:
     """Whether the 'real or imagined' format may be seeded.
 

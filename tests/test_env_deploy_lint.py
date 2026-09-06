@@ -405,3 +405,44 @@ def test_xai_api_key_is_forwarded_and_required():
     # not GitHub-secret existence — see module docstring SCOPE).
     assert "XAI_API_KEY" in _required_env_vars()
     assert "XAI_API_KEY" in _forwarded_env_vars()
+
+
+# ---------------------------------------------------------------------------
+# WO-LILY-SUPPLY-001 S2 — the supply lane's knobs, named explicitly.
+#
+# The bidirectional lint above already proves each of these is forwarded
+# (they have accessors and are not LOCAL_ONLY), but it proves it as a set
+# difference: drop all nine from deploy.yml AND add them to LOCAL_ONLY and
+# the lint stays green while the operator loses every way to change the
+# bank's depth, watermark, backoff and — the one the ruling turns on — the
+# background author's EFFORT without a redeploy. This names them, so that
+# trade has to be made deliberately.
+# ---------------------------------------------------------------------------
+
+BANK_REPLENISH_ENV = {
+    "LILY_BANK_REPLENISH_ENABLED",
+    "LILY_BANK_TARGET_DEPTH",
+    "LILY_BANK_REPLENISH_RATIO",
+    "LILY_BANK_REPLENISH_EFFORT",
+    "LILY_BANK_REPLENISH_BACKOFF_SECONDS",
+    "LILY_BANK_REPLENISH_MAX_ATTEMPTS",
+    "LILY_BANK_REPLENISH_INTERVAL_SECONDS",
+    "LILY_BANK_REPLENISH_MAX_NEW",
+    "LILY_BANK_REPLENISH_DUP_RATIO",
+}
+
+
+def test_bank_replenish_env_is_read_by_config():
+    missing = sorted(BANK_REPLENISH_ENV - _required_env_vars())
+    assert not missing, (
+        f"no lily_config accessor reads these supply-lane vars: {missing}"
+    )
+
+
+def test_bank_replenish_env_reaches_the_container():
+    missing = sorted(BANK_REPLENISH_ENV - _forwarded_env_vars())
+    assert not missing, (
+        f"deploy.yml does not deliver these supply-lane vars into the "
+        f"container: {missing} — the background author's depth/watermark/"
+        "effort knobs must be settable without a redeploy."
+    )
