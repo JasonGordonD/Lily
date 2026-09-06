@@ -834,8 +834,17 @@ Every model ID below was verified live on the funded keys before wiring.
   not be restored — on the non-streaming transport every live authoring
   call at `high` (16 of 16 across six sessions) hit the 20 s prefetch
   wall with no first byte, so questions arrived 20–45 s late. The
-  durable fix is a streaming transport whose wall applies to idle time,
-  not total generation (in flight).
+  durable fix landed as WO-LILY-STREAMING-REASONING-001: the transport
+  is STREAMED — it requests `stream: true` on the Responses API and
+  folds `response.output_text.delta` events (chat tiers:
+  `choices[0].delta.content` with `stream_options.include_usage`),
+  keeping reasoning-thread deltas out of the JSON.
+  `LILY_PREFETCH_TIMEOUT_SECONDS` is the IDLE wall between chunks,
+  `LILY_PREFETCH_TOTAL_BUDGET_SECONDS` the ceiling on the whole chain —
+  a long healthy answer is never cut at the per-call wall. Per call: one
+  `LILY_REASONING | STREAM | purpose= model= ttft_ms= total_ms= chunks=
+  chars= finish=` line and one `lily_llm_usage` row (ttft = first
+  content token; `timeout` / `cancelled:chars=<n>` on the failure paths).
 - **Tier-2 judge:** `grok-4.5` `medium`, structured and 12s-bounded; it
   proposes correctness only and never commits score.
 - **Vision / image correspondence:** `grok-4.5` handles player photo

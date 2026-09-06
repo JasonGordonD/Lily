@@ -47,6 +47,94 @@ and `on_transcript_event` with the live shape. Live receipt to pull: a
 `window_closed_at` on the next four-choice card answered "A", and a
 scored row with method=letter.
 
+## 2026-09-06 — WO-LILY-STREAMING-REASONING-001: the reasoning transport streams; the prefetch wall is an idle wall
+
+Operator ruling (verbatim): "medium effort now, streaming transport as the
+durable fix". Evidence: `lily_llm_usage` rows with purpose='reasoning' on
+2026-09-06 — 16 of 16 across six sessions ended at total_ms≈20001,
+ttft_ms null, finish_reason='cancelled'. The transport
+(`LilyReasoning._generate_grok_json`) was a NON-streaming POST: xAI only
+answers once the whole generation is done, so ttft tracked total and the
+20 s per-call wall (`LILY_PREFETCH_TIMEOUT_SECONDS`) measured TOTAL
+generation — every healthy-but-long authoring turn died at exactly the
+wall while the judge (small output, same key) returned in ~3.5 s.
+
+- **Streaming transport** (`lily_reasoning._lily_iter_sse`,
+  `_LilyStreamAccumulator`, `_generate_grok_json`). Both xAI endpoints
+  are requested with `stream: true` and consumed as Server-Sent Events
+  off `resp.content` — the `await resp.json()` read is gone. Chat
+  Completions (`grok-4.2` and other base tiers): `choices[0].delta.content`
+  concatenated, `stream_options: {"include_usage": true}` so the last
+  chunk before `data: [DONE]` carries usage, `finish_reason` from the
+  last chunk that states one; `delta.reasoning_content` is COUNTED and
+  never concatenated. Responses API (`grok-4.5`, the live reasoning
+  model, and the multi-agent tier): `response.output_text.delta`
+  concatenated; `response.reasoning_text.delta` /
+  `response.reasoning_summary_text.delta` excluded; usage + status off
+  `response.completed` / `response.done` / `response.incomplete`;
+  `response.failed` and `error` events raise. `response_format:
+  json_object` stays on the chat path; the concatenated content parses
+  through the unchanged `_shape_question` / `lily_parse_question_json`
+  path (fences stripped on the Responses path as before). A server that
+  ignores `stream` and answers `application/json` is consumed as one
+  document and logged `LILY_REASONING | STREAM_FALLBACK_JSON` — never
+  silently non-streaming.
+- **Wall semantics.** `timeout` on the transport is now an IDLE wall —
+  the longest silence tolerated between two chunks (default unchanged:
+  `LILY_PREFETCH_TIMEOUT_SECONDS` = 20 s), enforced in software around
+  every read plus aiohttp `sock_read`. The transport's own hard ceiling
+  is `total_timeout` (default `max(timeout,
+  LILY_PREFETCH_TOTAL_BUDGET_SECONDS)`, 45 s unchanged). The three
+  per-leg `asyncio.wait_for(..., prefetch_timeout_seconds())` walls in
+  `prefetch_question` — the exact source of the 20001 ms 'cancelled'
+  rows — are removed; the existing overall budget `wait_for` bounds the
+  stacked legs. No lily_config default changed; no new env knob (nothing
+  to forward in deploy.yml). Both accessors are still read at call time
+  (`tests/test_transition_reclaim.py::test_prefetch_walls_are_read_at_call_time`
+  now drives the wall inside the stream).
+- **The lily_llm_usage row.** ttft_ms = time to the FIRST CONTENT token
+  (null when none arrived — an HTTP error no longer reports a "ttft"
+  for its headers); total_ms = the full stream; prompt/completion tokens
+  from the usage chunk (null when the provider sent none);
+  finish_reason = the provider's last verdict (`stop` / `length` /
+  `completed` / `incomplete:<reason>`), `timeout` when the idle wall
+  fired, `cancelled:chars=<n>` when an outer wall killed the call — the
+  suffix says how many content chars had streamed, so an operator can
+  tell a dead stream (`chars=0`) from a live one cut short.
+- **Receipt (S1).** One `LILY_REASONING | STREAM | purpose= model=
+  ttft_ms= total_ms= chunks= chars= finish=` line per call, every
+  outcome (plus effort/transport/content_chunks/reasoning_chunks/walls).
+  Consumer: the row above and the operator SQL
+  `select purpose, ttft_ms, total_ms, finish_reason from lily_llm_usage
+  where purpose='reasoning' order by created_at desc limit 20;` — after
+  deploy, ttft_ms is non-null and total_ms < 20000 on healthy calls.
+- **Tests** — `tests/test_w8_streaming_reasoning.py` (10, failing-first:
+  10 of 10 RED on main — the fake response's `.json()` raises, so main's
+  body read fails every case): SSE chunks with 0.1 s gaps → ttft at the first
+  content delta, total at the end, usage captured, `stream`/
+  `stream_options` on the wire; the Responses stream for grok-4.5;
+  reasoning deltas excluded on both endpoints; a gap longer than the
+  idle wall → `timeout` row and the raise; the idle wall read from
+  config at call time; an outer cancel mid-stream → `cancelled:chars=26`;
+  the prefetch chain surviving a generation longer than the wall (the
+  live failure, reproduced and fixed); the STREAM receipt on success and
+  timeout; HTTP error with null ttft; the logged JSON fallback. Existing
+  fakes in `test_llm_usage_all_paths.py` / `test_xai_multi_agent.py`
+  now serve SSE; `test_failed_call_records_error_row_and_still_raises`
+  asserts the honest null ttft. No source-text tests.
+- **Live receipt (not run here — no xAI key in the build box):** after
+  deploy, one adult session with two prefetches; the SQL above must show
+  `finish_reason in ('completed','stop')`, `ttft_ms` non-null and
+  `total_ms < 20000` on the reasoning rows, and the session log must
+  carry the `LILY_REASONING | STREAM |` lines with `chunks>1`.
+- **Behavior notes.** Callers that passed an explicit `timeout=` keep it
+  as their idle wall; the arsenal author (ADULT_AUTHOR_TIMEOUT_SECONDS)
+  and the judge (12 s, still under its own outer `wait_for`) get the
+  45 s transport ceiling for total length. Multi-agent streaming on
+  `/responses` follows the Vercel xAI provider's verified event schema;
+  it is not live-verified on the multi-agent tier (the JSON fallback
+  above covers a tier that answers non-streaming).
+
 ## 2026-09-06 — Composition review of integ/w6: GO-WITH-FIXES, applied before main
 
 Reviewer verdict on 428bff1 (main 0bb3175 + WO-LILY-COMPOSITION-FOLLOWUP-001):

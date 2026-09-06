@@ -82,13 +82,39 @@ import asyncio
 import lily_config
 
 
+class _FakeContent:
+    """WO-LILY-STREAMING-REASONING-001: the transport streams SSE, so the
+    canned payload is served as the event stream a real server sends."""
+    def __init__(self, payload):
+        import json as _json
+        if "output" in payload:
+            text = payload["output"][0]["content"][0]["text"]
+            events = [
+                {"type": "response.output_text.delta", "delta": text},
+                {"type": "response.completed", "response": payload},
+            ]
+        else:
+            text = payload["choices"][0]["message"]["content"]
+            events = [
+                {"choices": [{"index": 0, "delta": {"content": text}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            ]
+        self._lines = []
+        for e in events:
+            self._lines += [b"data: " + _json.dumps(e).encode() + b"\n", b"\n"]
+        if "output" not in payload:
+            self._lines += [b"data: [DONE]\n", b"\n"]
+    async def readline(self):
+        return self._lines.pop(0) if self._lines else b""
+
+
 class _FakeResp:
+    content_type = "text/event-stream"
     def __init__(self, payload):
         self.status = 200
-        self._payload = payload
+        self.content = _FakeContent(payload)
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    async def json(self): return self._payload
     async def text(self): return ""
 
 

@@ -14,6 +14,7 @@ fake genai client and must produce exactly one row with the right fields.
 
 import asyncio
 import inspect
+import json
 import logging
 import sys
 from pathlib import Path
@@ -68,10 +69,53 @@ class _Sb:
         return _Q()
 
 
+def _sse_lines_for(body) -> list:
+    """WO-LILY-STREAMING-REASONING-001: the reasoning transport streams, so
+    a canned document is served as the SSE event stream a real server
+    would send for it (chat: delta + finish + usage chunks + [DONE];
+    Responses: output_text.delta + response.completed)."""
+    def _line(obj):
+        return b"data: " + json.dumps(obj).encode() + b"\n"
+
+    if "output" in body or "output_text" in body:
+        text = body.get("output_text") or "".join(
+            part.get("text") or ""
+            for item in body.get("output") or []
+            if item.get("type") == "message"
+            for part in item.get("content") or []
+        )
+        return [
+            _line({"type": "response.output_text.delta", "delta": text}), b"\n",
+            _line({"type": "response.completed", "response": body}), b"\n",
+        ]
+    choice = (body.get("choices") or [{}])[0]
+    text = (choice.get("message") or {}).get("content") or ""
+    lines = [
+        _line({"choices": [{"index": 0, "delta": {"content": text}}]}), b"\n",
+        _line({"choices": [{"index": 0, "delta": {},
+                            "finish_reason": choice.get("finish_reason")}]}),
+        b"\n",
+    ]
+    if body.get("usage"):
+        lines += [_line({"choices": [], "usage": body["usage"]}), b"\n"]
+    return lines + [b"data: [DONE]\n", b"\n"]
+
+
+class _FakeContent:
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    async def readline(self):
+        return self._lines.pop(0) if self._lines else b""
+
+
 class _FakeResp:
+    content_type = "text/event-stream"
+
     def __init__(self, body, status=200):
         self._body = body
         self.status = status
+        self.content = _FakeContent(_sse_lines_for(body) if body else [])
 
     async def __aenter__(self):
         return self
@@ -80,6 +124,7 @@ class _FakeResp:
         return False
 
     async def json(self, content_type=None):
+        # Still served for the vision transport (non-streaming by design).
         return self._body
 
     async def text(self):
@@ -560,7 +605,10 @@ def test_failed_call_records_error_row_and_still_raises(monkeypatch):
     assert len(sb.rows) == 1
     assert sb.rows[0]["finish_reason"] == "http_500"
     assert sb.rows[0]["purpose"] == "judge"
-    assert sb.rows[0]["ttft_ms"] is not None  # headers came back
+    # WO-LILY-STREAMING-REASONING-001: ttft is the first CONTENT token,
+    # and an error reply carries none — null is the honest value.
+    assert sb.rows[0]["ttft_ms"] is None
+    assert sb.rows[0]["total_ms"] is not None
 
 
 def test_assessment_row_carries_the_assessed_session(monkeypatch):

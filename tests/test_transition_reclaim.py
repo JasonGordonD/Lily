@@ -177,38 +177,80 @@ def test_prefetch_total_budget_bounds_stacked_stalls():
     assert sk.status_notes  # the honest "question machine failure" note
 
 
-def test_prefetch_walls_are_read_at_call_time():
+def test_prefetch_walls_are_read_at_call_time(monkeypatch):
     """Hygiene (HOTFIX-008): 82ad673 froze the lily_config wall accessors
     into module constants at import, so a live env change to either wall
     did nothing until the next deploy. The walls are read through the
     accessors at call time — patching an accessor AFTER lily_reasoning
     is imported must move the wall. Pinned on the per-call wall; the
     overall-budget accessor is pinned the same way by
-    test_prefetch_total_budget_bounds_stacked_stalls above."""
+    test_prefetch_total_budget_bounds_stacked_stalls above.
+
+    WO-LILY-STREAMING-REASONING-001 moved the per-call wall INTO the
+    transport as an idle wall between streamed chunks (the per-leg
+    wait_for that measured total generation is gone), so the hang now
+    lives in the stream: a provider that goes silent mid-answer must fail
+    the prefetch at the patched 0.2s, never at the 45s budget."""
     import lily_reasoning
+
+    class _Content:
+        def __init__(self):
+            self._lines = [
+                b'data: {"type":"response.output_text.delta","delta":"{"}\n',
+                b"\n",
+            ]
+
+        async def readline(self):
+            if self._lines:
+                return self._lines.pop(0)
+            await asyncio.sleep(60)      # the provider goes silent
+            return b""
+
+    class _Resp:
+        status = 200
+        content_type = "text/event-stream"
+
+        def __init__(self):
+            self.content = _Content()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def text(self):
+            return ""
+
+    class _Session:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def post(self, url, json=None, headers=None, timeout=None):
+            return _Resp()
+
+    monkeypatch.setattr(lily_config, "xai_api_key", lambda: "k")
+    monkeypatch.setattr(lily_config, "tavily_api_key", lambda: None)
+    monkeypatch.setattr(lily_reasoning.aiohttp, "ClientSession", _Session)
+    monkeypatch.setattr(lily_config, "prefetch_timeout_seconds", lambda: 0.2)
 
     reasoning = lily_reasoning.LilyReasoning.__new__(
         lily_reasoning.LilyReasoning
     )
-
-    async def _hang(*args, **kwargs):
-        await asyncio.sleep(60)
-
-    reasoning.generate_question = _hang
-
     sk = LilyScorekeeper("lily-1C53C6")
 
-    original_wall = lily_config.prefetch_timeout_seconds
-    lily_config.prefetch_timeout_seconds = lambda: 0.2
-    try:
-        async def _go():
-            return await asyncio.wait_for(
-                reasoning.prefetch_question(sk, "space", 2, []),
-                timeout=5.0,  # the 0.2s per-call wall must fire well first
-            )
-        result = asyncio.new_event_loop().run_until_complete(_go())
-    finally:
-        lily_config.prefetch_timeout_seconds = original_wall
+    async def _go():
+        return await asyncio.wait_for(
+            reasoning.prefetch_question(sk, "space", 2, []),
+            timeout=5.0,  # the 0.2s idle wall must fire well first
+        )
+    result = asyncio.new_event_loop().run_until_complete(_go())
 
     assert result is None
     assert sk.status_notes  # the honest "question machine failure" note

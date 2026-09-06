@@ -75,14 +75,16 @@ JUDGE_THINKING_LEVEL = "high"
 # Prefetch walls (lily-1C53C6, 30s -> 20s per call): at 30s per call the
 # generate -> verify -> choices chain could stack ~90s of dead wait
 # before PREFETCH_FAILED fired — the live q2 hang rode exactly two of
-# those stacked timeouts. 20s keeps margin over healthy-but-slow
-# authoring turns (grok-4.5 reasoning lanes routinely run double-digit
-# seconds); the overall budget is the real bound — no combination of
-# stalls can exceed it. Both walls are read through the lily_config
-# accessors (prefetch_timeout_seconds / prefetch_total_budget_seconds)
-# AT CALL TIME — never frozen into module constants at import — so a
-# live env change to either wall takes effect on the next prefetch
-# without a code deploy.
+# those stacked timeouts. WO-LILY-STREAMING-REASONING-001 (2026-09-06):
+# the per-call wall is now the transport's IDLE wall between streamed
+# chunks (a stalled provider still fails at 20s of silence; a long
+# healthy answer is no longer cut at 20s of total generation — 16/16
+# reasoning rows on 2026-09-06 died exactly there); the overall budget
+# is the real bound — no combination of stalls can exceed it. Both walls
+# are read through the lily_config accessors (prefetch_timeout_seconds /
+# prefetch_total_budget_seconds) AT CALL TIME — never frozen into module
+# constants at import — so a live env change to either wall takes effect
+# on the next prefetch without a code deploy.
 
 # xAI multi-agent transport (Engineering Note 2026-08-07): the
 # grok-*-multi-agent tier rejects the Chat Completions endpoint (HTTP 400
@@ -186,6 +188,189 @@ def _lily_extract_responses_text(data) -> str:
         if parts:
             return _lily_strip_json_fences("".join(parts))
     raise RuntimeError("xAI adult generation malformed Responses payload")
+
+
+# -- streaming transport (WO-LILY-STREAMING-REASONING-001) --------------------
+#
+# 2026-09-06 evidence: 16/16 purpose='reasoning' rows across six sessions
+# ended at total_ms≈20001, ttft_ms null, finish_reason='cancelled' — the
+# non-streaming POST only answers once the whole generation is done, so the
+# 20s prefetch wall measured TOTAL generation and killed every healthy-but-
+# long authoring turn. Streaming makes the wall an IDLE wall: the provider
+# starts sending deltas as soon as the answer begins, and a stall is a gap
+# between chunks, not a long answer. Both xAI endpoints stream Server-Sent
+# Events (`data: <json>` lines, `data: [DONE]` terminator on chat).
+
+async def _lily_iter_sse(resp, idle_timeout: Optional[float]):
+    """Yield the `data:` payload of each SSE event off an aiohttp response
+    body, enforcing `idle_timeout` BETWEEN reads (a gap longer than the wall
+    raises asyncio.TimeoutError — the stream stalled). Multi-line `data:`
+    events are joined per the SSE spec; comments (`:`), `event:`, `id:` and
+    `retry:` lines are skipped; `[DONE]` terminates. EOF flushes a trailing
+    event that arrived without its blank-line terminator."""
+    pending: list = []
+
+    def _flush() -> Optional[str]:
+        if not pending:
+            return None
+        payload = "\n".join(pending)
+        pending.clear()
+        return payload
+
+    while True:
+        read = resp.content.readline()
+        if idle_timeout is not None:
+            line = await asyncio.wait_for(read, timeout=idle_timeout)
+        else:
+            line = await read
+        if not line:
+            payload = _flush()
+            if payload is not None and payload.strip() != "[DONE]":
+                yield payload
+            return
+        s = line.decode("utf-8", "replace") if isinstance(line, bytes) else str(line)
+        s = s.rstrip("\r\n")
+        if not s:
+            payload = _flush()
+            if payload is None:
+                continue
+            if payload.strip() == "[DONE]":
+                return
+            yield payload
+            continue
+        if s.startswith(":"):
+            continue
+        if s.startswith("data:"):
+            pending.append(s[5:].lstrip(" "))
+
+
+class _LilyStreamAccumulator:
+    """Folds one SSE event at a time into the fields the receipt needs:
+    the CONTENT text (reasoning-thread deltas are counted but never
+    concatenated — json parsing must see only content), ttft at the first
+    content delta, usage from the terminal chunk, the provider's finish
+    verdict. Chat-completions chunks and Responses API events are both
+    understood; `feed` raises RuntimeError on a provider-signalled failure
+    (`response.failed` / `error`) after setting `finish`."""
+
+    _RESPONSES_TERMINAL = frozenset({
+        "response.completed", "response.done", "response.incomplete",
+        "response.failed",
+    })
+    _RESPONSES_REASONING = frozenset({
+        "response.reasoning_text.delta", "response.reasoning_summary_text.delta",
+    })
+
+    def __init__(self, responses_api: bool, t0: float):
+        self.responses_api = responses_api
+        self.t0 = t0
+        self.parts: list = []
+        self.chunks = 0            # SSE data events parsed
+        self.content_chunks = 0    # events that carried content text
+        self.reasoning_chunks = 0  # reasoning-thread deltas (excluded)
+        self.malformed = 0
+        self.ttft_ms: Optional[float] = None
+        self.tokens: tuple = (None, None)
+        self.finish: Optional[str] = None
+
+    @property
+    def chars(self) -> int:
+        return sum(len(p) for p in self.parts)
+
+    @property
+    def text(self) -> str:
+        joined = "".join(self.parts)
+        return _lily_strip_json_fences(joined) if self.responses_api else joined
+
+    def _content(self, delta: str) -> None:
+        if not delta:
+            return
+        if self.ttft_ms is None:
+            self.ttft_ms = round((time.monotonic() - self.t0) * 1000, 1)
+        self.parts.append(delta)
+        self.content_chunks += 1
+
+    def feed(self, payload: str) -> None:
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            self.malformed += 1
+            return
+        if not isinstance(obj, dict):
+            self.malformed += 1
+            return
+        self.chunks += 1
+        if self.responses_api:
+            self._feed_responses(obj)
+        else:
+            self._feed_chat(obj)
+
+    def _feed_chat(self, obj: dict) -> None:
+        choices = obj.get("choices") or []
+        c0 = choices[0] if choices and isinstance(choices[0], dict) else {}
+        delta = c0.get("delta") or {}
+        if isinstance(delta, dict):
+            content = delta.get("content")
+            if isinstance(content, str):
+                self._content(content)
+            if delta.get("reasoning_content"):
+                self.reasoning_chunks += 1
+        reason = c0.get("finish_reason")
+        if reason:
+            self.finish = str(reason)
+        if isinstance(obj.get("usage"), dict):
+            self.tokens = _lily_extract_usage(obj, False)
+        err = obj.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            self.finish = self.finish or "error:stream"
+            raise RuntimeError(f"xAI stream error: {str(err.get('message'))[:300]}")
+
+    def _feed_responses(self, obj: dict) -> None:
+        kind = obj.get("type")
+        if kind == "response.output_text.delta":
+            delta = obj.get("delta")
+            if isinstance(delta, str):
+                self._content(delta)
+            return
+        if kind in self._RESPONSES_REASONING:
+            self.reasoning_chunks += 1
+            return
+        if kind in self._RESPONSES_TERMINAL:
+            response = obj.get("response") or {}
+            if isinstance(response.get("usage"), dict):
+                self.tokens = _lily_extract_usage(response, True)
+            self.finish = _lily_extract_finish_reason(response, True) or self.finish
+            if kind == "response.failed":
+                err = (response.get("error") or {}).get("message") or "unknown"
+                self.finish = self.finish or "failed"
+                raise RuntimeError(f"xAI Responses stream failed: {str(err)[:300]}")
+            if not self.parts:
+                # The server closed without streaming deltas but the
+                # terminal event carries the message: take it whole.
+                try:
+                    self._content(_lily_extract_responses_text(response))
+                except RuntimeError:
+                    pass
+            return
+        if kind == "error":
+            self.finish = self.finish or "error:stream"
+            raise RuntimeError(
+                f"xAI stream error: {str(obj.get('message') or 'unknown')[:300]}"
+            )
+
+    def absorb_json_body(self, data) -> None:
+        """Non-streaming fallback: the server ignored `stream` and answered
+        with one JSON document. Fold it as if it were the terminal event."""
+        self.chunks += 1
+        self.tokens = _lily_extract_usage(data, self.responses_api)
+        self.finish = _lily_extract_finish_reason(data, self.responses_api)
+        text = (
+            _lily_extract_responses_text(data)
+            if self.responses_api
+            else _lily_extract_chat_text(data)
+        )
+        self._content(text or "")
+
 
 # Structured output (2026-07-14 P1 fix: QUESTION_PARSE_FAILED -> PREFETCH_FAILED):
 # Grok JSON mode carries no server-side schema, so these addenda pin the exact
@@ -386,6 +571,7 @@ class LilyReasoning:
         model: Optional[str] = None,
         purpose: str = "adult_reasoning",
         usage_session_id: Optional[str] = None,
+        total_timeout: Optional[float] = None,
     ) -> str:
         """Structured Grok transport for every question/reasoning lane.
 
@@ -399,17 +585,27 @@ class LilyReasoning:
         to share one global tier. None means "use the configured
         default".
 
+        WO-LILY-STREAMING-REASONING-001: the request STREAMS (`stream: true`,
+        SSE). `timeout` is an IDLE wall — the longest silence tolerated
+        between two chunks (default LILY_PREFETCH_TIMEOUT_SECONDS); a
+        healthy-but-long generation is never cut by it. `total_timeout`
+        is the transport's own hard ceiling on the whole call (default
+        max(timeout, LILY_PREFETCH_TOTAL_BUDGET_SECONDS)); the prefetch
+        chain's outer wait_for is the real bound on stacked legs.
+
         WO-LILY-LLM-USAGE-ALL-PATHS-001: EVERY call through here writes one
         lily_llm_usage row (fire-and-forget via lily_metrics) tagged with
         `purpose` and the model/effort ACTUALLY sent. `usage_session_id`
         overrides the bound session (the report sweep assessing another
-        session). Timing is measured around the transport: ttft_ms is the
-        time to the response HEADERS (first byte back — this transport is
-        NON-streaming, so the provider only answers once generation is
-        done and ttft tracks total_ms closely); total_ms is headers + body.
-        A failed call records too (finish_reason error:<class> / http_<n>
-        / timeout / cancelled) — a call that never came back is the row
-        the dead-air class needs most."""
+        session). ttft_ms is the time to the FIRST CONTENT TOKEN (null when
+        none ever arrived — headers alone are not a first token); total_ms
+        is the full stream; tokens come from the terminal usage chunk
+        (null when the provider sent none); finish_reason is the provider's
+        last verdict. A failed call records too — error:<class> / http_<n>
+        / timeout (the idle wall fired) / cancelled:chars=<n> (an outer
+        wall killed the call; the suffix says how far the stream got) —
+        a call that never came back is the row the dead-air class needs
+        most. One `LILY_REASONING | STREAM` receipt line per call."""
         key = lily_config.xai_api_key()
         if not key:
             raise RuntimeError(
@@ -419,6 +615,10 @@ class LilyReasoning:
         effort = effort or lily_config.adult_reasoning_effort()
         if timeout is None:
             timeout = lily_config.prefetch_timeout_seconds()
+        if total_timeout is None:
+            total_timeout = max(
+                float(timeout), lily_config.prefetch_total_budget_seconds()
+            )
         responses_api = _lily_uses_responses_api(model)
         # xAI's multi-agent tier (grok-*-multi-agent) does NOT support the
         # Chat Completions endpoint (HTTP 400 "Multi Agent requests are not
@@ -438,7 +638,7 @@ class LilyReasoning:
                 "role": "user",
                 "content": prompt + _MULTI_AGENT_JSON_DIRECTIVE,
             })
-            body = {"model": model, "input": supply}
+            body = {"model": model, "input": supply, "stream": True}
             if effort:
                 body["reasoning"] = {"effort": effort}
             if not _lily_is_multi_agent_model(model):
@@ -454,15 +654,17 @@ class LilyReasoning:
                 "messages": messages,
                 "response_format": {"type": "json_object"},
                 "max_tokens": max_tokens,
+                "stream": True,
+                # xAI: one extra usage-bearing chunk before `data: [DONE]`.
+                "stream_options": {"include_usage": True},
             }
             if effort:
                 body["reasoning_effort"] = effort
         # -- the receipt (WO-LILY-LLM-USAGE-ALL-PATHS-001) ------------------
         t0 = time.monotonic()
-        ttft_ms: Optional[float] = None
-        finish: Optional[str] = None
-        tokens = (None, None)
-        data = None
+        acc = _LilyStreamAccumulator(responses_api, t0)
+        transport = "responses" if responses_api else "chat"
+        http_finish: Optional[str] = None
 
         def _record(reason: Optional[str]) -> None:
             total_ms = round((time.monotonic() - t0) * 1000, 1)
@@ -470,12 +672,24 @@ class LilyReasoning:
                 purpose=purpose,
                 model=model,
                 effort=effort,
-                ttft_ms=ttft_ms,
+                ttft_ms=acc.ttft_ms,
                 total_ms=total_ms,
-                prompt_tokens=tokens[0],
-                completion_tokens=tokens[1],
+                prompt_tokens=acc.tokens[0],
+                completion_tokens=acc.tokens[1],
                 finish_reason=reason,
                 session_id=usage_session_id,
+            )
+            # The S1 receipt: one line per call, every outcome. Consumer =
+            # the lily_llm_usage row above + the operator's SQL
+            # (select purpose, ttft_ms, total_ms, finish_reason ...).
+            logger.info(
+                "LILY_REASONING | STREAM | purpose=%s model=%s ttft_ms=%s "
+                "total_ms=%s chunks=%d chars=%d finish=%s effort=%s "
+                "transport=%s content_chunks=%d reasoning_chunks=%d "
+                "idle_wall_s=%s total_wall_s=%s",
+                purpose, model, acc.ttft_ms, total_ms, acc.chunks, acc.chars,
+                reason, effort or "-", transport, acc.content_chunks,
+                acc.reasoning_chunks, timeout, total_timeout,
             )
 
         try:
@@ -484,44 +698,49 @@ class LilyReasoning:
                     endpoint,
                     json=body,
                     headers={"Authorization": f"Bearer {key}"},
-                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    # sock_read is aiohttp's own idle wall on the socket;
+                    # the software wall in _lily_iter_sse is the one the
+                    # receipt is written against (and the one tests drive).
+                    timeout=aiohttp.ClientTimeout(
+                        total=total_timeout, sock_read=timeout
+                    ),
                 ) as resp:
-                    # Headers are back: the first byte of the response.
-                    ttft_ms = round((time.monotonic() - t0) * 1000, 1)
                     if resp.status != 200:
                         err = await resp.text()
-                        finish = f"http_{resp.status}"
+                        http_finish = f"http_{resp.status}"
                         raise RuntimeError(
                             f"xAI adult generation {resp.status}: {err[:300]}"
                         )
-                    data = await resp.json()
-            tokens = _lily_extract_usage(data, responses_api)
-            finish = _lily_extract_finish_reason(data, responses_api)
+                    ctype = str(getattr(resp, "content_type", "") or "").lower()
+                    if "json" in ctype:
+                        # The server ignored `stream` and answered with one
+                        # document (a model tier without SSE support).
+                        # Explicitly logged as non-streaming — the wall
+                        # measured total generation on this call.
+                        transport = f"{transport}-json"
+                        logger.warning(
+                            "LILY_REASONING | STREAM_FALLBACK_JSON | purpose=%s "
+                            "model=%s content_type=%s — non-streaming reply, "
+                            "idle wall could not apply", purpose, model, ctype,
+                        )
+                        acc.absorb_json_body(await resp.json())
+                    else:
+                        async for payload in _lily_iter_sse(resp, timeout):
+                            acc.feed(payload)
         except asyncio.CancelledError:
-            _record("cancelled")
+            _record(f"cancelled:chars={acc.chars}")
             raise
         except asyncio.TimeoutError:
             _record("timeout")
             raise
         except Exception as e:
-            _record(finish or f"error:{type(e).__name__}")
+            _record(http_finish or acc.finish or f"error:{type(e).__name__}")
             raise
-        text = (
-            _lily_extract_responses_text(data)
-            if responses_api
-            else _lily_extract_chat_text(data)
-        )
+        text = acc.text
         if not (text or "").strip():
             _record("empty")
             raise RuntimeError(f"empty candidate from {model}")
-        _record(finish or "ok")
-        logger.info(
-            "LILY_REASONING | ADULT_GROK_GENERATION | purpose=%s model=%s "
-            "effort=%s transport=%s chars=%d ttft_ms=%s",
-            purpose, model, effort or "-",
-            "responses" if responses_api else "chat",
-            len(text), ttft_ms,
-        )
+        _record(acc.finish or "ok")
         return text
 
     async def approve_entity_image(
@@ -797,21 +1016,20 @@ class LilyReasoning:
             return from_bank
 
         async def _generate_verify_choices() -> dict:
-            question = await asyncio.wait_for(
-                self.generate_question(
-                    category, difficulty_tier,
-                    avoid_questions, multiple_choice=multiple_choice,
-                    avoid_answers=avoid_answers, effort=effort,
-                ),
-                timeout=lily_config.prefetch_timeout_seconds(),
+            # WO-LILY-STREAMING-REASONING-001: no per-leg TOTAL wall here
+            # any more. The per-call wall (prefetch_timeout_seconds) is
+            # the transport's IDLE wall between streamed chunks — it fires
+            # on a stalled provider, never on a long healthy answer — and
+            # the overall budget below bounds the stacked legs.
+            question = await self.generate_question(
+                category, difficulty_tier,
+                avoid_questions, multiple_choice=multiple_choice,
+                avoid_answers=avoid_answers, effort=effort,
             )
             if question is None:
                 raise RuntimeError("question generation returned unparseable JSON")
             pre_verify_answer = str(question.get("canonical_answer", ""))
-            ok, reason = await asyncio.wait_for(
-                self.verify_question(question),
-                timeout=lily_config.prefetch_timeout_seconds(),
-            )
+            ok, reason = await self.verify_question(question)
             if not ok:
                 raise RuntimeError(f"verification failed: {reason}")
             if multiple_choice and not lily_valid_choices(question):
@@ -833,10 +1051,7 @@ class LilyReasoning:
                             break
                 # Still invalid (missing / malformed / unswappable):
                 # synthesize distractors; failure degrades to freeform.
-                await asyncio.wait_for(
-                    self.ensure_choices(question),
-                    timeout=lily_config.prefetch_timeout_seconds(),
-                )
+                await self.ensure_choices(question)
             return question
 
         try:

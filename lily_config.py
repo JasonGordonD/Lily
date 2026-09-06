@@ -135,16 +135,19 @@ def live_preemptive_enabled() -> bool:
 
 
 def prefetch_timeout_seconds() -> float:
-    """Per-call wall for question authoring/verification/distractors
-    (lily-1C53C6: 30s walls stacked ~90s of dead wait). Keep above the
-    authoring lane's measured p95 — cutting healthy-but-slow generation
-    converts latency into supply failures."""
+    """Per-call IDLE wall for question authoring/verification/distractors
+    (lily-1C53C6: 30s walls stacked ~90s of dead wait). Since
+    WO-LILY-STREAMING-REASONING-001 the reasoning transport streams, so
+    this is the longest silence tolerated BETWEEN two chunks — a stalled
+    provider fails here; a long healthy answer does not (it is bounded by
+    prefetch_total_budget_seconds instead)."""
     return max(5.0, _get_float("LILY_PREFETCH_TIMEOUT_SECONDS", 20.0))
 
 
 def prefetch_total_budget_seconds() -> float:
     """Overall bound across the whole prefetch chain (generate -> verify ->
-    distractors) — the real cap on stacked stalls."""
+    distractors) — the real cap on stacked stalls, and since the transport
+    streams, the only cap on total generation length per leg."""
     return max(10.0, _get_float("LILY_PREFETCH_TOTAL_BUDGET_SECONDS", 45.0))
 
 
