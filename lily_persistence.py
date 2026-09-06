@@ -626,28 +626,164 @@ async def lily_log_addressee(
             return None
 
 
+# WO-LILY-LLM-USAGE-ALL-PATHS-001: columns added AFTER migration 026 that an
+# older environment may lack. The writer drops them on a schema-cache
+# column error (PGRST204) and retries ONCE, so a row still lands without
+# the optional field instead of the whole receipt vanishing.
+_LLM_USAGE_OPTIONAL_COLUMNS = ("effort",)
+# Process-level memo: once the effort column is proven absent the key is
+# dropped up front (one retry per process, not one per call).
+_llm_usage_absent_columns: set = set()
+# Bounded WARNING cadence for a dead usage lane (db down for a whole
+# session): the first few failures warn in full, then every 100th — the
+# per-session counter on LilyMetricsCollector carries the true total.
+_llm_usage_failure_count = 0
+_LLM_USAGE_WARN_FIRST = 10
+_LLM_USAGE_WARN_EVERY = 100
+
+
+def _lily_llm_usage_column_error(exc: Exception, column: str) -> bool:
+    """True when `exc` is PostgREST's missing-column error for `column`
+    (PGRST204: "Could not find the 'effort' column of 'lily_llm_usage' in
+    the schema cache"). Message-based by necessity — supabase-py raises a
+    generic APIError."""
+    msg = str(exc)
+    if not msg:
+        return False
+    return ("PGRST204" in msg or "column" in msg.lower()) and (
+        f"'{column}'" in msg or f'"{column}"' in msg or f" {column} " in msg
+    )
+
+
+def _lily_llm_usage_failure_level() -> int:
+    """WARNING for the first _LLM_USAGE_WARN_FIRST failures and every
+    _LLM_USAGE_WARN_EVERY-th after; DEBUG between so a dead lane can't
+    flood a session's log while still never going silent (S3)."""
+    n = _llm_usage_failure_count
+    if n <= _LLM_USAGE_WARN_FIRST or n % _LLM_USAGE_WARN_EVERY == 0:
+        return logging.WARNING
+    return logging.DEBUG
+
+
+async def _lily_insert_llm_usage_row(supabase, row: dict) -> bool:
+    """The one lily_llm_usage insert. Returns True iff a row landed.
+    Fail-open: never raises. Missing optional column -> drop + retry once
+    (memoized per process); any other failure -> WARNING (bounded cadence)
+    and False, so the caller can COUNT it (S2: the receipt says when the
+    receipt failed)."""
+    global _llm_usage_failure_count
+    if supabase is None or not row:
+        return False
+    row = {
+        k: v for k, v in row.items() if k not in _llm_usage_absent_columns
+    }
+
+    def _insert(payload):
+        return supabase.table("lily_llm_usage").insert(payload).execute()
+
+    try:
+        await asyncio.to_thread(lambda: _insert(row))
+        return True
+    except Exception as e:
+        missing = [
+            c for c in _LLM_USAGE_OPTIONAL_COLUMNS
+            if c in row and _lily_llm_usage_column_error(e, c)
+        ]
+        if not missing:
+            _llm_usage_failure_count += 1
+            logger.log(
+                _lily_llm_usage_failure_level(),
+                "LILY_LLM_USAGE | WRITE_FAILED | purpose=%s session=%s "
+                "failures=%d error_class=%s error=%s",
+                row.get("purpose"), row.get("session_id"),
+                _llm_usage_failure_count, type(e).__name__, str(e)[:300],
+            )
+            return False
+        logger.warning(
+            "LILY_LLM_USAGE | COLUMN_ABSENT | %s — migration "
+            "027_lily_llm_usage_effort not applied here; retrying without "
+            "it (this process drops the key from now on): %s",
+            ",".join(missing), str(e)[:200],
+        )
+        _llm_usage_absent_columns.update(missing)
+        retry = {k: v for k, v in row.items() if k not in missing}
+        try:
+            await asyncio.to_thread(lambda: _insert(retry))
+            return True
+        except Exception as e2:
+            _llm_usage_failure_count += 1
+            logger.log(
+                _lily_llm_usage_failure_level(),
+                "LILY_LLM_USAGE | WRITE_FAILED | purpose=%s session=%s "
+                "failures=%d (retry without %s) error_class=%s error=%s",
+                row.get("purpose"), row.get("session_id"),
+                _llm_usage_failure_count, ",".join(missing),
+                type(e2).__name__, str(e2)[:300],
+            )
+            return False
+
+
+async def lily_record_llm_call(
+    supabase: SupabaseClient,
+    *,
+    session_id: str,
+    purpose: str,
+    model: Optional[str],
+    effort: Optional[str],
+    ttft_ms: Optional[float],
+    total_ms: Optional[float],
+    prompt_tokens: Optional[int],
+    completion_tokens: Optional[int],
+    finish_reason: Optional[str],
+    phase: Optional[str],
+    utterance_id: Optional[str] = None,
+    empty_stop: Optional[bool] = None,
+) -> bool:
+    """THE writer contract for lily_llm_usage (WO-LILY-LLM-USAGE-ALL-PATHS-
+    001): one row per LLM call on EVERY path — vocal, adult_vocal,
+    reasoning, adult_reasoning, judge, assessment, vision, grounding,
+    arsenal_gen — with purpose, model, effort, ttft_ms and total_ms taken
+    from the ACTUAL call (never re-read from config later).
+
+    Fire-and-forget like the 026 writer (callers schedule it, never await
+    it on a hot path), but NOT silent: a failure logs at WARNING (bounded
+    cadence) and returns False so LilyMetricsCollector can count it into
+    `llm_usage_write_failures` for the session report. Fail-open on the
+    `effort` column being absent (older env): drop it, retry once, warn.
+
+    Returns True iff a row landed."""
+    if supabase is None:
+        return False
+    row = {
+        "session_id": session_id,
+        "utterance_id": utterance_id,
+        "phase": phase,
+        "model": model,
+        "purpose": purpose,
+        "effort": effort,
+        "ttft_ms": ttft_ms,
+        "total_ms": total_ms,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "finish_reason": finish_reason,
+        # Column is NOT NULL DEFAULT false; None here means "not an
+        # empty-STOP verdict lane" — write the default explicitly.
+        "empty_stop": bool(empty_stop) if empty_stop is not None else False,
+    }
+    return await _lily_insert_llm_usage_row(supabase, row)
+
+
 async def lily_write_llm_usage(
     supabase: SupabaseClient,
     row: dict,
 ) -> None:
-    """Fire-and-forget insert into lily_llm_usage (migration 026). One row
-    per vocal LLM call: token / latency accounting plus the empty-STOP finish
-    flag the 2026-08-14 dead-air diagnosis needed and could not read from the
-    database (usage lived in logs only).
-
-    FAIL-OPEN by contract — a usage-write failure, including PGRST205 when
-    migration 026 is not yet applied in an environment, is swallowed to debug
-    and never surfaces into the live session or the hot path. The caller
-    schedules this without awaiting, so the cross-region round trip never
-    blocks the audio pipeline."""
+    """Legacy raw-row writer (migration 026 shape). Kept for callers that
+    already hold a full row; routes through the same fail-open insert as
+    lily_record_llm_call, so failures now WARN (bounded) instead of being
+    swallowed at debug. New call sites use lily_record_llm_call."""
     if supabase is None or not row:
         return
-    try:
-        await asyncio.to_thread(
-            lambda: supabase.table("lily_llm_usage").insert(row).execute()
-        )
-    except Exception as e:
-        logger.debug("lily_write_llm_usage error: %s", e)
+    await _lily_insert_llm_usage_row(supabase, row)
 
 
 async def lily_update_addressee_label(

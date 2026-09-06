@@ -23,12 +23,67 @@ WO-LILY-STT-001 Q2's incoming-quality signals.
 
 Duck-typed and fully defensive — a missing key or unexpected shape is
 skipped, never raised, so a metrics hiccup can't touch a live session.
+
+WO-LILY-LLM-USAGE-ALL-PATHS-001 — one lily_llm_usage row per LLM call on
+EVERY path. The collector is the single scheduling seam for the durable
+per-call receipt:
+
+  * `wire_llm(llm, purpose=...)` subscribes one LLM COMPONENT's
+    `metrics_collected` and pins that component's identity (purpose, model,
+    effort read from its constructor opts) onto every event it emits — so
+    a swapped vocal LLM (adult_vocal) attributes its own rows and an
+    in-flight call on the old component still lands under the old one.
+  * `record_llm_call(...)` schedules `lily_persistence.lily_record_llm_call`
+    fire-and-forget and COUNTS failures into `llm_usage_write_failures`
+    (bounded) so the session report carries the receipt lane's own health.
+  * The module-level `record_llm_call(...)` routes to the collector bound
+    with `set_current_collector` — the seam the off-path transports
+    (reasoning / judge / assessment / vision / grounding / arsenal_gen)
+    call without holding any session object. One collector per process
+    (LiveKit runs one job per process); a call with no bound collector is
+    a no-op that returns False.
 """
 
 import asyncio
 import logging
+from typing import Optional
 
 logger = logging.getLogger("lily_metrics")
+
+# Purpose vocabulary for lily_llm_usage.purpose (the operator's contract:
+# "a row per LLM call with purpose, model, effort, ttft_ms, total_ms").
+LLM_PURPOSES = (
+    "vocal",            # framework vocal LLM (AgentSession lane)
+    "adult_vocal",      # a swapped-in adult vocal LLM wired via wire_llm
+    "reasoning",        # question authoring / verification / distractors
+    "adult_reasoning",  # bare Grok JSON transport default (adult config)
+    "judge",            # Tier-2 adjudication
+    "assessment",       # session report assessment
+    "vision",           # Grok vision (describe / content gate)
+    "grounding",        # Gemini google_search / url_context grounding
+    "arsenal_gen",      # standing picture-arsenal author + image gate
+)
+
+_USAGE_FAILURE_CAP = 10_000
+
+
+def _resolve(value):
+    """A usage-context field is a value or a zero-arg callable (the session
+    id / phase / client are read lazily at record time)."""
+    return value() if callable(value) else value
+
+
+def _llm_identity(llm) -> tuple:
+    """(model, effort) off an LLM component's constructor opts — the ACTUAL
+    call arguments, not a config accessor re-read later. Effort is None
+    unless the plugin was built with a string reasoning_effort (the
+    framework's NotGiven sentinel is not a string)."""
+    opts = getattr(llm, "_opts", None)
+    model = getattr(opts, "model", None) or getattr(llm, "model", None)
+    effort = getattr(opts, "reasoning_effort", None)
+    if not isinstance(effort, str):
+        effort = None
+    return (model if isinstance(model, str) else None), effort
 
 
 def _pct(values, q):
@@ -93,15 +148,160 @@ class LilyMetricsCollector:
         # the finish verdict. None sink -> persistence off (tests, no db).
         self._usage_sink = None
         self._finish_states = {}  # speech_id -> (finish_reason, empty_stop)
+        # WO-LILY-LLM-USAGE-ALL-PATHS-001: the durable-receipt lane's own
+        # accounting. Context = {supabase, session_id, phase} (values or
+        # zero-arg callables) bound once from the entrypoint; rows scheduled
+        # and write failures are counted so the session report can say
+        # when the receipt itself failed (S2).
+        self._usage_context = None
+        self._usage_rows_scheduled = 0
+        self._usage_write_failures = 0
 
     def set_usage_sink(self, sink) -> None:
-        """Install the durable per-call usage sink: a callable taking one
-        fields dict (utterance_id, ttft_ms, total_ms, prompt_tokens,
-        completion_tokens, finish_reason, empty_stop). Set once from the
-        entrypoint with the supabase + session context in scope; the sink
-        enriches with session_id/phase/model/purpose and schedules the
-        fire-and-forget write. None disables persistence."""
+        """Install a per-call usage sink: a callable taking one fields dict
+        (utterance_id, ttft_ms, total_ms, prompt_tokens, completion_tokens,
+        finish_reason, empty_stop, purpose, model, effort). When a sink is
+        set it REPLACES the collector's own scheduling (record_llm_call) for
+        the framework-LLM path — a test seam and an override hook. None
+        (the default) means collect_llm_call records through the bound
+        usage context directly."""
         self._usage_sink = sink
+
+    # -- WO-LILY-LLM-USAGE-ALL-PATHS-001: durable per-call receipt lane ----
+
+    def bind_usage_context(self, *, supabase, session_id, phase=None) -> None:
+        """Bind the session context every durable row needs. Each field is a
+        value or a zero-arg callable resolved at record time (the supabase
+        client and ui_phase live on the game object and can change)."""
+        self._usage_context = {
+            "supabase": supabase, "session_id": session_id, "phase": phase,
+        }
+
+    @property
+    def llm_usage_write_failures(self) -> int:
+        """Rows whose durable write failed this session (bounded)."""
+        return self._usage_write_failures
+
+    @property
+    def llm_usage_rows_scheduled(self) -> int:
+        return self._usage_rows_scheduled
+
+    def _note_usage_write_failure(self, reason) -> None:
+        if self._usage_write_failures < _USAGE_FAILURE_CAP:
+            self._usage_write_failures += 1
+        # The writer already logged the WARNING with the error detail; this
+        # is the counter's own trace so a session log can be grepped for
+        # the running total.
+        logger.debug(
+            "LILY_METRICS | USAGE_WRITE_FAILED | failures=%d reason=%s",
+            self._usage_write_failures, reason,
+        )
+
+    def _on_usage_write_done(self, task) -> None:
+        try:
+            if task.cancelled():
+                self._note_usage_write_failure("cancelled")
+                return
+            exc = task.exception()
+            if exc is not None:
+                self._note_usage_write_failure(type(exc).__name__)
+                return
+            if task.result() is not True:
+                self._note_usage_write_failure("insert_failed")
+        except Exception as e:  # never let a callback raise into the loop
+            logger.debug("LILY_METRICS | USAGE_DONE_CB | %s", e)
+
+    def record_llm_call(
+        self,
+        *,
+        purpose: str,
+        model: Optional[str],
+        effort: Optional[str],
+        ttft_ms: Optional[float],
+        total_ms: Optional[float],
+        prompt_tokens: Optional[int] = None,
+        completion_tokens: Optional[int] = None,
+        finish_reason: Optional[str] = None,
+        utterance_id: Optional[str] = None,
+        empty_stop: Optional[bool] = None,
+        session_id: Optional[str] = None,
+        phase: Optional[str] = None,
+    ) -> bool:
+        """Schedule ONE durable lily_llm_usage row, fire-and-forget. Never
+        raises; returns True iff a write was scheduled. `session_id` /
+        `phase` default to the bound context (the report sweep assessing
+        ANOTHER session passes its own). Failures — including "no event
+        loop" and a client that is None at record time — are counted."""
+        ctx = self._usage_context
+        if ctx is None:
+            return False
+        try:
+            import lily_persistence  # lazy: keeps this module import-light
+
+            sb = _resolve(ctx.get("supabase"))
+            if sb is None:
+                return False
+            sid = session_id or _resolve(ctx.get("session_id"))
+            ph = phase if phase is not None else _resolve(ctx.get("phase"))
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._note_usage_write_failure("no_running_loop")
+            return False
+        except Exception as e:
+            self._note_usage_write_failure(type(e).__name__)
+            logger.warning("LILY_METRICS | USAGE_SCHEDULE_FAILED | %s", e)
+            return False
+        try:
+            task = loop.create_task(lily_persistence.lily_record_llm_call(
+                sb,
+                session_id=sid,
+                purpose=purpose,
+                model=model,
+                effort=effort,
+                ttft_ms=ttft_ms,
+                total_ms=total_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                finish_reason=finish_reason,
+                phase=ph,
+                utterance_id=utterance_id,
+                empty_stop=empty_stop,
+            ))
+            task.add_done_callback(self._on_usage_write_done)
+            self._usage_rows_scheduled += 1
+            return True
+        except Exception as e:
+            self._note_usage_write_failure(type(e).__name__)
+            logger.warning("LILY_METRICS | USAGE_SCHEDULE_FAILED | %s", e)
+            return False
+
+    def wire_llm(self, llm, *, purpose: str = "vocal",
+                 model: Optional[str] = None,
+                 effort: Optional[str] = None) -> dict:
+        """Subscribe one LLM COMPONENT's `metrics_collected` and pin its
+        identity (purpose + model + effort from ITS constructor opts) onto
+        every event it emits. THE seam for the vocal lane and any swapped
+        component (adult_vocal): call it on the new LLM at the swap site
+        and its turns write their own rows. Returns the identity dict."""
+        opt_model, opt_effort = _llm_identity(llm)
+        ident = {
+            "purpose": purpose,
+            "model": model or opt_model,
+            "effort": effort or opt_effort,
+        }
+        # collect_llm_call_soon, not collect_llm_call: the framework's
+        # sibling subscriber stamps speech_id onto the event in place, and
+        # emitter subscriber order is a coin flip — the deferred fold
+        # always sees the stamp (wave-1 review, HIGH finding).
+        llm.on(
+            "metrics_collected",
+            lambda m, _ident=ident: self.collect_llm_call_soon(m, _ident),
+        )
+        logger.info(
+            "LILY_METRICS | LLM_WIRED | purpose=%s model=%s effort=%s",
+            ident["purpose"], ident["model"], ident["effort"],
+        )
+        return ident
 
     def note_finish_state(self, speech_id, finish_reason, empty_stop) -> None:
         """Stash a call's finish verdict for the next collect_llm_call fold
@@ -151,7 +351,7 @@ class LilyMetricsCollector:
         except Exception as e:
             logger.warning("LILY_METRICS | TURN_SKIPPED | %s", e)
 
-    def collect_llm_call_soon(self, m) -> None:
+    def collect_llm_call_soon(self, m, identity=None) -> None:
         """Fold one per-call LLMMetrics, DEFERRED one event-loop tick
         (wave-1 review finding, HIGH): the framework's own subscriber on
         the same emitter stamps speech_id onto the event IN PLACE
@@ -162,17 +362,23 @@ class LilyMetricsCollector:
         whole emit pass, so the stamp always lands first. Falls back to an
         immediate fold when no loop is running (tests, teardown)."""
         try:
-            asyncio.get_running_loop().call_soon(self.collect_llm_call, m)
+            asyncio.get_running_loop().call_soon(
+                self.collect_llm_call, m, identity
+            )
         except RuntimeError:
-            self.collect_llm_call(m)
+            self.collect_llm_call(m, identity)
 
-    def collect_llm_call(self, m) -> None:
+    def collect_llm_call(self, m, identity=None) -> None:
         """Fold one per-call LLMMetrics from the LLM COMPONENT's
         `metrics_collected` event (HOTFIX-007 Y1c). The component-level
         event is first-class at 1.6.8 — the deprecation the U3(b) audit
         flagged is only on AgentSession.on("metrics_collected"), which we
         still avoid. Emits one INFO line per call so a live session's log
-        answers "is the prompt prefix cache-hitting?" without a redeploy."""
+        answers "is the prompt prefix cache-hitting?" without a redeploy.
+
+        `identity` is the {purpose, model, effort} dict wire_llm pinned on
+        the emitting component; None (legacy subscription) records as a
+        plain "vocal" call with unknown model/effort."""
         if m is None:
             return
         try:
@@ -218,12 +424,15 @@ class LilyMetricsCollector:
             # finish verdict (empty-STOP) rides the state stashed by
             # llm_node's guard for this speech_id; default is a plain finish.
             # Inside this try, so a sink raise is fail-open like the fold.
-            if self._usage_sink is not None:
+            # Nothing here runs before the first token — the framework
+            # emits metrics_collected AFTER the call completes.
+            if self._usage_sink is not None or self._usage_context is not None:
                 finish_reason, empty_stop = self._finish_states.pop(
                     speech, (None, False)
                 )
                 duration = g("duration")
-                self._usage_sink({
+                ident = identity or {}
+                fields = {
                     "utterance_id": speech,
                     "ttft_ms": (
                         _ms(ttft) if isinstance(ttft, (int, float)) else None
@@ -236,7 +445,14 @@ class LilyMetricsCollector:
                     "completion_tokens": completion,
                     "finish_reason": finish_reason,
                     "empty_stop": empty_stop,
-                })
+                    "purpose": ident.get("purpose") or "vocal",
+                    "model": ident.get("model"),
+                    "effort": ident.get("effort"),
+                }
+                if self._usage_sink is not None:
+                    self._usage_sink(fields)
+                else:
+                    self.record_llm_call(**fields)
         except Exception as e:
             logger.warning("LILY_METRICS | LLM_CALL_SKIPPED | %s", e)
 
@@ -406,4 +622,52 @@ class LilyMetricsCollector:
                 "used": self._preemptive_used,
                 "invalidated": self._preemptive_invalidated,
             }
+        # WO-LILY-LLM-USAGE-ALL-PATHS-001: the receipt lane's own health is
+        # a row whenever the lane is live (context bound) or anything was
+        # attempted — a session with 0 failures says so explicitly.
+        if (
+            self._usage_context is not None
+            or self._usage_rows_scheduled
+            or self._usage_write_failures
+        ):
+            out["llm_usage"] = {
+                "rows_scheduled": self._usage_rows_scheduled,
+                "llm_usage_write_failures": self._usage_write_failures,
+            }
         return out
+
+
+# ---------------------------------------------------------------------------
+# Module-level seam for the off-path transports (WO-LILY-LLM-USAGE-ALL-
+# PATHS-001). lily_reasoning / lily_vision / lily_search / lily_assessment /
+# lily_arsenal_gen hold no session object; they call record_llm_call here
+# and the entrypoint binds the session's collector once. One collector per
+# process — LiveKit runs one job per process, and the standalone seeding
+# job (lily_arsenal_seed) binds nothing, so its calls are no-ops.
+# ---------------------------------------------------------------------------
+
+_current_collector: Optional[LilyMetricsCollector] = None
+
+
+def set_current_collector(collector: Optional[LilyMetricsCollector]) -> None:
+    """Bind (or with None, unbind) the process's usage collector."""
+    global _current_collector
+    _current_collector = collector
+
+
+def current_collector() -> Optional[LilyMetricsCollector]:
+    return _current_collector
+
+
+def record_llm_call(**fields) -> bool:
+    """Route one off-path LLM call receipt to the bound collector (see
+    LilyMetricsCollector.record_llm_call for the fields). Never raises;
+    False when no collector is bound or the write was not scheduled."""
+    c = _current_collector
+    if c is None:
+        return False
+    try:
+        return c.record_llm_call(**fields)
+    except Exception as e:
+        logger.warning("LILY_METRICS | RECORD_LLM_CALL_FAILED | %s", e)
+        return False

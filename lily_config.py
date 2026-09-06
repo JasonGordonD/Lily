@@ -12,7 +12,14 @@ import os
 from typing import Optional
 
 
+# WO-LILY-LLM-USAGE-ALL-PATHS-001: when effective_snapshot() is tracing an
+# accessor, every env name it reads is appended here (None = not tracing).
+_snapshot_trace: Optional[list] = None
+
+
 def _get(name: str, default: Optional[str] = None) -> Optional[str]:
+    if _snapshot_trace is not None:
+        _snapshot_trace.append(name)
     value = os.environ.get(name)
     if value is None or value == "":
         return default
@@ -1467,3 +1474,117 @@ def arsenal_real_images_enabled() -> bool:
     if raw in ("1", "true", "yes", "on"):
         return True
     return bool(exa_api_key())
+
+
+# ---------------------------------------------------------------------------
+# Build identity + effective-config receipt (WO-LILY-LLM-USAGE-ALL-PATHS-001)
+# ---------------------------------------------------------------------------
+
+def git_sha() -> Optional[str]:
+    """The deployed commit. Baked into the image by the Dockerfile
+    (ARG/ENV LILY_GIT_SHA) and forwarded as a runtime env by deploy.yml
+    from ${{ github.sha }}. None when neither path set it (local runs)."""
+    return _get("LILY_GIT_SHA")
+
+
+def build_run_id() -> Optional[str]:
+    """The GitHub Actions run that deployed this build (deploy.yml forwards
+    GITHUB_RUN_ID from ${{ github.run_id }}). None outside a deploy."""
+    return _get("GITHUB_RUN_ID")
+
+
+# Never snapshot these. Matched as SUBSTRINGS against both the accessor
+# name and every env var name the accessor read — an accessor that reads
+# a secret is excluded even if its own name looks innocent. Explicit and
+# tested (tests/test_config_snapshot.py); extend it, never relax it.
+SNAPSHOT_DENYLIST = (
+    "KEY",     # every *_API_KEY and SUPABASE_SERVICE_ROLE_KEY
+    "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL",
+    "VOICE",   # ElevenLabs voice ids (LILY_VOICE_*, LILY_VOICE_ID)
+    "URL",     # LIVEKIT_URL / SUPABASE_URL / XAI base url
+)
+# Accessors whose NAME trips the denylist but whose VALUE is a bare
+# presence bool (never the secret) — allowed explicitly.
+_SNAPSHOT_PRESENCE_ALLOW = ("google_api_key_present",)
+
+
+def _snapshot_denied(accessor_name: str, env_names: list) -> bool:
+    if accessor_name in _SNAPSHOT_PRESENCE_ALLOW:
+        return False
+    probe = [accessor_name.upper()] + [n.upper() for n in env_names]
+    return any(d in p for d in SNAPSHOT_DENYLIST for p in probe)
+
+
+def effective_snapshot() -> dict:
+    """The DEPLOYED configuration, as a receipt: every public accessor in
+    this module that reads an env var, name -> the value it resolves to
+    RIGHT NOW (env override or in-code default), minus everything on
+    SNAPSHOT_DENYLIST. The operator has no other way to read a LiveKit
+    Cloud container's env from outside; the integrator persists this as
+    `config_snapshot` in lily_sessions.metadata.
+
+      values         accessor name -> resolved value (json-safe scalars)
+      env_overrides  the non-secret env names actually SET in this
+                     process (so override-vs-default is visible)
+      git_sha        deployed commit (LILY_GIT_SHA), omitted when unset
+      build_run_id   deploy run (GITHUB_RUN_ID), omitted when unset
+
+    Accessors that take a required argument are skipped; an accessor that
+    raises (a _require boot key with no env) is skipped too — the
+    snapshot never fails a session. Pure reads: no accessor here has side
+    effects beyond os.environ lookups."""
+    global _snapshot_trace
+    import inspect
+
+    values: dict = {}
+    overrides: set = set()
+    module = globals()
+    for name in sorted(module):
+        fn = module[name]
+        if (
+            name.startswith("_")
+            or not inspect.isfunction(fn)
+            or fn.__module__ != __name__
+            or name in ("effective_snapshot",)
+        ):
+            continue
+        try:
+            params = inspect.signature(fn).parameters.values()
+        except (TypeError, ValueError):
+            continue
+        if any(
+            p.default is inspect.Parameter.empty
+            and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+            for p in params
+        ):
+            continue
+        trace: list = []
+        _snapshot_trace = trace
+        try:
+            value = fn()
+        except Exception:
+            continue
+        finally:
+            _snapshot_trace = None
+        if not trace:
+            continue  # a pure constant, not an env read
+        if _snapshot_denied(name, trace):
+            continue
+        if not isinstance(value, (str, int, float, bool)) and value is not None:
+            value = str(value)
+        values[name] = value
+        for env_name in trace:
+            # A presence-allowed accessor may have read a secret env name
+            # — the NAME of a set secret is still not for the receipt.
+            if _snapshot_denied("", [env_name]):
+                continue
+            if os.environ.get(env_name) not in (None, ""):
+                overrides.add(env_name)
+    out = {"values": values, "env_overrides": sorted(overrides)}
+    sha = git_sha()
+    if sha:
+        out["git_sha"] = sha
+    run_id = build_run_id()
+    if run_id:
+        out["build_run_id"] = run_id
+    return out

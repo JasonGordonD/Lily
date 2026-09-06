@@ -11054,48 +11054,38 @@ async def entrypoint(ctx: JobContext) -> None:
     # only on the AgentSession-level subscription, still avoided). Only the
     # per-call LLMMetrics carries prompt_cached_tokens, the number that
     # proves whether the Y1a static prefix actually cache-hits at Grok.
-    def _wire_llm_metrics(llm) -> None:
-        # collect_llm_call_soon, not collect_llm_call: the framework's
-        # sibling subscriber stamps speech_id onto the event in place, and
-        # emitter subscriber order is a coin flip — the deferred fold
-        # always sees the stamp (wave-1 review, HIGH finding).
-        llm.on(
-            "metrics_collected",
-            lambda m: session_metrics.collect_llm_call_soon(m),
-        )
+    # WO-LILY-LLM-USAGE-ALL-PATHS-001: one durable lily_llm_usage row per
+    # LLM call on EVERY path, purpose/model/effort from the ACTUAL call.
+    #   * The vocal lane: wire_llm subscribes the component's
+    #     metrics_collected (deferred one tick — see collect_llm_call_soon)
+    #     and pins purpose + the model/effort the component was BUILT with
+    #     onto every event it emits. metrics_collected fires after the call
+    #     completes, so nothing here runs before the first token.
+    #   * game._llm_metrics_wire is THE seam for any swapped vocal
+    #     component: `game._llm_metrics_wire(new_llm, purpose="adult_vocal")`
+    #     at the swap site makes that component's turns write their own
+    #     rows (the REFACTOR-001 tree has no swap site; the wire is kept
+    #     live so a re-introduced swap cannot go dark again).
+    #   * The off-path transports (reasoning / judge / assessment / vision /
+    #     grounding / arsenal_gen) hold no session object; they record via
+    #     lily_metrics.record_llm_call, routed to this collector.
+    # The context is bound lazily (game.supabase / ui_phase are read at
+    # record time) and every write is fire-and-forget; failures WARN and
+    # count into llm_usage_write_failures for the session report.
+    def _wire_llm_metrics(llm, purpose: str = "vocal") -> None:
+        session_metrics.wire_llm(llm, purpose=purpose)
 
     _wire_llm_metrics(general_vocal_llm)
     game._llm_metrics_wire = _wire_llm_metrics
-    # WO-LILY-LLM-USAGE-PERSISTENCE: durably persist every per-call usage row
-    # (token/latency + the empty-STOP finish flag) so the dead-air class is
-    # answerable from the db, not logs alone. The collector holds only metric
-    # fields; this sink enriches with session/phase/model and fires the
-    # fail-open write WITHOUT awaiting, so the cross-region round trip never
-    # blocks the audio pipeline. game._session_metrics lets llm_node's
-    # empty-STOP guard stash its finish verdict for the matching call.
+    # game._session_metrics lets llm_node's empty-STOP guard stash its
+    # finish verdict for the matching call.
     game._session_metrics = session_metrics
-    _vocal_model = (
-        getattr(getattr(general_vocal_llm, "_opts", None), "model", None)
-        or getattr(general_vocal_llm, "model", None)
+    session_metrics.bind_usage_context(
+        supabase=lambda: getattr(game, "supabase", None),
+        session_id=lambda: game.sk.session_id,
+        phase=lambda: getattr(game, "ui_phase", None),
     )
-
-    def _persist_llm_usage(fields: dict) -> None:
-        try:
-            sb = getattr(game, "supabase", None)
-            if sb is None:
-                return
-            row = dict(fields)
-            row["session_id"] = game.sk.session_id
-            row["phase"] = getattr(game, "ui_phase", None)
-            row["model"] = _vocal_model
-            row["purpose"] = "vocal"
-            asyncio.ensure_future(
-                lily_persistence.lily_write_llm_usage(sb, row)
-            )
-        except Exception as e:
-            logger.debug("LILY_METRICS | USAGE_PERSIST_SKIPPED | %s", e)
-
-    session_metrics.set_usage_sink(_persist_llm_usage)
+    lily_metrics.set_current_collector(session_metrics)
     # Y2 measurement gate: count the framework's preemptive-invalidation
     # warnings (and, when debug is on, the used-lines) off its own logger.
     # The settle-vs-volatile-split decision closes on this number.

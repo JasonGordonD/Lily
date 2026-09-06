@@ -237,11 +237,26 @@ def _deploy_env_forms() -> tuple:
     return env_block, docker_shell
 
 
+def _github_context_forwards() -> set:
+    """`-e NAME="${{ github.X }}"` args: build identity the workflow
+    forwards straight from the GitHub context (GITHUB_RUN_ID, LILY_GIT_SHA
+    — WO-LILY-LLM-USAGE-ALL-PATHS-001 addendum). These carry a real value
+    with no job `env:` mapping, so they count as forwarded but are exempt
+    from the two-forms consistency check."""
+    text = _DEPLOY.read_text()
+    return set(
+        re.findall(
+            r'-e\s+([A-Z][A-Z0-9_]*)="\$\{\{\s*github\.[a-z_]+\s*\}\}"', text
+        )
+    )
+
+
 def _forwarded_env_vars() -> set:
     """Vars that actually reach the running agent container: present in
-    BOTH deploy.yml forms (a var in only one form expands to empty)."""
+    BOTH deploy.yml forms (a var in only one form expands to empty), plus
+    the GitHub-context forwards."""
     env_block, docker_shell = _deploy_env_forms()
-    return env_block & docker_shell
+    return (env_block & docker_shell) | _github_context_forwards()
 
 
 # ---------------------------------------------------------------------------

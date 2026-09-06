@@ -5,6 +5,117 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — WO-LILY-LLM-USAGE-ALL-PATHS-001: a usage row per LLM call on every path
+
+Operator directive (verbatim intent): "I want a row per LLM call with
+purpose, model, effort, ttft_ms, total_ms on every path, same contract as
+the fleet telemetry WO. Fix the writer; do not redesign the table in this
+wave." Live facts that drove it: `lily_llm_usage` held 64 rows, ALL
+`purpose='vocal' model='grok-4.5'`, because the only writer was the vocal
+component's `metrics_collected` sink with purpose and model HARDCODED
+(`lily_agent._persist_llm_usage`), and every off-path transport —
+reasoning, judge, assessment, vision, Google grounding, arsenal author —
+was a direct API call that never wrote, by construction. The writer also
+swallowed every failure at DEBUG (S3: a silent writer).
+
+1. **One writer contract.** `lily_persistence.lily_record_llm_call(
+   supabase, *, session_id, purpose, model, effort, ttft_ms, total_ms,
+   prompt_tokens, completion_tokens, finish_reason, phase, utterance_id=
+   None, empty_stop=None)`. Fire-and-forget as before, but a failure logs
+   at WARNING (bounded cadence: first 10, then every 100th) and returns
+   False so `LilyMetricsCollector.llm_usage_write_failures` counts it —
+   the session report's `llm_usage` block now carries
+   `{rows_scheduled, llm_usage_write_failures}` whenever the lane is live
+   (S2: the receipt says when the receipt failed). The legacy
+   `lily_write_llm_usage(supabase, row)` routes through the same insert.
+2. **`effort` column — additive, not a redesign.** `migrations/
+   027_lily_llm_usage_effort.sql` adds ONE nullable `effort text` column
+   (`add column if not exists`); nothing existing changes. The writer
+   stays fail-open where 027 is not applied: on PostgREST's missing-column
+   error (PGRST204) it drops the key, retries once, warns, and memoizes
+   the absence for the process.
+3. **Every off-path call site writes, with the model/effort ACTUALLY sent.**
+   `LilyReasoning._generate_grok_json` (the single Grok JSON transport)
+   gained `purpose=` (default `adult_reasoning`, its own default config)
+   and `usage_session_id=`; it records one row per call, measuring
+   `ttft_ms` as time-to-response-HEADERS (first byte back) and `total_ms`
+   as headers + body around the aiohttp call. Failures record too
+   (`finish_reason` = `http_<n>` / `timeout` / `cancelled` /
+   `error:<Class>` / `empty`) — a call that never came back is the row the
+   dead-air class needs most. `lily_vision._grok_vision_text` records the
+   same way (`effort` NULL — the call sends none) with a `purpose=`
+   threaded through `lily_describe_image` / `lily_describe_image_bytes` /
+   `lily_classify_image_bytes`. `lily_search._lily_grounded_generate`
+   records `grounding` with the model captured before the call.
+   Purpose vocabulary (`lily_metrics.LLM_PURPOSES`): `vocal`,
+   `adult_vocal`, `reasoning` (generate_question / verify_question /
+   ensure_choices), `adult_reasoning` (bare transport default), `judge`,
+   `assessment` (row carries the ASSESSED session's id — the sweep runs
+   inside another live session's process), `vision`, `grounding`,
+   `arsenal_gen` (author + the arsenal's vision gate/caption).
+   **Streaming note:** none of these transports stream — the provider
+   answers once generation is done, so for the aiohttp lanes `ttft_ms`
+   (headers) tracks `total_ms` closely, and for the google-genai SDK call
+   (blocking, no first-byte hook) `ttft_ms` is recorded EQUAL to
+   `total_ms`. Recorded as measured; not inferred.
+   **Session plumbing (minimal seam):** the off-path modules hold no
+   session object. `lily_metrics.set_current_collector(collector)` binds
+   the session's collector once (one job per process on LiveKit), and the
+   modules call `lily_metrics.record_llm_call(...)`; the collector's
+   `bind_usage_context(supabase=, session_id=, phase=)` takes values or
+   zero-arg callables resolved at record time. The standalone seeding job
+   (`lily_arsenal_seed`) binds nothing, so its calls are no-ops.
+4. **Vocal path: identity from the component, not a global.**
+   `LilyMetricsCollector.wire_llm(llm, purpose=...)` subscribes the
+   component's `metrics_collected` and pins `{purpose, model, effort}`
+   read from ITS constructor opts (`_opts.model` / `_opts.reasoning_effort`)
+   onto every event it emits — so a swapped component attributes its own
+   rows and an in-flight call on the old one still lands under the old
+   identity. `lily_agent` wires `general_vocal_llm` through it and keeps
+   `game._llm_metrics_wire(llm, purpose="vocal")` as THE seam for a swap:
+   `game._llm_metrics_wire(new_llm, purpose="adult_vocal")` at a swap site
+   makes adult-vocal turns write `adult_vocal` rows. The REFACTOR-001 tree
+   has NO adult swap site (the swap was deleted with the content-mode
+   gate; `game._adult_llm` is a dead field), so nothing calls it today —
+   the wire was stored and never called before, and is now the documented
+   entry point. Nothing runs before the first token: `metrics_collected`
+   fires after the call completes and the sink stays fire-and-forget.
+5. **Config snapshot receipt.** `lily_config.effective_snapshot()` returns
+   `{values, env_overrides, git_sha?, build_run_id?}`: every public
+   accessor that reads an env var, name → the value it resolves to NOW
+   (deployed override or in-code default), plus which non-secret env names
+   are actually set, minus everything on the explicit `SNAPSHOT_DENYLIST`
+   (`KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `CREDENTIAL`, `VOICE`, `URL` —
+   matched against accessor AND env names; only `*_present` bools are
+   allowed through). Build identity (addendum): `git_sha()` reads
+   `LILY_GIT_SHA`, `build_run_id()` reads `GITHUB_RUN_ID`; both omitted
+   from the snapshot when unset. `Dockerfile` gains `ARG/ENV LILY_GIT_SHA`
+   and deploy.yml passes `--build-arg LILY_GIT_SHA=${{ github.sha }}` to
+   the CI image build; the LiveKit Cloud deploy builds remotely with no
+   build-arg hook, so deploy.yml ALSO forwards `-e LILY_GIT_SHA="${{
+   github.sha }}"` to the plugin container alongside `GITHUB_RUN_ID` (the
+   runtime env is the path that reaches the deployed agent). The env lint
+   now counts `${{ github.* }}` forwards as forwarded. The integrator
+   persists the snapshot as `config_snapshot` in `lily_sessions.metadata`.
+6. **No model or effort default changed** (operator decision).
+
+Pre-existing bug fixed in passing (in-region, one line):
+`lily_search._lily_grounded_generate` called
+`lily_forbid_vocal_import(lily_direct_importer(None))`, which iterated
+None and raised `TypeError` on every real call — the grounding lane had
+no live caller, so it never surfaced. It now builds the stack-name list
+the same way the import-time tripwire does.
+
+Tests (behavior, not source text): `tests/test_llm_usage_all_paths.py`
+drives each call site through its real transport with a fake HTTP
+session / fake genai client and a fake supabase capturing inserts —
+exactly one row each with the right purpose/model/effort/ttft/total; the
+failure path warns and counts; the missing-column fallback drops, retries
+once, memoizes; the adult swap wires its own identity; the collector's
+summary carries the lane's health. `tests/test_config_snapshot.py` pins
+the denylist (no denylisted key, no secret value in the blob), the env
+override reflection, and the build-identity present/absent cases.
+
 ## 2026-08-17 — WO-LILY-RESTART-001: restart the game on request — kill the game, keep the people
 
 Operator directive: Lily must be able to RESTART the game on request.

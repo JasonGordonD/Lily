@@ -11,6 +11,17 @@ ENV PYTHONUNBUFFERED=1
 # Disable pip version check to speed up builds.
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# WO-LILY-LLM-USAGE-ALL-PATHS-001 (addendum): bake the deployed commit into
+# the image so lily_config.effective_snapshot() can stamp git_sha onto every
+# session receipt (commit SHA -> build id -> session). deploy.yml passes
+# --build-arg LILY_GIT_SHA=${{ github.sha }} to the CI image build; the
+# LiveKit Cloud deploy builds remotely with no build-arg hook, so deploy.yml
+# ALSO forwards LILY_GIT_SHA as a runtime env (-e) — the runtime value wins,
+# and an image built without either simply carries an empty string, which
+# the snapshot omits.
+ARG LILY_GIT_SHA=""
+ENV LILY_GIT_SHA=$LILY_GIT_SHA
+
 # Non-privileged user the app runs under.
 ARG UID=10001
 RUN adduser \

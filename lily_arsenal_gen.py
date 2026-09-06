@@ -761,12 +761,14 @@ async def lily_author_question(
                 timeout=ADULT_AUTHOR_TIMEOUT_SECONDS,
                 model=lily_config.adult_reasoning_model(),
                 effort=lily_config.adult_reasoning_effort(),
+                purpose="arsenal_gen",
             )
         return await reasoning._generate_grok_json(
             instruction,
             max_tokens=2048,
             model=lily_config.reasoning_model(),
             effort=lily_config.reasoning_effort(),
+            purpose="arsenal_gen",
         )
 
     last_err: object = "author returned nothing"
@@ -834,7 +836,7 @@ async def lily_classify_image(
         )
         return await asyncio.wait_for(
             lily_vision.lily_classify_image_bytes(
-                image_bytes, content_type, prompt
+                image_bytes, content_type, prompt, purpose="arsenal_gen"
             ),
             timeout=25.0,
         )
@@ -864,7 +866,7 @@ async def lily_describe_image(
         )
         result = await asyncio.wait_for(
             lily_vision.lily_describe_image_bytes(
-                image_bytes, content_type, prompt
+                image_bytes, content_type, prompt, purpose="arsenal_gen"
             ),
             timeout=25.0,
         )
