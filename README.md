@@ -1841,8 +1841,14 @@ bar: assessed within `LILY_REPORT_DEADLINE_S`, default 5 min) and a
 **reconciliation sweep** at session start for orphaned pending rows
 (aborted sessions / past failures; assessed from stored data,
 `LILY_REPORT_SWEEP_MIN_AGE_S` grace, `LILY_REPORT_SWEEP_LIMIT` per boot).
-The desk runs on the reasoning model (`LILY_ASSESSMENT_MODEL` to pin), its
-own genai client (§11.5 isolation). The fill is pending-guarded (UPDATE
+The desk runs on `lily_config.assessment_model()` / `assessment_effort()`,
+which are currently **hard-coded** (`grok-4.5`, `high`) — there is no
+`LILY_ASSESSMENT_MODEL` env read; an operator override is a future config
+change at those two accessors (REFACTOR-STAGE-1B-001 P2-5 corrected this
+paragraph, which used to claim an env pin that never existed). The call goes
+through the reasoning node's Grok JSON transport
+(`LilyReasoning._generate_grok_json`, `purpose="assessment"`), not a client
+of its own. The fill is pending-guarded (UPDATE
 WHERE `report_status='pending'` → sets `assessment` +
 `report_status='complete'`), so the close path's later transcript re-upsert
 (which omits both columns) and any re-run never clobber it. Failure is
