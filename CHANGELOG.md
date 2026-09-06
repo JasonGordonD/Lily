@@ -5,6 +5,118 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — HOTFIX-DOUBLE-WELCOME-001: the second welcome-back behind the first
+
+**Live receipts (two sessions, same shape):**
+
+* `lily-C47CD4-690cc8fd` — 14:24:12Z "Rami. There you are. Last time you
+  walked out with the W — sixteen questions deep. This table remembers.
+  Usual for you is relaxed pacing. Want that again, or change anything?"
+  then 14:24:25Z "Took me a second — welcome back, Rami. Last time you
+  walked out with the win, and this table still has the energy for it.
+  Want the usual — relaxed pace, straight in — or change anything tonight?"
+* `lily-38C562-2eb12a08` — 17:31:31Z "[soft] Rami — there you are. Last
+  time you cleaned up the board, twenty-two questions deep. [pause] Who
+  else is at this table tonight?" then 17:31:47Z "[soft] Took me a second
+  — welcome back, Rami. Last time you walked out of here with the W,
+  twenty-two deep. Still got it, I bet. [pause] Usual night — relaxed
+  pacing, jacket off — or you changing anything?"
+
+**What the durable rows say (SELECT-only, project svqbfxdhpsmioaosuhkb).**
+38C562: the player's "Hi, this is Rami" final at 17:31:04.9;
+`identity_promotions` = `{voiceprint_match, late_beat_path}` at 17:31:07.331
+and `{final_transcript, late_beat_path}` at 17:31:07.333 — a VOICE door,
+not the stated-name door, so `_name_door_promotion_tail` never ran and no
+watch was armed. `lily_llm_usage`: the organic reply `speech_5e44e95458fc`
+generated twice — first at ~17:31:05.8 (memory-blind, 14685 prompt tokens,
+26 completion tokens = a tool round), then RE-generated at ~17:31:09.5
+(14916 tokens, +231 = the [RETURNING TABLE] block; that is the "twenty-two
+questions deep" line); the late beat `speech_62c4466666fa` dispatched at
+~17:31:07.6 (ttft 14268 ms) and re-generated at ~17:31:21.7. The organic
+confirmed at 17:31:31; the beat's SpeechHandle was already queued in the
+framework's sequential scheduler and aired 17:31:31→47. C47CD4 is
+the same shape (promotions at 14:23:47.262/.263; organic
+`speech_9632e1c5e666` memory-blind at 13905 tokens, re-generated
+14:23:53.8→57.1 at 14313 tokens; beat `speech_543c905939ce` dispatched
+14:23:47.3, ttft 9811 ms; organic aired to 14:24:12, beat to 14:24:25). `airgate_events` holds NO recognition row in either
+session — the retirement never touched a handle. Both sessions' beats
+carried the same memory fact ("twenty-two deep" / "walked out with the
+win") — the anti-repetition rails cannot see a turn that is still queued.
+
+**Hypothesis verified in code, with one correction.** Confirmed:
+`note_recognition_aired` (lily_identity.py) cleared `_late_recognition_flight`
+and `_recognition_carriers` — bookkeeping only; nothing reached the beat's
+handle. The late beat is in `_BARGE_FLUSH_EXEMPT_ACTS` and is not a
+`_PROGRESSION_ACT`, so neither the barge flush nor the reply-owed latch
+ever cancels it. Correction: the live door was `voiceprint_match`, not a
+name door, so the dispatch was `maybe_fire_late_recognition` from the
+`late_beat_path` tail, and the organic registered as a carrier
+(`memory_turn_organic`, lane open via the beat's flight) — and then the
+"older never-aired" prune in `resolve_recognition_carry` (the beat's
+snapshot preceded the organic's) dropped the beat's carrier before the
+stamp, so even a handle-aware stamp would have missed it.
+
+**Mechanism (the spine decides).**
+1. `note_recognition_aired(source, text=None, *, speech_id=None)`
+   (lily_identity.py:725) computes every OTHER in-flight recognition
+   carrier BEFORE the clears — registered carriers, the flight's beat id,
+   any `late_recognition` dispatch record — filtered to a live handle in
+   `_speech_handles` or an unspent dispatch record
+   (`_recognition_duplicates_in_flight`, :772), stamps, then retires each
+   through the codebase's ONE cancel path, `cancel_speech` →
+   `on_dispatch_suppressed` + `interrupt(force=True)`
+   (`_retire_recognition_duplicates`, :799). Stamp first, cancel second: the
+   suppression listener and the playout exit both return on the stamped
+   fact, so a retired duplicate can never re-arm the beat it duplicates.
+   Receipt: `LILY_MEMORY | RECOGNITION_DUPLICATE_RETIRED | session= speech_id=
+   act= reason=aired_by=<source>`; airgate row `{reason:
+   "recognition_duplicate", stage: "cancel", act, speech_id, detail:
+   {aired_by, carrier_source}}` (persisted at both metadata write sites).
+2. `resolve_recognition_carry` (:1055): the confirm branch stamps WITH the
+   airing speech id before the prune; the prune never drops a dispatched
+   beat (:1116); a cut carrier does NOT re-arm while the beat is still
+   queued with a live handle (`_late_beat_still_queued`, :838; receipt
+   `RECOGNITION_CARRY_CUT_BEAT_QUEUED`) — pre-fix that re-arm cleared the
+   flight, the queued beat aired unstamped, and the next seam dispatched a
+   SECOND beat behind it.
+3. Dispatch conditional: `_promote_device_candidate` (:1489) opens the lane
+   (`_late_recognition_pending = True`) on the late-beat path BEFORE the
+   rekey/reload awaits, so an organic generation that snapshots WITH the
+   just-visible block inside that window registers as a carrier and the
+   tail's `maybe_fire_late_recognition` defers on
+   `recognition_carry_inflight` — the carrier confirms (stamps) or is cut
+   (re-arms once through the existing owed path). Pre-fix that snapshot
+   went unregistered (no lane open) and the tail dispatched over it.
+
+Reverse order (beat confirms first): the queued organic carrier is
+retired, not aired without the memory line — its text was generated with
+the block in context (that is what made it a carrier) and there is no text
+surgery on a queued handle; the beat already answered the name.
+
+No prompt-rail or spoken-wording change; no config default change.
+
+**Failing-first:** `tests/test_hotfix_double_welcome.py` — 6 tests, 5 RED
+on a clean 1783e82 checkout (1, 2, 3b, 4a, 4b), 1 GREEN by design (3a, the
+carrier-cut regression guard). Suites: 3392/3392 on `python3` and on
+`venv313` (baseline 3386 + 6); `python3 -W error -c "import lily_agent"`
+clean on both.
+
+**Live receipt to pull next call:** exactly ONE welcome-back line in
+`lily_transcripts` after a promotion; when two were generated,
+`LILY_MEMORY | RECOGNITION_DUPLICATE_RETIRED` in the log and a
+`{reason: "recognition_duplicate", stage: "cancel"}` row in
+`lily_sessions.metadata->'airgate_events'` naming the retired speech_id;
+`lily_llm_usage` may still show both generations (the beat's LLM cost is
+spent before the stamp — cancellation is at playout, not at generation).
+
+**Residual (not in this hotfix):** the late beat is dispatched in parallel
+with a reply-owed organic turn (`reply_owed_reason()` binds only
+`_PROGRESSION_ACTS`), so both generations are still paid for; deferring the
+beat until the owed reply resolves needs a lobby retry seam that does not
+exist today (the only flush is the between-questions seam). The
+`_RECOG_FLIGHT_STALE_SECONDS = 30` prune can re-arm a beat that is queued
+behind a long organic (17:31 was 24 s queue-to-air).
+
 ## 2026-09-06 — WO-LILY-SUPPLY-001 S1: bank-first question supply
 ## 2026-09-06 — WO-LILY-SUPPLY-001 S2: the bank serves, the author replenishes
 

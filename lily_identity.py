@@ -723,15 +723,27 @@ class LilyIdentityMixin:
     # _result_aired there is no clear.
 
     def note_recognition_aired(
-        self, source: str, text: str | None = None
+        self, source: str, text: str | None = None, *, speech_id=None
     ) -> None:
         """Stamp that recognition/welcome-back content has gone to air (or
         is carried by a turn already in flight, for the name-door organic
         case). Idempotent: the first airing wins, so the record names the
         lane the room actually heard. Stamping retires the late beat and
-        its pending bit — every recognition producer consults this fact."""
+        its pending bit — every recognition producer consults this fact.
+
+        HOTFIX-DOUBLE-WELCOME-001: retiring the OTHER lanes used to be
+        bookkeeping only (flight=None, carriers={}) — a late beat whose
+        SpeechHandle was already queued in the framework's sequential
+        scheduler aired anyway, 16 s after the organic carrier confirmed
+        (live 2026-09-06 14:24:12/14:24:25 and 17:31:31/17:31:47). The
+        spine now retires every other in-flight recognition carrier
+        MECHANICALLY: cancel_speech (interrupt(force=True) through the one
+        suppression hook) on each, before it reaches playout. `speech_id`
+        names the carrier that aired, so it is never cancelled itself."""
         if self._recognition_aired is not None:
             return
+        # Computed BEFORE the clears below wipe the bookkeeping they read.
+        duplicates = self._recognition_duplicates_in_flight(exclude=speech_id)
         self._recognition_aired = {
             "source": source,
             "text": (text or "").strip(),
@@ -751,6 +763,91 @@ class LilyIdentityMixin:
             "for the session (ANTIREPEAT-PROTOCOL-001)",
             getattr(self.sk, "session_id", "?"), source,
         )
+        # Stamped FIRST, then cancelled: the suppression listener
+        # (note_recognition_dispatch_suppressed) and the playout exit
+        # (resolve_recognition_carry) both return on the stamped fact, so a
+        # retired duplicate can never re-arm the beat it duplicates.
+        self._retire_recognition_duplicates(duplicates, aired_by=source)
+
+    def _recognition_duplicates_in_flight(self, exclude=None) -> dict:
+        """Every recognition-bearing speech still in flight OTHER than
+        `exclude`: registered carriers (a generation snapshotted WITH the
+        memory block), the dispatched late beat (by its flight id, or by
+        its act when the flight never bound one). "In flight" is
+        mechanical — a live SpeechHandle in _speech_handles, or a dispatch
+        record in _dispatched_act_by_speech that playout has not spent
+        (on_agent_speech_finished pops both). A finished or invalidated
+        generation is neither and is never reported as retired (S2)."""
+        found: dict = {}
+        for sid, entry in (self._recognition_carriers or {}).items():
+            found[sid] = (entry or {}).get("source") or "memory_turn_organic"
+        flight = self._late_recognition_flight
+        if flight is not None and flight.get("speech_id"):
+            found.setdefault(flight["speech_id"], "late_recognition_beat")
+        acts = getattr(self, "_dispatched_act_by_speech", None) or {}
+        for sid, act in acts.items():
+            if act == "late_recognition":
+                found.setdefault(sid, "late_recognition_beat")
+        if exclude:
+            found.pop(exclude, None)
+        live = getattr(self, "_speech_handles", None) or {}
+        return {
+            sid: src for sid, src in found.items()
+            if sid in live or sid in acts
+        }
+
+    def _retire_recognition_duplicates(self, duplicates: dict, *, aired_by: str) -> None:
+        """Cancel each duplicate through the codebase's ONE cancel path
+        (cancel_speech: suppressed-id mark, on_dispatch_suppressed airgate
+        row + listeners, interrupt(force=True) on the live handle). The
+        airgate row is {reason: recognition_duplicate, stage: cancel, act,
+        speech_id, detail: {aired_by, carrier_source}}."""
+        cancel = getattr(self, "cancel_speech", None)
+        if not duplicates or not callable(cancel):
+            return
+        session_id = getattr(self.sk, "session_id", "?")
+        for sid, carrier_source in duplicates.items():
+            act = self._dispatched_act_for(sid)
+            logger.warning(
+                "LILY_MEMORY | RECOGNITION_DUPLICATE_RETIRED | session=%s "
+                "speech_id=%s act=%s reason=aired_by=%s — recognition is "
+                "already on air; this %s carrier is cancelled before playout "
+                "(HOTFIX-DOUBLE-WELCOME-001)",
+                session_id, sid, act, aired_by, carrier_source,
+            )
+            # The airgate record merges these facts into the cancel row
+            # (on_dispatch_suppressed reads _last_airgate_decision by id).
+            self._last_airgate_decision = {
+                "speech_id": sid,
+                "key": None,
+                "qnum": None,
+                "stage": "cancel",
+                "detail": {
+                    "aired_by": aired_by,
+                    "carrier_source": carrier_source,
+                },
+            }
+            try:
+                cancel(sid, reason="recognition_duplicate")
+            except Exception:
+                logger.exception(
+                    "LILY_MEMORY | RECOGNITION_DUPLICATE_CANCEL_FAILED | "
+                    "session=%s speech_id=%s", session_id, sid,
+                )
+
+    def _late_beat_still_queued(self, exclude=None) -> bool:
+        """Is a dispatched late beat still coming — its SpeechHandle live
+        in the framework's queue — other than the speech being resolved?
+        A beat still queued is not OWED: it will air and stamp, or die and
+        re-arm through its own exit. Re-arming over it dispatches a second
+        beat at the next seam behind the first (HOTFIX-DOUBLE-WELCOME-001)."""
+        flight = self._late_recognition_flight
+        if flight is None:
+            return False
+        sid = flight.get("speech_id")
+        if not sid or sid == exclude:
+            return False
+        return sid in (getattr(self, "_speech_handles", None) or {})
 
     def recognition_aired(self) -> dict | None:
         """The recognition-aired record ({source, text, at}), or None."""
@@ -992,11 +1089,6 @@ class LilyIdentityMixin:
         act = self._dispatched_act_for(speech_id)
         if speech_id and speech_id in carriers:
             entry = carriers.pop(speech_id)
-            for sid, other in list(carriers.items()):
-                if other.get("seq", 0) < entry.get("seq", 0) and (
-                    other.get("aired_at") is None
-                ):
-                    carriers.pop(sid, None)  # an older never-aired generation
             if confirmed:
                 self._name_door_watch = None
                 self._late_recognition_flight = None
@@ -1005,8 +1097,27 @@ class LilyIdentityMixin:
                     event["carried_memory"] = True
                     event["confirmed_at"] = round(time.time(), 3)
                     event["carrier_speech_id"] = speech_id
-                self.note_recognition_aired(entry.get("source") or "memory_turn_organic")
+                # HOTFIX-DOUBLE-WELCOME-001: stamped WITH the airing id —
+                # the stamp retires every OTHER carrier still in flight
+                # (the queued late beat included) mechanically, so the
+                # older-never-aired prune below must not run first and hide
+                # them from it (the live shape: the beat's snapshot preceded
+                # the organic's, so its carrier was the "older" one).
+                self.note_recognition_aired(
+                    entry.get("source") or "memory_turn_organic",
+                    speech_id=speech_id,
+                )
                 return
+            beat_sid = (flight or {}).get("speech_id")
+            for sid, other in list(carriers.items()):
+                if sid == beat_sid or self._dispatched_act_for(sid) == (
+                    "late_recognition"
+                ):
+                    continue  # a dispatched beat is never a preemptive
+                if other.get("seq", 0) < entry.get("seq", 0) and (
+                    other.get("aired_at") is None
+                ):
+                    carriers.pop(sid, None)  # an older never-aired generation
             if entry.get("aired_at") is None and not suppressed:
                 logger.info(
                     "LILY_MEMORY | RECOGNITION_CARRY_INVALIDATED | session=%s "
@@ -1017,6 +1128,21 @@ class LilyIdentityMixin:
                 return
             if carriers:
                 return  # another carrier still in flight decides
+            if self._late_beat_still_queued(exclude=speech_id):
+                # HOTFIX-DOUBLE-WELCOME-001: the cut carrier's welcome-back
+                # is still coming — the dispatched beat sits queued behind
+                # it with a live handle. Nothing is owed: the beat's own
+                # confirm stamps (or its own cut re-arms). Re-arming here
+                # cleared the flight and dispatched a SECOND beat at the
+                # next seam behind the first.
+                logger.info(
+                    "LILY_MEMORY | RECOGNITION_CARRY_CUT_BEAT_QUEUED | "
+                    "session=%s speech=%s beat=%s — the carrier was cut but "
+                    "the late beat is still queued; not re-armed",
+                    getattr(self.sk, "session_id", "?"), speech_id,
+                    (flight or {}).get("speech_id"),
+                )
+                return
             self._rearm_owed_recognition(
                 "carrier_suppressed" if suppressed else "carrier_cut",
                 event=event,
@@ -1030,7 +1156,9 @@ class LilyIdentityMixin:
                 # The beat played out but never snapshotted with the block
                 # (memory cleared mid-flight) — it still aired as the beat.
                 self._late_recognition_flight = None
-                self.note_recognition_aired("late_recognition_beat")
+                self.note_recognition_aired(
+                    "late_recognition_beat", speech_id=speech_id
+                )
                 return
             self._rearm_owed_recognition(
                 "late_beat_suppressed" if suppressed else "late_beat_cut"
@@ -1353,6 +1481,24 @@ class LilyIdentityMixin:
             # still needs no beat: the memory block's "usual:" line plus the
             # system prompt's standing instruction carry it.
             self._name_door_promotion_tail(trigger, candidate)
+        elif (
+            self.memory_block
+            and self._recognition_aired is None
+            and not self._late_recognition_fired
+        ):
+            # HOTFIX-DOUBLE-WELCOME-001: the late-beat path. The block is
+            # visible NOW; the beat dispatches only after the rekey/reload
+            # awaits below. An organic generation that snapshots WITH the
+            # block inside that window is the welcome-back's carrier — but
+            # note_generation_snapshot registers carriers only while a
+            # recognition lane is open, and on this path none was: the
+            # organic aired the memory unobserved and the tail dispatched
+            # the beat over it. Open the lane (the beat is OWED from this
+            # moment) so that snapshot registers, the tail's
+            # maybe_fire_late_recognition defers on recognition_carry_
+            # inflight, the carrier's CONFIRM stamps, and a cut carrier
+            # re-arms through the existing owed path.
+            self._late_recognition_pending = True
         # Rekey + reloads run AFTER the block is visible (concurrently
         # inside upgrade_group_id); its own tail call no-ops.
         await self.upgrade_group_id(candidate, label)
