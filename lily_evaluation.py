@@ -737,11 +737,18 @@ _NUMBER_POSITIONAL_RE = re.compile(r"^(?:the )?number (one|two|three|four|[1-4])
 # sentence, read off the raw lowercased text. The lead-in is optional (a
 # bare "a" still parses); the letter must be a whole word and the last
 # content of the utterance (trailing punctuation only).
+#
+# Composition review of integ/w6 (P1-1): the letter "a" is also the
+# English article, so a trailing "a" binds ONLY as a bare utterance or
+# after a real pick lead-in — "I think it's a…", "give me a", "or a",
+# "that was a" (a clause the 2.5 s cap can commit early) must stay
+# unresolved. "b", "c", "d" may stand bare at the end of a sentence.
 _MC_TERMINAL_LETTER_RE = re.compile(
-    r"(?:^|\b(?:say|said|pick|picking|choose|choosing|go with|going with|"
-    r"it s|it's|its|is|answer is|i d say|i'd say|i think|think|guess|"
-    r"guessing|take|option|letter|choice|probably|maybe|definitely|be|"
-    r"with|for|on|and|or))?\s*\b([abcd])\b[\s.!?,;:]*$"
+    r"(?:^\s*([abcd])\b"
+    r"|\b(?:say|said|pick|picking|choose|choosing|go|going|go with|"
+    r"going with|answer is|i d say|i'd say|i think|guess|guessing|take|"
+    r"option|letter|choice|probably|maybe|definitely)\s+([abcd])\b"
+    r"|\b([bcd])\b)[\s.!?,;:]*$"
 )
 # The bounded TAIL a spoken pick may carry after the option ("Mars, final
 # answer", "Jupiter I think", "Venus for sure").
@@ -750,6 +757,13 @@ _MC_TAIL_RE = re.compile(
     r"lily|right|yeah|please|that s my answer|i m sure|for real|probably|"
     r"maybe|obviously|of course))+$"
 )
+
+
+def _raw_is_bare_a(text: str) -> bool:
+    """True when the utterance, minus punctuation and trailing disfluency,
+    is the single word "a" (the letter, not the article in a clause)."""
+    raw = lily_strip_trailing_disfluency(text or "").lower()
+    return _PUNCT_RE.sub(" ", raw).split() == ["a"]
 
 
 def _mc_utterance_core(text: str) -> str:
@@ -891,13 +905,21 @@ def lily_tier1_evaluate_mc(
         raw = lily_strip_trailing_disfluency(transcript_text or "").lower().strip()
         m = _MC_TERMINAL_LETTER_RE.search(raw) if raw else None
         if m:
-            selected, method, similarity = _LETTER_INDEX[m.group(1)], "letter", 1.0
+            letter = next(g for g in m.groups() if g)
+            selected, method, similarity = _LETTER_INDEX[letter], "letter", 1.0
 
     kept = _strip_fillers(transcript_text)  # articles preserved: bare "a" = A
 
     # Letter: "b", "letter b", "option c", "is it d".
     if selected is None and kept:
         m = _LETTER_RE.match(kept)
+        # Composition review P1-1: the filler stripper turns "I think it's
+        # a" / "is it a" into a bare "a" — the ARTICLE, not the letter. A
+        # lone "a" binds only when the player said just that; with other
+        # words around it the terminal-letter parser above (which demands
+        # a real pick lead-in) already had its chance and declined.
+        if m and m.group(1) == "a" and kept == "a" and not _raw_is_bare_a(transcript_text):
+            m = None
         if m:
             selected, method, similarity = _LETTER_INDEX[m.group(1)], "letter", 1.0
 

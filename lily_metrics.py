@@ -473,7 +473,7 @@ class LilyMetricsCollector:
         """Build one turn entry from a USER-turn MetricsReport (it carries
         stopped_speaking_at); agent-turn reports fold nothing here. EVERY
         entry carries eot_probability / eot_threshold / eot_model /
-        eot_source (operator rule) — null + a source name when no debug
+        source (operator rule) — null + a source name when no debug
         record was captured for the turn."""
         stopped = g("stopped_speaking_at")
         eot = g("end_of_turn_delay")
@@ -507,7 +507,7 @@ class LilyMetricsCollector:
             "eot_probability": None,
             "eot_threshold": None,
             "eot_model": self._turn_detector_name(),
-            "eot_source": (
+            "source": (
                 "no_debug_record" if self._eot_tap_attached else "tap_not_attached"
             ),
             "endpointing_delay": None,
@@ -532,11 +532,11 @@ class LilyMetricsCollector:
             if bundle.get("model"):
                 entry["eot_model"] = bundle["model"]
             if pred.get("timed_out"):
-                entry["eot_source"] = "prediction_timed_out"
+                entry["source"] = "prediction_timed_out"
             elif pred:
-                entry["eot_source"] = "debug_record"
+                entry["source"] = "debug_record"
             else:
-                entry["eot_source"] = "commit_record_only"
+                entry["source"] = "commit_record_only"
         self._commit_reasons[reason] = self._commit_reasons.get(reason, 0) + 1
         self._eot_turns.append(entry)
         while len(self._eot_turns) > self._EOT_TURNS_CAP:

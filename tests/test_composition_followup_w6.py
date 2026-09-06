@@ -870,10 +870,10 @@ def test_commit_reason_classification(td, eot, reason):
     assert entry["stt_final_at"] == pytest.approx(100.0 + td)
     assert entry["commit_at"] == pytest.approx(100.0 + eot)
     assert entry["vad_end_of_speech_at"] == 100.0
-    for key in ("eot_probability", "eot_threshold", "eot_model", "eot_source"):
+    for key in ("eot_probability", "eot_threshold", "eot_model", "source"):
         assert key in entry
     assert entry["eot_probability"] is None
-    assert entry["eot_source"] == "tap_not_attached"
+    assert entry["source"] == "tap_not_attached"
     assert c.summary()["turn_taking"]["commit_reasons"] == {reason: 1}
 
 
@@ -917,7 +917,7 @@ def test_eot_tap_captures_the_debug_records_without_the_c12_capture(framework_lo
     assert entry["eot_probability"] == pytest.approx(0.00569)
     assert isinstance(entry["eot_probability"], float)
     assert entry["eot_threshold"] == 0.56
-    assert entry["eot_source"] == "debug_record"
+    assert entry["source"] == "debug_record"
     assert entry["from_cache"] is False
     assert entry["endpointing_delay"] == 2.5
     assert entry["commit_trigger"] == "vad"
@@ -929,7 +929,7 @@ def test_eot_tap_captures_the_debug_records_without_the_c12_capture(framework_lo
     entry2 = c.summary()["turn_taking"]["turns"][1]
     assert entry2["eot_probability"] is None
     assert entry2["eot_threshold"] is None
-    assert entry2["eot_source"] == "no_debug_record"
+    assert entry2["source"] == "no_debug_record"
 
 
 def test_eot_tap_counts_timeouts_and_never_raises_the_level(framework_logger):
@@ -943,7 +943,7 @@ def test_eot_tap_counts_timeouts_and_never_raises_the_level(framework_logger):
     c.collect_turn(_user_report(50.1, 0.2, 0.25))
     tt = c.summary()["turn_taking"]
     assert tt["eot_prediction_timeouts"] == 1
-    assert tt["turns"][0]["eot_source"] == "prediction_timed_out"
+    assert tt["turns"][0]["source"] == "prediction_timed_out"
 
 
 def test_eot_tap_shield_keeps_the_debug_flood_out_of_root_handlers(framework_logger):

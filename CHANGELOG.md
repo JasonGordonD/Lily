@@ -5,6 +5,46 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — Composition review of integ/w6: GO-WITH-FIXES, applied before main
+
+Reviewer verdict on 428bff1 (main 0bb3175 + WO-LILY-COMPOSITION-FOLLOWUP-001):
+no P0; MRO duplicates 0; exactly one guarded `user_input_transcribed`
+handler; the hygiene chokepoint live at all three injection sites; one
+028 retirement script carrying both blocks; rail-1 / rail-3 / PAIR 3
+wording byte-identical to the operator's text; L1 2.5 s with the wrong
+framework-default claim gone; L2 tap parses records that exist in the
+installed 1.6.10 and sets `livekit.agents` to DEBUG itself. Fixes applied:
+
+- **P1 — a trailing article "a" bound as option A.** The new terminal-
+  letter parser listed `it's|is|with|for|and|or` as lead-ins with the
+  lead-in optional, and the older filler stripper turned "I think it's a"
+  / "is it a" into a bare "a"; either path resolved A. Under the 2.5 s cap
+  "I think it's a … gas giant" commits the first clause and B1 precedence
+  then refuses the real answer. Now the letter "a" binds only as the bare
+  utterance or after a real pick lead-in (`say / pick / go / I'd say /
+  I think / option / letter …`); b/c/d may stand bare at the end
+  (`lily_evaluation._MC_TERMINAL_LETTER_RE`, `_raw_is_bare_a`).
+  "I would comfortably say a." / "I'd go A" / "A lot of people think B"
+  still bind; "it's a", "give me a", "or a", "that was a" stay unresolved
+  (the clarify door).
+- **P2 — receipt key name.** The per-turn EOT receipt's source key is
+  `source` (operator: `eot_probability: null, source: "no_debug_record"`),
+  not `eot_source`; the fourth values `commit_reason=other` (the classifier
+  could not place the commit within 50 ms of either bound or 300 ms of
+  the STT final) and `source=commit_record_only` are kept as honest
+  buckets and documented here.
+- **P2 — the choices-on-demand re-ask could be muted.** RegenGate's
+  stubborn-repeat branch, with a regen flag left by the previous turn,
+  silenced the `question_reask` act as "the third copy" (reproduced
+  through the real say pipeline). The act is exempt — it repeats the live
+  question by design.
+- **P2 — "let's play" / "play on" / "resume" now lift a sticky pause.**
+  Bare "okay" / "yes" / "alright" deliberately still do not (B2: explicit
+  resume only) — widening that is the operator's call.
+
+Failing-first: tests/test_w6_review_fixes.py (5 tests, 3 red on 428bff1;
+the two invariance pins green). Suite 3064/3064 on 3.11 and 3.13.
+
 ## 2026-09-06 — HOTFIX-STT-QUARANTINE-001: a quarantined final crashed the framework's STT consumer (broken-code sweep P0-1)
 
 Found by the read-only broken-code sweep of d4d79e3, verified by executed
@@ -255,7 +295,7 @@ stopped_speaking_at| ≤ 0.25 s; the warnings "eot prediction timed out" /
 is stamped per commit. UNITS: `eot_probability` / `eot_threshold` are the
 framework's 0–1 decimals as emitted (0.00569…, 0.56), numbers, never
 percentages or strings. EVERY entry carries `eot_probability`,
-`eot_threshold`, `eot_model`, `eot_source` — `eot_source` is
+`eot_threshold`, `eot_model`, `source` — `source` is
 `debug_record` when matched, `no_debug_record` when the tap saw nothing
 for that turn, `tap_not_attached` when the tap never ran,
 `prediction_timed_out` after the timeout warning. INDEPENDENCE: the tap
@@ -273,7 +313,7 @@ turn_detector, …p50s}`. Receipt SQL:
 metadata->'session_metrics'->'turn_taking'->>'eot_tap_level' from
 lily_sessions where session_id = '<id>';` and per turn
 `select t->>'commit_reason', t->>'end_of_turn_delay_ms', t->>'eot_probability',
-t->>'eot_source' from lily_sessions, jsonb_array_elements(
+t->>'source' from lily_sessions, jsonb_array_elements(
 metadata->'session_metrics'->'turn_taking'->'turns') t where session_id='<id>';`.
 
 **L3 — continuity rails, operator wording verbatim** (`prompts/lily_

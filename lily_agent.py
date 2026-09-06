@@ -8268,9 +8268,19 @@ class RegenGate(SpeechTransform):
                     instructions=_REGEN_REAIR_DIRECTIVE.strip()
                 ),
             )
+        # Composition review of integ/w6 (P2-2): the on-demand choices
+        # re-ask (act question_reask) repeats the live question BY DESIGN
+        # mid-window; a regen flag left by the previous turn must not mute
+        # it as the "third copy".
+        is_reask = (
+            (getattr(turn.game, "_dispatched_act_by_speech", None) or {}).get(
+                getattr(turn, "speech_id", None)
+            ) == "question_reask"
+        )
         if (
             getattr(turn.agent, "_reair_regen_pending", False)
             and turn.repeat_kind
+            and not is_reask
             and not turn.game.is_question_delivery_turn(turn.text)
         ):
             # WS-3 tightening: the one regen retry ALSO came back verbatim. The

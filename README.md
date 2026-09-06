@@ -28,9 +28,13 @@ voiceprint row under an engine label `S<n>` or with a null `player_name` is
 never injected as a known speaker; the write path never persists one) — and
 one from the broken-code sweep, HOTFIX-STT-QUARANTINE-001 (a quarantined
 final no longer raises inside the framework's STT consumer; a Lily-side
-handler fault costs one final, never the ear) — 2950 tests, 3.11 + 3.13. The W6 follow-up (composition-review P0s, operator
-behavior mods B1–B5, the 2.5 s endpointing cap with a per-turn receipt) is in
-flight; the dated entries are at the top of [CHANGELOG.md](CHANGELOG.md).
+handler fault costs one final, never the ear). WO-LILY-COMPOSITION-FOLLOWUP-001
+landed next (pause is a hard stop, MC letters bind while conversational
+speech never does, meta requests never bind, choices on demand, the 2.5 s
+endpointing cap with a per-turn EOT receipt, the operator's rail wording)
+with the composition reviewer's fixes applied — 3064 tests, 3.11 + 3.13.
+W7 (operator mods B6–B8) and refactor Stage 1b are in flight; the dated
+entries are at the top of [CHANGELOG.md](CHANGELOG.md).
 Live-call receipts (build → session → row) are the acceptance for the
 live-found defects — see each CHANGELOG entry.
 
