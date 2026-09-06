@@ -5,6 +5,225 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — WO-LILY-SUPPLY-001 S1: bank-first question supply
+
+Operator ruling, VERBATIM:
+
+> the bank serves, the author replenishes. Live question authoring never
+> sits on the delivery path again.
+
+Evidence: on 2026-09-06 grok-4.5 authoring takes 20–39 s to the first
+content token on **every** call (WO-LILY-STREAMING-REASONING-001 fixed it
+from dying, not from being slow), while `lily_questions` holds 448 active
+rows (307 general, 141 adult).
+
+### Archaeology (what already existed, file:line)
+
+The operator's expectation was "principally LOGICAL — re-ordering who
+serves whom; most machinery exists." That held. It also turned up three
+things that were not ordering problems.
+
+**The picture arsenal already does this, and is the enforcement model.**
+`lily_arsenal.lily_arsenal_draw` (lily_arsenal.py:124–190) draws a
+pre-generated pair with DB-enforced per-group no-repeat
+(`UNIQUE(arsenal_id, group_id)`), and `_arsenal_picture_draw`
+(lily_supply.py:1387–1467) is rung 1 of the picture ladder with the
+comment "ZERO generation on this path". Replenishment is
+`_kick_arsenal_replenish` (lily_supply.py:1469–1513): watermark-gated,
+`asyncio.ensure_future`, "never awaited, never on the delivery path". The
+enforcing test is
+`tests/test_arsenal_seed_job.py:365` —
+`test_a_seeded_bank_serves_instantly_with_zero_generation`, whose
+assertion is `provider.calls == 0, "zero generation on the delivery path"`
+(ARSENAL-SEED-001; HOTFIX-005 X2 is the reveal-gate lineage, not the draw
+one). S1's `test_the_delivery_path_makes_no_reasoning_lane_call` is the
+same shape one layer down: the transport itself raises.
+
+**The text bank draw.** `lily_persistence.lily_fetch_bank_question`
+(:962–1163 post-change): staged `.eq(category)/.eq(difficulty_tier)` with
+an any-category last stage, `strict_category` removing that stage
+(HOTFIX-006 N2), `exclude_ids`/`exclude_hashes`/`exclude_answers`
+(migration 010/017, PATCH-001 T7), `BANK_FETCH_CANDIDATE_LIMIT = 100`
+(:42), `lily_memory.lily_bank_mode_filter` (lily_memory.py:527, a
+pass-through since the content-mode gate was deleted). Callers:
+`kb_only()`/`prefer_bank` in `_prefetch_inner`, the insurance leg, and
+`_bank_to_supply` (mech. 79) with `RESERVE_PROMOTED`/`_promote_reserve`
+(lily_supply.py) behind it.
+
+**Asked history / no-repeat.** `lily_bank.lily_record_asked` +
+`lily_load_asked_history` (`ASKED_HISTORY_LIMIT = 500` — that limit IS the
+no-repeat window); the in-memory mirror appended at
+`arm_next_question` (lily_supply.py, "the IN-SESSION mirror stays at
+arm"); the durable row written at PLAYOUT START via
+`record_question_asked` (lily_agent.py:7445) from
+`note_playout_started` (lily_speech_delivery.py:2068) — moved there from
+arm by the `lily-2C489B` fix ("a question the table never heard must not
+be spent forever"); `_no_repeat_exclusion` (lily_agent.py:7573) unions
+history + this session's drawn set (G2) + the WS-4 burned sets.
+
+**Burn.** `_burn_question`/`_is_burned` (lily_supply.py), global
+`status='burned'` via `lily_persistence.lily_burn_question`, plus the
+session-scoped id/hash dead set. Burn is GLOBAL, not per-group; the
+group-scoped half of "exclude burned at group scope" is the group's
+asked-history rows, and the session-scoped half is the dead set. All three
+are already unioned by `_no_repeat_exclusion` — which is exactly what
+`_bank_to_supply` was NOT using.
+
+**Where the delivery path awaited an author.** `_prefetch_inner` awaited
+`reasoning.prefetch_question` for every lane except an operator topic, and
+`prefetch_question` (lily_reasoning.py:1014) returns a `from_bank` row
+immediately but otherwise runs `_generate_verify_choices` (:1036) under
+`prefetch_total_budget_seconds`. The insurance leg then awaited a bank
+draw AND `ensure_choices` (lily_reasoning.py:957, which calls
+`_generate_grok_json`). `_bank_to_supply` awaited `ensure_choices` too,
+and the CLASS 6 topic backfill awaited `prefetch_question`. S5 owns the
+prefetch WALLS; this WO owns the ORDER.
+
+### Three findings that were not ordering problems
+
+1. **The general deck was structurally unreachable.**
+   `lily_fetch_bank_question` filtered `.eq("adult", True)` for every
+   caller — the "unified adult deck" of WO-PRMPT-LILY-REFACTOR-001 (commit
+   2b3e005). A general table's bank was the 141-row adult register or
+   nothing; the 307 active `adult=false` rows could not be drawn by any
+   path in the game. **BEHAVIOURAL.**
+2. **Two of four rotation lanes could never match a bank row.** The
+   families are `["academic", "pop culture", "wordplay",
+   "lifestyle-potpourri"]`; the bank stores `pop_culture` (38 rows, vs 6
+   labelled `pop culture`) and `lifestyle` (40 rows, vs 0 labelled
+   `lifestyle-potpourri`). Both fell through to the any-category stage —
+   the stage HOTFIX-006 N2 had to make refusable. **BEHAVIOURAL.**
+3. **`_bank_to_supply` drew burned questions.** It built its own exclusion
+   union (history | drawn) and omitted the WS-4 burned sets, so the Z2
+   recovery ladder could draw a question whose answer was already on air;
+   `REARM_BLOCKED` caught it at arm, one wasted slot per stall.
+   **LOGICAL** (a shared helper existed; this caller did not use it).
+
+### Changes, by solution class
+
+| change | class |
+|---|---|
+| Bank asked FIRST for every lane; author only on a dry lane (`_bank_draw` / `_author_draw`, lily_supply.py:101–216; rewiring at :554–620) | **LOGICAL** — same two callees, inverted order |
+| `deck` axis on the draw (lily_persistence.py:1043–1060) + `_deck_for_supply` (lily_supply.py:85) | **BEHAVIOURAL** — 307 rows become servable when the adult deck is off |
+| `lane` axis: `LANE_BANK_CATEGORIES` / `lily_lane_categories` / `lily_lane_for_category` (lily_bank.py:83–145), staged in the draw (lily_persistence.py:1077–1088) | **BEHAVIOURAL** — two lanes stop falling through to "anything" |
+| `register`: tier relaxed across the whole lane before the lane is left | **LOGICAL** — HOTFIX-006 N2's existing rule, applied per lane |
+| `_bank_to_supply` routed through the shared draw, so it uses `_no_repeat_exclusion()` (lily_supply.py:1055–1069) | **LOGICAL** — deletes a divergent copy of an existing union |
+| MC: prefer a banked row with `choices`, degrade to freeform, never await synthesis (lily_persistence.py:1114–1128; `MC_DEGRADED` lily_supply.py:167) | **BEHAVIOURAL** — an MC round on a lane with no MC-capable row now runs freeform instead of waiting on a model |
+| Receipts: `BANK_DRAW`/`BANK_DRY`/`AUTHOR_ON_DELIVERY_PATH`, `question_timeline[n].source`/`bank_id` (lily_supply.py:1280–1288), `supply_receipt()` (:69) | **TECHNICAL** |
+| `lily_bank_health` — per-lane ready/active/servable/burned + S2's replenishment stamp and run receipts (lily_bank.py) | **TECHNICAL** |
+| Servable status widened to `('active', 'ready')`, queried in that order, with `burned`/`retired` still unservable (lily_bank.py; lily_persistence.py) | **LOGICAL** — the S2 seam; 'ready' is the arsenal's own promotion vocabulary |
+| Each lane's category list ends with its own family name (`lifestyle-potpourri` etc.), because S2's lanes are `<deck>:<family>` (lily_bank.py) | **BEHAVIOURAL** — without it every potpourri row S2 authors is undrawable |
+| `lily_record_asked` returns True/False and logs a recoverable payload on failure (lily_bank.py:365) | **TECHNICAL** — fleet S2 |
+
+### Deletions
+
+- **The insurance-bank leg** in `_prefetch_inner`: `INSURANCE_BANK_HIT`,
+  `INSURANCE_BANK_EMPTY`, `INSURANCE_BANK_ERROR` and its awaited
+  `ensure_choices`. It re-ran the same draw with the same arguments the
+  bank-first draw has already run, so after the inversion it could only
+  repeat a miss. Deleted, not left dead.
+- **The awaited `ensure_choices`** in `_bank_to_supply`
+  (`SUPPLY_FALLBACK_CHOICES`).
+- **The `prefer_bank` preference** and the `from_bank=` hand-off into
+  `reasoning.prefetch_question` — the author no longer gets a vote on
+  whether to use the bank row.
+- **`_bank_to_supply`'s private exclusion union** (`history_ids`
+  local).
+- `test_supply_recovery_z2.py`'s two insurance-telemetry tests are
+  re-pointed at `BANK_DRAW`/`BANK_DRY` (Z2's requirement — this draw is
+  never untelemetered — is carried, not dropped).
+
+### The S1 <-> S2 seam (reconciled against S2 @ 71cf80d, fixture-pinned)
+
+S1 was first written against an assumed contract (`status='active'` as
+S2's last write, plus an S1-owned `lily_bank_lane_health` table on
+migration 029). S2 landed a different and better one, and S1 was rewritten
+to it: **S2 owns migration 029; S1 adds no migration at all.** What S1 now
+codes against, each half pinned by a test:
+
+- **Servable status is `('active', 'ready')`, queried in that order.**
+  S2 lands verified/deduped/moderation-passed rows at `'ready'` and never
+  writes or reinterprets `'active'`. `'active'` is offered first so the
+  448-row standing bank drains before the replenished reserve.
+  `'burned'` (WS-4) and `'retired'` (the E tuning job) stay unservable —
+  server-side filter plus a client-side belt.
+  (`test_a_ready_row_from_the_replenisher_is_servable`,
+  `test_the_standing_bank_drains_before_the_replenished_reserve`,
+  `test_a_retired_row_is_never_servable`.)
+- **The draw does NOT filter on S2's `lane` column.** It is NULL on all
+  448 pre-existing rows; a draw that required it would have served only
+  what S2 had authored. The draw's own deck+category pair IS that key —
+  S2 says so itself ("back-reads a lane's depth by (mode, adult,
+  category) so legacy rows count toward depth without being rewritten")
+  — and `lily_bank.lily_lane_key` mirrors S2's `lily_lane_id` so the
+  receipt and the health readout speak S2's spelling.
+  (`test_the_draw_never_requires_the_s2_lane_column`,
+  `test_the_lane_key_matches_the_replenishers_lane_id`,
+  `test_the_draw_receipt_carries_the_s2_lane_id`.)
+- **Every lane's category list ends with its own family name.** S2's
+  lanes are `<deck>:<family>`, so it writes `category='pop culture'` and
+  `category='lifestyle-potpourri'` — the second of which no pre-WO bank
+  row carries. Without the family name in the lane map, every potpourri
+  row S2 authored would be undrawable.
+  (`test_the_replenishers_own_family_categories_are_drawable`.)
+- **Health reads S2's real surfaces, never writes them.**
+  `last_replenished_at` = newest `lily_questions.replenished_at` in the
+  lane; `rejection_rate` = (skipped_duplicate + rejected_verify +
+  rejected_moderation) / authored_count over the most recent COMPLETED
+  `lily_bank_replenish_runs` row per S2 lane. Absent column / absent
+  table / no completed run = `null`, never 0.
+  (`test_bank_health_counts_the_replenishers_ready_rows_separately`,
+  `test_bank_health_derives_the_rejection_rate_from_the_s2_run_receipt`.)
+- **Open ask of S2:** author `choices` for rows banked into MC-capable
+  lanes; until then `LILY_SUPPLY | MC_DEGRADED` counts what
+  freeform-degraded.
+- **Seam risk to flag, not a defect:** S2's adult lanes are
+  `adult:adult_couples` and `adult:adult_kink` (`ADULT_CATEGORY_FAMILIES`),
+  while `_category_for_round` rotates `CATEGORY_FAMILIES` for every
+  session. On the adult deck that means only the potpourri lane is
+  replenished; the academic / pop culture / wordplay adult lanes drain
+  the standing 141 rows with nothing topping them up. Pre-existing
+  (the adult rotation was already unused since
+  WO-PRMPT-LILY-REFACTOR-001), out of S1's region, and visible in the
+  health readout the day it starts to bite.
+
+### Left for S5
+
+The prefetch WALLS are untouched: `prefetch_timeout_seconds`,
+`prefetch_total_budget_seconds`, `PREFETCH_HARD_TIMEOUT_TICKS`, the
+`asyncio.wait_for` around the bank draw
+(`BANK_DRAW_TIMEOUT_SECONDS = 20.0`, lily_supply.py:24) and the
+`_recover_supply` retry budget all remain. The prefetch call sites remain
+in place and are still awaited **inside the background prefetch task** —
+which is the supply line, not the delivery path; the delivery path
+(`arm_next_question` → `armed_question`) awaits nothing at all. The one
+place a table can still wait on a model is `_author_draw`, reached only on
+a dry lane, and it is counted.
+
+### The four numbers
+
+### Guard-map deltas (restated after the S2 reconciliation)
+
+Mech. **90** added (bank-first supply draw, now including the
+`('active','ready')` status axis); the insurance leg RETIRED and struck
+from mech. 79's row; mechs. 79 and 32 amended. No S1 migration. Count
+89 → 90.
+
+### The four numbers
+
+- **lines added: 1980** (of which 802 are the new test file and 397 are
+  CHANGELOG/README/GUARD_MAP prose; production code + existing-test
+  fixups: 781)
+- **lines deleted: 189** (177 of them production code — the insurance
+  leg, the awaited MC synthesis, the `prefer_bank`/`from_bank`
+  hand-off, and `_bank_to_supply`'s private exclusion union)
+- **failing-first tests: 28** (`tests/test_supply_001_s1.py` as shipped,
+  run against `wo/supply-001` with no implementation: 28 failed / 6
+  passed; 34 pass after)
+- **mechanisms retired: 1** (the insurance-bank leg of mech. 79)
+
+Suites: 3282 pass (3248 baseline + 34), on `python3` and on the 3.13 venv.
+`python3 -W error -c "import lily_agent"` clean.
 ## 2026-09-06 — Composition review of integ/next c71287e: the precedence walk, one P1 applied
 
 Operator: "the precedence chain is the load-bearing part — STOP retires,

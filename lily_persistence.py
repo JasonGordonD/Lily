@@ -968,10 +968,58 @@ async def lily_fetch_bank_question(
     exclude_hashes: Optional[set] = None,
     exclude_answers: Optional[set] = None,
     strict_category: bool = False,
+    deck: Optional[str] = None,
+    lane_categories: Optional[list] = None,
+    prefer_choices: bool = False,
+    stats: Optional[dict] = None,
 ) -> Optional[dict]:
     """Pull one unused curated question from lily_questions, preferring the
     requested category/tier, falling back to any unused row. Returns the
     §4.2 structured shape or None.
+
+    THE THREE AXES (WO-LILY-SUPPLY-001 S1). This is the delivery path's
+    only supply now, so what it filters on is stated rather than implied:
+
+      deck     — the `adult` boolean column. "general" serves adult=false
+                 rows, "adult" serves adult=true, "any" serves both.
+                 `deck=None` keeps the pre-WO behaviour EXACTLY (adult=true
+                 only, the unified adult deck of
+                 WO-PRMPT-LILY-REFACTOR-001) so no existing caller moves
+                 under its feet. That legacy filter is why the 307 active
+                 adult=false rows were unreachable by every draw path in
+                 the game: a general table's bank was the 141-row adult
+                 register or nothing.
+      lane     — `lane_categories`: the bank `category` values this
+                 rotation lane draws from, in draw order
+                 (lily_bank.lily_lane_categories). The rotation's family
+                 names are NOT the bank's vocabulary — "pop culture" the
+                 family vs "pop_culture" the 38 rows, "lifestyle-potpourri"
+                 the family vs "lifestyle" the 40 rows — so an exact
+                 `.eq("category", family)` reached two of four lanes and
+                 the other two fell through to the any-category stage.
+                 Omitted -> the single `category` argument, as before.
+      register — `difficulty_tier`. The SOFT axis: tier is relaxed inside
+                 the lane before the lane is left, because a lane question
+                 at the wrong difficulty is still a lane question
+                 (HOTFIX-006 N2's rule, now applied per lane rather than
+                 only inside a strict draw).
+
+    Servable status (the S1<->S2 seam): `lily_bank.BANK_SERVABLE_STATUSES`
+    = ('active', 'ready'). Migration 009's 'active' is the standing bank;
+    S2's background author lands verified, deduped, moderation-passed rows
+    at 'ready' and never touches 'active'. Both serve, 'active' first, so
+    the standing bank drains before the replenished reserve. 'burned'
+    (WS-4) and 'retired' (the E tuning job) never serve. The draw does NOT
+    filter on S2's `lane` column: it is NULL on all 448 pre-existing rows,
+    and this draw's own deck+category pair is that same key
+    (`lily_bank.lily_lane_key`).
+
+    `stats`, when passed, is filled with the receipt the caller logs:
+    {deck, lane, lane_category, status, stage, pool_remaining, excluded} —
+    `pool_remaining` is how many rows the winning stage could still have
+    served AFTER exclusions (so "the lane is nearly dry" is a number, not
+    an inference), `excluded` is how many candidates the group's history /
+    burn / drawn sets removed from that stage.
 
     Category strictness (WO-LILY-HOTFIX-006 N2): `strict_category=True`
     removes the any-category fallback stage, so the draw returns a row in
@@ -1002,46 +1050,83 @@ async def lily_fetch_bank_question(
         for a in (exclude_answers or set())
         if str(a).strip()
     }
+    deck_key = str(deck or "").strip().lower() or None
+    if stats is not None:
+        stats.update({
+            "deck": deck_key or "adult",
+            "lane_category": None,
+            "lane": None,
+            "status": None,
+            "stage": None,
+            "pool_remaining": 0,
+            "excluded": 0,
+        })
     try:
         def _query_stage(
             stage_category: Optional[str],
             stage_tier: Optional[int],
+            stage_status: str,
         ):
             query = (
                 supabase.table("lily_questions")
                 .select("*")
-                .eq("status", "active")
-                # Unified adult deck: serve adult-register rows.
-                .eq("adult", True)
+                .eq("status", stage_status)
             )
+            # Deck. `None` is the legacy unified-adult filter, kept byte-
+            # identical so every pre-WO caller (and the adult-identity
+            # fixture that pins it) is untouched.
+            if deck_key is None or deck_key == "adult":
+                query = query.eq("adult", True)
+            elif deck_key == "general":
+                query = query.eq("adult", False)
+            # deck_key == "any": no register filter at all.
             if stage_category is not None:
                 query = query.eq("category", stage_category)
             if stage_tier is not None:
                 query = query.eq("difficulty_tier", stage_tier)
             return query.limit(BANK_FETCH_CANDIDATE_LIMIT).execute()
 
-        # Tier relaxation stays inside a strict draw: a Cape Cod question at
-        # the wrong difficulty is still a Cape Cod question. Only the
-        # category filter is inviolable.
-        stages = (
-            (category, difficulty_tier),
-            (category, None),
-        ) if strict_category else (
-            (category, difficulty_tier),
-            (category, None),
-            (None, None),
-        )
+        # Lane, then register. The lane's categories are tried in declared
+        # order at the requested tier, then the whole lane again with the
+        # tier relaxed — a lane question at the wrong difficulty is still a
+        # lane question (HOTFIX-006 N2's rule, per lane). Only after the
+        # WHOLE lane is dry does the any-category stage run, and a strict
+        # draw (a topic the table NAMED) does not get that stage at all.
+        lane = [c for c in (lane_categories or []) if c] or [category]
+        # Status is the innermost axis and it is a PREFERENCE, not a
+        # filter: inside one lane category at one tier, the standing bank's
+        # 'active' rows are offered before the S2 replenisher's 'ready'
+        # reserve, so the 448 curated rows drain before the rows a job
+        # wrote last night. It is queried rather than filtered client-side
+        # because `status` is the leading column of migration 016's draw
+        # index and of S2's partial ready index — an `in`-list would need a
+        # postgrest operator every bank fake in the suite would have to
+        # grow, for a stage that almost always hits on its first query.
+        statuses = list(lily_bank.BANK_SERVABLE_STATUSES)
+        stages = [
+            (c, difficulty_tier, st) for c in lane for st in statuses
+        ]
+        stages += [(c, None, st) for c in lane for st in statuses]
+        if not strict_category:
+            stages += [(None, None, st) for st in statuses]
         row = None
-        for stage_category, stage_tier in stages:
+        for stage_category, stage_tier, stage_status in stages:
             rows = await asyncio.to_thread(
-                _query_stage, stage_category, stage_tier
+                _query_stage, stage_category, stage_tier, stage_status
             )
             pool = lily_memory.lily_bank_mode_filter(rows.data or [])
-            candidates = [
+            servable = [
                 r for r in pool
                 if r.get("question") and r["question"] not in exclude_prompts
-                and (r.get("status") or "active") == "active"
-                and f"kb_{r.get('id', 0)}" not in exclude_ids
+                # Belt over the server-side filter: 'burned' (WS-4) and
+                # 'retired' (the E tuning job) are never servable, however
+                # a row reached this list.
+                and (r.get("status") or "active")
+                in lily_bank.BANK_SERVABLE_STATUSES
+            ]
+            candidates = [
+                r for r in servable
+                if f"kb_{r.get('id', 0)}" not in exclude_ids
                 and (
                     not exclude_hashes
                     or lily_bank.lily_question_text_hash(r["question"])
@@ -1055,8 +1140,38 @@ async def lily_fetch_bank_question(
                 )
             ]
             if candidates:
+                # MC rounds prefer a row that ALREADY carries choices
+                # (WO-LILY-SUPPLY-001 S1). Synthesizing distractors is a
+                # reasoning-lane call, and the delivery path does not make
+                # those any more: an MC round serves an MC-capable row when
+                # the lane has one and degrades honestly to freeform when it
+                # does not. Preference only — never a reason to leave the
+                # lane or to serve nothing.
+                if prefer_choices:
+                    with_choices = [
+                        r for r in candidates
+                        if isinstance(r.get("choices"), list) and r["choices"]
+                    ]
+                    if with_choices:
+                        candidates = with_choices
                 row = random.choice(candidates)
+                if stats is not None:
+                    stats["lane_category"] = stage_category
+                    stats["status"] = stage_status
+                    stats["lane"] = lily_bank.lily_lane_key(
+                        stats["deck"], stage_category or category
+                    )
+                    stats["stage"] = (
+                        "any" if stage_category is None
+                        else ("lane" if stage_tier is None else "lane+tier")
+                    )
+                    # What is LEFT after this serve: the number that says
+                    # how close this lane is to starving the game.
+                    stats["pool_remaining"] = len(candidates) - 1
+                    stats["excluded"] += len(servable) - len(candidates)
                 break
+            if stats is not None:
+                stats["excluded"] += len(servable) - len(candidates)
         if row is None:
             return None
         # Live-schema tolerance: the production table stores the answer as

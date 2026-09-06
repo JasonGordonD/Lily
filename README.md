@@ -2360,6 +2360,142 @@ session.
   recover it, which is one more reason `volume_threshold` stays 0.0 until
   calibrated.
 
+## Bank-first question supply (WO-LILY-SUPPLY-001 S1)
+
+Operator ruling, 2026-09-06: **"the bank serves, the author replenishes.
+Live question authoring never sits on the delivery path again."**
+Evidence: grok-4.5 authoring measured 20-39 s to the FIRST content token on
+every call (WO-LILY-STREAMING-REASONING-001 stopped it dying, not being
+slow), while `lily_questions` held 448 active rows.
+
+**What changed.** The supply line used to ask the AUTHOR first for every
+lane except an operator topic and reach the bank only as insurance, after
+authoring had already failed. That ordering is inverted: `_bank_draw` is
+asked first, and `_author_draw` runs only when the lane is dry for this
+table. Every author call left on the supply line is counted into
+`session_metrics.supply.generation_calls_on_delivery_path`, which is
+expected to be **0** — a non-zero value is a bank-health defect (the lane
+named in `bank_dry_lanes` ran out), not the design.
+
+**The three axes of a draw** (`lily_fetch_bank_question`):
+
+| axis | column | source |
+|---|---|---|
+| **deck** | `adult` | `_deck_for_supply()` — the session's `availability_flags["adult_deck"]`. `"adult"` serves `adult=true` (the unified standard deck of WO-PRMPT-LILY-REFACTOR-001); `"general"` serves `adult=false`. Passing no deck keeps the legacy adult-only filter for pre-WO callers. |
+| **lane** | `category` | `lily_bank.lily_lane_categories(family, deck)` — the rotation family mapped onto the bank's own vocabulary, tried in declared order. |
+| **register** | `difficulty_tier` | `_difficulty_for_round`. The SOFT axis: tier relaxes across the whole lane before the lane is left. |
+| **status** | `status` | `lily_bank.BANK_SERVABLE_STATUSES = ('active', 'ready')`. A preference, not a filter: inside one lane category at one tier, the standing bank's `active` rows are offered before the S2 replenisher's `ready` reserve, so the 448 curated rows drain first. `burned` (WS-4) and `retired` (the E tuning job) never serve. |
+
+**The S1 <-> S2 seam.** The background replenisher (S2, `lily_bank_replenish.py`,
+migration 029) lands verified, deduped, moderation-passed rows at
+`status='ready'` and never writes or reinterprets `active`; it stamps
+`lane` (`<deck>:<category>`), `question_text_sha256`, `replenished_at` and
+`replenish_run_id`. **The draw does not filter on `lane`** — it is NULL on
+all 448 pre-existing rows, so a draw that required it would serve only what
+S2 had authored — and the draw's own deck+category pair is that same key
+(`lily_bank.lily_lane_key`, which mirrors S2's `lily_lane_id`). S2's lanes
+are `<deck>:<family>`, so it writes `category='lifestyle-potpourri'`, a
+value no pre-WO row carries: every lane's category list therefore ends with
+its own family name, or the rows S2 authored for it would be undrawable.
+
+**The lane map** (`lily_bank.LANE_BANK_CATEGORIES`). The rotation's family
+names were never the bank's category vocabulary, and the draw compared them
+with an exact `.eq("category", family)`:
+
+| family | bank reality before | now maps to (general) |
+|---|---|---|
+| `academic` | 148 rows, HIT | academic, science, history, geography, nature, mythology |
+| `wordplay` | 40 rows, HIT | wordplay, literature |
+| `pop culture` | 6 rows labelled `pop culture` while 38 sat under `pop_culture` — MISS | pop_culture, pop culture, music, sports |
+| `lifestyle-potpourri` | 0 rows — the bank stores `lifestyle` — MISS | lifestyle, art, Greece, potpourri |
+
+Two of four lanes could therefore only ever be served by the any-category
+fallback stage. `lily_lane_for_category` is the declared inverse and the
+grouping key of the health readout; anything unlisted is potpourri.
+
+**Multiple choice.** Distractor synthesis (`ensure_choices`) is a
+reasoning-lane call, so it is no longer awaited on the supply line. An MC
+round prefers a banked row that already carries `choices` inside its lane
+and degrades honestly to freeform when the lane has none
+(`LILY_SUPPLY | MC_DEGRADED`).
+
+**Receipts.** Per draw: `LILY_SUPPLY | BANK_DRAW | session= q= id= deck=
+lane= excluded= pool_remaining= category= stage= trigger=`; a dry lane logs
+`BANK_DRY` and an awaited author logs `AUTHOR_ON_DELIVERY_PATH`. Per
+question: `lily_sessions.metadata.question_timeline[n].source` (`bank` /
+`author`) and `.bank_id`. Per session:
+`lily_sessions.metadata.session_metrics.supply` =
+`{bank_draws, author_draws, generation_calls_on_delivery_path,
+pool_remaining_min, bank_dry_lanes, mc_degraded}`.
+
+### Per-lane bank health
+
+`lily_bank.lily_bank_health(supabase)` returns
+`{lane: {ready, active, servable, burned, last_replenished_at,
+rejection_rate}}` for all four lanes — always all four, so an empty lane is
+a stated zero rather than a missing key. `ready` is what the S2 replenisher
+banked and nobody has served, `active` is the standing bank, `servable` is
+their sum (what the draw can reach). `last_replenished_at` is the newest
+`lily_questions.replenished_at` in the lane and `rejection_rate` is
+`(skipped_duplicate + rejected_verify + rejected_moderation) /
+authored_count` over the most recent COMPLETED run per S2 lane
+(`lily_bank_replenish_runs`, migration 029). Both stay `null` — never 0 —
+until S2 has actually run: "not measured" and "measured as zero" are
+different claims. S1 never writes either surface.
+
+The same readout as SQL (`replenished_at` needs migration 029 applied; drop that column from the projection to run it against a pre-029 database):
+
+```sql
+-- Per-lane bank health. The lane map lives in
+-- lily_bank.LANE_BANK_CATEGORIES; this CASE is its SQL twin, so a change
+-- to one is a change owed to the other.
+with laned as (
+  select
+    case
+      when category in ('academic','science','history','geography',
+                        'nature','mythology','adult_science',
+                        'adult_history')            then 'academic'
+      when category in ('pop_culture','pop culture','music','sports',
+                        'adult_popculture')          then 'pop culture'
+      when category in ('wordplay','literature',
+                        'adult_wordplay')            then 'wordplay'
+      else 'lifestyle-potpourri'
+    end                                              as lane,
+    adult,
+    status,
+    status in ('active', 'ready')                    as servable,
+    replenished_at
+  from lily_questions
+)
+select
+  l.lane,
+  count(*) filter (where l.servable and not l.adult)  as servable_general,
+  count(*) filter (where l.servable and     l.adult)  as servable_adult,
+  count(*) filter (where l.status = 'ready')          as ready_reserve,
+  count(*) filter (where l.status = 'burned')         as burned,
+  max(l.replenished_at)                               as last_replenished_at
+from laned l
+group by l.lane
+order by count(*) filter (where l.servable);
+```
+
+Ordering by the smallest pool first is deliberate: the lane at the top of
+that result is the one that will make a table wait on an author. Live
+output, 2026-09-06 (before any S2 replenishment — every row is `active`,
+so `ready_reserve` is 0 and `last_replenished_at` is null throughout):
+
+| lane | servable_general | servable_adult | burned |
+|---|---|---|---|
+| wordplay | 43 | 16 | 0 |
+| pop culture | 47 | 16 | 9 |
+| lifestyle-potpourri | 48 | 76 | 30 |
+| academic | 169 | 33 | 42 |
+
+The rejection rate is the run receipt's, not this query's: `select lane,
+(skipped_duplicate + rejected_verify + rejected_moderation)::numeric /
+nullif(authored_count, 0) as rejection_rate from lily_bank_replenish_runs
+where status = 'completed' order by started_at desc;`
+
 ## Bank curation loop (WO-LILY-OMNIBUS-002 D/E/F)
 
 The curated bank (`lily_questions`) is a living asset: it grows from

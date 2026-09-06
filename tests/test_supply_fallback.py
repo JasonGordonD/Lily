@@ -126,16 +126,28 @@ def _patch_bank(monkeypatch, result):
     async def _fake_fetch(supabase, category, difficulty_tier,
                           exclude_prompts, mode="general",
                           exclude_ids=None, exclude_hashes=None,
-                          exclude_answers=None, strict_category=False):
+                          exclude_answers=None, strict_category=False,
+                          deck=None, lane_categories=None,
+                          prefer_choices=False, stats=None):
         # strict_category (HOTFIX-006 N2): the fallback draws strictly inside
         # a round the table NAMED, so an operator topic can never be filled
         # with a stranger's question. These fixtures all run the fixed
         # rotation, where it is False and the behaviour is unchanged.
+        # deck / lane_categories / prefer_choices / stats:
+        # WO-LILY-SUPPLY-001 S1 — the bank-first draw's three axes and its
+        # receipt. Captured so the fallback's deck and lane are assertable.
+        if stats is not None:
+            stats.update({
+                "deck": deck or "adult", "lane_category": category,
+                "stage": "lane+tier", "pool_remaining": 0, "excluded": 0,
+            })
         calls.append({
             "category": category, "tier": difficulty_tier, "mode": mode,
             "exclude_ids": exclude_ids, "exclude_hashes": exclude_hashes,
             "exclude_answers": exclude_answers,
             "strict_category": strict_category,
+            "deck": deck, "lane_categories": lane_categories,
+            "prefer_choices": prefer_choices,
         })
         return dict(result) if isinstance(result, dict) else result
 

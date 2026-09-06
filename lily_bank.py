@@ -49,6 +49,133 @@ ASKED_HISTORY_LIMIT = 500
 CATEGORY_PROMOTE_MIN_USES = 10
 CATEGORY_PROMOTE_MIN_GROUPS = 3
 
+# ---------------------------------------------------------------------------
+# Lane map: the fixed family rotation -> the bank's category vocabulary
+# (WO-LILY-SUPPLY-001 S1)
+# ---------------------------------------------------------------------------
+#
+# The rotation (lily_agent.CATEGORY_FAMILIES) and the bank
+# (lily_questions.category) were never the same vocabulary, and the draw
+# compared them with an exact `.eq("category", family)`. Live counts,
+# 2026-09-06:
+#
+#   family "academic"            -> 148 general rows labelled "academic"  HIT
+#   family "wordplay"            ->  40 general rows labelled "wordplay"  HIT
+#   family "pop culture"         ->   6 rows labelled "pop culture" while
+#                                     38 sit under "pop_culture"        MISS
+#   family "lifestyle-potpourri" ->   0 rows: the bank stores "lifestyle"
+#                                                                       MISS
+#
+# Two of four lanes could therefore only ever be served by the
+# any-category fallback stage — which is exactly the stage HOTFIX-006 N2
+# had to make refusable, because "anything" is how Psycho ended up in a
+# Cape Cod round. Bank-first supply cannot rest on it, so the mapping is
+# declared here as data, tested against the live vocabulary, and used by
+# the draw (ordered: the primary category first, then the lane's
+# neighbours) and by the per-lane health readout.
+#
+# Each lane lists its bank categories most-specific-first, per deck. A
+# category may appear in exactly ONE lane (lily_lane_for_category is the
+# declared inverse); anything unlisted falls to the potpourri lane, which
+# is what "potpourri" means.
+POTPOURRI_LANE = "lifestyle-potpourri"
+
+LANE_BANK_CATEGORIES: dict = {
+    "academic": {
+        "general": ["academic", "science", "history", "geography",
+                    "nature", "mythology"],
+        "adult": ["adult_science", "adult_history", "academic", "science",
+                  "history", "geography", "mythology"],
+    },
+    "pop culture": {
+        "general": ["pop_culture", "pop culture", "music", "sports"],
+        "adult": ["adult_popculture", "pop_culture", "pop culture",
+                  "music", "sports"],
+    },
+    "wordplay": {
+        "general": ["wordplay", "literature"],
+        "adult": ["adult_wordplay", "wordplay", "literature"],
+    },
+    POTPOURRI_LANE: {
+        "general": ["lifestyle", "art", "Greece", "potpourri",
+                    POTPOURRI_LANE],
+        "adult": ["adult_couples", "adult_kink", "drinking", "lifestyle",
+                  "art", "potpourri"],
+    },
+}
+
+# Decks: the `adult` boolean column on lily_questions. "adult" is the
+# unified standard deck WO-PRMPT-LILY-REFACTOR-001 left in place; the 307
+# active adult=false rows are the "general" deck, structurally unreachable
+# before this WO because every draw filtered `.eq("adult", True)`.
+BANK_DECKS = ("general", "adult")
+
+# ---------------------------------------------------------------------------
+# The S1 <-> S2 seam (WO-LILY-SUPPLY-001)
+# ---------------------------------------------------------------------------
+#
+# STATUS. Migration 009 established `status`, with 'active' = servable.
+# The S2 background author lands its rows at 'ready' — verified, deduped,
+# moderation-passed, never served — and never writes or reinterprets
+# 'active'. Both are servable to this draw. The ORDER matters and is
+# deliberate: 'active' first, so the 448-row standing bank drains before
+# the replenished reserve does. Anything else — 'burned' (WS-4),
+# 'retired' (the E tuning job) — is not servable and never has been.
+BANK_SERVABLE_STATUSES = ("active", "ready")
+
+# LANE ID. S2 stamps `lily_questions.lane` as `<deck>:<category>`
+# (lily_bank_replenish.lily_lane_id) and keys its watermark, its run
+# receipts and its depth counts on it. THE DRAW DOES NOT FILTER ON THAT
+# COLUMN, on purpose: it is NULL on all 448 pre-existing rows, so a draw
+# that required it would serve only what S2 had authored and would have
+# emptied the standing bank overnight. The draw's own `adult` + `category`
+# pair IS the same key — S2 says so itself ("the replenisher back-reads a
+# lane's depth by (mode, adult, category) so legacy rows count toward
+# depth without being rewritten") — and this function is where the two
+# spellings are reconciled, for the receipt and the health readout.
+def lily_lane_key(deck, category) -> str:
+    """`general` + `academic` -> `general:academic`. Mirrors S2's
+    `lily_bank_replenish.lily_lane_id` exactly. Restated rather than
+    imported: lily_agent imports the replenisher (the entrypoint hook),
+    and importing it back from here would close a cycle."""
+    return f"{str(deck or '').strip().lower()}:{str(category or '').strip()}"
+
+
+# S2's run receipts, read (never written) by the health readout.
+REPLENISH_RUNS_TABLE = "lily_bank_replenish_runs"
+
+
+def lily_lane_categories(lane, deck: str = "general") -> list:
+    """The bank `category` values a rotation lane draws from, in draw
+    order, for one deck. Unknown lane -> that lane's own name (an
+    operator topic draws strictly under its own label, HOTFIX-006 N2).
+
+    Each list ends with the lane's OWN family name where that is not
+    already a bank category, because that is the `category` S2 writes:
+    its lanes are `<deck>:<family>`, so a replenished potpourri row lands
+    as category='lifestyle-potpourri' — a value no pre-WO bank row has
+    ever carried. Leaving it off would have made every row S2 authored
+    for that lane undrawable."""
+    entry = LANE_BANK_CATEGORIES.get(str(lane or ""))
+    if entry is None:
+        name = str(lane or "").strip()
+        return [name] if name else []
+    deck_key = "adult" if str(deck or "").lower() == "adult" else "general"
+    return list(entry[deck_key])
+
+
+def lily_lane_for_category(category) -> str:
+    """The rotation lane a bank category belongs to — the declared inverse
+    of lily_lane_categories, and the grouping key of the health readout.
+    Anything unlisted (an operator topic, a category promoted since this
+    table was written) is potpourri, which is what potpourri is for."""
+    name = str(category or "").strip()
+    for lane, decks in LANE_BANK_CATEGORIES.items():
+        for categories in decks.values():
+            if name in categories:
+                return lane
+    return POTPOURRI_LANE
+
 
 # ---------------------------------------------------------------------------
 # Normalization + hashing (pure)
@@ -272,9 +399,18 @@ async def lily_record_asked(
     group_id: str,
     question: dict,
     session_id: str,
-) -> None:
+) -> bool:
     """One lily_asked_history row per question SERVED (armed into the
-    state block for delivery). Fire-and-forget.
+    state block for delivery). Fire-and-forget at the call site.
+
+    WO-LILY-SUPPLY-001 S1: returns True only when the row actually
+    landed. This is the durable half of the group no-repeat ledger — the
+    ONLY thing that stops the next session re-serving what this one asked
+    — and a bank-first game leans on it far harder than a generate-first
+    one did, because with the bank serving, a lost row is a guaranteed
+    repeat rather than a merely likely one. Fleet S2: the return value
+    exists so a failure is a stated fact, not an inference from a log
+    line nobody reads.
 
     The row carries the question's CATEGORY (migration 023,
     WO-LILY-HOTFIX-006 N2). Session lily-16A9AE was narrated as a custom
@@ -283,7 +419,7 @@ async def lily_record_asked(
     actually built" a fact the ledger can answer, per group and per
     session, instead of something reconstructed from question text."""
     if supabase is None or not group_id or not isinstance(question, dict):
-        return
+        return False
     payload = {
         "group_id": group_id,
         "question_id": question.get("id"),
@@ -322,15 +458,158 @@ async def lily_record_asked(
                 "question_id=%s (pre-023 schema — category skipped)",
                 group_id, session_id, question.get("id"),
             )
-            return
+            return True
         logger.info(
             "LILY_BANK | ASKED_RECORDED | group=%s session=%s question_id=%s "
             "category=%s",
             group_id, session_id, question.get("id"), payload["category"],
         )
+        return True
     except Exception as e:
-        logger.error("LILY_BANK | ASKED_RECORD_FAILED | group=%s error=%s",
-                     group_id, e)
+        # Cardinal Rule (no memory is bad memory): a lost asked-history row
+        # is a repeat the table will hear next session, so the payload is
+        # logged whole and recoverable, not summarised.
+        try:
+            recover = json.dumps(payload, default=str)
+        except Exception:
+            recover = repr(payload)
+        logger.error(
+            "LILY_BANK | ASKED_RECORD_FAILED | RECOVERY_PAYLOAD | group=%s "
+            "error=%s payload=%s", group_id, e, recover,
+        )
+        return False
+
+
+def _empty_lane_health() -> dict:
+    return {
+        "ready": 0,
+        "active": 0,
+        "servable": 0,
+        "burned": 0,
+        "last_replenished_at": None,
+        "rejection_rate": None,
+    }
+
+
+async def lily_bank_health(supabase) -> dict:
+    """Per-lane bank health (WO-LILY-SUPPLY-001 S1 deliverable 4).
+
+    Returns {lane: {ready, active, servable, burned, last_replenished_at,
+    rejection_rate}} for EVERY lane in the rotation, always all four, so an
+    empty lane is a stated zero rather than a missing key. With the bank
+    serving the delivery path, what starves a table is a lane running out —
+    not the bank as a whole — and this is the readout that names which one.
+
+      ready     rows the S2 replenisher has banked and nobody has served
+                (status='ready');
+      active    the standing bank's own rows (status='active');
+      servable  ready + active — what the draw can actually reach;
+      burned    retired by WS-4 (status='burned').
+
+    `last_replenished_at` is the newest `lily_questions.replenished_at` in
+    the lane (migration 029, stamped only by a replenishment run) and
+    `rejection_rate` is (skipped_duplicate + rejected_verify +
+    rejected_moderation) / authored_count over the most recent COMPLETED
+    run per S2 lane inside this rotation lane
+    (`lily_bank_replenish_runs`). Both stay None — never 0 — while S2 has
+    not run: "not measured" and "measured as zero" are different claims
+    and only one of them is true. S1 never writes either surface; a
+    missing column or a missing table is a null, not an error."""
+    lanes = {lane: _empty_lane_health() for lane in LANE_BANK_CATEGORIES}
+    if supabase is None:
+        return lanes
+    try:
+        try:
+            result = await asyncio.to_thread(
+                lambda: supabase.table("lily_questions")
+                .select("id, category, adult, status, replenished_at")
+                .execute()
+            )
+        except Exception as e:
+            # Migration-lag tolerance (the lily_register_operator_category
+            # pattern): a database still on the pre-029 schema has no
+            # replenished_at, and the ready/active/burned counts are worth
+            # more than the stamp.
+            if "replenished_at" not in str(e):
+                raise
+            result = await asyncio.to_thread(
+                lambda: supabase.table("lily_questions")
+                .select("id, category, adult, status")
+                .execute()
+            )
+        for row in (result.data or []):
+            row = row or {}
+            lane = lily_lane_for_category(row.get("category"))
+            bucket = lanes.setdefault(lane, _empty_lane_health())
+            status = str(row.get("status") or "active")
+            if status in BANK_SERVABLE_STATUSES:
+                bucket[status] = bucket.get(status, 0) + 1
+                bucket["servable"] += 1
+            elif status == "burned":
+                bucket["burned"] += 1
+            stamp = row.get("replenished_at")
+            if stamp and (
+                bucket["last_replenished_at"] is None
+                or str(stamp) > str(bucket["last_replenished_at"])
+            ):
+                bucket["last_replenished_at"] = stamp
+    except Exception as e:
+        logger.error("LILY_BANK | HEALTH_READ_FAILED | error=%s", e)
+        return lanes
+    # S2's run receipts. An absent table (S2 not landed, or migration 029
+    # not applied) leaves rejection_rate null, which is the honest answer.
+    try:
+        runs = await asyncio.to_thread(
+            lambda: supabase.table(REPLENISH_RUNS_TABLE)
+            .select(
+                "lane, status, authored_count, accepted_count, "
+                "skipped_duplicate, rejected_verify, rejected_moderation, "
+                "started_at"
+            )
+            .eq("status", "completed")
+            .order("started_at", desc=True)
+            .limit(200)
+            .execute()
+        )
+        latest: dict = {}
+        for row in (runs.data or []):
+            s2_lane = str((row or {}).get("lane") or "")
+            if s2_lane and s2_lane not in latest:
+                # Ordered newest-first, so the first sighting of an S2 lane
+                # IS its most recent completed run.
+                latest[s2_lane] = row
+        totals: dict = {}
+        for s2_lane, row in latest.items():
+            _, category = (s2_lane.split(":", 1) + [""])[:2]
+            bucket_lane = lily_lane_for_category(category)
+            authored, rejected = totals.get(bucket_lane, (0, 0))
+            authored += int(row.get("authored_count") or 0)
+            rejected += (
+                int(row.get("skipped_duplicate") or 0)
+                + int(row.get("rejected_verify") or 0)
+                + int(row.get("rejected_moderation") or 0)
+            )
+            totals[bucket_lane] = (authored, rejected)
+        for bucket_lane, (authored, rejected) in totals.items():
+            bucket = lanes.get(bucket_lane)
+            if bucket is None or not authored:
+                continue
+            bucket["rejection_rate"] = round(rejected / authored, 4)
+    except Exception as e:
+        logger.info(
+            "LILY_BANK | REPLENISH_RUNS_UNAVAILABLE | error=%s "
+            "(no completed replenishment run to read a rejection rate from)",
+            e,
+        )
+    logger.info(
+        "LILY_BANK | HEALTH | %s",
+        " ".join(
+            f"{lane}:servable={v['servable']}(ready={v['ready']},"
+            f"active={v['active']}),burned={v['burned']}"
+            for lane, v in sorted(lanes.items())
+        ),
+    )
+    return lanes
 
 
 async def lily_load_asked_history(

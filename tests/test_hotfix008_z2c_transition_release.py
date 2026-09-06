@@ -447,7 +447,15 @@ def test_combined_z2_z2c_the_2260354c_stall_is_unreproducible(monkeypatch):
     async def _fake_fetch(supabase, category, difficulty_tier,
                           exclude_prompts, mode="general",
                           exclude_ids=None, exclude_hashes=None,
-                          exclude_answers=None, strict_category=False):
+                          exclude_answers=None, strict_category=False,
+                          deck=None, lane_categories=None,
+                          prefer_choices=False, stats=None):
+        # WO-LILY-SUPPLY-001 S1 signature (deck/lane/register + receipt).
+        if stats is not None:
+            stats.update({
+                "deck": deck or "adult", "lane_category": category,
+                "stage": "lane+tier", "pool_remaining": 0, "excluded": 0,
+            })
         return dict(BANK_Q2)
 
     monkeypatch.setattr(

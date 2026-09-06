@@ -176,8 +176,17 @@ def _patch_bank(monkeypatch, script):
     async def _fake_fetch(supabase, category, difficulty_tier,
                           exclude_prompts, mode="general",
                           exclude_ids=None, exclude_hashes=None,
-                          exclude_answers=None, strict_category=False):
-        calls.append({"category": category, "mode": mode})
+                          exclude_answers=None, strict_category=False,
+                          deck=None, lane_categories=None,
+                          prefer_choices=False, stats=None):
+        # WO-LILY-SUPPLY-001 S1 added the deck/lane/register axes and the
+        # `stats` receipt to the draw; the Z2 contract is unchanged.
+        if stats is not None:
+            stats.update({
+                "deck": deck or "adult", "lane_category": category,
+                "stage": "lane+tier", "pool_remaining": 0, "excluded": 0,
+            })
+        calls.append({"category": category, "mode": mode, "deck": deck})
         result = remaining.pop(0) if len(remaining) > 1 else remaining[0]
         return dict(result) if isinstance(result, dict) else result
 
@@ -288,10 +297,21 @@ def test_total_supply_failure_one_honest_line_and_pause_offer(monkeypatch):
     assert any("pause" in n for n in game.sk.status_notes)
 
 
-# -- insurance telemetry (the zero-telemetry leg of the RCA) -------------------
+# -- bank telemetry (the zero-telemetry leg of the RCA) -----------------------
+#
+# AMENDED BY WO-LILY-SUPPLY-001 S1. Z2's contract point 5 was "the inline
+# INSURANCE draw logs what it did (HIT / EMPTY / ERROR)" — insurance being
+# the bank draw that ran AFTER authoring had already failed. S1 retired
+# that leg by inverting the ordering: the bank is asked FIRST, so the draw
+# these two tests watch is no longer insurance and no longer waits on a
+# 20-39 s authoring call to reach. The requirement Z2 actually placed —
+# this draw never runs untelemetered again — is unchanged and is now
+# carried by `BANK_DRAW` / `BANK_DRY`.
 
 
-def test_insurance_bank_hit_is_logged(monkeypatch, caplog):
+def test_the_bank_draw_is_logged_and_lands_without_asking_the_author(
+    monkeypatch, caplog
+):
     game = _make_game()
     _arm_q1_window_open(game)
     _patch_bank(monkeypatch, [BANK_Q])
@@ -303,15 +323,18 @@ def test_insurance_bank_hit_is_logged(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="lily_agent"):
         _run(scenario())
     assert game.next_question is not None
-    assert any("INSURANCE_BANK_HIT" in r.message for r in caplog.records)
-    # A successful insurance draw is not a failure: no recovery scheduled.
+    assert any("BANK_DRAW" in r.message for r in caplog.records)
+    assert not any("INSURANCE_BANK" in r.message for r in caplog.records)
+    # The whole point of the inversion: the author was never asked.
+    assert game.reasoning.calls == []
+    # A successful bank draw is not a failure: no recovery scheduled.
     assert getattr(game, "_supply_recovery_task", None) is None
 
 
-def test_insurance_bank_empty_is_logged(monkeypatch, caplog):
+def test_a_dry_bank_is_logged_before_the_author_is_asked(monkeypatch, caplog):
     game = _make_game()
     _arm_q1_window_open(game)
-    _patch_bank(monkeypatch, [None, None, BANK_Q])
+    _patch_bank(monkeypatch, [None])
 
     async def scenario():
         game.start_prefetch()
@@ -319,7 +342,12 @@ def test_insurance_bank_empty_is_logged(monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO, logger="lily_agent"):
         _run(scenario())
-    assert any("INSURANCE_BANK_EMPTY" in r.message for r in caplog.records)
+    messages = [r.message for r in caplog.records]
+    assert any("BANK_DRY" in m for m in messages)
+    # ...and only THEN does the table end up waiting on a model, which is
+    # itself logged as the bank-health defect it is.
+    assert any("AUTHOR_ON_DELIVERY_PATH" in m for m in messages)
+    assert game.reasoning.calls
 
 
 # -- the watchdog detects the silent window from ANY phase ---------------------
