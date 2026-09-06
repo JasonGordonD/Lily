@@ -78,6 +78,7 @@ import lily_assessment
 import lily_audeering_client
 import lily_audeering_consumers
 import lily_bank
+import lily_bank_replenish
 import lily_bank_tuning
 import lily_capabilities
 import lily_config
@@ -11275,6 +11276,18 @@ def lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics) -> di
     # acoustic trajectory, LLM usage, grounding usage) — process-level, one
     # job process per session, so this IS the session's count.
     session_block["telemetry_write_failures"] = _telemetry_failure_counts_or_failed()
+    # WO-LILY-SUPPLY-001 S2 (S1): the background author's own receipt —
+    # {runs, authored, accepted, rejected, dup}. Always present, zeros when
+    # the job never ran, so "the author did nothing tonight" is a stated
+    # value on the session row rather than an absent log line.
+    session_block["bank_replenish"] = lily_bank_replenish.lily_session_summary()
+    # WO-LILY-SUPPLY-001 S1 (integrator's line): the delivery-path supply
+    # receipt — bank_draws, author_draws, generation_calls_on_delivery_path
+    # (must read 0), pool_remaining_min, bank_dry_lanes, mc_degraded.
+    try:
+        session_block["supply"] = game.supply_receipt()
+    except Exception as e:  # the receipt never breaks the metadata write
+        session_block["supply"] = {"error": type(e).__name__}
     return {
         "pipeline_latency": {
             k: (round(sum(v) / len(v), 1) if v else None)
@@ -12065,6 +12078,30 @@ async def entrypoint(ctx: JobContext) -> None:
             lily_persistence.lily_sweep_abandoned_sessions(supabase)
         )
         asyncio.ensure_future(lily_assessment.lily_report_sweep(supabase))
+
+        # WO-LILY-SUPPLY-001 S2 — the background question author. ONE
+        # guarded spawn, in the same boot fan-out as the embedder prewarm
+        # and the report sweep, at the first point in the entrypoint where
+        # a supabase handle exists. DETACHED and never awaited: the game
+        # draws from what is already banked, and this job tops the lanes it
+        # finds below their 40%-consumed watermark while play happens. Its
+        # 20-39s think time costs the table nothing because nothing waits
+        # on it. Default OFF (lily_config.bank_replenish_enabled) — the
+        # out-of-session runner (scripts/bank_replenish.py) is how the bank
+        # gets topped until the operator flips LILY_BANK_REPLENISH_ENABLED.
+        if lily_config.bank_replenish_enabled():
+            _bank_author_task = lily_spawn(
+                lily_bank_replenish.lily_run_background_author(supabase),
+                "bank_replenish",
+            )
+            # The stop half. lily_shutdown_callback returns a ZERO-ARG
+            # coroutine function on purpose: livekit 1.6.10 inspects the
+            # callback's arity and hands a 1-arg callable the shutdown
+            # REASON string, so a defaulted lambda (`lambda t=task:`) would
+            # take the reason as its task and cancel nothing.
+            ctx.add_shutdown_callback(
+                lily_bank_replenish.lily_shutdown_callback(_bank_author_task)
+            )
 
     scorekeeper = LilyScorekeeper(
         session_id=room_name,  # session_id = room name, never random UUIDs

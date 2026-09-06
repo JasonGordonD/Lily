@@ -137,4 +137,9 @@ def test_fault_keys_sit_beside_the_collectors_summary():
         "handler_faults", "divergence_net_faults",
         "telemetry_write_failures",  # P1-3's lane
         "task_faults",  # P1-5's counter
+        # WO-LILY-SUPPLY-001 S2: the background question author's own
+        # {runs, authored, accepted, rejected, dup} block. This assertion
+        # fired exactly as designed when the lane was added — a new key on
+        # the session record is a deliberate edit here, never a drift.
+        "bank_replenish",
     }

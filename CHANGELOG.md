@@ -6,6 +6,7 @@ nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
 ## 2026-09-06 — WO-LILY-SUPPLY-001 S1: bank-first question supply
+## 2026-09-06 — WO-LILY-SUPPLY-001 S2: the bank serves, the author replenishes
 
 Operator ruling, VERBATIM:
 
@@ -292,6 +293,275 @@ tests, 3077 green. Fixes applied here:
 
 Failing-first: tests/test_review_c1ff3f6_fixes.py (5 tests, 5 red on
 7fa03d0).
+Branch `wo/supply-001-s2` on b463dc1 (`wo/supply-001`). S1 (the draw side)
+runs in parallel and is untouched here.
+
+**The evidence.** grok-4.5 authoring takes **20-39 s to the first content
+token per call** — now measurable per call, because
+WO-LILY-STREAMING-REASONING-001 put the transport on SSE and every call
+writes a `lily_llm_usage` row. The live `purpose='reasoning'` rows on
+2026-09-06 read avg ttft **17.1 s**, avg total **18.2 s**, 983 prompt +
+875 completion tokens per call at the interim medium effort. Verification
+is 3-7 s. The bank draw is one indexed SELECT. For as long as authoring
+sat inside prefetch, a table waited through that; the same question could
+have been written the night before by a job nobody was waiting on.
+
+### Archaeology (what already existed, file:line)
+
+The operator expected this to be principally **LOGICAL** — the picture
+arsenal's pattern applied to text — and it is. Everything below was read
+before anything was written:
+
+* **Watermark + target depth + replenish loop (pictures).**
+  `lily_arsenal.lily_replenish_threshold` (lily_arsenal.py:350),
+  `lily_should_replenish` (:390), `lily_arsenal_ready_count` (:297),
+  `lily_arsenal_bank_depth` (:316), `lily_arsenal_replenish` (:699),
+  `lily_arsenal_health` (:765), `lily_arsenal_low_warnings` (:869).
+  Accessors: `arsenal_target_depth` (lily_config.py:1461),
+  `arsenal_replenish_ratio` (:1483, 0.40), `arsenal_gate_mode` (:1499),
+  `arsenal_moderation_retries` (:1542).
+* **Runs table + resumability.** `lily_picture_arsenal_runs`
+  (migrations/022_lily_picture_arsenal_entry.sql:158-200) with the partial
+  unique index `…_one_active_idx` (:191); `lily_run_start`
+  (lily_arsenal.py:918), `lily_run_finish` (:955), `lily_run_heartbeat`
+  (:987), `lily_run_reclaim_stale` (:1023).
+* **Seed script.** `lily_arsenal_seed.py` (753 lines) — idempotent,
+  concurrency-safe, resumable, moderation-is-expected; its CLI shape
+  (`--status`, `--dry-run`, `--depth`, `--max-slots`) at :717-750 and its
+  `_build_supabase` at :438.
+* **A5 similarity check.** `lily_arsenal_is_duplicate`
+  (lily_arsenal.py:438) over `lily_bank.lily_find_duplicate`
+  (lily_bank.py:79, exact normalized-hash any category + difflib ≥
+  `DUP_FUZZY_RATIO` 0.87 same category), `lily_normalize_question_text`
+  (:61), `lily_question_text_hash` (:71, **sha1**);
+  `ARSENAL_DUP_RATIO = 0.82` (lily_arsenal.py:95).
+* **Moderation / availability classification.**
+  `lily_arsenal_gen.lily_is_moderation_rejection` (lily_arsenal_gen.py:109)
+  and `lily_is_unavailable` (:118), with the outcome constants at :71-76.
+* **The in-session prefetch this WO takes off the critical path.**
+  `LilyReasoning.prefetch_question` (lily_reasoning.py:1014) and its inner
+  `_generate_verify_choices` (:1036); `generate_question` (:813);
+  `verify_question` (:889); the streaming transport `_generate_grok_json`
+  (:581) with its `purpose` / `usage_session_id` / `effort` parameters and
+  the `record_llm_call` receipt at :687-711. Callers:
+  `lily_supply.py:409` (prefetch) and `:939` (recovery), each feeding
+  `_curate_generated_question` (lily_agent.py:4019) →
+  `lily_bank.lily_record_category_proposal` (lily_bank.py:371) and
+  `lily_bank_generated_question` (:189).
+* **The in-session background pattern, already load-bearing.**
+  `_kick_arsenal_replenish` (lily_supply.py:1341) — watermark first, then
+  `asyncio.ensure_future`, never awaited — and `lily_spawn`
+  (lily_agent.py:402, Stage 1b's fault-observing fire-and-forget).
+* **The per-group no-repeat ledger.** `lily_asked_history` (migration 010;
+  `lily_record_asked` lily_bank.py:270, `lily_load_asked_history` :336,
+  `lily_history_hashes` :132 / `lily_history_answers` :115), and the draw
+  it guards, `lily_persistence.lily_fetch_bank_question` (:962).
+* **The bank itself, measured (Supabase SELECT-only, project
+  svqbfxdhpsmioaosuhkb, 2026-09-06):** `lily_questions` columns
+  id, mode, category, question, canonical_answer, acceptable_answers[],
+  difficulty_tier, reveal_color, source, adult, status, choices[],
+  image_prompt, image_url, image_source, image_license_note. Live
+  `status='active'`: **307 general + 141 adult = 448** (the WO's 464
+  counts something this query does not; the 307/141 split matches). The
+  rotation lanes hold academic 148, wordplay 40, pop_culture 38,
+  lifestyle 40, adult_kink 40, adult_couples 32 — plus a long legacy tail
+  (history, science, Greece, mythology…). `status='burned'`: 79.
+
+### What was added (solution class per change)
+
+| Change | Class | Why |
+|---|---|---|
+| `lily_bank_replenish.py` — lanes, watermark, dedup, run receipts, the detached loop | **LOGICAL** | The arsenal's replenishment pattern transposed to text. `lily_replenish_threshold`, `lily_find_duplicate`, `lily_is_moderation_rejection` and `lily_is_unavailable` are reused verbatim rather than re-implemented, so the two banks cannot drift on what "40% consumed", "the same question" or "a refusal" means |
+| migration 029 — `lane`, `question_text_sha256`, `replenished_at`, `replenish_run_id`, three indexes, `lily_bank_replenish_runs` | **TECHNICAL** | Storage the pattern needs. Mirrors `lily_picture_arsenal_runs` column for column where the concept survives the change of medium (cost is TOKENS, not a per-image price sheet) |
+| `scripts/bank_replenish.py` — the out-of-session runner | **LOGICAL** | `lily_arsenal_seed.py`'s job shape, same loop, no session |
+| `lily_config` — nine additive accessors | **TECHNICAL** | Depth, watermark, backoff, interval, burst cap, dup ratio, enable flag, and the background author's OWN effort knob |
+| `lily_reasoning.generate_question` / `verify_question` — `purpose` / `usage_session_id` kwargs | **TECHNICAL** | Both default-preserving; they ride parameters `_generate_grok_json` already takes. **No transport change.** They are what makes cost-per-question a SELECT instead of an estimate |
+| `lily_agent` — one guarded `lily_spawn` + one shutdown cancel + one `session_metrics` line | **TECHNICAL** | The entrypoint hook and the S1 consumer. Nothing else in that file |
+
+**BEHAVIOURAL:** none. No spoken line, no gate, no timing, no default
+changes for any existing path. The in-session author ships **OFF**
+(`LILY_BANK_REPLENISH_ENABLED`, default false) — turning live authoring on
+for every room is a spend decision, and the runner tops the bank without
+it.
+
+### Deletions
+
+**None.** No function, mechanism, guard, table, column, default or test was
+removed, narrowed or renumbered. The WO's "mechanisms retired" number for
+S2 is **0** — this is additive supply infrastructure, and the mechanism it
+will eventually retire (live authoring on the delivery path) is retired by
+S1's draw preferring the bank, not by this branch.
+
+### Guard-map delta (docs/GUARD_MAP.md)
+
+Two mechanisms added in a new addendum, **64** (S2 bank watermark) and
+**65** (S2 bank-write gate: verify → sha256 → A5 similarity → moderation
+classification → INSERT `status='ready'`). Both live entirely in the
+background lane and can neither refuse nor delay a spoken turn; they are
+recorded because they gate what reaches the bank the delivery path draws
+from. Count moves to **89 core + 6 addendum (60-65)**; nothing removed.
+
+### The status contract with S1
+
+S2 writes `status='ready'` and **only** 'ready' — verified, deduped,
+moderation-passed, never served — with `lane`, `question_text_sha256`
+(sha256 of the normalized text, deliberately a different column and digest
+from `lily_asked_history.question_text_hash`, which is sha1), and
+`replenished_at`. It never writes, updates or reinterprets `active`. S1's
+draw accepts 'ready' or 'active'; both count toward a lane's depth here,
+so a lane the author just filled does not read empty and get filled again.
+
+### The four numbers
+
+* **Lines added:** 3,847
+* **Lines deleted:** 7 (call sites in `lily_reasoning` re-pointed at the
+  new default-preserving kwargs; no behaviour removed)
+* **Failing-first red on `wo/supply-001`:** **65** — the 63 tests in
+  `tests/test_supply_001_s2_bank.py` + `tests/test_supply_001_s2_offpath.py`
+  (arriving on base as two `ModuleNotFoundError` collection errors) plus 2
+  named failures in `tests/test_env_deploy_lint.py`. Of the 63, **11 are
+  red against the POST-review code with only the review fix reverted** —
+  they fail on the defect, not merely on the missing module
+* **Mechanisms retired:** 0
+
+Suites: **3,313** on `python3 -m pytest tests -q` and on the 3.13 venv
+(baseline 3,248 + 65). `python3 -W error -c "import lily_agent"` clean.
+One existing pin updated deliberately:
+`tests/test_s1b_divergence_nets.py::test_fault_keys_sit_beside_the_collectors_summary`
+enumerates the exact keys added to `session_metrics`, and it fired exactly
+as designed when `bank_replenish` was added — a new key on the session
+record is a conscious edit, never a drift.
+
+### Effort: the decision, and the measurement behind it
+
+The interim `adult_reasoning_effort() == "medium"` is **untouched** — it
+stays until the operator rules, and it is still the live delivery-path
+tier. The background author gets its own accessor,
+`bank_replenish_effort()`, which **ships on the same value** so this WO
+changes no model behaviour on its own.
+
+**Measured, at medium, from the live `lily_llm_usage` rows:**
+`purpose='reasoning'` (the authoring + verification lane) — 12 calls,
+avg 983 prompt + 875 completion = **1,858 tokens per call**, ttft 17.1 s,
+total 18.2 s. One banked question is one author call plus one verify call:
+**≈ 3,700 tokens per accepted question**, before rejections; grossed up
+for a 20 % verify/dup rejection rate, **≈ 4,600 tokens per banked
+question**.
+
+**Recommendation: raise the BACKGROUND author to high**
+(`LILY_BANK_REPLENISH_EFFORT=high`) and leave the live path at medium. The
+evidence that forced medium is a *latency* constraint — 16 of 16 live
+authoring calls at high hit the 20 s prefetch wall with no first byte — and
+that constraint does not exist for a job no table is waiting on. Effort is
+a quality dial here, exactly as the WO says.
+
+**What that recommendation is NOT backed by, stated plainly:** there is no
+measured high-effort token count or quality delta for this lane. Migration
+`027_lily_llm_usage_effort.sql` is **not applied in production** — the live
+`lily_llm_usage` table has no effort column — so historical high-effort
+calls cannot even be separated from medium ones. The honest path is one
+comparison run, which the runner already supports:
+
+    python3 scripts/bank_replenish.py --lane general:academic --max-new 5           # medium
+    python3 scripts/bank_replenish.py --lane general:academic --max-new 5 --effort high
+
+and read `cost_tokens_per_question` off the two `lily_bank_replenish_runs`
+receipts. **Finding for the operator:** migration 027 wants applying, or
+the effort dimension stays unmeasurable on every lane, not just this one.
+
+### Receipts (S1 — every one has a consumer)
+
+`LILY_BANK | WATERMARK | lane= ready= target= consumed_pct=` (consumer: the
+sweep, which replenishes exactly the lanes this marks below, and the health
+readout) · `REPLENISH_START` / `REPLENISH_DONE` / `REPLENISH_FAILED` ·
+`DUP_REJECTED` · `MODERATION_REJECTED` · `VERIFY_REJECTED` · `BANKED` ·
+`REPLENISH | lane= authored= accepted= rejected= dup= cost_tokens=` (the
+cost line) — plus the durable receipt row in `lily_bank_replenish_runs` and
+`session_metrics.bank_replenish` = `{runs, authored, accepted, rejected,
+dup}` on `lily_sessions.metadata`, built by the single
+`lily_session_metadata` builder so both write sites carry it.
+
+### Review fixes (independent review of 71cf80d — GO-WITH-FIXES)
+
+Every P1 was the same species of defect: **something that looks wired and
+does nothing.** That is the failure mode a background job is most prone to,
+because nobody is sitting in front of it while it works, and all three
+would have shipped looking healthy.
+
+* **P1-1 — the shutdown cancel was inert.** livekit 1.6.10 inspects a
+  shutdown callback's arity and hands a one-argument callable the shutdown
+  REASON string, so `lambda t=_bank_author_task:` took the reason as its
+  task and cancelled nothing; the author would have outlived its session
+  with nothing in the log to say so. `lily_shutdown_callback()` now returns
+  a **zero-argument** coroutine function — the same shape as
+  `_wait_for_persistence` twenty lines below the call site — and the test
+  drives it through a dispatcher that reproduces the framework's arity
+  inspection.
+* **P1-2 — the runner authored for free and reported it.**
+  `lily_metrics.record_llm_call` routes through a module-global collector
+  that the AGENT's entrypoint binds. A CLI process has no entrypoint:
+  unbound, `record_llm_call` returns False, no `lily_llm_usage` row is
+  ever written, and every runner receipt would have printed
+  `cost_tokens=0` — on the only job that will actually be run, and for the
+  one number the effort decision needs. `_bind_usage_context` now binds it
+  (session_id `bank_replenish`, phase `offline`) before the first
+  authoring call, and the run report warns when usage writes fail.
+* **P1-3 — two of six lanes pointed at categories the bank does not
+  have.** Measured live: the bank stores `lifestyle` (40 active) and
+  `pop_culture` (38 active); the rotation calls those families
+  `lifestyle-potpourri` and `pop culture`. Both lanes would have counted
+  **zero** rows, read as fully consumed, and authored ~74 questions into
+  category values nothing draws from — a full night's spend banked where
+  nobody can see it. `LANE_BANK_CATEGORY` now aliases both directions of
+  the seam: the depth count and the dedup read look under **every**
+  spelling a lane covers (38 under `pop_culture` **and** 6 under `pop
+  culture`), and the written row carries the bank's spelling. Second half
+  of the same finding: `_GENERATION_PROMPT` hardcoded `Mode: adult`, so
+  topping up `academic` would have filled a general lane with innuendo.
+  The register is now a parameter defaulting to `adult` — every existing
+  caller renders a byte-identical prompt — and the background author
+  passes its lane's.
+
+Also: **P2-3** the heartbeat beats at the TOP of each slot, so an
+all-rejection run is not reclaimed as stale while it is still working;
+**P2-4** `difficulty_tier` is clamped to 1..3 (the live CHECK; the prompt
+says "of 4", and an unclamped 4 is an INSERT the database refuses);
+**P2-5** `lily_run_start` classifies its failure — "already active" only on
+a duplicate-key error, the real error otherwise, so an unapplied migration
+029 is not hidden behind a reassuring INFO line; **P2-6** the cost read
+waits, bounded, for usage rows still in flight (the transport writes them
+fire-and-forget, so the last call's row is typically not in the table when
+the run ends) and logs `COST_PARTIAL` if they never land; **P2-7** the
+author is steered off the lane's existing questions via the avoid-list
+`generate_question` already takes; **P2-8** a stale docstring test
+reference corrected.
+
+**P2-2 — the watermark is SHORTFALL-ONLY, and now says so.** The arsenal's
+second limb (serves this session) needs a session's draw counts, which a
+background process does not have and the out-of-session runner cannot have
+at all. Rather than leave a parameter standing in for a thing that is not
+measured, the parameter is gone and the limitation is stated in
+`lily_bank_should_replenish`'s docstring, with a test that asserts both.
+
+**P2-1 — the run bookkeeping stays a deliberate copy** of
+`lily_arsenal`'s rather than a parameterisation of it. Two reasons, both
+worth the duplication: `lily_arsenal.py` is outside this WO's declared file
+region (S2 owns `lily_arsenal_gen.py`, and a parallel worker holds the
+arsenal), and the two receipts genuinely differ — key column `partition` vs
+`lane`/`deck`/`category`, cost in a USD price sheet vs measured tokens. The
+parts that are the same idea *are* shared: the threshold, the duplicate
+finder, and the moderation/unavailable classifiers are imported, not
+retyped.
+
+### Files
+
+`lily_bank_replenish.py` (new), `migrations/029_lily_bank_replenish.sql`
+(new), `scripts/bank_replenish.py` (new),
+`tests/test_supply_001_s2_bank.py` (new),
+`tests/test_supply_001_s2_offpath.py` (new), `lily_config.py`,
+`lily_reasoning.py`, `lily_agent.py`, `.github/workflows/deploy.yml`,
+`tests/test_env_deploy_lint.py`, `tests/test_s1b_divergence_nets.py`,
+`docs/GUARD_MAP.md`, this entry.
 
 ## 2026-09-06 — WO-LILY-ADDRESSED-001 (B9): progression yields to the table
 

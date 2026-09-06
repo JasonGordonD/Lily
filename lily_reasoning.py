@@ -444,9 +444,7 @@ Write ONE trivia question following these constraints:
   right overall. difficulty_tier {difficulty_tier} of 4 (1 = warm-up
   ~65% success, 4 = final round ~40-45% success).
 - Category: {category}.
-- Mode: adult. In adult mode: innuendo and wordplay, surprising sex-ed
-  facts, pop culture scandal, drinking culture, questionable historical
-  decisions — about the world, never about the people in the room.
+- {mode_block}
 - Do NOT repeat or closely resemble any of these already-used questions:
 {avoid_block}
 
@@ -456,6 +454,32 @@ Respond with ONLY a JSON object, no markdown fences, exactly this shape:
  "canonical_answer": "<the single answer>",
  "acceptable_answers": ["<lowercase canonical>", "<common variants>"],
  "reveal_color": "<one short spicy fact or trap-note for the reveal>"}}"""
+
+# The register line of _GENERATION_PROMPT, split out by WO-LILY-SUPPLY-001
+# S2 so a lane can author in its own register.
+#
+# The adult text is VERBATIM what the prompt has carried since the unified
+# deck landed, and it is still the default at every entry point — the live
+# prefetch renders exactly the prompt it rendered before. What changes is
+# that the BACKGROUND bank author, which stocks general lanes as well as
+# adult ones, can now say "general" and mean it: without this, topping up
+# `academic` would have filled it with innuendo, because the prompt said
+# adult unconditionally and nothing else in the call did.
+_MODE_BLOCKS = {
+    "adult": (
+        "Mode: adult. In adult mode: innuendo and wordplay, surprising "
+        "sex-ed\n  facts, pop culture scandal, drinking culture, "
+        "questionable historical\n  decisions — about the world, never "
+        "about the people in the room."
+    ),
+    "general": (
+        "Mode: general. A mixed table of adults, any age at the table: "
+        "sharp,\n  playful, widely-known-but-not-obvious facts. No sexual "
+        "content, no\n  innuendo, nothing that needs an adult deck to be "
+        "asked out loud."
+    ),
+}
+
 
 _VERIFICATION_PROMPT = """You verify trivia questions before a live host performs them.
 Question JSON:
@@ -852,12 +876,34 @@ class LilyReasoning:
         multiple_choice: bool = False,
         avoid_answers: Optional[list] = None,
         effort: Optional[str] = None,
+        purpose: str = "reasoning",
+        usage_session_id: Optional[str] = None,
+        mode: str = "adult",
     ) -> Optional[dict]:
+        """Author one question.
+
+        WO-LILY-SUPPLY-001 S2 added `purpose` / `usage_session_id`, both
+        default-preserving: the BACKGROUND bank author calls this same
+        entry point tagged purpose='bank_replenish' with the replenishment
+        run's id, so its lily_llm_usage rows are attributable and the run's
+        token cost is a SELECT rather than an estimate. The live prefetch
+        passes neither and behaves exactly as before. No transport change:
+        both values ride the parameters `_generate_grok_json` already
+        takes.
+
+        `mode` defaults to "adult" — the register the prompt has hardcoded
+        since the unified deck, so every existing caller renders the same
+        prompt it did before. The background author passes its LANE's
+        register, because a general lane stocked from an adult-register
+        prompt is a general lane full of innuendo."""
         avoid_block = "\n".join(f"- {q}" for q in avoid_questions[-20:]) or "- (none yet)"
         prompt = _GENERATION_PROMPT.format(
             category=category,
             difficulty_tier=difficulty_tier,
             avoid_block=avoid_block,
+            mode_block=_MODE_BLOCKS.get(
+                str(mode or "adult").strip().lower(), _MODE_BLOCKS["adult"]
+            ),
         )
         # Answer-level no-repeat (migration 017): this group has already
         # played these facts — a reworded question with the same answer is
@@ -895,7 +941,8 @@ class LilyReasoning:
             # Z2 (HOTFIX-008): a supply-recovery retry passes a de-escalated
             # effort so a hard draw does not reproduce the stall verbatim.
             effort=effort or lily_config.adult_reasoning_effort(),
-            purpose="reasoning",
+            purpose=purpose,
+            usage_session_id=usage_session_id,
         )
         # Schema mode: the output IS the JSON document — parse it directly.
         parsed: Optional[dict] = None
@@ -921,11 +968,23 @@ class LilyReasoning:
         return parsed
 
     async def verify_question(
-        self, question: dict
+        self,
+        question: dict,
+        *,
+        purpose: str = "reasoning",
+        usage_session_id: Optional[str] = None,
     ) -> tuple[bool, str]:
         """Verification at prefetch time on Grok 4.5 at the table-wide
         authoring tier (lily_config.adult_reasoning_effort — medium since
-        the 2026-09-06 operator ruling)."""
+        the 2026-09-06 operator ruling).
+
+        WO-LILY-SUPPLY-001 S2: `purpose` / `usage_session_id` are
+        default-preserving tags for the background bank author, which runs
+        this SAME verify step (3-7s, fast — it stays in-line even off the
+        delivery path, because it is the gate that stops a wrong answer
+        being banked forever). Effort here is deliberately NOT the
+        background author's knob: verification is cheap and its tier is a
+        table-wide decision."""
         prompt = _VERIFICATION_PROMPT.format(
             question_json=json.dumps(question, ensure_ascii=False)
         )
@@ -955,7 +1014,8 @@ class LilyReasoning:
             max_tokens=lily_config.reasoning_max_output_tokens(),
             model=lily_config.adult_reasoning_model(),
             effort=lily_config.adult_reasoning_effort(),
-            purpose="reasoning",
+            purpose=purpose,
+            usage_session_id=usage_session_id,
         )
         # Schema mode: direct parse first; fence stripping is a defensive
         # last resort. Honest failure stays intact — an unparseable verdict
