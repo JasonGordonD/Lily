@@ -59,7 +59,7 @@ VoiceSettings + the two patched seams + `lily_tts` / `lily_tts_receipts`).
 Env list already carried `ELEVEN_API_KEY`, `SUPABASE_URL`,
 `SUPABASE_SERVICE_ROLE_KEY`.
 
-Shipped: <sha>
+Shipped: fba35db (merged to main at 9781864 with the Q4 review fixes 5bbeefa)
 
 ## 2026-09-06 — Composition review of a4b953c (Q4 hotfix): GO-WITH-FIXES, applied
 
