@@ -142,4 +142,9 @@ def test_fault_keys_sit_beside_the_collectors_summary():
         # fired exactly as designed when the lane was added — a new key on
         # the session record is a deliberate edit here, never a drift.
         "bank_replenish",
+        # WO-LILY-SUPPLY-001 S1 (integrator's line): the delivery-path
+        # supply receipt — bank_draws, author_draws,
+        # generation_calls_on_delivery_path, pool_remaining_min,
+        # bank_dry_lanes, mc_degraded.
+        "supply",
     }
