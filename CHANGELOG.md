@@ -5,6 +5,40 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — Composition review of integ/next c71287e: the precedence walk, one P1 applied
+
+Operator: "the precedence chain is the load-bearing part — STOP retires,
+explicit pause above, addressed above reply-owed and above every question
+lane … walk EVERY dispatch site against the precedence table … A hold that
+one lane ignores is not a hold."
+
+The reviewer's walk (every site that can dispatch or schedule a read,
+nudge, re-air, resume, kickoff or floor line — 40+ rows, in
+scratchpad/review_next/REVIEW_c71287e.md) passes for `game_stopped`,
+`hold` and `addressed` on every lane, and confirms in code: STOP retires
+`addressed`; explicit pause outranks it; `dispute_hold` (W9b) sits above
+it; `reply_owed` below; no timer lifts it (`release_addressed` callers:
+new address, answer, acceptance, stop). Stage 1b's registration set is
+identical to c1ff3f6 with every handler guarded and no early-value
+capture; B7's latch cannot re-open the 11:59 wedge; the ack lines are the
+operator's; the UNIVERSAL RULE is verbatim in the prompt.
+
+**P1 (applied):** four lanes that pass only through the gated_say
+chokepoint — the window_fallback nudge, the fusion-clipped delivery, the
+C3c/C3d MC resume, the stale-claim retry — could put a read on the air
+under `dispute_hold`, `restart_confirm_pending` or `reply_owed`, because
+the chokepoint read `addressed` but not the two holds W9b placed above it
+nor B7's latch. `lily_speech_delivery.gated_say` and `expect_delivery`
+now read all of them (`DISPATCH_PAUSED` / `EXPECT_BLOCKED` with the
+reason). Failing-first: tests/test_review_next_precedence_walk.py (10
+behaviour tests red on c71287e; one clear-table sanity pin).
+
+Noted for the next WO, not changed: a spoken `skip` never consults the
+pause reason (P2-2); `addressed_cap_text` marks `responded` before playout
+(P2-4); operator standing is group-level once a voice door confirmed the
+group (P2-5, matches the operator's wording); a dead second
+`dispute_hold_active()` check in `progression_paused_reason` (P2-1).
+
 ## 2026-09-06 — Composition review of main c1ff3f6: GO-WITH-FIXES, applied on integ/next
 
 Reviewer verdict on c1ff3f6 (streaming transport on the letter-A hotfix and

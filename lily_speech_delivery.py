@@ -445,11 +445,21 @@ class LilySpeechDeliveryMixin:
             # fallback, the supply auto-advance, the undelivered refire,
             # the idle re-arm, dispatch_armed_question) — "no question
             # dispatches over it" is enforced here, not lane by lane.
+            # Composition review of integ/next (P1-1): the two holds that
+            # sit ABOVE `addressed` in the precedence chain and B7's latch
+            # were not read here, so four lanes (window_fallback, the
+            # fusion delivery, the C3c/C3d resume, the stale-claim retry)
+            # could put a read on the air under a dispute, a restart
+            # confirm, or an owed reply. A hold one lane ignores is not a
+            # hold — the chokepoint reads all of them.
             paused = (
                 "address_unanswered"
                 if self._awaiting_address_since
                 else "setup_pending" if self.pending_setup_jobs()
-                else "addressed" if self.addressed_active() else None
+                else "addressed" if self.addressed_active()
+                else "dispute_hold" if self.dispute_hold_active()
+                else "restart_confirm_pending" if self.restart_confirm_pending()
+                else self.reply_owed_reason()
             )
             if paused:
                 logger.info(
@@ -2108,10 +2118,17 @@ class LilySpeechDeliveryMixin:
         # (reason=question_pending), so the nudge aired without ever
         # becoming a registered delivery — the desync fixture's exact
         # regression.
+        # Composition review of integ/next (P1-1): mirror the dispatch
+        # chokepoint's holds so a refused read never arms the delivery
+        # expectation either.
         paused = (
             "address_unanswered"
             if self._awaiting_address_since
-            else "setup_pending" if self.pending_setup_jobs() else None
+            else "setup_pending" if self.pending_setup_jobs()
+            else "addressed" if self.addressed_active()
+            else "dispute_hold" if self.dispute_hold_active()
+            else "restart_confirm_pending" if self.restart_confirm_pending()
+            else self.reply_owed_reason()
         )
         if paused:
             logger.info(
