@@ -6058,15 +6058,56 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                 # judging (zero added reveal latency); order stays decided
                 # by scorekeeper timestamps — earliest correct/partial wins.
                 consumed_speculative = False
+                # Review fix (a4b953c P2): a candidate whose cached verdict
+                # was skipped as stale still needs the batched judge, even
+                # when another candidate's cached verdict was consumed.
+                stale_skipped = False
 
-                def _bind_latest(cand: dict) -> None:
-                    """HOTFIX-REVISION-JUDGE-001: a judge verdict is about
-                    the player's current words — the ledger row names the
-                    revision that won, never the attempt it replaced."""
-                    latest = cand.get("_latest_attempt")
-                    if latest is not None and latest.get("text"):
-                        cand["text"] = latest["text"]
-                        cand["_bound_attempt"] = latest
+                def _answer_shaped_attempts(cand: dict) -> list[dict]:
+                    return [
+                        a for _, cc, _, a in attempts_timeline if cc is cand
+                    ]
+
+                def _bind_judged(cand: dict, verdict: dict | None) -> None:
+                    """HOTFIX-REVISION-JUDGE-001 (review fix, a4b953c P1):
+                    a judge-correct binds the attempt the judge actually
+                    ruled on — the one closest to its normalized_answer,
+                    latest on a tie — so a trailing "hang on" after the real
+                    answer never becomes the ledger row's transcript."""
+                    attempts = _answer_shaped_attempts(cand)
+                    if not attempts:
+                        return
+                    target = lily_evaluation.lily_normalize_answer(
+                        str((verdict or {}).get("normalized_answer") or "")
+                    )
+                    best = None
+                    if target:
+                        best_score = 0.5  # below this the text says nothing
+                        for a in attempts:
+                            norm = lily_evaluation.lily_normalize_answer(
+                                str(a.get("text") or "")
+                            )
+                            score = lily_evaluation.SequenceMatcher(
+                                None, norm, target
+                            ).ratio()
+                            if score >= best_score:
+                                best, best_score = a, score
+                    if best is None:
+                        # A semantic ruling ("the Dorian Gray guy" → Wilde)
+                        # resembles nothing: bind the latest attempt that is
+                        # not a hold ("hang on", "wait") — a hold is never
+                        # the answer the judge accepted.
+                        for a in reversed(attempts):
+                            if not lily_scorekeeper.lily_detect_hold_request(
+                                str(a.get("text") or "")
+                            ):
+                                best = a
+                                break
+                        else:
+                            best = attempts[-1]
+                    if best.get("text"):
+                        cand["text"] = best["text"]
+                        cand["_bound_attempt"] = best
 
                 for c in uncertain:
                     key = c["player"] or f"unrostered:{c['speaker_label']}"
@@ -6093,24 +6134,35 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                             self.sk.session_id, key,
                             str(judged_text)[:60], str(latest)[:60],
                         )
+                        stale_skipped = True
                         continue
                     try:
                         verdict = await asyncio.wait_for(
                             asyncio.shield(task), timeout=4.0
                         )
-                    except (asyncio.TimeoutError, Exception):
+                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                         verdict = None
                     if _abandoned("speculative_judge"):
                         return
-                    consumed_speculative = True
                     if verdict and verdict["verdict"] in ("correct", "partial"):
+                        consumed_speculative = True
                         eval_tier = 2
                         judge_reason = verdict.get("reason", "")
                         winner_candidate = c
-                        _bind_latest(c)
+                        _bind_judged(c, verdict)
                         break
+                    if len(_answer_shaped_attempts(c)) > 1:
+                        # Review fix (a4b953c P1): a single-text verdict on
+                        # the player's LAST words ("Hang on.") says nothing
+                        # about the answer before it — the batched judge
+                        # rules with the whole timeline in view.
+                        stale_skipped = True
+                        continue
+                    consumed_speculative = True
 
-                if winner_candidate is None and not consumed_speculative:
+                if winner_candidate is None and (
+                    not consumed_speculative or stale_skipped
+                ):
                     # Fallback: one batched non-spoken LLM turn at reveal
                     # time (speculation unavailable, e.g. window closed
                     # before any final landed).
@@ -6134,6 +6186,13 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                     # keyed by the attempt's speaker string.
                     hyp_map: dict[str, list] = {}
                     for c in uncertain:
+                        # Review fix (a4b953c P2): the n-best set is the
+                        # LATEST utterance's; with several attempts the
+                        # prompt would attach it to every one of them as
+                        # "the same utterance". Only a single attempt
+                        # carries its hypotheses.
+                        if len(_answer_shaped_attempts(c)) > 1:
+                            continue
                         nb = self._nbest_lookup(
                             c["player"] or f"unrostered:{c['speaker_label']}"
                         )
@@ -6171,7 +6230,7 @@ class LilyGame(lily_transition.LilyTransitionMixin, lily_supply.LilySupplyMixin,
                                 break
                         if winner_candidate is None:
                             winner_candidate = uncertain[0]
-                        _bind_latest(winner_candidate)
+                        _bind_judged(winner_candidate, verdict)
 
             points = (
                 5 if self.sk.round > self.rounds_total else max(1, self.sk.round)
@@ -9503,10 +9562,22 @@ class LilyAgent(Agent):
                 # ruling missed) are in-session evidence too — the same
                 # buffer the misheard ground already reads, the same
                 # Tier-1 matcher, nothing new.
+                # Review fix (a4b953c P1): the buffer holds EVERY in-window
+                # line, including ones adjudicate refused to score ("Did
+                # you say six?", "Lily, is it six?"). The same N4 gate
+                # adjudicate applies — non-answer shapes and host-directed
+                # speech never corroborate a denial.
+                contested_q = {"canonical_answer": canonical}
                 try:
                     for t in sk.in_window_transcripts_for(
                         name, denied.get("question_index") if denied else None
                     ):
+                        if lily_evaluation.lily_non_answer_utterance(
+                            t, contested_q, list(sk.players)
+                        ):
+                            continue
+                        if lily_scorekeeper.lily_is_system_directed(t)[0]:
+                            continue
                         if self._answer_matches(t, canonical):
                             corroborating_attempt = t
                             break

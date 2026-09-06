@@ -5,6 +5,57 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — Composition review of a4b953c (Q4 hotfix): GO-WITH-FIXES, applied
+
+Independent read-only review over a4b953c (main 1c03eee, deployed run
+34050145372 ✓ 18:03:46Z). Verdict GO-WITH-FIXES; the three claimed
+mechanisms confirmed (21 red / 5 green on a clean 1783e82 worktree). Three
+P1s, each a point-fabrication path opened by the hotfix's own new branches,
+all reproduced by the reviewer through the real code and fixed here:
+
+- **P1 — pronoun "one" scored as the number** (`lily_evaluation._numbers_named_in`):
+  "no one knows", "which one", "one sec", "say that one more time",
+  "Air Force One" were Tier-1 **correct** against a canonical of `1`.
+  "one" is now excluded from the phrase branch; a bare "one" still takes
+  the E1 numeric path and "the answer is one" goes to the judge.
+- **P1 — answer_denied restored a point from a line adjudicate refused to score**
+  (`lily_correct_verdict`): the in-window buffer holds every line, so
+  "Did you say six?" / "Lily, is it six?" corroborated a denial. The loop
+  now applies adjudicate's own N4 gate (`lily_non_answer_utterance`,
+  `lily_is_system_directed`) before the matcher.
+- **P1 — a trailing filler was a "revision"** (`adjudicate`): "The Dorian
+  Gray guy." then "Hang on." — the speculative verdict on "Hang on."
+  (incorrect) was consumed as the ruling and `_bind_latest` would have
+  written "Hang on." as the transcript of a correct. A not-correct cached
+  verdict on a candidate with more than one answer-shaped attempt is no
+  longer consumed (the batched judge rules with the whole timeline), the
+  judge instruction now says a hedge / hold / apology is not a revision,
+  and `_bind_judged` binds the attempt closest to the judge's
+  `normalized_answer` (≥ 0.5), else the latest attempt that is not a hold
+  request.
+- P2 — a stale-skipped candidate still reaches the batched judge when
+  another candidate's cached verdict was consumed (`stale_skipped`).
+- P2 — n-best hypotheses ride only a single-attempt speaker (the set is the
+  latest utterance's; attaching it to every attempt mislabels them as one
+  utterance).
+- P2 — `asyncio.CancelledError` added to the speculative-await except.
+- P2 — `lily_strip_speaker_tags` strips any bracketed label up to 80 chars
+  ("[Éric]", "[123]", long labels): the plugin emits exactly
+  `"[{speaker_id}] {text}"` and nothing else in brackets.
+- P2 — **CHANGELOG correction.** The a4b953c entry said "the scorekeeper's
+  stored transcripts keep the prefix as before". False: the handler strips
+  before every consumer, so `lily_transcripts.text`, the transcript buffer,
+  `lily_answers.transcript` and the glass panel all lose the `[Rami]`
+  prefix from this build on (the speaker rides `speaker_label`). That is
+  the intended behaviour; the claim was wrong.
+
+Tests: `tests/test_hotfix_q4_revision.py` +14 (40 total); **14 red on
+merged main 1c03eee**, 40/40 here. Docketed, not fixed: a trailing
+"Sorry." / "Or." after a semantic judge-correct still binds as the ledger
+transcript (audit inaccuracy, not a point); `lily_binding`,
+`lily_addressee_classifier`, `lily_addressee`, `lily_evaluation:1495`
+still strip only `[S\d+]` on their own entry points.
+
 ## 2026-09-06 — HOTFIX-DOUBLE-WELCOME-001: the second welcome-back behind the first
 
 **Live receipts (two sessions, same shape):**
@@ -200,7 +251,9 @@ airgate rows `hold/release by=new_address`). Fix:
 `lily_scorekeeper.lily_strip_speaker_tags` strips every `[label]` tag
 (engine `S<n>` or a known-speaker name) at the source;
 `_strip_diarization_tag` delegates to it so the command normalizer sees the
-same text. The scorekeeper's stored transcripts keep the prefix as before.
+same text. Stored transcripts, the transcript buffer and `lily_answers`
+rows lose the prefix from this build on (corrected by the review entry
+above — the original wording here claimed they kept it).
 
 ### Tests — `tests/test_hotfix_q4_revision.py`, 26 tests
 

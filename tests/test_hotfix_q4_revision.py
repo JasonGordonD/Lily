@@ -102,7 +102,7 @@ def test_number_in_phrase_never_goes_fuzzy_or_phonetic():
     assert r["verdict"] == "uncertain" and r["method"] != "phonetic", r
     assert E._numbers_named_in("or sorry six") == {"6"}
     assert E._numbers_named_in("in 1968 or 1969") == {"1968", "1969"}
-    assert E._numbers_named_in("air force one") == {"1"}
+    assert E._numbers_named_in("air force one") == set()  # "one" is a pronoun
     assert E._numbers_named_in("canberra") == set()
 
 
@@ -391,3 +391,155 @@ def test_handler_strips_the_known_speaker_prefix_before_the_scorekeeper():
     )
     lily_agent._on_transcribed_body(game, sk, transcripts, ev)
     assert seen == ["Yes!"]
+
+
+# ---------------------------------------------------------------------------
+# Review fixes on a4b953c (GO-WITH-FIXES): the three P1s + n-best / stale
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("said", [
+    "no one knows", "which one", "one sec", "give me one second",
+    "say that one more time", "Air Force One",
+])
+def test_pronoun_one_never_scores_against_a_canonical_of_one(said):
+    # a4b953c P1: every one of these was Tier-1 correct against "1".
+    r = E.lily_tier1_evaluate(said, ["1", "one"])
+    assert r["verdict"] == "uncertain", (said, r)
+    # A bare "one" still takes the E1 numeric path.
+    assert E.lily_tier1_evaluate("one", ["1"])["verdict"] == "correct"
+
+
+@pytest.mark.parametrize("stray", [
+    "[Rami] Did you say six?", "[Rami] Lily, is it six?",
+])
+def test_answer_denied_is_not_corroborated_by_a_non_answer_line(stray):
+    """a4b953c P1: the in-window buffer holds lines adjudicate refused to
+    score; the contest applies the same N4 gate, so a question ABOUT the
+    answer never restores a point."""
+    from lily_agent import LilyAgent
+    from test_hotfix009_verdict_correction import _agent_with
+
+    sk = LilyScorekeeper("lily-38C562-contest-gate")
+    sk.bind_speaker("Rami", "Rami")
+    sk.start_question(dict(KB_271))
+    sk.round = 1
+    sk.set_phase("round")
+    t0 = 6000.0
+    sk.open_answer_window(20.0, now=t0)
+    for text, t in ((FIRST, t0 + 3.9), (stray, t0 + 6.0)):
+        sk.on_transcript_segment(
+            text=text, speaker_label="Rami", is_final=True,
+            now=t, segment_start_time=t, segment_end_time=t + 0.5,
+        )
+    sk.close_answer_window()
+    sk.record_result(
+        "Rami", correct=False, points=0, question_id="kb_271",
+        question_index=sk.question_number, transcript=FIRST, utterance_id="u4",
+    )
+    agent, game = _agent_with(
+        sk, asked_history=[{"question_id": "kb_271", "canonical_answer": "six"}],
+    )
+    msg = _call(LilyAgent.lily_correct_verdict.__wrapped__(
+        agent, None, "Rami", "answer_denied", "I said six",
+    ))
+    assert "No correction made" in msg, msg
+    assert sk.players["Rami"]["score"] == 0
+
+
+class _JudgeRulingOn:
+    """Judge fake that rules correct and names the attempt it ruled on."""
+
+    def __init__(self, normalized):
+        self.prompts = []
+        self.normalized = normalized
+
+    async def prefetch_question(self, sk, **kw):
+        return None
+
+    async def judge(self, instructions, prompt):
+        self.prompts.append(prompt)
+        return json.dumps({
+            "verdict": "correct", "winner": "Rami",
+            "normalized_answer": self.normalized, "reason": "wilde",
+        })
+
+
+def test_a_trailing_filler_is_not_a_revision_and_the_answer_is_still_judged(monkeypatch):
+    """a4b953c P1: "The Dorian Gray guy." then "Hang on." — the spec verdict
+    on "Hang on." (incorrect) must not be the ruling; the batched judge sees
+    both, rules correct, and the ledger binds the REAL answer, not "Hang on."."""
+    _AnswerRows(monkeypatch)
+    game = _make_game("lily-38C562-filler")
+    judge = _JudgeRulingOn("oscar wilde")
+    game.reasoning = judge
+    at = time.time()
+
+    async def scenario():
+        _live(game, Q_WILDE, at)
+        game.open_window(duration=30.0)
+        _final(game, "The Dorian Gray guy.", "Rami", at + 3.0)
+        _final(game, "Hang on.", "Rami", at + 5.0)
+        # The glass relaunch left a verdict on the player's LAST words.
+        game._spec_judge["Rami"] = _stale_spec_task("Hang on.")
+        await asyncio.sleep(0)
+        await game.adjudicate()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    _run(lambda: scenario())
+    assert game.sk.players["Rami"]["score"] == 1
+    assert len(judge.prompts) == 1
+    assert "'The Dorian Gray guy.'" in judge.prompts[0] and "'Hang on.'" in judge.prompts[0]
+    row = game.sk.ledger_row_for("Rami", None)
+    assert row["transcript"] == "The Dorian Gray guy."
+
+
+def test_stale_skip_for_one_player_still_reaches_the_batched_judge(monkeypatch):
+    """a4b953c P2: A's task stale (skipped), B's consumed incorrect — the
+    batched judge must still run for A."""
+    _AnswerRows(monkeypatch)
+    game = _make_game("lily-38C562-two")
+    judge = _JudgeRulingOn("oscar wilde")
+    game.reasoning = judge
+    at = time.time()
+
+    async def scenario():
+        _live(game, Q_WILDE, at)
+        game.sk.bind_speaker("Sam", "Sam")
+        game.open_window(duration=30.0)
+        _final(game, "Dickens.", "Rami", at + 2.0)
+        _final(game, "Shaw.", "Sam", at + 3.0)
+        game._spec_judge["Rami"] = _stale_spec_task("Dickens.")
+        game._spec_judge["Sam"] = _stale_spec_task("Shaw.")
+        await asyncio.sleep(0)
+        _final(game, "Or, sorry — the Earnest guy.", "Rami", at + 5.0)
+        await game.adjudicate()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    _run(lambda: scenario())
+    assert len(judge.prompts) == 1
+    assert game.sk.players["Rami"]["score"] == 1
+    assert game.sk.players["Sam"]["score"] == 0
+
+
+def test_nbest_rides_only_a_single_attempt():
+    """a4b953c P2: with two attempts the (latest) n-best set is not attached
+    to every one of them as 'the same utterance'."""
+    prompt = E.lily_build_judge_prompt(
+        "q", "Oscar Wilde", [("Rami", "Dickens."), ("Rami", "Wild.")],
+        hypotheses_by_speaker={"Rami": [{"text": "Wilde", "confidence": 0.7}]},
+    )
+    # The builder itself attaches by speaker — adjudicate now withholds
+    # the map for multi-attempt speakers, pinned through _make_game below.
+    assert prompt.count("ASR N-BEST") == 2  # the builder's behaviour, unchanged
+
+
+@pytest.mark.parametrize("raw,clean", [
+    ("[Éric] Yes!", "Yes!"),
+    ("[123] Yes!", "Yes!"),
+    ("[" + "A" * 60 + "] Yes!", "Yes!"),
+])
+def test_strip_covers_every_label_shape_the_plugin_can_emit(raw, clean):
+    assert lily_scorekeeper.lily_strip_speaker_tags(raw) == clean
