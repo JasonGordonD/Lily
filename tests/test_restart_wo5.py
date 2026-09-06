@@ -46,17 +46,58 @@ from lily_scorekeeper import (
 )
 
 
+class _Handle:
+    """SpeechHandle-shaped: the restart confirm binds to its handle id and
+    is answerable only after that handle confirms on air
+    (WO-LILY-CONTROL-GATES-001 R1), so the fake lanes mint ids the way
+    the framework does."""
+
+    def __init__(self, sid: str) -> None:
+        self.id = sid
+        self.interrupted = False
+
+    def interrupt(self, force=False):
+        self.interrupted = True
+        return self
+
+
 class _FakeSession:
     def __init__(self) -> None:
         self.instructions: list[str] = []
         self.said: list[str] = []
+        self._n = 0
 
-    def generate_reply(self, instructions: str) -> None:
+    def _handle(self) -> _Handle:
+        self._n += 1
+        return _Handle(f"speech_{self._n}")
+
+    def generate_reply(self, instructions: str):
         self.instructions.append(instructions)
+        return self._handle()
 
     def say(self, text, *a, **k):
         self.said.append(text)
-        return None
+        return self._handle()
+
+
+def _speech_id_for(game: "LilyGame", act: str) -> str | None:
+    for sid, a in reversed(list(game._dispatched_act_by_speech.items())):
+        if a == act:
+            return sid
+    return None
+
+
+def _air(game: "LilyGame", act: str, text: str = "") -> str:
+    """The act's handle completes its playout cleanly — what the
+    speech_created watcher reports live via on_agent_speech_finished."""
+    sid = _speech_id_for(game, act)
+    assert sid is not None, f"no dispatched handle for act={act}"
+    game.on_agent_speech_finished(text or act, speech_id=sid)
+    return sid
+
+
+def _air_confirm(game: "LilyGame") -> str:
+    return _air(game, "restart_confirm", LilyGame._RESTART_CONFIRM_LINE)
 
 
 class _FakeAgentHandle:
@@ -93,6 +134,11 @@ def _make_game(*, started: bool) -> LilyGame:
     game.group_id = "grp_test"
     game.eliminated = []
     game.prewager_standings = None
+    # The confirm's handle now completes its playout through the real
+    # on_agent_speech_finished (R1 aired gate) — the __init__-only reveal
+    # state that path reads.
+    game._pending_reveal_event = None
+    game._pending_unbound_award = None
     return game
 
 
@@ -206,6 +252,7 @@ def test_live_game_restart_asks_one_confirm_then_resets_on_yes():
         confirms = [s for s in game.session.said if "scores gone" in s.lower()]
         assert len(confirms) == 1
 
+        _air_confirm(game)  # R1: the yes counts only once the ask aired
         await _drive(game, "yes")
         assert game._pending_restart_confirm is None
         assert game.game_started is False
@@ -254,6 +301,7 @@ def test_restated_restart_command_counts_as_the_affirmative():
     async def _run():
         await _drive(game, "restart the game")
         assert game._pending_restart_confirm is not None
+        _air_confirm(game)  # R1: restated by the REQUESTER after the ask aired
         await _drive(game, "yes, restart the game")
         assert game.game_started is False
         assert game.sk.ledger_scores()["Rami"] == 0
@@ -440,6 +488,7 @@ def test_restart_confirm_airs_during_hold_and_dispute():
     # gate cannot deadlock the restart behind the hold machinery.
     assert any("scores gone" in s.lower() for s in game.session.said)
 
+    _air_confirm(game)
     game.resolve_restart_confirm("yes", "Rami")
     assert game.game_started is False
     assert game._hold_active is False
@@ -461,6 +510,7 @@ def test_stopped_game_start_over_restarts_not_resumes():
         assert game._delivery_stop_sticky is True
         assert game.game_started is True
 
+        _air_confirm(game)
         await _drive(game, "yeah")
         assert game.game_started is False
         assert game._delivery_stop_sticky is False

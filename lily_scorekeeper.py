@@ -364,17 +364,74 @@ def lily_detect_pacing_choice(text_normalized: str) -> Optional[str]:
 # Spoken game-start phrases — deterministic, so start_game engages from the
 # spoken path too (not just the lily_begin_round tool / lily_control.start
 # RPC). Conservative set; "let s" is "let's" after punctuation stripping.
+#
+# WO-LILY-CONTROL-GATES-001 S2: the phrase set had NO negation, question
+# or object guard, so "not ready to start", "are you ready to start?",
+# "let's go get a drink first", "let's play it by ear" and "let's begin
+# with the rules" all opened round one. The verb phrases now refuse an
+# OBJECT continuation that makes them about something else (a drink, the
+# rules, "it by ear", music), and every consumer runs the whole-utterance
+# guards below (negation / a question put TO Lily / a deferral).
+_START_OBJECT_GUARD = (
+    r"(?!\s+(?:it|this|that|by|some|for|after|when|once|until|if|before"
+    r"|get|getting|grab|grabbing|have|having|find|check|see|do|make|take"
+    r"|eat|home|out|back|to|with (?:the )?(?:rules|names|intros"
+    r"|introductions)|without|a drink|drinks|later|relaxed|timed|music"
+    r"|cards|ball|catch|around|along|nice|dumb|dead|hard|safe|fair"
+    r"|tomorrow|next|another|again|more|our|my|your|his|her|their)\b)"
+)
 _START_GAME_RE = _re.compile(
     r"\b(?:"
     r"start the (?:game|quiz|trivia)"
-    r"|let\s?s (?:start|play|go|begin)"
+    r"|let\s?s (?:start|play|go|begin)" + _START_OBJECT_GUARD +
     r"|start round one"
-    r"|ready to (?:start|begin|play)"
+    r"|ready to (?:start|begin|play)" + _START_OBJECT_GUARD +
     r"|dive in"
     r"|begin (?:the )?(?:game|round|quiz)"
     r"|kick (?:it )?off"
     r")\b"
 )
+# S2 whole-utterance guards. NEGATION: "not ready to start", "I don't want
+# to play yet", "we can't start". QUESTION put TO LILY: "are you ready to
+# start?" / "Lily, is everyone ready to play?" — the player is asking her,
+# not telling her (a "can WE start?" proposal still starts). DEFERRAL: an
+# explicit not-now marker riding the phrase ("ready to play whenever",
+# "...just kidding, one sec", "in a minute", "a drink first").
+_START_NEGATION_RE = _re.compile(
+    r"\b(?:not|never|isn t|isnt|aren t|arent|ain t|aint|no|don t|dont"
+    r"|do not|won t|wont|can t|cant|cannot|couldn t|couldnt|shouldn t"
+    r"|shouldnt)\s+(?:\w+\s+){0,2}?(?:ready|start|play|begin|go|dive|kick)\b"
+    r"|\bnot (?:yet|quite|really|totally|even close)\b"
+)
+_START_QUESTION_RE = _re.compile(
+    r"^(?:\w+\s+){0,3}?(?:are|is|am|was|were|do|does|did|will|would|could"
+    r"|should|shall|have|has)\s+(?:you|she|he|lily|everyone|everybody|they)\b"
+    r"|\b(?:are|is) (?:you|she|he|lily|everyone|everybody|they) "
+    r"(?:\w+ ){0,2}?ready\b"
+    r"|\byou ready\b"
+)
+_START_DEFERRAL_RE = _re.compile(
+    r"\b(?:later|not yet|in a (?:minute|min|sec|second|bit|moment|while)"
+    r"|one sec|one second|just kidding|kidding|joking|sometime|some time"
+    r"|whenever|eventually|after (?:this|that|we|i|the|dinner|lunch)"
+    r"|once (?:we|i|everyone|they)|when (?:we|i|everyone|they)"
+    r"|before (?:we|i|you)"
+    r"|(?:a |the |some |our |my )?(?:drink|drinks|food|snack|snacks|bathroom"
+    r"|break|smoke|bite|coffee|beer|beers|wine|pizza|water|names)"
+    r"s? first)\b"
+    r"|\bfirst$"
+)
+
+
+def _start_phrase_blocked(normalized: str) -> bool:
+    """S2: True when the utterance carries a start phrase that must NOT
+    count — negated, asked of Lily as a question, or explicitly deferred.
+    Runs on the normalized text every start consumer already has."""
+    return bool(
+        _START_NEGATION_RE.search(normalized)
+        or _START_QUESTION_RE.search(normalized)
+        or _START_DEFERRAL_RE.search(normalized)
+    )
 
 # HOSTLOOP-001 C7 — the BARE start intent. Session A (2026-08-12 04:51):
 # the player said "Starts." — an STT rendering of "start" — which matched
@@ -412,7 +469,12 @@ def lily_is_bare_start_intent(text: str) -> bool:
 # intents present in the final so "let's play + adult + pictures + voice"
 # cannot collapse to start_game.
 _START_PARAPHRASE_RE = _re.compile(
-    r"\b(?:i|we)\s+(?:want|would like)\s+to\s+play\b"
+    r"\b(?:i|we)\s+(?:want|would like|d like|wanna)\s+to\s+play\b"
+    # S2: a pacing/setup/deferral OBJECT makes this a setup sentence, not
+    # a start ("I want to play relaxed" set the start flag live and the
+    # auto-start net opened round one on it minutes later).
+    r"(?!\s+(?:relaxed|timed|by|some|it|later|tomorrow|sometime|again"
+    r"|another|a different|as|in|on|at|after|once|when|first|music|cards)\b)"
 )
 _VOICE_CHANGE_REQUEST_RE = _re.compile(
     r"\b(?:"
@@ -546,11 +608,21 @@ def lily_parse_lobby_setup_intents(text: str) -> dict:
         heat = "explicit"
     elif _ADULT_HEAT_SUGGESTIVE_RE.search(normalized):
         heat = "suggestive"
+    # S2 (WO-LILY-CONTROL-GATES-001): the start flag is a START, never a
+    # pacing/setup sentence — a pacing choice in the same final ("I want
+    # to play relaxed", "let's play timed") owns the utterance, and the
+    # negation/question/deferral guards apply to the paraphrase too.
+    start = bool(
+        _START_GAME_RE.search(normalized)
+        or _START_PARAPHRASE_RE.search(normalized)
+    )
+    if start and (
+        _start_phrase_blocked(normalized)
+        or lily_detect_pacing_choice(normalized) is not None
+    ):
+        start = False
     return {
-        "start": bool(
-            _START_GAME_RE.search(normalized)
-            or _START_PARAPHRASE_RE.search(normalized)
-        ),
+        "start": start,
         "voice": bool(_VOICE_CHANGE_REQUEST_RE.search(normalized)),
         "adult": bool(_ADULT_DECK_REQUEST_RE.search(normalized))
         and not _ADULT_DECK_REFUSAL_RE.search(normalized),
@@ -1193,6 +1265,54 @@ def lily_detect_verdict_contest(
     return bool(_VERDICT_CONTEST_LETTER_RE.search(normalized))
 
 
+# WO-LILY-CONTROL-GATES-001 D3 (seam with W3): the contest detector above
+# is ONE class for the X12 re-check, but the settle-window WITHDRAW must
+# only fire for the BINDING-DENIAL sub-class ("I didn't say anything" —
+# the player disowns the bind). Live audit C: "I say Detroit, final" hit
+# the contest regex through the "i say ... it" arm (W3 owns that
+# word-boundary fix) and the answer was WITHDRAWN after it had scored.
+# These sub-class reads are separate compiled sets so W3's regex work and
+# this class restriction do not collide; W3 may later fold them into a
+# classed detector and these become thin aliases.
+_BINDING_DENIAL_RE = _re.compile(
+    r"\b(?:"
+    r"i (?:didn t|did not|never) (?:say|said) (?:anything|a word|a thing|that)"
+    r"|(?:that|it) (?:wasn t|was not|isn t|is not) (?:my|an) answer"
+    r"|i (?:was|am|m) still thinking"
+    r"|i (?:never|didn t|did not|haven t|have not) answer(?:ed)?\b"
+    r"|what do you mean,? locked in"
+    r"|i (?:didn t|did not|never) lock(?:ed)? (?:that|it|anything) in"
+    r")\b"
+)
+_PREMATURE_ADJUDICATION_RE = _re.compile(
+    r"\b(?:"
+    r"(?:we|i) (?:a?re? |am |m )?still preparing"
+    r"|i m (?:\w+ )?still talking"
+    r"|(?:why|how come)[a-z0-9 ]*?(?:went|jump(?:ed)?) (?:in)?to[a-z0-9 ]*?questions"
+    r"|(?:should not|shouldn t) have a timer"
+    r")\b"
+)
+
+
+def lily_detect_binding_denial(text: str) -> bool:
+    """D3 sub-class: the player disputes that they ANSWERED at all. Only
+    this class may withdraw a bound answer inside a settle window."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    return bool(_BINDING_DENIAL_RE.search(normalized))
+
+
+def lily_detect_premature_adjudication_protest(text: str) -> bool:
+    """D1b sub-class: the table says the ruling machinery ran while they
+    were never in play ("we're still preparing", "why did you jump to the
+    questions"). Anchored to an OPEN window, not to a past verdict."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    return bool(_PREMATURE_ADJUDICATION_RE.search(normalized))
+
+
 def lily_detect_control_command(text: str) -> Optional[str]:
     """
     Detect a sticky player command in an utterance.
@@ -1230,7 +1350,9 @@ def lily_detect_control_command(text: str) -> Optional[str]:
         return pacing
     if _re.search(r"\bskip\b", normalized):
         return "skip"
-    if _START_GAME_RE.search(normalized):
+    if _START_GAME_RE.search(normalized) and not _start_phrase_blocked(
+        normalized
+    ):
         return "start_game"
     if lily_is_bare_start_intent(normalized):
         return "start_game"  # C7: "Starts." is a start, deterministically
@@ -2698,6 +2820,20 @@ class LilyScorekeeper:
             field = "window_reopened_at"
         if field not in q:
             q[field] = round(t, 3)
+
+    def note_question_mark(self, field: str, value) -> None:
+        """WO-LILY-CONTROL-GATES-001 receipts: a non-time mark on the
+        current question's timeline row (same persisted lane as
+        note_question_time — lily_sessions.metadata.question_timeline).
+        Used for the SQL-pullable receipts the operator named: the
+        speech id that released a dispute-hold, the reason a timed
+        window went untimed. Last write wins (a mark is a fact about the
+        latest event, not a first-edge timestamp)."""
+        timeline = getattr(self, "question_timeline", None)
+        if timeline is None:
+            timeline = self.question_timeline = {}
+        q = timeline.setdefault(int(self.question_number), {})
+        q[field] = value
 
     def open_answer_window(
         self,

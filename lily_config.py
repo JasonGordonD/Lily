@@ -510,6 +510,29 @@ def dispute_hold_timeout_seconds() -> float:
     return _get_float("LILY_DISPUTE_HOLD_TIMEOUT_SECONDS", 45.0)
 
 
+def restart_confirm_ttl_seconds() -> float:
+    """WO-LILY-CONTROL-GATES-001 R1: how long the ONE deterministic
+    restart confirm ("Restart from scratch — scores gone. Sure?") stays
+    answerable, measured from the moment the confirm actually AIRED (or
+    from dispatch while it never reaches the air). Past the TTL the
+    pending confirm is dropped with a one-line "didn't catch a yes" and a
+    later affirmative from anyone is ordinary table talk — never a wipe.
+    Live R2: a "Yeah it's the femur" ten minutes after the ask erased
+    the board."""
+    return _get_float("LILY_RESTART_CONFIRM_TTL_SECONDS", 20.0)
+
+
+def setup_start_intent_ttl_seconds() -> float:
+    """WO-LILY-CONTROL-GATES-001 S2: the multi-intent setup parser's
+    start flag ("I want to play" class) expires after this many seconds
+    of not starting. Pre-WO the flag was set once and never cleared
+    (except by restart), so start_intent_present() read True forever and
+    the auto-start net / begin_round tool could open round one minutes
+    later with no start phrase in the room (the 08-15 class re-opened).
+    The explicit spoken/UI start fact is NOT subject to this TTL."""
+    return _get_float("LILY_SETUP_START_INTENT_TTL_SECONDS", 120.0)
+
+
 def mc_answer_aborts_read() -> bool:
     """WS-5 (WO-LILY-OMNIBUS-003): a final landing DURING an in-flight
     multiple-choice options read that Tier-1-matches a read option (or the

@@ -195,6 +195,13 @@ class LilyFloorMixin:
             return "game_stopped"
         if self._hold_active:
             return "hold"
+        if self.restart_confirm_pending():
+            # WO-LILY-CONTROL-GATES-001 R1: a restart confirm is on the
+            # air — the table has been asked whether the game dies. No new
+            # question may take the floor over that question (pre-WO the
+            # game kept playing under a pending wipe). Self-releasing: the
+            # confirm carries a TTL and every answer path clears it.
+            return "restart_confirm_pending"
         if self._question_pending:
             return "question_pending"
         if self._awaiting_address_since:
@@ -290,19 +297,191 @@ class LilyFloorMixin:
         ref = now if now is not None else time.time()
         if (ref - since) >= lily_config.dispute_hold_timeout_seconds():
             self.release_dispute_hold(reason="timeout")
+            # WO-LILY-CONTROL-GATES-001 D2: a timed-out dispute is still
+            # UNADDRESSED — pre-WO N+1 fired over it silently. One
+            # deterministic line names the debt before progression
+            # resumes; the contest note dies with the hold (its window
+            # to condition a turn is over). Hold-exempt source: the hold
+            # machinery is exactly what this line is released from.
+            self._contest_note = None
+            if getattr(self, "game_started", False) and not getattr(
+                self, "game_over", False
+            ):
+                self.gated_say(
+                    None,
+                    "dispute_timeout_ack",
+                    "[deterministic dispute timeout: still on their call]",
+                    source="hold_release",
+                    text=self._DISPUTE_TIMEOUT_LINE,
+                )
             return False
         return True
 
-    def release_dispute_hold(self, reason: str) -> bool:
-        """Lift the dispute-hold (post-protest turn confirmed on air, or
-        the timeout elapsed). Returns True if a hold was actually lifted."""
+    _DISPUTE_TIMEOUT_LINE = (
+        "Still on your call — I haven't forgotten it; carrying on for now."
+    )
+
+    def release_dispute_hold(
+        self, reason: str, speech_id: str | None = None
+    ) -> bool:
+        """Lift the dispute-hold (post-protest ADDRESSING turn confirmed on
+        air, or the timeout elapsed). Returns True if a hold was actually
+        lifted. The release is stamped on the question's timeline row
+        (dispute_released_at / dispute_released_by — the addressing speech
+        id, or the reason when no speech released it) so the D2 receipt is
+        SQL-pullable from lily_sessions.metadata.question_timeline."""
         if getattr(self, "_dispute_hold_since", None) is None:
             return False
         self._dispute_hold_since = None
         self._dispute_hold_reason = None
         logger.info(
-            "LILY_DISPUTE | RELEASED | session=%s reason=%s",
-            self.sk.session_id, reason,
+            "LILY_DISPUTE | RELEASED | session=%s reason=%s speech_id=%s",
+            self.sk.session_id, reason, speech_id or "-",
+        )
+        try:
+            self.sk.note_question_time("dispute_released_at")
+            self.sk.note_question_mark(
+                "dispute_released_by", speech_id or reason
+            )
+        except Exception:  # pragma: no cover — telemetry never takes
+            pass  # the release down
+        return True
+
+    # -- WO-LILY-CONTROL-GATES-001 D2: which turn may discharge a dispute --
+    #
+    # Pre-WO the hold released on ANY confirmed speech post-dating the
+    # protest — "Take your time." (hold_ack), a pacing ack, the N+1
+    # delivery itself. None of those can address a contest. A turn can
+    # discharge the dispute only when it was GENERATED WITH THE CONTEST
+    # NOTE IN CONTEXT: an LLM-lane turn (organic / instructed_reply)
+    # dispatched after the protest while the note was armed. Mechanism:
+    # arming the note bumps a sequence number; every outbound handle is
+    # stamped at dispatch/creation with the sequence live at that moment
+    # (None when no note was armed) and with its LANE (text = a fixed
+    # deterministic line that cannot address anything); at confirm the
+    # stamps are compared. Unknown handles (never stamped — harness or an
+    # exotic lane) FAIL OPEN, as the post-dating read already does: a hold
+    # must never be a wedge, and the hard timeout still bounds it.
+
+    _CONTEST_NOTE_TEXT = (
+        "[verdict contest — a player says they were misheard, that "
+        "their answer was right, or that a rule was misapplied. Give "
+        "them ONE honest re-check against the committed record (the "
+        "SCORES field and the last ruling) and the recorded utterance. "
+        "If the ruling was wrong — a correct answer denied, an answer "
+        "misheard, a rule misapplied (a clock on a relaxed round), or "
+        "a call made outside its own window — put it right with "
+        "lily_correct_verdict (grounds = answer_denied / misheard / "
+        "wrong_rule / out_of_window). That tool APPENDS an audited "
+        "correction and restores the point; it will refuse if there is "
+        "no committed verdict to amend, so you can never invent a "
+        "point. Say what you're fixing and why ('that one was yours — "
+        "putting the point back'). If the ruling stands, tell them "
+        "exactly why in one line. Never brush it off with 'we're past "
+        "that' or 'the board is locked'. One re-check only.]"
+    )
+
+    def arm_contest_note(self, *, reason: str) -> bool:
+        """Arm the X12 contest note (one-shot; a live note is kept, not
+        re-armed) and bump the note sequence so turns dispatched from here
+        can be told apart from turns that predate it. Returns True when
+        newly armed."""
+        if getattr(self, "_contest_note", None):
+            return False
+        self._contest_note = self._CONTEST_NOTE_TEXT
+        self._contest_note_seq = int(
+            getattr(self, "_contest_note_seq", 0) or 0
+        ) + 1
+        logger.info(
+            "LILY_CONTEST | ARMED | session=%s seq=%d reason=%s",
+            self.sk.session_id, self._contest_note_seq, reason,
+        )
+        return True
+
+    def _stamp_speech_context(
+        self, speech_id: str | None, lane: str | None = None
+    ) -> None:
+        """Stamp one outbound handle with the contest-note sequence live at
+        dispatch (None = no note armed) and, when known, its lane ("text"
+        for a deterministic line, "llm" for a generated turn). Idempotent
+        across the dispatch stamp and the speech_created stamp (whichever
+        lands first wins the sequence; the lane is recorded when given).
+        Bounded like every per-speech map."""
+        if not speech_id:
+            return
+        seqs = getattr(self, "_speech_contest_seq", None)
+        if seqs is None:
+            seqs = self._speech_contest_seq = {}
+        if speech_id not in seqs:
+            seqs[speech_id] = (
+                int(getattr(self, "_contest_note_seq", 0) or 0)
+                if getattr(self, "_contest_note", None)
+                else None
+            )
+            while len(seqs) > 64:
+                seqs.pop(next(iter(seqs)))
+        if lane:
+            lanes = getattr(self, "_speech_lane", None)
+            if lanes is None:
+                lanes = self._speech_lane = {}
+            lanes[speech_id] = lane
+            while len(lanes) > 64:
+                lanes.pop(next(iter(lanes)))
+
+    def speech_addresses_contest(
+        self, speech_id: str | None, act: str | None = None
+    ) -> bool:
+        """Could this confirmed turn have addressed the live contest? False
+        for a deterministic text line, a game-lane payload, or a turn
+        generated while no contest note was armed / under an older note.
+        True when no protest was ever heard (nothing to address — the
+        legacy clear stays) and for an unknown, never-stamped handle
+        (fail open: never a wedge)."""
+        if not getattr(self, "_last_protest_at", 0.0):
+            return True
+        if act and (
+            act in self._GAME_LANE_ACTS or str(act).endswith("_delivery")
+        ):
+            return False
+        if not speech_id:
+            return True
+        lane = (getattr(self, "_speech_lane", None) or {}).get(speech_id)
+        if lane == "text":
+            return False
+        seqs = getattr(self, "_speech_contest_seq", None) or {}
+        if speech_id not in seqs:
+            return True
+        stamped = seqs[speech_id]
+        return stamped is not None and stamped == int(
+            getattr(self, "_contest_note_seq", 0) or 0
+        )
+
+    def discharge_contest_on_confirm(
+        self, speech_id: str | None, act: str | None = None
+    ) -> bool:
+        """The confirm-time read (on_agent_speech_finished, CONFIRMED
+        playouts only): clear the contest note and release the
+        dispute-hold ONLY for a post-protest turn that carried the
+        note. Returns True when the contest was discharged."""
+        if not self.speech_dispatch_postdates(
+            speech_id, getattr(self, "_last_protest_at", 0.0)
+        ):
+            return False
+        if not self.speech_addresses_contest(speech_id, act):
+            if getattr(self, "_dispute_hold_since", None) is not None:
+                logger.info(
+                    "LILY_DISPUTE | HOLD_KEPT | session=%s speech_id=%s "
+                    "act=%s — confirmed turn post-dates the protest but "
+                    "could not have addressed it (deterministic line / "
+                    "game payload / no contest note in context); the "
+                    "hold waits for the addressing turn "
+                    "(WO-LILY-CONTROL-GATES-001 D2)",
+                    self.sk.session_id, speech_id or "-", act or "-",
+                )
+            return False
+        self._contest_note = None
+        self.release_dispute_hold(
+            reason="post_protest_turn_confirmed", speech_id=speech_id
         )
         return True
 
@@ -345,6 +524,18 @@ class LilyFloorMixin:
         self._last_protest_at = now_wall
         self._last_protest_text = str(text or "")[:160]
         anchor = self._verdict_recently_aired(time.monotonic())
+        if anchor is None and getattr(self.sk, "answer_window_open", False):
+            # WO-LILY-CONTROL-GATES-001 D1b: a protest INSIDE AN OPEN
+            # WINDOW is anchored to that window, not to a past verdict.
+            # The 08-15 protest ("we're still preparing things") landed
+            # on a timed window with no ruling aired yet, read
+            # PROTEST_UNANCHORED, the clock ran out and the question
+            # burned — the premature-adjudication class could never arm
+            # because nothing had been ruled. The hold now binds the
+            # window's expiry/close (the expiry waits on the hold; the
+            # deadline is lifted so the table is not timed out under a
+            # dispute), and every wait arm self-releases.
+            anchor = "open_window"
         if anchor is None:
             logger.info(
                 "LILY_DISPUTE | PROTEST_UNANCHORED | session=%s player=%s "
@@ -356,6 +547,11 @@ class LilyFloorMixin:
         already = getattr(self, "_dispute_hold_since", None) is not None
         self._dispute_hold_since = now_wall
         self._dispute_hold_reason = anchor
+        # D2: the contest note is armed HERE too (not only on the X12
+        # branch, which stands down for a command-carrying final — the
+        # 08-15 protest was fused with a pacing command), so the next
+        # generated turn carries it and can discharge the hold.
+        self.arm_contest_note(reason=f"protest:{anchor}")
         if not already:
             logger.warning(
                 "LILY_DISPUTE | ARMED | session=%s player=%s anchor=%s "
@@ -363,23 +559,45 @@ class LilyFloorMixin:
                 "confirms on air (WO-LILY-BIND-DISPUTE-001 D2)",
                 self.sk.session_id, player, anchor, str(text)[:80],
             )
+            try:
+                self.sk.note_question_time("dispute_armed_at")
+                self.sk.note_question_mark("dispute_anchor", anchor)
+            except Exception:  # pragma: no cover
+                pass
+        if anchor == "open_window":
+            hold_expiry = getattr(self, "hold_window_expiry", None)
+            if callable(hold_expiry):
+                hold_expiry(reason="dispute_hold")
         # D3: a protest against a bind still inside the solo-relaxed settle
         # window disowns the bind itself — withdraw it so roster-complete
         # re-opens and the question cannot burn on the protest.
+        #
+        # WO-LILY-CONTROL-GATES-001 D3: ONLY the binding-denial sub-class
+        # ("I didn't say anything") disowns a bind. Any other contest
+        # shape inside the settle window (live audit C: "I say Detroit,
+        # final" — a restatement that hit the contest regex) left the
+        # answer WITHDRAWN after it had scored. A player who did answer
+        # and is arguing the ruling keeps their answer.
         settle_qnum = getattr(self, "_relaxed_settle_pending", None)
         if (
             settle_qnum is not None
             and settle_qnum == self.sk.question_number
             and player
+            and lily_scorekeeper.lily_detect_binding_denial(text)
         ):
             self.sk.withdraw_candidate(
                 player, reason="binding_denied_protest"
             )
 
-    def _note_speech_dispatch(self, speech_id: str | None) -> None:
+    def _note_speech_dispatch(
+        self, speech_id: str | None, lane: str | None = None
+    ) -> None:
         """Stamp the wall-clock dispatch time of one outbound speech.
         Consumed by the post-dating reads below — a turn can only discharge
-        a protest/address debt that predates its own dispatch. Bounded."""
+        a protest/address debt that predates its own dispatch. Bounded.
+        `lane` (WO-LILY-CONTROL-GATES-001 D2) names the dispatch lane —
+        "text" for a fixed deterministic line, "llm" for a generated turn —
+        and rides the contest-context stamp."""
         if not speech_id:
             return
         store = getattr(self, "_speech_dispatched_at", None)
@@ -389,6 +607,7 @@ class LilyFloorMixin:
         if len(store) > 64:
             for stale in sorted(store, key=store.get)[: len(store) - 64]:
                 store.pop(stale, None)
+        self._stamp_speech_context(speech_id, lane=lane)
 
     def speech_dispatch_postdates(
         self, speech_id: str | None, since: float
@@ -439,10 +658,64 @@ class LilyFloorMixin:
     def start_intent_present(self) -> bool:
         """Has a player expressed start intent through a deterministic
         channel this session? Reads the explicit fact and the multi-intent
-        setup parser's start flag (\"I want to play\" class)."""
+        setup parser's start flag (\"I want to play\" class).
+
+        WO-LILY-CONTROL-GATES-001 S2: the setup flag EXPIRES
+        (setup_start_intent_ttl_seconds after it was set) — pre-WO it was
+        set once and never cleared, so a lobby that said "I want to play"
+        and then kept chatting read start-intent-present forever and the
+        auto-start net / begin_round tool could open round one minutes
+        later with no start phrase in the room. A flag with no stamp
+        (legacy harness) never expires."""
         if getattr(self, "_player_start_intent", None) is not None:
             return True
-        return bool(getattr(self, "_setup_start_requested", False))
+        if not getattr(self, "_setup_start_requested", False):
+            return False
+        stamped_at = float(getattr(self, "_setup_start_requested_at", 0.0) or 0.0)
+        ttl = lily_config.setup_start_intent_ttl_seconds()
+        if not stamped_at or ttl <= 0 or (time.time() - stamped_at) <= ttl:
+            return True
+        self._setup_start_requested = False
+        self._setup_start_requested_at = 0.0
+        logger.info(
+            "LILY_STATE | START_INTENT_EXPIRED | session=%s source=setup_parser "
+            "ttl=%.0fs — the 'I want to play' flag aged out; a fresh start "
+            "phrase is required (WO-LILY-CONTROL-GATES-001 S2)",
+            getattr(self.sk, "session_id", "?"), ttl,
+        )
+        return False
+
+    def note_spoken_start_request(self, text: str) -> None:
+        """WO-LILY-CONTROL-GATES-001 S1: the spoken start branch's own
+        bookkeeping, run BEFORE start_game is scheduled.
+
+        (1) The start phrase is host-directed, so FL-1 stamped an address
+        debt for THIS final one line above — and start_game's lobby-settle
+        gate then read lobby_unsettled:address_unanswered off the very
+        utterance that asked to start: every voice start aired "One sec —
+        locking the table first", landed a second late, and the latch
+        below made the second request silent ("late and eager",
+        reintroduced). The debt minted by the command-carrying final is
+        released here: the start composite (or the hold line) IS its
+        answer. An OLDER debt (a previous unanswered address) is left
+        alone — the settle gate still honors it.
+        (2) `_start_hold_said` re-arms per start request, so a table that
+        asks twice hears the hold line twice, never silence.
+        (3) The code lane owns this utterance (AIRGATE-001 D4): the
+        kickoff composite / hold line is the reply, no organic double."""
+        self._start_hold_said = False
+        if self._awaiting_address_since and int(
+            getattr(self, "_address_stamp_seq", -1)
+        ) == int(getattr(self, "_user_final_seq", 0) or 0):
+            self._awaiting_address_since = 0.0
+            self._address_unanswered_warned = False
+            logger.info(
+                "LILY_STATE | START_INTENT | session=%s source=voice — "
+                "address debt minted by the start phrase itself released; "
+                "the kickoff is its answer (WO-LILY-CONTROL-GATES-001 S1)",
+                getattr(self.sk, "session_id", "?"),
+            )
+        self.mark_deterministic_reply(text)
 
     def lobby_unsettled_reason(self) -> str | None:
         """Why the lobby is NOT settled enough for round one to dispatch.
@@ -500,24 +773,32 @@ class LilyFloorMixin:
         "whenever you're ready."
     )
     _RESTART_DECLINED_LINE = "Good — the game stands. Where were we?"
+    _RESTART_CONFIRM_DROPPED_LINE = "Didn't catch a yes — keeping the game."
+    # R1: the confirm is re-asked at most ONCE after its airing was lost
+    # (suppressed / flushed / interrupted); a second loss drops the ask.
+    _RESTART_CONFIRM_MAX_ATTEMPTS = 2
 
     def note_player_restart_intent(
-        self, *, source: str, text: str = ""
+        self, *, source: str, text: str = "", requester: str | None = None
     ) -> None:
         """Record the explicit restart-intent fact. Set ONLY by
         deterministic channels: the spoken restart detector
         (command == restart_game) or a UI/rpc control. Model judgment
         never writes this — the tool path verifies it (the WO-3 start-gate
-        discipline)."""
+        discipline). `requester` (WO-LILY-CONTROL-GATES-001 R1) is the
+        speaker label / player the ask came from — the confirm binds to
+        it, and the tool path inherits it."""
         if getattr(self, "_player_restart_intent", None) is None:
             logger.info(
-                "LILY_RESTART | INTENT | session=%s source=%s text=%r",
-                getattr(self.sk, "session_id", "?"), source,
+                "LILY_RESTART | INTENT | session=%s source=%s requester=%s "
+                "text=%r",
+                getattr(self.sk, "session_id", "?"), source, requester,
                 str(text)[:80],
             )
         self._player_restart_intent = {
             "source": source,
             "text": str(text or "")[:160],
+            "requester": requester,
             "at": time.time(),
         }
 
@@ -576,56 +857,260 @@ class LilyFloorMixin:
         and the user final that carried the restart request has already
         released any A4 hold on the classify seam — restart intent during
         a hold is how a stuck table gets out."""
-        if getattr(self, "_pending_restart_confirm", None) is not None:
-            # A re-stated restart command IS the affirmative — the table
-            # answered the confirm with the request itself.
+        if requester is None:
+            # The tool path carries no speaker; the detector-set intent
+            # fact does (R1: the confirm binds to whoever asked).
+            requester = (
+                getattr(self, "_player_restart_intent", None) or {}
+            ).get("requester")
+        if self.restart_confirm_pending():
+            pending = self._pending_restart_confirm
+            # WO-LILY-CONTROL-GATES-001 R1: a re-stated restart command is
+            # the affirmative ONLY from the requester, and ONLY once the
+            # confirm has actually aired — live R9: two "restart the game"
+            # finals from anyone (an STT dup, an echo, a second player)
+            # wiped the board with no yes ever heard.
+            bound = pending.get("requester")
+            if bound and requester != bound:
+                logger.warning(
+                    "LILY_RESTART | RESTATED_IGNORED | session=%s by=%s "
+                    "bound_to=%s — a restart restated by another speaker "
+                    "does not confirm; the requester's yes settles it",
+                    self.sk.session_id, requester, bound,
+                )
+                return "confirm_pending"
+            if not pending.get("aired_at"):
+                logger.warning(
+                    "LILY_RESTART | RESTATED_BEFORE_CONFIRM_AIRED | "
+                    "session=%s by=%s — the confirm has not reached the "
+                    "air; a restatement before the question was heard "
+                    "is not an answer to it (dup/echo guard)",
+                    self.sk.session_id, requester,
+                )
+                return "confirm_pending"
             logger.info(
-                "LILY_RESTART | RESTATED_WHILE_PENDING | session=%s — the "
-                "repeated restart command confirms",
-                self.sk.session_id,
+                "LILY_RESTART | RESTATED_WHILE_PENDING | session=%s by=%s — "
+                "the requester repeated the restart after the confirm "
+                "aired; that confirms",
+                self.sk.session_id, requester,
             )
-            self.execute_restart(source=f"{source}_restated", requester=requester)
+            self.execute_restart(
+                source=f"{source}_restated", requester=requester,
+                resolved_by="restated_by_requester",
+            )
             return "restarted"
         if not self.restart_requires_confirm():
-            self.execute_restart(source=source, requester=requester)
+            self.execute_restart(
+                source=source, requester=requester, resolved_by="no_stakes",
+            )
             return "restarted"
         self._pending_restart_confirm = {
             "requester": requester,
             "source": source,
             "text": str(text or "")[:160],
             "at": time.time(),
+            "speech_id": None,
+            "aired_at": None,
+            "attempts": 1,
         }
         logger.warning(
             "LILY_RESTART | CONFIRM_ARMED | session=%s requester=%s "
-            "source=%s — live game with stakes; ONE deterministic confirm, "
-            "reset only on an affirmative final from a player",
+            "source=%s ttl=%.0fs — live game with stakes; ONE deterministic "
+            "confirm, reset only on the requester's affirmative after the "
+            "confirm airs",
             self.sk.session_id, requester, source,
+            lily_config.restart_confirm_ttl_seconds(),
         )
-        self.gated_say(
+        self._dispatch_restart_confirm()
+        return "confirm_armed"
+
+    # -- R1 confirm lifecycle (WO-LILY-CONTROL-GATES-001) ------------------
+    #
+    # Pre-WO the pending confirm had no expiry, no requester, and no
+    # notion of whether the question was ever heard; it was consulted on
+    # EVERY final from ANY player with the forget flow's broad yes-set,
+    # and the game kept playing underneath it. Live R2: ten minutes later
+    # a DIFFERENT player answered a trivia question with "Yeah it's the
+    # femur" — bound as an answer AND the board was wiped. Now: the
+    # confirm binds to the requester, is answerable only after its handle
+    # CONFIRMED on air (playout completed without cut/suppression), for a
+    # TTL, with the narrow restart yes-parser; progression pauses while it
+    # is out; and a lost airing (suppressed / flushed / interrupted) unwinds
+    # the pending state and re-asks once, else drops the ask out loud.
+
+    def _dispatch_restart_confirm(self) -> None:
+        """Put the confirm on the air and bind its speech id to the
+        pending state. A dispatch that yields no handle at all (refused at
+        the gate, or a session without a say lane) counts as a lost
+        airing and takes the suppression path."""
+        pending = getattr(self, "_pending_restart_confirm", None)
+        if pending is None:
+            return
+        dispatched = self.gated_say(
             None,
             "restart_confirm",
             "[deterministic restart confirm: scores would be lost]",
             source="restart_request",
             text=self._RESTART_CONFIRM_LINE,
         )
-        return "confirm_armed"
+        speech_id = None
+        if dispatched:
+            act_map = getattr(self, "_dispatched_act_by_speech", None) or {}
+            for sid, act in reversed(list(act_map.items())):
+                if act == "restart_confirm":
+                    speech_id = sid
+                    break
+        if speech_id is None:
+            logger.warning(
+                "LILY_RESTART | CONFIRM_NOT_DISPATCHED | session=%s "
+                "attempt=%d dispatched=%s — no handle for the confirm; "
+                "treating as a lost airing",
+                self.sk.session_id, pending.get("attempts", 1), dispatched,
+            )
+            self.on_dispatch_suppressed(
+                "restart_confirm", None, "not_dispatched"
+            )
+            return
+        pending["speech_id"] = speech_id
+        pending["at"] = time.time()
+
+    def restart_confirm_pending(self, now: float | None = None) -> bool:
+        """True while a restart confirm is live. The TTL is read lazily
+        here (every consult site — the transcript seam, the progression
+        gate, the tool — shares it): an expired confirm is dropped with
+        the one-line 'didn't catch a yes' and reads False."""
+        pending = getattr(self, "_pending_restart_confirm", None)
+        if pending is None:
+            return False
+        ref = now if now is not None else time.time()
+        anchor = float(pending.get("aired_at") or pending.get("at") or 0.0)
+        if anchor and (ref - anchor) >= lily_config.restart_confirm_ttl_seconds():
+            self._drop_restart_confirm(reason="ttl_expired", say=True)
+            return False
+        return True
+
+    def _drop_restart_confirm(self, *, reason: str, say: bool) -> None:
+        """Unwind a pending confirm without destroying anything. The
+        intent fact dies with it (the tool cannot restart on a stale ask);
+        a fresh spoken restart re-records both."""
+        pending = getattr(self, "_pending_restart_confirm", None)
+        self._pending_restart_confirm = None
+        self._player_restart_intent = None
+        logger.warning(
+            "LILY_RESTART | CONFIRM_DROPPED | session=%s reason=%s "
+            "requester=%s aired=%s attempts=%s — nothing reset; the game "
+            "stands (WO-LILY-CONTROL-GATES-001 R1)",
+            self.sk.session_id, reason,
+            (pending or {}).get("requester"),
+            bool((pending or {}).get("aired_at")),
+            (pending or {}).get("attempts"),
+        )
+        if say:
+            self.gated_say(
+                None,
+                "restart_confirm_dropped",
+                "[deterministic restart confirm dropped: no yes heard]",
+                source="restart_declined",
+                text=self._RESTART_CONFIRM_DROPPED_LINE,
+            )
+
+    def note_dispatch_playout(
+        self,
+        act: str | None,
+        speech_id: str | None,
+        *,
+        interrupted: bool = False,
+        suppressed: bool = False,
+        failed: bool = False,
+    ) -> None:
+        """Playout outcome of one dispatched act (wired from
+        on_agent_speech_finished BEFORE the act map is popped). For the
+        restart confirm: a clean completion stamps `aired_at` — the
+        moment from which a yes may be honored and the TTL runs; a lost
+        airing takes the suppression path."""
+        if act != "restart_confirm":
+            return
+        pending = getattr(self, "_pending_restart_confirm", None)
+        if pending is None or pending.get("speech_id") != speech_id:
+            return
+        if interrupted or suppressed or failed:
+            self.on_dispatch_suppressed(
+                act, speech_id,
+                "failed" if failed else "suppressed" if suppressed
+                else "interrupted",
+            )
+            return
+        pending["aired_at"] = time.time()
+        logger.info(
+            "LILY_RESTART | CONFIRM_AIRED | session=%s speech_id=%s "
+            "requester=%s — the confirm reached the room; the requester's "
+            "yes is honored for %.0fs",
+            self.sk.session_id, speech_id, pending.get("requester"),
+            lily_config.restart_confirm_ttl_seconds(),
+        )
+
+    def on_dispatch_suppressed(
+        self, act: str, speech_id: str | None, reason: str
+    ) -> None:
+        """SEAM (W1 exposes this hook from the say-gate / flush / cancel
+        paths and calls it with the act, the handle id and the reason; this
+        is the consumer). A restart confirm that never reached the room —
+        suppressed by the freshness gate, flushed by a barge, interrupted,
+        failed — unwinds the pending state: re-ask ONCE, else drop the ask
+        with a one-line 'didn't catch a yes'. Any other act: no-op here."""
+        if act != "restart_confirm":
+            return
+        pending = getattr(self, "_pending_restart_confirm", None)
+        if pending is None:
+            return
+        bound_id = pending.get("speech_id")
+        if speech_id and bound_id and speech_id != bound_id:
+            return  # a stale handle from an earlier attempt
+        if pending.get("aired_at"):
+            return  # already heard; a later event cannot un-air it
+        attempts = int(pending.get("attempts") or 1)
+        if attempts >= self._RESTART_CONFIRM_MAX_ATTEMPTS:
+            self._drop_restart_confirm(
+                reason=f"confirm_lost:{reason}", say=True
+            )
+            return
+        pending["attempts"] = attempts + 1
+        pending["speech_id"] = None
+        pending["at"] = time.time()
+        logger.warning(
+            "LILY_RESTART | CONFIRM_LOST | session=%s speech_id=%s "
+            "reason=%s — pending state unwound; re-asking once "
+            "(attempt %d/%d)",
+            self.sk.session_id, speech_id or "-", reason,
+            pending["attempts"], self._RESTART_CONFIRM_MAX_ATTEMPTS,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            # Deferred one tick: this hook can run inside the barge
+            # classification that is still flushing the queue.
+            loop.call_soon(self._dispatch_restart_confirm)
+        else:
+            self._dispatch_restart_confirm()
 
     def resolve_restart_confirm(
         self, text: str, speaker: str | None
     ) -> bool:
         """Consume one finalized user segment against a pending restart
-        confirm. An affirmative from a PLAYER (any player — the table owns
-        its game) executes the restart; a no drops it (and clears the
-        intent fact, so the tool cannot later restart on the stale ask);
-        anything ambiguous does nothing destructive and stays pending.
-        Returns True when this turn was consumed by the confirm flow."""
-        if getattr(self, "_pending_restart_confirm", None) is None:
+        confirm. A "no" from ANY player drops it (the non-destructive
+        direction; the intent fact dies with it so the tool cannot later
+        restart on the stale ask). A "yes" — the narrow restart yes-parser,
+        the utterance must BE a yes — executes the reset ONLY from the
+        requester and ONLY after the confirm handle confirmed on air.
+        Anything else does nothing destructive and is NOT consumed (an
+        answer-shaped final from another player stays an answer). Returns
+        True when this turn was consumed by the confirm flow."""
+        if not self.restart_confirm_pending():
             return False
-        verdict = lily_forget.lily_parse_forget_confirmation(text)
-        if verdict == "yes":
-            self.mark_deterministic_reply(text)
-            self.execute_restart(source="voice_confirm", requester=speaker)
-            return True
+        pending = self._pending_restart_confirm
+        verdict = lily_forget.lily_parse_restart_confirmation(text)
         if verdict == "no":
             self._pending_restart_confirm = None
             self._player_restart_intent = None
@@ -642,10 +1127,45 @@ class LilyFloorMixin:
                 text=self._RESTART_DECLINED_LINE,
             )
             return True
-        return False
+        if verdict != "yes":
+            return False
+        bound = pending.get("requester")
+        if bound and speaker != bound:
+            logger.warning(
+                "LILY_RESTART | YES_IGNORED_NOT_REQUESTER | session=%s "
+                "by=%s bound_to=%s text=%r — an affirmative from another "
+                "speaker does not wipe the board",
+                self.sk.session_id, speaker, bound, str(text)[:60],
+            )
+            return False
+        if not pending.get("aired_at"):
+            logger.warning(
+                "LILY_RESTART | YES_BEFORE_CONFIRM_AIRED | session=%s by=%s "
+                "text=%r — the confirm has not reached the room; a yes to "
+                "a question nobody heard is not consent",
+                self.sk.session_id, speaker, str(text)[:60],
+            )
+            return False
+        if not bound:
+            logger.warning(
+                "LILY_RESTART | YES_UNBOUND_REQUESTER | session=%s by=%s — "
+                "the ask carried no speaker label; honoring the first "
+                "player yes after the confirm aired",
+                self.sk.session_id, speaker,
+            )
+        self.mark_deterministic_reply(text)
+        self.execute_restart(
+            source="voice_confirm", requester=speaker,
+            resolved_by="voice_yes",
+        )
+        return True
 
     def execute_restart(
-        self, *, source: str, requester: str | None = None
+        self,
+        *,
+        source: str,
+        requester: str | None = None,
+        resolved_by: str | None = None,
     ) -> dict:
         """THE reset (WO-LILY-RESTART-001): kill the dead game cleanly,
         keep the people, return to a lobby with the WO-3 start gate armed.
@@ -667,6 +1187,16 @@ class LilyFloorMixin:
           bumped roster_gen + blank room metadata, all through the
           existing publish chokepoints.
         """
+        # WO-LILY-CONTROL-GATES-001 R2: the generation token. Every
+        # resumable coroutine of the dead game (adjudicate across its
+        # judge/publish awaits, the relaxed settle watcher, the breath, the
+        # deferred-start watcher) re-reads this after each await and stands
+        # down when it moved — an untracked ensure_future(adjudicate) used
+        # to survive the reset and commit a dead-game verdict into game 2
+        # (its post-await guard read only _delivery_stop_sticky, which the
+        # reset itself clears).
+        self._game_generation = int(getattr(self, "_game_generation", 0) or 0) + 1
+        pending_confirm = getattr(self, "_pending_restart_confirm", None) or {}
         # -- 0. the dead game's obligations: cancel with accounting --------
         for speech_id in list(getattr(self, "_speech_handles", None) or {}):
             self.cancel_speech(speech_id, reason="game_restart")
@@ -724,10 +1254,18 @@ class LilyFloorMixin:
         events = getattr(self, "_game_restart_events", None)
         if events is None:
             events = self._game_restart_events = []
+        # R1 receipt (SQL-pullable from lily_sessions.metadata.game_restarts):
+        # who asked, whether/when the confirm aired, and what resolved it.
         events.append({
             "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "source": source,
             "requester": requester,
+            "confirm_requester": pending_confirm.get("requester"),
+            "confirm_dispatched_at": pending_confirm.get("at"),
+            "confirm_aired_at": pending_confirm.get("aired_at"),
+            "confirm_attempts": pending_confirm.get("attempts"),
+            "resolved_by": resolved_by or source,
+            "generation": self._game_generation,
             "dead_game": summary,
         })
 
@@ -787,6 +1325,16 @@ class LilyFloorMixin:
         self._supply_retry_attempts = 0
         self._supply_exhausted_notified = False
         self._phase_hold = None
+        # WO-LILY-CONTROL-GATES-001 R2: the per-key stale-retry budget is
+        # keyed q_N_* — game 2's q_1 watchdog budget was pre-spent by game
+        # 1's (audit R8) — and the relaxed settle marker relied on the
+        # cancelled watcher's `finally` to clear (a cancelled task that
+        # never got to run its finally left it set). Both are reset HERE,
+        # unconditionally; W1's purge_game_scoped also pops retry counts.
+        self._stale_retry_counts = {}
+        self._relaxed_settle_pending = None
+        self._relaxed_settle_task = None
+        self._contest_note = None
         # NOT cleared, deliberately: asked_history / _burned_question_* /
         # _drawn_* / used_prompts (the no-repeat ledgers — a restarted
         # table never re-hears game 1's questions), next_question and its
@@ -806,7 +1354,9 @@ class LilyFloorMixin:
         # intent is required to begin again ---------------------------------
         self._player_start_intent = None
         self._setup_start_requested = False
+        self._setup_start_requested_at = 0.0
         self._start_hold_said = False
+        self._start_settle_exhausted = False
         self._player_restart_intent = None
         self._pending_restart_confirm = None
 
@@ -837,9 +1387,11 @@ class LilyFloorMixin:
             pass
         logger.warning(
             "LILY_RESTART | EXECUTED | session=%s source=%s requester=%s "
+            "resolved_by=%s confirm_aired_at=%s generation=%d "
             "dead_game_q=%s roster=%d — back to lobby, start gate armed "
             "(fresh start intent required)",
-            self.sk.session_id, source, requester,
+            self.sk.session_id, source, requester, resolved_by or source,
+            pending_confirm.get("aired_at"), self._game_generation,
             summary.get("question_number"),
             len(getattr(self.sk, "players", None) or {}),
         )
@@ -1476,6 +2028,12 @@ class LilyFloorMixin:
             lily_addressee_classifier.CLASS_HOST_DIRECTED
         ):
             self._awaiting_address_since = time.time()
+            # WO-LILY-CONTROL-GATES-001 S1: remember WHICH final minted
+            # this debt, so a command branch that answers its own final
+            # deterministically can release exactly that debt.
+            self._address_stamp_seq = int(
+                getattr(self, "_user_final_seq", 0) or 0
+            )
         # WO-LILY-BIND-DISPUTE-001 D2: the dispute sensor rides the same
         # every-final seam (this classifier runs on the production path for
         # each finalized segment, ahead of the contest-note branch), so a

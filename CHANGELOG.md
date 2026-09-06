@@ -5,6 +5,208 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — WO-LILY-CONTROL-GATES-001: the control gates — restart confirm, spoken start, window/dispute holds
+
+Two read-only audits (Auditors A and C) against main a380531 reproduced
+ten defects on the control surfaces; their scripts
+(`scratchpad/audit_repros.py` R2/R8/R9, `scratchpad/audit_scenarios.py`
+A/C/D/E/G) are re-driven as failing-first tests in
+`tests/test_control_gates_w2.py`. Fleet standards touched: S5 (mechanical
+gates — every gate below lives in `.py`), S2 (the receipts: nothing here
+reports a wipe/start/release it cannot evidence).
+
+**PRIOR CLAIMS THAT WERE FALSE** (named so the record is honest):
+
+- WO-LILY-RESTART-001 §2 claimed "the reset runs only on an affirmative
+  final from a player … a re-stated restart command counts as the yes".
+  FALSE as a safety claim: the confirm had no expiry, no requester bind
+  and no check that the confirm ever AIRED; it was consulted on every
+  final from any player with the forget flow's broad yes-set, and the
+  game kept playing under it. Audit R2: ten minutes after "restart the
+  game", a DIFFERENT player answering a trivia question with "Yeah it's
+  the femur" was bound as an answer AND wiped the board. Audit R9: two
+  "restart the game" finals (STT dup / echo / a second player) wiped the
+  board with no yes ever heard.
+- WO-LILY-RESTART-001 §3 claimed every dead-game obligation was "cancelled
+  WITH ACCOUNTING … no dead-game verdict can re-air". FALSE for the
+  untracked `ensure_future(adjudicate)` tasks (instant Tier-1 path,
+  MC early-answer forks, relaxed beat close): they survive the reset and
+  their post-await guard read only `_delivery_stop_sticky`, which the
+  reset itself clears — a dead game's verdict could commit into game 2.
+  `_stale_retry_counts` (audit R8) and `_relaxed_settle_pending` were
+  also never reset.
+- WO-LILY-BIND-DISPUTE-001 D3 claimed the solo-relaxed settle window
+  covered "both live burns (Oscar Wilde 08-14, Aphrodite 08-15)". FALSE
+  for 08-15: the settle window exists only for RELAXED windows
+  (`_maybe_close_relaxed_beat`'s pacing guard); the 08-15 window was
+  TIMED, `set_pacing` never touched `_window_timer`, the protest read
+  PROTEST_UNANCHORED (no verdict had aired), the clock expired and the
+  question burned. The PREMATURE-ADJUDICATION regex class D2 added could
+  never arm a hold, because it is anchored to a past ruling and there is
+  none.
+- WO-LILY-BIND-DISPUTE-001 D2 claimed the hold releases "ONLY by a turn
+  POST-DATING the protest confirming on air". TRUE but insufficient: ANY
+  post-dating confirmed speech released it — "Take your time." (hold_ack),
+  a pacing ack, the N+1 delivery itself — and a CUT addressing reply left
+  the hold until the 45s timeout, after which N+1 fired silently over the
+  unaddressed dispute.
+- WO-LILY-BIND-DISPUTE-001 D3 also claimed "a binding-denial protest
+  during settle WITHDRAWS the bind". The code withdrew on ANY contest
+  class: "I say Detroit, final" (audit C) hit the contest regex and the
+  scored answer was withdrawn.
+- WO-LILY-BIND-DISPUTE-001 ADDENDUM claimed "a start request while
+  unsettled gets one deterministic line … and dispatches when settled".
+  What it did not say: EVERY spoken start was unsettled by its OWN
+  address stamp (classify_addressee runs before command dispatch; a start
+  phrase is host-directed), so every voice start aired "One sec — locking
+  the table first", landed ≥1s late, the `_start_hold_said` latch made a
+  second request SILENT, and the organic reply was not suppressed (no
+  reply ownership on the start branch). No test drove a spoken start
+  through on_transcript_event. The addendum's `_START_GAME_RE` also had
+  no negation/question/deferral guard ("not ready to start", "are you
+  ready to start?", "let's go get a drink first" all started) and "I want
+  to play relaxed" set a start flag that never expired.
+
+**R1 — the restart confirm is a real gate** (`lily_floor.py`,
+`lily_forget.py`, `lily_glass.py`): the confirm binds to the REQUESTING
+speaker label (the tool path inherits it from the detector fact); a yes
+is honored ONLY from the requester, ONLY after the confirm's handle
+CONFIRMED on air (`note_dispatch_playout`, read off
+`on_agent_speech_finished` before the act map is popped), inside a TTL
+(`LILY_RESTART_CONFIRM_TTL_SECONDS`, 20s from airing), and only through
+the narrow `lily_parse_restart_confirmation` (the utterance must BE a
+yes — "yeah it's the femur" is ambiguous). A restated restart counts only
+from the requester after the confirm aired (the dup/echo guard). A "no"
+from anyone still drops the ask. `progression_paused_reason` gains a
+`restart_confirm_pending` arm. A confirm whose airing is lost
+(suppressed / flushed / interrupted / failed / no handle) unwinds the
+pending state through `on_dispatch_suppressed(act, speech_id, reason)`
+(the W1 seam — W1 exposes and calls it; this WO consumes it and reaches
+it through the playout report meanwhile), re-asks ONCE, else drops with
+"Didn't catch a yes — keeping the game." The expired confirm drops the
+same way, out loud. Receipt (SQL-pullable from
+`lily_sessions.metadata.game_restarts`): each event now carries
+`confirm_requester`, `confirm_dispatched_at`, `confirm_aired_at`,
+`confirm_attempts`, `resolved_by` (voice_yes / restated_by_requester /
+no_stakes / host_tool…), `generation`.
+
+**R2 — the reset is complete and resumable coroutines abandon**
+(`lily_floor.execute_restart`, `lily_agent.adjudicate` and friends):
+`_stale_retry_counts`, `_relaxed_settle_pending`, `_relaxed_settle_task`,
+`_contest_note` reset unconditionally (W1's `purge_game_scoped` also pops
+retry counts); a `_game_generation` token bumps on every restart and is
+re-read after EVERY await in `adjudicate` (speculative judge, Tier-2
+judge, pre-commit, reveal publish, finish_game — `ADJUDICATION_ABANDONED`
+logs and nothing commits), in the relaxed settle watcher, the
+inter-question breath, the window expiry and the deferred-start watcher.
+
+**S1 — the spoken start is not deferred by its own trigger**
+(`lily_glass.py` start branch, `lily_floor.note_spoken_start_request`):
+classify_addressee now remembers WHICH final minted the address debt
+(`_address_stamp_seq`); the start branch releases exactly that debt (an
+OLDER unanswered address still defers — pinned), re-arms
+`_start_hold_said` per request, and marks reply ownership
+(`mark_deterministic_reply`) so the kickoff composite is the ONE reply.
+Real-path test: "Let's start the game." through on_transcript_event
+commits `start_game` in the same tick with no hold line.
+
+**S2 — start-phrase guards** (`lily_scorekeeper.py`): `_START_GAME_RE`'s
+verb phrases refuse object continuations ("let's play it by ear", "let's
+begin with the rules", "let's go get a drink", "ready to play some music")
+and every consumer runs `_start_phrase_blocked` — NEGATION ("not ready to
+start", "I don't want to play yet"), QUESTION put to Lily ("are you ready
+to start?"), DEFERRAL ("whenever", "just kidding, one sec", "a drink
+first"). The setup parser's start flag is never set by a pacing/setup
+sentence ("I want to play relaxed" is a pacing choice) and now EXPIRES
+(`LILY_SETUP_START_INTENT_TTL_SECONDS`, 120s; the explicit spoken/UI
+start fact does not). "Let's play, with pictures on." and "I want to play
+the adult deck" still start (P0-2 pinned).
+
+**S3 — bounded start fallback** (`lily_agent.start_game` /
+`_defer_start_until_settled`): when the settle watcher exhausts its
+budget it latches `_start_settle_exhausted`; the next RESTATED player
+start (voice/rpc) starts regardless of settle with one line ("Locking
+the table as it stands — here we go.") — a solo table (below
+`auto_start_min_players`) now has a structural "always starts" path.
+
+**D1 — timed windows survive a pacing flip; a protest anchors to the OPEN
+window** (`lily_agent.set_pacing`, `_convert_window_untimed`,
+`_arm_window_expiry`, `hold_window_expiry`; `lily_floor.note_protest_final`):
+(a) a relaxed flip mid-window cancels the expiry task and lifts the
+deadline (timed on an untimed window arms a fresh clock); (b) a
+protest-shaped final with no ruling to anchor to but an OPEN window
+anchors the hold to the window (`anchor=open_window`), lifts the deadline
+and makes the expiry WAIT on the hold before closing — no timeout verdict
+under a protest; the hold self-releases (addressing turn / timeout line).
+`note_protest_final` also arms the contest note itself (the X12 branch
+stands down for a command-carrying final — the 08-15 protest was fused
+with a pacing command). Receipt (`lily_sessions.metadata.question_timeline`
+row): `window_untimed_at` + `window_untimed_reason=pacing_flip:<source>`
+after the pacing_set, `window_held_at` / `window_hold_reason`,
+`dispute_armed_at` / `dispute_anchor`.
+
+**D2 — only the addressing turn discharges a dispute** (`lily_floor`:
+`arm_contest_note`, `_stamp_speech_context`, `speech_addresses_contest`,
+`discharge_contest_on_confirm`; `lily_agent.on_agent_speech_finished`):
+arming the contest note bumps a sequence; every outbound handle is
+stamped at dispatch / speech_created with the sequence live at that
+moment and its LANE (`direct_say` = text, `instructed_reply` = llm); at
+confirm the hold releases only for a post-protest LLM-lane turn stamped
+with the current sequence that is not a game payload. "Take your time."
+(hold_ack), the N+1 delivery and a turn generated before the note cannot
+release it; a CUT addressing reply keeps the hold for the next generated
+turn. The timeout now AIRS "Still on your call — I haven't forgotten it;
+carrying on for now." instead of progressing silently. Receipt: the
+release is stamped on the question's timeline row —
+`dispute_released_at`, `dispute_released_by=<speech id | timeout |
+game_restart>` — and logged `LILY_DISPUTE | RELEASED | … speech_id=`.
+Seam with W1: W1 adds the post-protest exemption to
+`result_narration_already_aired` so the addressing turn is not suppressed;
+both read `_last_protest_at`.
+
+**D3 — the settle-withdraw is the binding-denial sub-class only**
+(`lily_floor.note_protest_final`, `lily_scorekeeper.lily_detect_binding_denial`
+/ `lily_detect_premature_adjudication_protest`): separate compiled
+sub-class sets (seam with W3, which owns the shared contest regex and its
+word-boundary bug); "I say Detroit, final" keeps its answer, "I didn't say
+anything" still withdraws.
+
+- Config (local-only, in-code defaults): `LILY_RESTART_CONFIRM_TTL_SECONDS`
+  (20), `LILY_SETUP_START_INTENT_TTL_SECONDS` (120).
+- `LilyScorekeeper.note_question_mark(field, value)` — a non-time mark on
+  the current question's timeline row (the receipts above).
+- Tests: `tests/test_control_gates_w2.py` (45) — 40/45 red on a380531
+  (the 5 green are invariance pins: an older address still defers, "I
+  don't want to play yet" already refused, binding denial still
+  withdraws, a pre-note turn / a cut reply cannot release). Every test
+  drives real methods on real state (on_transcript_event for the spoken
+  start and the restart confirm; on_agent_speech_finished for
+  airing/suppression). Two inherited SOURCE-GREP tests replaced by
+  behavior tests (`test_hotfix009_verdict_correction::
+  test_contest_note_points_at_the_correction_tool`,
+  `test_hotfix009_w6_burned_reserve::
+  test_timer_topology_adjudicate_runs_inside_the_window_timer_task`).
+  `tests/test_restart_wo5.py` adapted: handle-returning lanes + the
+  confirm is aired before the yes (the R1 contract). Full suite green on
+  python3.11 AND the 3.13 venv: 2811 (baseline 2766 + 45).
+- LIVE-CALL ACCEPTANCE RECEIPTS (post-deploy, per fix): S1 — a spoken
+  "let's play" whose transcript shows the kickoff with NO "One sec —
+  locking the table first" and the log lines `LILY_STATE | START_INTENT |
+  … source=voice_command` then `LILY_STATE | GAME_START | … source=voice`;
+  D1 — a timed-window question that survives a pacing flip:
+  `question_timeline[q]` shows `window_untimed_at` >
+  `window_opened_at` with `window_untimed_reason=pacing_flip:voice_command`
+  and no burn row; R1 — `metadata.game_restarts[-1]` carrying
+  `confirm_requester` (the label), `confirm_aired_at` (non-null) and
+  `resolved_by=voice_yes`; D2 — `question_timeline[q].dispute_released_by`
+  equal to the addressing turn's speech id (and the matching
+  `LILY_DISPUTE | RELEASED | … speech_id=` line).
+- NOT done (named): no migrations/RLS/policies touched (receipts ride the
+  existing `lily_sessions.metadata` lanes only); the STOP primitive and
+  the say-gate exempt sets are W1's (R3/R4 in the audit script —
+  `restart_confirm` in `_FRESHNESS_EXEMPT_ACTS` / `_BARGE_FLUSH_EXEMPT_ACTS`
+  — are NOT fixed here; this WO only makes a lost confirm unwind
+  correctly); the contest regex word-boundary bug ("Detro-it") is W3's.
 ## 2026-09-06 — WO-LILY-EVAL-INTEGRITY-001: numeric answers, the shape regression, the clarify door, the contest regex, corroborated corrections, solo miss lines
 
 Auditor C executed every case below against the deployed classifiers

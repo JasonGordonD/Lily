@@ -583,18 +583,26 @@ def test_tool_persists_the_correction_audit_row(monkeypatch):
 
 
 def test_contest_note_points_at_the_correction_tool():
-    # The wiring: a detected contest arms a directive that names the real
-    # correction tool and its grounds (pre-W1 it pointed at a capability
-    # that did not exist). Driven through the live final path
-    # (WO-LILY-EVAL-INTEGRITY-001: behavior, not source text).
+    """The wiring, driven for real (WO-LILY-CONTROL-GATES-001 replaced the
+    source-grep here): a contest-shaped final through on_transcript_event
+    arms the directive on the game, and the directive names the real
+    correction tool and its grounds (pre-W1 it pointed at a capability
+    that did not exist). The state block carries the same note."""
     import time
-    from test_bind_dispute_p0 import _arm_wilde, _final, _make_game, _run
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_bind_dispute_p0 import _make_game, _arm_wilde, _final, _run
 
     game = _make_game("lily-contest-note")
     now = _arm_wilde(game)
-    game.sk.set_pacing("relaxed")
-    _run(lambda: _final(game, "you misheard me", now + 2))
-    note = game._contest_note or ""
+    game.note_result_aired(game.sk.question_number, "Nobody had it — Oscar Wilde")
+    assert game._contest_note is None
+
+    _run(lambda: _final(game, "You misheard me, I was right", now + 2))
+
+    note = game._contest_note
+    assert note, "a contest-shaped final must arm the directive"
     assert "lily_correct_verdict" in note
     assert "answer_denied" in note and "wrong_rule" in note
     assert "misheard" in note and "out_of_window" in note
+    assert game._contest_note_seq >= 1
+    assert "lily_correct_verdict" in game.build_state_block()
