@@ -813,10 +813,12 @@ class LilySupplyMixin:
                 self._supply_retry_attempts = (
                     self._supply_retry_attempts + 1
                 )
-                # De-escalate: adult authoring runs high by default, general
-                # runs medium — the retry drops a band so a hard draw does
-                # not reproduce the stall verbatim.
-                effort = "medium"
+                # De-escalate: the retry drops a band below the configured
+                # authoring tier so a hard draw does not reproduce the stall
+                # verbatim. Composition review of c1ff3f6 (P1-2): with the
+                # tier now MEDIUM (operator ruling 2026-09-06) a "medium"
+                # retry was identical to the failed draw — it is LOW.
+                effort = "low"
                 logger.warning(
                     "LILY_SUPPLY | RETRY | session=%s q=%d attempt=%d/%d "
                     "trigger=%s effort=%s — re-running the failed prefetch",
@@ -945,7 +947,11 @@ class LilySupplyMixin:
                             multiple_choice=mc,
                             avoid_answers=sorted(history_answers),
                         ),
-                        timeout=20.0,
+                        # Composition review of c1ff3f6 (P1-1): this was a
+                        # literal 20 s TOTAL wall — the exact class the
+                        # streaming WO retired (authoring ttft is 20–39 s);
+                        # the chain's own budget is the bound.
+                        timeout=lily_config.prefetch_total_budget_seconds(),
                     )
                 except Exception:
                     gen = None

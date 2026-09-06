@@ -244,7 +244,7 @@ def test_spine_2260354c_supply_recovers_while_q1_window_cycles(monkeypatch):
 
 
 def test_retry_deescalates_effort(monkeypatch):
-    # De-escalation on the retry: the unified adult deck retries at "medium"
+    # De-escalation on the retry: the unified adult deck retries at "low" (one band below the medium tier)
     # (content-mode gate removed — effort no longer branches on mode). The
     # original draw passes effort=None (config default).
     game = _make_game()
@@ -257,7 +257,7 @@ def test_retry_deescalates_effort(monkeypatch):
 
     _run(scenario())
     assert game.reasoning.calls[0].get("effort") is None
-    assert game.reasoning.calls[1].get("effort") == "medium"
+    assert game.reasoning.calls[1].get("effort") == "low"
 
 
 def test_total_supply_failure_one_honest_line_and_pause_offer(monkeypatch):

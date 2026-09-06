@@ -747,7 +747,10 @@ _MC_TERMINAL_LETTER_RE = re.compile(
     r"(?:^\s*([abcd])\b"
     r"|\b(?:say|said|pick|picking|choose|choosing|go|going|go with|"
     r"going with|answer is|i d say|i'd say|i think|guess|guessing|take|"
-    r"option|letter|choice|probably|maybe|definitely)\s+([abcd])\b"
+    r"option|letter|choice|probably|maybe|definitely"
+    # Composition review of c1ff3f6 (P2-5): a backchannel lead-in before
+    # the letter ("Yeah, a.", "Oh really? A.") is still a pick.
+    r"|yeah|yep|yes|okay|ok|oh really|right|sure|hmm|um|uh)[\s,.?!]+([abcd])\b"
     r"|\b([bcd])\b)[\s.!?,;:]*$"
 )
 # The bounded TAIL a spoken pick may carry after the option ("Mars, final

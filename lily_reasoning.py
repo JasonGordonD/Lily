@@ -23,6 +23,7 @@ question machine" instead of inventing an explanation.
 """
 
 import asyncio
+import contextlib
 import itertools
 import json
 import logging
@@ -201,13 +202,18 @@ def _lily_extract_responses_text(data) -> str:
 # between chunks, not a long answer. Both xAI endpoints stream Server-Sent
 # Events (`data: <json>` lines, `data: [DONE]` terminator on chat).
 
-async def _lily_iter_sse(resp, idle_timeout: Optional[float]):
+async def _lily_iter_sse(
+    resp, idle_timeout: Optional[float], deadline: Optional[float] = None,
+):
     """Yield the `data:` payload of each SSE event off an aiohttp response
     body, enforcing `idle_timeout` BETWEEN reads (a gap longer than the wall
-    raises asyncio.TimeoutError — the stream stalled). Multi-line `data:`
-    events are joined per the SSE spec; comments (`:`), `event:`, `id:` and
-    `retry:` lines are skipped; `[DONE]` terminates. EOF flushes a trailing
-    event that arrived without its blank-line terminator."""
+    raises asyncio.TimeoutError — the stream stalled). `deadline` is the
+    TOTAL wall as a monotonic instant: past it the read raises
+    asyncio.TimeoutError("total") so the receipt can name which wall fired
+    (composition review of c1ff3f6, P2-1). Multi-line `data:` events are
+    joined per the SSE spec; comments (`:`), `event:`, `id:` and `retry:`
+    lines are skipped; `[DONE]` terminates. EOF flushes a trailing event
+    that arrived without its blank-line terminator."""
     pending: list = []
 
     def _flush() -> Optional[str]:
@@ -218,9 +224,20 @@ async def _lily_iter_sse(resp, idle_timeout: Optional[float]):
         return payload
 
     while True:
+        wall = idle_timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError("total")
+            wall = remaining if wall is None else min(wall, remaining)
         read = resp.content.readline()
-        if idle_timeout is not None:
-            line = await asyncio.wait_for(read, timeout=idle_timeout)
+        if wall is not None:
+            try:
+                line = await asyncio.wait_for(read, timeout=wall)
+            except asyncio.TimeoutError:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise asyncio.TimeoutError("total")
+                raise
         else:
             line = await read
         if not line:
@@ -743,13 +760,30 @@ class LilyReasoning:
                         )
                         acc.absorb_json_body(await resp.json())
                     else:
-                        async for payload in _lily_iter_sse(resp, timeout):
-                            acc.feed(payload)
+                        # Composition review of c1ff3f6 (P2-4): close the
+                        # generator BEFORE a provider-error raise propagates,
+                        # not at garbage collection.
+                        async with contextlib.aclosing(
+                            _lily_iter_sse(
+                                resp, timeout,
+                                deadline=t0 + float(total_timeout),
+                            )
+                        ) as events:
+                            async for payload in events:
+                                acc.feed(payload)
         except asyncio.CancelledError:
             _record(f"cancelled:chars={acc.chars}")
             raise
-        except asyncio.TimeoutError:
-            _record("timeout")
+        except asyncio.TimeoutError as e:
+            # Composition review of c1ff3f6 (P2-1): the TOTAL wall (the
+            # transport ceiling) and the IDLE wall must not share a label —
+            # the receipt contract says `timeout` = idle wall fired.
+            elapsed = time.monotonic() - t0
+            total_fired = (
+                str(e) == "total"
+                or elapsed >= float(total_timeout) - 0.5
+            )
+            _record("timeout:total" if total_fired else "timeout")
             raise
         except Exception as e:
             _record(http_finish or acc.finish or f"error:{type(e).__name__}")

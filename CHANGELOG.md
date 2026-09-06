@@ -5,6 +5,41 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — Composition review of main c1ff3f6: GO-WITH-FIXES, applied on integ/next
+
+Reviewer verdict on c1ff3f6 (streaming transport on the letter-A hotfix and
+the medium-effort ruling): nothing invalidates the deployed behaviour; the
+SSE reader's idle-wall cancellation is safe on aiohttp 3.14 (no leaked task,
+no observable corruption), both accumulators match the documented event
+shapes, the receipt fires on every outcome, MRO duplicates 0, no source-text
+tests, 3077 green. Fixes applied here:
+
+- **P1 — the named-topic regeneration in `_bank_to_supply` still ran under
+  a literal 20 s TOTAL wall** (the exact class the streaming WO retired —
+  live authoring is 20–39 s to first token): the wall is the chain's own
+  `prefetch_total_budget_seconds()`.
+- **P1 — the Z2 de-escalated retry was `effort="medium"`**, identical to the
+  now-medium authoring tier: it is `low`.
+- **P2 — the transport's TOTAL wall and IDLE wall shared the `timeout`
+  label**; `_lily_iter_sse` now carries the total deadline and the row
+  says `timeout:total` when the ceiling fired (idle stays `timeout`).
+- **P2 — a provider-error raise mid-stream left the SSE generator
+  suspended until GC**: `contextlib.aclosing` closes it before the raise
+  propagates.
+- **P2 — a backchannel lead-in before a terminal letter ("Yeah, a.",
+  "Oh really? A.") did not bind**: the letter parser accepts
+  `yeah|yep|yes|okay|ok|oh really|right|sure|hmm|um|uh` before the letter;
+  "it's a" / "is it a" stay unresolved.
+- Noted, not changed: effective ceilings per caller (from_bank
+  `ensure_choices` 20→45 s; arsenal general tier 3×45 s worst case; judge
+  12 s unchanged; assessment 60 s unchanged); the idle wall survives a
+  39 s think phase only because the provider streams reasoning deltas in
+  the gap — the SQL check should include `ttft_ms is null and
+  finish_reason='timeout'`; `readline` caps a single SSE line at 128 KiB.
+
+Failing-first: tests/test_review_c1ff3f6_fixes.py (5 tests, 5 red on
+7fa03d0).
+
 ## 2026-09-06 — WO-LILY-ADDRESSED-001 (B9): progression yields to the table
 
 Operator text, VERBATIM. The UNIVERSAL RULE (the scope correction that
