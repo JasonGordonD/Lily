@@ -716,24 +716,6 @@ def voice_gate_source() -> str:
 VOICE_GATE_VAD_FALLBACK_AFTER_SECONDS = 15.0
 
 
-def voice_identity_match_min_speech_seconds() -> float:
-    """LEGACY (pre VOICE-TRUTH-001): the wall-clock frame floor the old
-    one-shot match fired at. The voiced gate (voice_min_voiced_seconds)
-    supersedes it; kept only so an env override still parses.
-
-    Speech needed before RECOGNITION is attempted — deliberately far
-    below the enrollment minimum.
-
-    Enrollment folds a sample into a stored centroid and wants a long clean
-    take. Recognition only has to clear a cosine threshold, which ECAPA
-    does on a couple of seconds. Sharing one floor made a returning player
-    wait for an enrollment-grade sample before the match could even be
-    tried; live 2026-08-08 the match landed correctly 3m36s into the
-    session, long after the greeting had called a four-win regular a blank
-    slate."""
-    return max(1.0, _get_float("LILY_VOICE_IDENTITY_MATCH_MIN_SPEECH", 2.5))
-
-
 def voice_identity_match_threshold() -> float:
     """Absolute cosine floor for a confident voice match. Conservative: a
     false merge (greeting a stranger by a housemate's name) is far costlier
