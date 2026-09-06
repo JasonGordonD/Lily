@@ -505,7 +505,7 @@ No fixes under this clause; recommended as the next work order.
 | STT | Speechmatics — `en`, diarization, `model=ENHANCED`; tuned under WS-13 (artifact `stt_tuned.json` / `lily_stt_tuning.LILY_STT_TUNED`): `speaker_sensitivity=0.35`, `prefer_current_speaker=True`, `max_speakers=7`, FIXED turn mode, `ignore_speakers=["__ASSISTANT__"]`, player-name vocab, and StartRecognition `get_speakers`/volume injection. `LilySpeechmaticsSTT` maps the 1.6.8 plugin onto the supported RT `model` property; deprecated `operating_point` never reaches the wire. |
 | Vocal LLM | `grok-4.5`; `medium` effort for the vocal and adult vocal lanes (operator ruling 2026-09-06; per-turn escalation for dispute/ambiguity/multi-intent/meta stays); the adult prompt layer is always-on (content-mode gate removed, WO-PRMPT-LILY-REFACTOR-001) |
 | Question reasoning | `grok-4.5`; author/verify `medium` (operator ruling 2026-09-06 — at `high` every live authoring call hit the 20 s prefetch wall; do not restore `high`); never speaks or mutates state |
-| TTS | ElevenLabs v3 via `lily_tts.py` (`/v1/text-to-speech/{voice_id}/stream`; the dialogue endpoint stays off per fleet revert). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`) |
+| TTS | ElevenLabs `eleven_v3_conversational` over the text-to-dialogue multi-stream-input websocket via `lily_tts.py` on livekit-plugins-elevenlabs 1.7.1 (WO-FLEET-LKA-171-TTD-PORT-001; the HTTP stream path is gone). Two voice presets, runtime-switchable (`lily_voice_switch.py`): voice1 primary/default `W3C2vBPukr5b5jvoXhPK` (hardcoded, `LILY_VOICE_1` override), voice2 Raven's (env `LILY_VOICE_ID`, falls back to `RAVEN_VOICE_ID`). One context per speech; voice per preset. Receipts: `fleet_tts_events` (`lily_tts_receipts.py`) |
 | VAD | Silero — barge-in enabled; STT is never gated during TTS |
 | Persistence | Supabase (`lily_*` tables), fail-fast init, checkpoint on score change / 60s / key events |
 
@@ -520,6 +520,69 @@ For a keyed question delivery, `PROHIBITED_CONTENT` bypasses the failed model
 and emits the already-vetted `rendered_armed_question()` sheet once; ordinary
 conversation fails closed without retry. The block log carries request/model/
 question IDs and context-component hashes, never raw private prompt contents.
+
+## TTS — livekit-agents 1.7.1 + eleven_v3_conversational on the TTD websocket (WO-FLEET-LKA-171-TTD-PORT-001)
+
+Port of the Minka cutover (MinkaMoor `979175e` → `9a6ee3f` → `1eeb8d2` →
+`4a38b1a` → `1c17415`, runbook `docs/fleet/RUNBOOK-LKA-171-TTD-PORT.md`).
+Lily went 1.6.10 → 1.7.1 in one move on the operator's order (no 1.7.0
+step).
+
+**Pins.** Every `livekit-agents` / `livekit-plugins-*` line is `==1.7.1`;
+`livekit-plugins-elevenlabs==1.7.1` added. `tests/test_upgrade_168.py` and
+`tests/test_lily_tts_v3_conversational.py` pin them (deploy-blocking).
+
+**Transport (`lily_tts.py`).** `LilyTTS` is `streaming=True`; the framework
+drives `LilySynthesizeStream` directly (no `StreamAdapter`). Inside, a lazy
+`livekit.plugins.elevenlabs.TTS(model="eleven_v3_conversational",
+encoding="pcm_24000", voice_settings=…)` owns the multi-stream-input
+websocket. Streamed turns: LLM tokens are sanitized (speaker tags), buffered,
+flushed on sentence end (`_SENTENCE_FLUSH`, trailing space optional so a
+greeting ending in `?` flushes) or at 80 chars; **the socket opens only on
+the first non-empty sanitized flush** (an empty open trips the plugin's
+watchdog and dies `1008 input_timeout_exceeded`). `say()` rides the same
+websocket: prewarm `_current_connection()`, `push_text` → `flush` → wait
+for the first audio event → `end_input` (`close_context` before the first
+byte drops the utterance). One context per speech; an over-cap utterance's
+tail pieces ride the same context.
+
+**Voice settings.** Lily's own values are unchanged: voice1 stability 0.5 /
+speed 0.87, baseline (Raven's + any other id) 0.4 / 0.90, shared similarity
+0.9 / style 0.0 / speaker boost. All five keys ride the TTD setup frame —
+runtime `_unlock_dialogue_voice_settings()` plus the Dockerfile exact-string
+patch on the plugin's `_DIALOGUE_VOICE_SETTINGS_FIELDS` (the `assert old in
+src` is the tripwire). `set_voice` / `set_pace` re-issue `update_options`
+on the inner plugin, so the NEXT speech opens its context on the new
+voice/speed.
+
+**Failure posture.** TTFB watchdog `max(5.0, LILY_TTS_TTFB_TIMEOUT_SECS)` on
+the first byte; on timeout the inner stream closes, the circuit trips for
+`LILY_TTS_CIRCUIT_COOLDOWN_SECS`, and the turn degrades to **silence** (a
+10 ms placeholder frame keeps the SDK's one-frame contract). No substitute
+voice, no second provider, no fallback model; `APITimeoutError` is never
+re-raised (framework retries stack into dead air). `initialize()` is never
+called twice on an emitter.
+
+**Receipts (`lily_tts_receipts.py`).** One `fleet_tts_events` row per
+speech from the `finally` of both paths: `agent_name='lily'`,
+`session_id` = room name (bound in the entrypoint), `node_name='LilyAgent'`,
+`transport='ws_ttd'`, `chars`, `ttfb_ms`, `total_ms`, `audio_ms`, `chunks`,
+`interrupted`, `contexts_open_max`, `error`, `raw.setup_frame`. Fire-and-
+forget, 5 s, integer ms, never deletes; the `__s3_verify_keep__` row is
+untouched.
+
+**Retired with the HTTP path.** The per-chunk zero-bytes re-fetch (HOTFIX-005
+X5), the `/stream/with-timestamps` per-word alignment
+(WO-LILY-UI-SYNC-TYPEWRITER-001 `_WordTimingAggregator`; the wrapper carries
+no per-word timings out of the plugin, so `capabilities.aligned_transcript`
+is False — the flag was already dark), the HTTP prewarm probe (now the
+websocket itself is prewarmed), and `tests/test_tts_word_alignment_seam.py`.
+
+**Live verify (Phase 5).** Read `fleet_tts_events where agent_name='lily'`,
+not the transcript: greeting row `audio_ms > 0`, `error null`; streamed
+`ttfb_ms` in the 150–400 ms band; zero `ttfb-timeout` rows;
+`raw.setup_frame.voice_settings` carries five keys; user turns keep
+`speaker` after an overlap (the 1.7.1 transcript-gate hazard).
 
 ## LilyGame owner split (REFACTOR W3)
 
@@ -1442,7 +1505,7 @@ defect: keyed game acts recover through the game loop, but **organic
 conversational turns had no cut-recovery path** — resumption depended on a
 player re-prompting.
 
-**WS-2 — chunk-safe TTS dispatch (`lily_tts.py`).** `MAX_CHUNK_SIZE` sits
+**WS-2 — chunk-safe TTS dispatch (`lily_tts.py`).** _Since WO-FLEET-LKA-171-TTD-PORT-001 the transport is the TTD websocket: `_split_text` still caps a single say() utterance, but the pieces ride ONE context and delivery is tracked at utterance granularity (delivered 0 or 1; the whole text is the remainder when no byte arrived). The per-chunk HTTP re-fetch (HOTFIX-005 X5) and the with-timestamps path are gone. The paragraph below is the pre-port record._ `MAX_CHUNK_SIZE` sits
 at 3,800, comfortably below the ElevenLabs per-request cap
 (`ELEVENLABS_REQUEST_CHAR_CAP = 4200`) — a chunk over the cap 4xx's
 mid-turn and, since earlier chunks already aired, kills the turn
@@ -1615,8 +1678,12 @@ lily_say_gate.py     outbound-speech gate: markdown/emoji strip ([tag]-preservin
 lily_forget.py       right-to-be-forgotten pure logic: tombstone, cascade plan,
                      yes/no confirm parser, explain-memory + result shapes,
                      disclosure cap (stdlib-only)
-lily_tts.py          ElevenLabs v3 wrapper (lbs_tts lift; byte-alignment carry, 5K split,
-                     set_voice runtime swap)
+lily_tts.py          ElevenLabs eleven_v3_conversational over the TTD websocket
+                     (livekit-plugins-elevenlabs 1.7.1; Minka shape; per-voice
+                     settings, P7 pace, set_voice runtime swap, TTFB watchdog ->
+                     silence, no substitute voice)
+lily_tts_receipts.py fleet_tts_events writer (one row per speech; AGENT_NAME 'lily';
+                     fire-and-forget, 5 s, never deletes)
 lily_voice_switch.py voice-preset switching tools (Zuna port): lily_list_voices +
                      lily_switch_voice over voice1 (primary) / voice2 (Raven's)
 lily_capabilities.py the capabilities manifest: versioned feature list, rematch

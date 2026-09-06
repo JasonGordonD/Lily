@@ -1,7 +1,8 @@
 """WO-LILY-HOTFIX-005 X5/X6/X7 — delivery & display integrity.
 
-X5: a torn chunk that pushed ZERO bytes is re-fetched once in-place (no
-audio duplication) so the tail stays off the cut-recovery routine path.
+X5 (the HTTP per-chunk clean re-fetch) retired with the HTTP transport in
+WO-FLEET-LKA-171-TTD-PORT-001 — the websocket path has no per-request
+chunks to re-fetch.
 X6: published metadata stamps the question number so the glass can detect a
 stale render (displayed id ≠ active id).
 X7: a provider content/moderation rejection is a first-class REJECTED
@@ -13,14 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import lily_tts
 import lily_imagegen
-
-
-# -- X5: bounded chunk retry constant -----------------------------------------
-
-def test_chunk_retry_is_bounded():
-    assert lily_tts._MAX_CHUNK_RETRIES == 1
 
 
 # -- X7: content-rejection classifier -----------------------------------------

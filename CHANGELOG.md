@@ -5,6 +5,62 @@ split out of README.md on 2026-07-31 (dated sections moved verbatim —
 nothing removed or truncated). New dated/WO entries are appended at the
 TOP of this file. Living documentation lives in [README.md](README.md).
 
+## 2026-09-06 — WO-FLEET-LKA-171-TTD-PORT-001: livekit-agents 1.7.1 + eleven_v3_conversational TTD websocket + fleet_tts_events
+
+Operator order 2026-09-06: Lily's hold in the fleet WO table lifted; bump
+1.6.10 → 1.7.1 directly (no 1.7.0 step). Port of the Minka cutover per
+`MinkaMoor docs/fleet/RUNBOOK-LKA-171-TTD-PORT.md` @ 329bfea, reference
+commits 979175e / 9a6ee3f (+ 1eeb8d2, 4a38b1a, 1c17415).
+
+**Phase 1 — pins.** `requirements.txt`: `livekit-agents`, `-speechmatics`,
+`-google`, `-silero`, `-openai` all `==1.7.1`; `livekit-plugins-elevenlabs==1.7.1`
+added. `tests/test_upgrade_168.py` re-anchored (pin + installed version).
+The Anthropic Dockerfile compaction patch does not apply: Lily has no
+`livekit-plugins-anthropic` (xAI reasoning lane) and no such patch existed.
+No Lily test pinned the 1.7.1 `_update_agent_state("listening")` seam, so
+hazard 1 did not bite. Full suite on 1.7.1 with the OLD transport: 3390
+green, only the two pin tests red.
+
+**Phase 2 — transport (`lily_tts.py`, Minka shape, Lily sanitizers).**
+`MODEL_ID = "eleven_v3_conversational"`, `pcm_24000`, `streaming=True`,
+lazy inner `livekit.plugins.elevenlabs.TTS`, `StreamAdapter` dropped
+(the framework drives `LilySynthesizeStream`). Full five-key
+`voice_settings` on the setup frame — runtime
+`_unlock_dialogue_voice_settings()` + Dockerfile exact-string patch
+(target verified present in 1.7.1 before copying). Socket opens only on
+the first non-empty sanitized flush; `_SENTENCE_FLUSH` trailing space
+optional. `say()` on the same websocket: prewarm, `push_text`, `flush`,
+first byte, `end_input` (`_drive_ttd_say`); an over-cap utterance's tail
+pieces ride the same context. TTFB watchdog `max(5.0, …)` → SILENCE only
+(Lily has no side chat channel). No substitute voice anywhere in the repo
+(tripwire scans every `.py`). Kept: per-voice settings VALUES (0.5/0.87,
+0.4/0.90, 0.9/0.0/boost), PATCH-003 pace, `set_voice`, speaker-tag guard.
+Retired: HTTP `/stream` + `/stream/with-timestamps`, `_MAX_CHUNK_RETRIES`
+(X5), `_WordTimingAggregator` and the per-word aligned transcript
+(`capabilities.aligned_transcript` is now False; the
+`LILY_VOICE_SYNCED_TRANSCRIPT` flag was already dark), HTTP prewarm probe.
+
+**Phase 3 — receipts.** `lily_tts_receipts.py` = Minka's writer with
+`AGENT_NAME = "lily"`. `bind_session_id(room_name)` + `bind_node_name("LilyAgent")`
+in the entrypoint right after the room name is known. `record_tts_event`
+in the `finally` of both `_run` paths. S3 INSERT probe: see the closing
+note below.
+
+**Phase 4 — tests.** `tests/test_lily_tts_v3_conversational.py` (16: the
+fourteen runbook tripwires + per-voice setup frame + pace on the frame +
+socket-opens-on-first-flush through the real `LilySynthesizeStream`),
+`tests/test_lily_tts_receipts.py` (4), `tests/test_tts_chunk_safety.py`
+rewritten for the websocket say path (9). `tests/test_tts_word_alignment_seam.py`
+deleted with the path it pinned; `test_hotfix005_x5_x6_x7.py` drops the X5
+constant pin.
+
+**Deploy.** `deploy.yml` gains an import-surface step (elevenlabs TTS +
+VoiceSettings + the two patched seams + `lily_tts` / `lily_tts_receipts`).
+Env list already carried `ELEVEN_API_KEY`, `SUPABASE_URL`,
+`SUPABASE_SERVICE_ROLE_KEY`.
+
+Shipped: <sha>
+
 ## 2026-09-06 — HOTFIX-DOUBLE-WELCOME-001: the second welcome-back behind the first
 
 **Live receipts (two sessions, same shape):**

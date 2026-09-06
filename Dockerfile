@@ -54,6 +54,24 @@ RUN pip install --no-cache-dir \
       -r requirements.txt \
       -r requirements-voice-identity.txt
 
+# WO-FLEET-LKA-171-TTD-PORT-001 (Minka 9a6ee3f): the TTD websocket
+# context-setup frame must carry the full voice_settings dict (operator
+# probe-proven 2026-09-06). livekit-plugins-elevenlabs 1.7.1 filters to
+# stability-only. Exact-string patch; the assert is the tripwire if the
+# plugin ever moves. Runs as root, before USER appuser.
+RUN python3 -c "\
+import importlib.util, pathlib;\
+pkg = importlib.util.find_spec('livekit.plugins.elevenlabs');\
+tts_path = pathlib.Path(pkg.submodule_search_locations[0]) / 'tts.py';\
+src = tts_path.read_text();\
+old = '_DIALOGUE_VOICE_SETTINGS_FIELDS = frozenset({\"stability\"})';\
+new = '_DIALOGUE_VOICE_SETTINGS_FIELDS = frozenset({\"stability\", \"similarity_boost\", \"style\", \"use_speaker_boost\", \"speed\"})';\
+assert old in src, 'PRMPT PATCH: could not find _DIALOGUE_VOICE_SETTINGS_FIELDS in elevenlabs tts.py -- plugin version changed?';\
+src = src.replace(old, new, 1);\
+tts_path.write_text(src);\
+print('PRMPT PATCH: full TTD voice_settings applied to', tts_path);\
+"
+
 # All remaining application files (excludes .dockerignore entries).
 COPY . .
 

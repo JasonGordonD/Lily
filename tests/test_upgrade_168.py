@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _REPO = Path(__file__).resolve().parent.parent
 
 
-def test_requirements_pinned_to_1_6_10():
+def test_requirements_pinned_to_1_7_1():
     req = (_REPO / "requirements.txt").read_text()
     for pkg in [
         "livekit-agents",
@@ -23,19 +23,23 @@ def test_requirements_pinned_to_1_6_10():
         "livekit-plugins-google",
         "livekit-plugins-silero",
         "livekit-plugins-openai",
+        "livekit-plugins-elevenlabs",
     ]:
-        assert re.search(rf"^{re.escape(pkg)}==1\.6\.10$", req, re.M), pkg
+        assert re.search(rf"^{re.escape(pkg)}==1\.7\.1$", req, re.M), pkg
+    assert "==1.6.10" not in req and "==1.7.0" not in req
     # NC stays pinned where it was (compatible with 1.6.8; upgrades only for
     # compatibility, and this migration confirmed 0.2.6 is compatible).
     assert re.search(r"^livekit-plugins-noise-cancellation==0\.2\.6$", req, re.M)
 
 
-def test_installed_agents_is_1_6_10():
+def test_installed_agents_is_1_7_1():
     import livekit.agents as a
     # Operator-ordered bump 2026-08-14: 1.6.8 -> 1.6.10. The rest of this
     # file pins the BEHAVIORAL assumptions; all held across the bump
     # (2612 tests green before this pin moved).
-    assert a.__version__ == "1.6.10", a.__version__
+    # WO-FLEET-LKA-171-TTD-PORT-001 (operator order 2026-09-06): 1.6.10 ->
+    # 1.7.1 directly. The behavioral pins below are re-run on 1.7.1.
+    assert a.__version__ == "1.7.1", a.__version__
 
 
 def test_blessed_metrics_surface_exists_on_pinned_framework():

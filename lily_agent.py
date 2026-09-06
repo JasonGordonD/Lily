@@ -120,6 +120,7 @@ from lily_scorekeeper import LilyScorekeeper
 import lily_images
 import lily_vision
 from lily_tts import LilyTTS, lily_prewarm_tts_connection
+import lily_tts_receipts
 from lily_vision import lily_analyze_image
 from lily_voice_switch import lily_list_voices, lily_switch_voice
 import lily_voice_embedder
@@ -12072,6 +12073,10 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     room_name = ctx.room.name or "unknown"
     _setup_session_log(room_name)
+    # WO-FLEET-LKA-171-TTD-PORT-001 Phase 3: fleet_tts_events receipts are
+    # keyed on the room name; Lily is single-node, so the node binds once.
+    lily_tts_receipts.bind_session_id(room_name)
+    lily_tts_receipts.bind_node_name("LilyAgent")
 
     # --- Voiceprint model: start loading NOW, in a thread ---------------
     # The ECAPA load is a HuggingFace fetch plus a torch init. It used to
@@ -13007,7 +13012,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Prewarm the ElevenLabs connection so the greeting's first synthesis
     # skips the TCP+TLS handshake.
-    asyncio.ensure_future(lily_prewarm_tts_connection())
+    asyncio.ensure_future(lily_prewarm_tts_connection(lily_tts_instance))
 
     def _latency_metadata() -> dict:
         # Heartbeat write of lily_sessions.metadata — the SAME builder as

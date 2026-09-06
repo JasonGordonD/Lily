@@ -50,6 +50,21 @@ jobs:
       - name: Run unit tests
         run: python -m pytest tests -q
 
+      - name: Import surface (WO-FLEET-LKA-171-TTD-PORT-001)
+        # The deploy job never imports the agent; a plugin that fails to
+        # import ships green and dies at boot. Import the transport here.
+        run: |
+          python -c "
+          from livekit.plugins.elevenlabs import TTS as _ElevenLabsTTS  # noqa: F401
+          from livekit.plugins.elevenlabs import VoiceSettings           # noqa: F401
+          import livekit.plugins.elevenlabs.tts as _el
+          assert hasattr(_el, '_DIALOGUE_VOICE_SETTINGS_FIELDS')
+          assert hasattr(_el, '_build_dialogue_context_init_packet')
+          import lily_tts, lily_tts_receipts  # noqa: F401
+          print('import surface ok', lily_tts.MODEL_ID)
+          "
+
+
       - name: Apply migrations to empty PostgreSQL
         run: |
           set -euo pipefail
