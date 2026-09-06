@@ -3430,6 +3430,26 @@ class LilySpeechDeliveryMixin:
                 "stop and let them answer:\n" + resume_text
             )
             source = "question_barge_reoffer"
+        # Composition re-walk of integ/next (P2): the side effects below
+        # (cutting the current speech, staging the resume, consuming the
+        # barge-cut marker) ran BEFORE the chokepoint refused the nudge, so
+        # under a dispute / restart confirm / owed reply / address the
+        # resume arm was lost and the read came back only through the
+        # slower undelivered-refire ladder. Consult the same holds first
+        # and leave the marker armed for the release path.
+        held = (
+            "addressed" if self.addressed_active()
+            else "dispute_hold" if self.dispute_hold_active()
+            else "restart_confirm_pending" if self.restart_confirm_pending()
+            else self.reply_owed_reason()
+        )
+        if held:
+            logger.info(
+                "LILY_BARGE | QUESTION_RESUME_DEFERRED | session=%s q=%d "
+                "reason=%s — the barge-cut marker stays armed",
+                self.sk.session_id, qnum, held,
+            )
+            return False
         self._interrupt_current_speech()
         self.arm_delivery_resume(resume_text)
         self.expect_delivery()
