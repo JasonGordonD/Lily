@@ -281,8 +281,84 @@ _PENDING_AIRING_CAP = 16
 # ever owning a later, unrelated turn that happens to contain the words.
 _DETERMINISTIC_REPLY_TTL_SECONDS = 20.0
 
+# ---------------------------------------------------------------------------
+# WO-LILY-OPERATOR-MODS-001 B7 — the REPLY OWED latch (one speech at a time).
+#
+# Live lily-D11A7E 11:50:33Z: "are you really ignoring the operator? I need
+# you to pause" → "Paused." at 11:50:37Z → the NEXT QUESTION at ~11:50:38Z
+# while the answer to his question was still in the LLM (it aired at
+# 11:50:49Z, and by then his next utterance's turn commit had cut the
+# question at 11:50:42Z — the six "[cut off]" rows all sit 15-36 ms after a
+# user final: the framework's own turn-commit interrupt on speech that was
+# already airing over the human). The code lane's question dispatch only
+# read `host_speaking` (her audio live NOW) and `user_speaking`; nothing
+# read "a reply to the human is in flight and has not reached the air".
+#
+# Mechanism: on_user_turn_completed → note_user_turn stamps the commit.
+# The framework creates the organic reply's SpeechHandle synchronously
+# after that hook (agent_activity._user_turn_completed_task →
+# _generate_reply → speech_created → note_speech_handle), and every CODE
+# dispatch stamps itself through _note_speech_dispatch inside the same
+# say()/generate_reply() call — so "the handle created after the commit
+# that no lane stamped" IS the organic reply, readable at any later tick.
+# progression_paused_reason reads "reply_owed" from the commit until that
+# handle's first frame (note_playout_started) or its end (playout end,
+# cut, suppressed, cancelled — note_reply_owed_speech_end); a turn the
+# deterministic lanes owned (StopResponse: no organic handle ever appears)
+# releases after _REPLY_OWED_GRACE_SECONDS; nothing holds past
+# _REPLY_OWED_MAX_SECONDS (a latch may never enforce silence — the
+# stale-claim discipline). The held question is retried the moment the
+# owed reply ends, never on the next 10 s watchdog tick.
+# ---------------------------------------------------------------------------
+_REPLY_OWED_GRACE_SECONDS = 2.0
+_REPLY_OWED_MAX_SECONDS = 20.0
+
+# ---------------------------------------------------------------------------
+# WO-LILY-OPERATOR-MODS-001 B8 — the SILENCE BUDGET (operator: "If no reply
+# is dispatched within N seconds of a completed user turn (propose 4 s),
+# emit a short in-character holding line, then the reply").
+#
+# Live lily-D11A7E: 11:48:55Z "can I get some multiple choice answers" →
+# nothing until 11:50:09Z (74 s); 11:49:09Z "Lily." / 11:49:12Z "are you
+# there?" / 11:49:35Z "could you kindly respond" — all silent. Every gap
+# was a turn NO lane replied to (the prehook's StopResponse with no code
+# ack behind it), not a slow reply. The NEVER-SILENT-001 floor line
+# existed for exactly this and did not fire: it is keyed on a HOST-DIRECTED
+# final (FL-1's address latch) and fired by the 10 s watchdog tick against
+# responsiveness_budget_seconds.
+#
+# Mechanism: the same floor line (lily_say_gate.LILY_FLOOR_LINES, rotated
+# — existing operator-shipped wording, nothing new spoken), keyed on EVERY
+# completed user turn, on a precise timer armed at the commit, with the
+# operator's predicate read literally: "no reply is DISPATCHED" = no Lily
+# speech handle exists (pending or airing) since the final. Then the reply:
+# an instructed organic turn that answers the last final. Constraints
+# (operator, binding): through gated_say (act "floor", text lane,
+# interruptible — not in _UNINTERRUPTIBLE_ACK_ACTS); never while the human
+# is speaking or any Lily speech is on the air / pending (the framework's
+# speech queue is strictly sequential — a line queued behind a pending
+# reply would air AFTER it, which is the one thing worse than silence);
+# never stacked (one per committed turn, and never while its own line +
+# reply are still pending). Stands down under a hold/pause and an answer
+# candidate in an open window (silence by design until the ruling).
+# ---------------------------------------------------------------------------
+_SILENCE_BUDGET_SECONDS = 4.0
+
+
 class LilySpeechDeliveryMixin:
     """Mixin: speech/delivery methods for LilyGame."""
+
+    # B7 / B8 state (class defaults: LilyGame instances built via __new__ in
+    # the fixtures never run __init__; every write below is an instance
+    # attribute).
+    _reply_owed_since: "float | None" = None
+    _reply_owed_handle: "str | None" = None
+    _reply_owed_seq: int = 0
+    _reply_owed_blocked_dispatch: bool = False
+    _silence_budget_token: int = 0
+    _silence_budget_fired_seq: int = 0
+    _last_user_final_text: str = ""
+    _last_user_final_mono: "float | None" = None
 
     def gated_say(
         self,
@@ -1224,15 +1300,24 @@ class LilySpeechDeliveryMixin:
 
     # -- WO-LILY-AIRGATE-001 D1b: conversational freshness/supersession ------
 
-    def note_user_final(self) -> None:
+    def note_user_final(self, text: "str | None" = None) -> None:
         """One committed user final reached the transcript layer. The
         monotone sequence is the supersession clock for conversational
         acks: an ack dispatched against final N is stale once final N+1
         commits (the 17:51 collisions: a queued ack airing over the answer
         the table had already moved on to). Wired at the TOP of
         on_transcript_event, so an ack dispatched inside the SAME event
-        snapshots a sequence that already includes its own trigger."""
+        snapshots a sequence that already includes its own trigger.
+
+        OPERATOR-MODS-001 B8: the final's text and arrival stamp ride
+        along — the silence budget's reply directive names the utterance
+        that went unanswered, and "a reply was dispatched" is judged from
+        the final's arrival (a code ack dispatched inside this very event
+        precedes the commit)."""
         self._user_final_seq = int(getattr(self, "_user_final_seq", 0)) + 1
+        self._last_user_final_mono = time.monotonic()
+        if text is not None:
+            self._last_user_final_text = str(text)
         self._purge_stale_deterministic_marks()
 
     def _purge_stale_deterministic_marks(self) -> None:
@@ -1850,6 +1935,8 @@ class LilySpeechDeliveryMixin:
         if started is None:
             started = self._playout_started_ids = set()
         started.add(speech_id)
+        # OPERATOR-MODS-001 B7: the reply the human was owed is on the air.
+        self._note_reply_owed_airing(speech_id)
         act = (self._dispatched_act_by_speech or {}).get(speech_id)
         if act in _STOP_BRAKE_EXEMPT_ACTS:
             # A4/A6 receipt: the acknowledgment the STOP/hold is owed has
@@ -2306,6 +2393,247 @@ class LilySpeechDeliveryMixin:
                 "no live arm may leak to an unrelated dispatch",
                 self.sk.session_id,
             )
+        # OPERATOR-MODS-001 B7/B8: this commit owes the human a reply — the
+        # latch holds the code lane's question until it airs (B7), and the
+        # silence budget starts counting (B8).
+        self._begin_reply_owed()
+        self._arm_silence_budget()
+
+    # -- OPERATOR-MODS-001 B7: the reply-owed latch ---------------------------
+
+    def _begin_reply_owed(self) -> None:
+        self._reply_owed_since = time.monotonic()
+        self._reply_owed_handle = None
+        self._reply_owed_seq = int(self._reply_owed_seq or 0) + 1
+
+    def _clear_reply_owed(self, reason: str, speech_id: "str | None" = None,
+                          *, level: int = logging.INFO) -> None:
+        since = self._reply_owed_since
+        if since is None:
+            return
+        waited_ms = (time.monotonic() - since) * 1000
+        self._reply_owed_since = None
+        self._reply_owed_handle = None
+        logger.log(
+            level,
+            "LILY_REPLY | %s | session=%s turn=%d speech_id=%s waited_ms=%.0f",
+            reason, self.sk.session_id, int(self._reply_owed_seq or 0),
+            speech_id, waited_ms,
+        )
+
+    def _bind_reply_owed_handle(self) -> "str | None":
+        """The organic reply for the latched commit: the live handle created
+        AFTER the commit that no Lily lane stamped (code dispatches stamp
+        `_speech_dispatched_at` / `_dispatched_act_by_speech` inside the
+        same say()/generate_reply() call, so a later read is exact)."""
+        if self._reply_owed_handle is not None:
+            return self._reply_owed_handle
+        since = self._reply_owed_since
+        if since is None:
+            return None
+        created = getattr(self, "_speech_created_at", None) or {}
+        dispatched = getattr(self, "_speech_dispatched_at", None) or {}
+        acts = self._dispatched_act_by_speech or {}
+        for speech_id in list(self._speech_handles or {}):
+            if created.get(speech_id, -1.0) < since:
+                continue
+            if speech_id in dispatched or speech_id in acts:
+                continue
+            self._reply_owed_handle = speech_id
+            return speech_id
+        return None
+
+    def reply_owed_handle(self) -> "str | None":
+        """The speech id of the reply the latched commit is owed, if the
+        framework has created it (None before creation, after release, or
+        when the turn was code-owned)."""
+        if self._reply_owed_since is None:
+            return None
+        return self._bind_reply_owed_handle()
+
+    def reply_owed_reason(self) -> "str | None":
+        """"reply_owed" while a reply to the human is in flight and has not
+        reached the air; else None. Self-releasing on every exit the
+        pipeline defines (first frame, playout end, cut, suppression),
+        after the grace when no organic reply is coming, and at the cap.
+        A truthy read records that a dispatch was held, so the release can
+        retry it (never a silent deferral)."""
+        since = self._reply_owed_since
+        if since is None:
+            return None
+        age = time.monotonic() - since
+        if age > _REPLY_OWED_MAX_SECONDS:
+            self._clear_reply_owed(
+                "OWED_TIMEOUT", self._reply_owed_handle, level=logging.WARNING,
+            )
+            return None
+        handle = self._bind_reply_owed_handle()
+        if handle is not None:
+            if handle in (self._playout_started_ids or set()):
+                self._clear_reply_owed("OWED_AIRED", handle)
+                return None
+            if handle not in (self._speech_handles or {}):
+                self._clear_reply_owed("OWED_ENDED", handle)
+                return None
+            self._reply_owed_blocked_dispatch = True
+            return "reply_owed"
+        if age <= _REPLY_OWED_GRACE_SECONDS:
+            self._reply_owed_blocked_dispatch = True
+            return "reply_owed"
+        self._clear_reply_owed("OWED_CODE_OWNED", None, level=logging.DEBUG)
+        return None
+
+    def _note_reply_owed_airing(self, speech_id: "str | None") -> None:
+        """First-frame hook (note_playout_started): the owed reply is on
+        the air — the latch releases; the held question waits for its END."""
+        if not speech_id or self._reply_owed_since is None:
+            return
+        if self._bind_reply_owed_handle() == speech_id:
+            self._clear_reply_owed("OWED_AIRED", speech_id)
+
+    def note_reply_owed_speech_end(
+        self, speech_id: "str | None", *, interrupted: bool = False,
+        suppressed: bool = False, failed: bool = False,
+    ) -> None:
+        """Playout-end hook (lily_floor.note_dispatch_playout, wired from
+        on_agent_speech_finished for EVERY handle): the owed reply is over
+        — aired in full, cut, suppressed or failed — so a question it held
+        is dispatched now. Cheap no-op for any other handle."""
+        if not speech_id:
+            return
+        owed_now = (
+            self._reply_owed_since is not None
+            and self._bind_reply_owed_handle() == speech_id
+        )
+        if owed_now:
+            self._clear_reply_owed(
+                "OWED_ENDED", speech_id,
+                level=logging.WARNING if (interrupted or suppressed or failed)
+                else logging.INFO,
+            )
+        if not self._reply_owed_blocked_dispatch:
+            return
+        self._reply_owed_blocked_dispatch = False
+        if not (
+            getattr(self, "game_started", False)
+            and not getattr(self, "game_over", False)
+            and getattr(self, "armed_question", None) is not None
+            and not getattr(self.sk, "answer_window_open", False)
+            and not self.game_delivery_stopped()
+        ):
+            return
+        logger.info(
+            "LILY_REPLY | OWED_RELEASED_DISPATCH | session=%s q=%d — the "
+            "reply that held the next question has ended; dispatching it "
+            "now (B7)",
+            self.sk.session_id, self.sk.question_number,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.dispatch_armed_question(source="reply_owed_released")
+            return
+        # After the finishing callback unwinds (the composite flight and
+        # the handle maps of the speech that just ended are cleared there).
+        loop.call_soon(
+            lambda: self.dispatch_armed_question(source="reply_owed_released")
+        )
+
+    # -- OPERATOR-MODS-001 B8: the silence budget ----------------------------
+
+    def _arm_silence_budget(self) -> None:
+        self._silence_budget_token = int(self._silence_budget_token or 0) + 1
+        token = self._silence_budget_token
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # offline: silence_budget_fire is driven directly
+        asyncio.ensure_future(self._silence_budget_watch(token))
+
+    async def _silence_budget_watch(self, token: int) -> None:
+        await asyncio.sleep(_SILENCE_BUDGET_SECONDS)
+        if token != self._silence_budget_token:
+            return  # a newer commit re-armed the budget
+        self.silence_budget_fire()
+
+    def silence_budget_state(self) -> str:
+        """"fire" when the last committed turn has gone unanswered — no Lily
+        speech dispatched (pending or airing) since its final, nobody on
+        the air, no hold, no answer awaiting its ruling, not already
+        floored; else the stand-down reason."""
+        seq = int(self._reply_owed_seq or 0)
+        if seq == 0:
+            return "no_turn"
+        if int(self._silence_budget_fired_seq or 0) == seq:
+            return "already_fired"
+        if self._delivery_stop_sticky:
+            return "game_stopped"
+        if self._hold_active:
+            return "hold"
+        if getattr(self, "_user_speaking", False):
+            return "user_speaking"
+        if getattr(self.sk, "host_speaking", False):
+            return "host_speaking"
+        if self._speech_handles:
+            return "reply_dispatched"
+        if getattr(self.sk, "answer_window_open", False):
+            try:
+                if self.sk.ordered_candidates():
+                    return "answer_pending"
+            except Exception:
+                pass
+        return "fire"
+
+    def silence_budget_fire(self) -> bool:
+        """The budget's consequence: ONE rotated floor line through
+        gated_say (text lane, interruptible), then the reply — an
+        instructed organic turn that answers the unanswered final. Returns
+        True when the line or the reply dispatched."""
+        state = self.silence_budget_state()
+        seq = int(self._reply_owed_seq or 0)
+        if state != "fire":
+            logger.info(
+                "LILY_SILENCE | BUDGET_STAND_DOWN | session=%s turn=%d "
+                "reason=%s", self.sk.session_id, seq, state,
+            )
+            return False
+        self._silence_budget_fired_seq = seq
+        since = self._last_user_final_mono or self._reply_owed_since
+        waited_ms = (
+            (time.monotonic() - since) * 1000 if since is not None else 0.0
+        )
+        last_text = (self._last_user_final_text or "").strip()
+        nonce = int(getattr(self, "_floor_line_nonce", 0) or 0)
+        self._floor_line_nonce = nonce + 1
+        line = lily_say_gate.lily_floor_line(self._floor_context(), nonce)
+        logger.warning(
+            "LILY_SILENCE | BUDGET_FIRED | session=%s turn=%d waited_ms=%.0f "
+            "budget_s=%.1f line=%r last_final=%r — a completed turn with no "
+            "reply dispatched; holding line then the reply (B8)",
+            self.sk.session_id, seq, waited_ms, _SILENCE_BUDGET_SECONDS,
+            line, last_text[:80],
+        )
+        self.note_airgate_event(
+            "silence_budget_fired", act="floor", stage="silence_budget",
+            detail={
+                "turn": seq, "waited_ms": round(waited_ms),
+                "budget_s": _SILENCE_BUDGET_SECONDS,
+                "last_final": last_text[:120],
+            },
+        )
+        said = self.gated_say(
+            None, "floor", "", source="silence_budget", text=line,
+        )
+        directive = (
+            "SILENCE BUDGET: the table's last turn went unanswered for "
+            f"{waited_ms / 1000:.0f} s — {last_text!r}. A one-line holding "
+            "beat has just aired; now answer that utterance directly, one "
+            "beat, in character, then stop. Do not ask a new question."
+        )
+        replied = self.gated_say(
+            None, "silence_budget_reply", directive, source="silence_budget",
+        )
+        return bool(said or replied)
 
     def _floor_yields_recovery(self) -> "str | None":
         """The floor read for the auto-resume: the floor state to yield to,
@@ -3200,10 +3528,15 @@ class LilySpeechDeliveryMixin:
             # while the user is mid-utterance, or inside a hold, is the
             # 17:51 re-offer machine-gunning over the table. Defer and
             # re-check (bounded, so the watchdog still cannot leak).
+            # OPERATOR-MODS-001 B7: and never over the reply the barge is
+            # OWED — while it is in flight (created, not yet aired) the
+            # resume defers exactly as it does while she is speaking, so
+            # the read lands after the answer, never ahead of it.
             if (
                 getattr(self.sk, "host_speaking", False)
                 or self._user_speaking
                 or self._hold_active
+                or self.reply_owed_reason() is not None
             ):
                 continue
             logger.warning(
@@ -3233,6 +3566,20 @@ class LilySpeechDeliveryMixin:
             # Answer-shaped but unbindable here (stem still protected, or
             # aborts-read disabled). Leave the marker: the fallback resolves
             # it, and the pre-window buffer still carries the answer.
+            return False
+        if self.reply_owed_reason() is not None:
+            # OPERATOR-MODS-001 B7: the human is owed a reply that has not
+            # aired — a resume dispatched now would be queued AHEAD of it
+            # (the framework plays speeches in scheduling order) and
+            # mcq_barge_resume's interrupt would cut whatever is current.
+            # The C3d watch (deferring on the same latch) resumes the read
+            # once the reply has ended.
+            logger.info(
+                "LILY_BARGE | QUESTION_RESUME_DEFERRED | session=%s q=%d "
+                "reason=reply_owed — the read resumes after the reply the "
+                "barge is owed, never ahead of it (B7)",
+                self.sk.session_id, qnum,
+            )
             return False
         return self.mcq_barge_resume(ref)
 

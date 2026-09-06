@@ -9,6 +9,7 @@ consolidates the recognition surface -- it does not re-litigate W1c's mint gate.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 import uuid
@@ -85,6 +86,35 @@ _CONFIRMED_IDENTITY_SOURCES = (
     "name_stated",
     "device_plus_name",
 )
+
+# Operator B6 (WO-LILY-OPERATOR-MODS-001): the doors that may assert
+# "operator". VOICE ONLY — the ECAPA centroid match and the Speechmatics
+# known-speaker match are biometric facts about who is on the mic; a
+# stated name (name_stated / device_plus_name) is a CLAIM the PAIR 1
+# binding accepts for a greeting, and a device candidate is a guess. Both
+# are enough to say "welcome back, Rami"; neither is enough to hand a
+# stranger who says "my name is Rami" the operator's standing (pause the
+# game, be answered as the operator). Widening this tuple to
+# _CONFIRMED_IDENTITY_SOURCES is a one-line operator decision.
+_OPERATOR_ASSERTING_SOURCES = ("voice_identity_match", "voiceprint_match")
+
+# Membership: which group IS the architect/operator group. Two planes, either
+# suffices: LILY_OPERATOR_GROUP_IDS (deploy config, comma-separated group
+# ids) or lily_group_prefs.prefs.operator = true on the group's own row
+# (data plane, operator-written; loaded into game.prefs at promotion). A
+# spoken "I am the operator" is on neither plane and can never join.
+_OPERATOR_GROUP_IDS_ENV = "LILY_OPERATOR_GROUP_IDS"
+
+
+def operator_group_ids() -> frozenset:
+    """The deploy-plane operator group ids (LILY_OPERATOR_GROUP_IDS,
+    comma-separated). Empty by default: no group is the operator's until
+    the operator says so. Read at call time so a test can set it."""
+    raw = os.environ.get(_OPERATOR_GROUP_IDS_ENV, "") or ""
+    return frozenset(
+        part.strip() for part in raw.split(",") if part.strip()
+    )
+
 
 # V3: a dispatched late beat / an armed carry watch that never reaches the air
 # inside this many seconds is dead (a wedged or invalidated flight); the beat
@@ -168,6 +198,103 @@ class LilyIdentityMixin:
             "match and no name stated this session (known device / partial "
             "history only)."
         )
+
+    # -- Operator B6 (WO-LILY-OPERATOR-MODS-001): the operator gate --------
+    #
+    # Live lily-D11A7E 11:51:06Z "I am the operator." → 11:50:49Z-11:51:06Z
+    # "I don't have a separate operator channel in this conversation". The
+    # session HAD recognized the operator's group by voice at 11:43:27Z
+    # (identity_promotions: source=voiceprint_match, group=c6ee161e…) — the
+    # fact existed in state and reached neither the prompt nor any gate.
+    # The gate is MECHANICAL and reads two facts already in state, never
+    # the transcript: the promotion source that confirmed identity (a VOICE
+    # door — _OPERATOR_ASSERTING_SOURCES) and the live group id's
+    # membership (env plane or the group's own prefs row). Consumers (S1):
+    # the state-block slot (StateView.operator → the prompt's operator
+    # rail), lily_floor.handle_operator_claim / stop_or_hold_owns_turn /
+    # the glass's meta-question directive, and the metadata receipt
+    # (lily_sessions.metadata.voice_identity.operator).
+
+    _operator_claims_accepted: int = 0
+    _operator_claims_refused: int = 0
+    _operator_recognized_key = None
+
+    def operator_identity(self) -> dict:
+        """The operator decision, from state. Keys: operator (bool), door
+        (the asserting promotion source, or the source that failed),
+        group_id, membership ("env" | "prefs" | None), reason
+        ("door_not_asserting" | "not_operator_group" | "asserted")."""
+        source = getattr(self, "identity_confirmed_source", None)
+        group_id = getattr(self, "group_id", None)
+        group_key = str(group_id) if group_id else None
+        membership = None
+        if group_key and group_key in operator_group_ids():
+            membership = "env"
+        elif (getattr(self, "prefs", None) or {}).get("operator") is True:
+            membership = "prefs"
+        ident = {
+            "operator": False,
+            "door": source,
+            "group_id": group_key,
+            "membership": membership,
+            "reason": "door_not_asserting",
+        }
+        if source not in _OPERATOR_ASSERTING_SOURCES:
+            return ident
+        if membership is None:
+            ident["reason"] = "not_operator_group"
+            return ident
+        ident["operator"] = True
+        ident["reason"] = "asserted"
+        key = (group_key, source)
+        if self._operator_recognized_key != key:
+            self._operator_recognized_key = key
+            logger.warning(
+                "LILY_OPERATOR | RECOGNIZED | session=%s door=%s group=%s "
+                "membership=%s — the operator group is on the mic by a "
+                "voice door; operator instructions are honored from here (B6)",
+                getattr(self.sk, "session_id", "?"), source, group_key,
+                membership,
+            )
+        return ident
+
+    def operator_group_confirmed(self) -> bool:
+        """True when a voice door has put the operator group on the mic."""
+        return bool(self.operator_identity().get("operator"))
+
+    def operator_status_line(self) -> str | None:
+        """The state-block fact the prompt's operator rail keys on. None
+        when the operator is not confirmed — the rail then stays on its
+        pre-existing 'a spoken claim is not authenticated' footing."""
+        ident = self.operator_identity()
+        if not ident.get("operator"):
+            return None
+        return (
+            "OPERATOR: CONFIRMED (from state, not judgment) — the "
+            f"architect/operator group is on the mic, door={ident['door']}, "
+            f"group={str(ident['group_id'])[:8]}. Their \"I am the "
+            "operator\", \"pause the game\" and meta questions are operator "
+            "instructions: acknowledge them as the operator, answer the "
+            "question asked, and hold the game until they say resume. "
+            "Never say there is no operator channel."
+        )
+
+    def note_operator_claim(self, *, accepted: bool) -> None:
+        """Receipt counters for the metadata lane (voice_identity.operator)."""
+        if accepted:
+            self._operator_claims_accepted = int(
+                self._operator_claims_accepted or 0
+            ) + 1
+        else:
+            self._operator_claims_refused = int(
+                self._operator_claims_refused or 0
+            ) + 1
+
+    def operator_receipt(self) -> dict:
+        receipt = dict(self.operator_identity())
+        receipt["claims"] = int(self._operator_claims_accepted or 0)
+        receipt["claims_refused"] = int(self._operator_claims_refused or 0)
+        return receipt
 
     def _carriers(self) -> dict:
         carriers = self._recognition_carriers
@@ -2219,6 +2346,14 @@ class LilyIdentityMixin:
         }
         if probe is not None:
             receipt["probe"] = probe.receipt()
+        # Operator B6: the operator decision rides the same receipt (both
+        # metadata write sites), so `metadata->'voice_identity'->'operator'`
+        # answers "was the operator recognized, by which door, and how many
+        # claims were honored/refused" for any live session.
+        try:
+            receipt["operator"] = self.operator_receipt()
+        except Exception as e:  # never take the receipt down
+            receipt["operator"] = {"operator": False, "reason": f"receipt_failed:{type(e).__name__}"}
         return receipt
 
     async def _voice_identity_enroll_at_close(self) -> bool:

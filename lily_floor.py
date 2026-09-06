@@ -225,6 +225,14 @@ class LilyFloorMixin:
             return "user_speaking"
         if getattr(self.sk, "host_speaking", False):
             return "host_speaking"
+        # OPERATOR-MODS-001 B7 ("a question must not cut a pending answer
+        # to the player"): a reply to the human is in flight and has not
+        # reached the air (live 11:50:38Z: the next question fired between
+        # "Paused." and the answer to his question). Self-releasing — see
+        # lily_speech_delivery.reply_owed_reason.
+        owed = self.reply_owed_reason()
+        if owed:
+            return owed
         if self.pending_setup_jobs():
             return "setup_pending"
         return None
@@ -1162,7 +1170,14 @@ class LilyFloorMixin:
         on_agent_speech_finished BEFORE the act map is popped). For the
         restart confirm: a clean completion stamps `aired_at` — the
         moment from which a yes may be honored and the TTL runs; a lost
-        airing takes the suppression path."""
+        airing takes the suppression path.
+
+        OPERATOR-MODS-001 B7: every handle's end passes through here
+        (act None for an organic reply) — the reply-owed latch reads it."""
+        self.note_reply_owed_speech_end(
+            speech_id, interrupted=interrupted, suppressed=suppressed,
+            failed=failed,
+        )
         if act != "restart_confirm":
             return
         pending = getattr(self, "_pending_restart_confirm", None)
@@ -1842,6 +1857,16 @@ class LilyFloorMixin:
         if lily_scorekeeper.lily_detect_hold_request(text):
             self.handle_pause_request(text)
             return True
+        # WO-LILY-OPERATOR-MODS-001 B6: the operator CLAIM. Honored only
+        # when the identity gate already put the operator group on the mic
+        # by a VOICE door (handle_operator_claim decides and logs both
+        # ways). A bare claim is the whole reply (ack + hold, LLM bypassed);
+        # a claim carrying a question is acked and held but NOT swallowed —
+        # "answer the question asked" is the organic lane's, under the
+        # operator directive.
+        if lily_scorekeeper.lily_detect_operator_claim(text):
+            if self.handle_operator_claim(text):
+                return not lily_scorekeeper.lily_is_question_shaped(text)
         return False
 
     # AIRGATE-001 D3: how long one interim-routed stop suppresses re-routing
@@ -1914,9 +1939,118 @@ class LilyFloorMixin:
                 lily_scorekeeper.lily_detect_stop(text, solo=solo)
                 or lily_scorekeeper.lily_detect_pause_request(text)
                 or lily_scorekeeper.lily_detect_hold_request(text)
+                # B6: a bare operator claim from the confirmed operator is
+                # answered by its code ack alone (the same predicate
+                # maybe_route_stop returns True on).
+                or (
+                    lily_scorekeeper.lily_detect_operator_claim(text)
+                    and not lily_scorekeeper.lily_is_question_shaped(text)
+                    and self.operator_group_confirmed()
+                )
             )
         except Exception:
             return False
+
+    # -- WO-LILY-OPERATOR-MODS-001 B6: the operator claim -----------------------
+    #
+    # Operator text: "When the identified group is the architect/operator
+    # group (Rami), 'I am the operator' / 'pause the game' / meta questions
+    # are operator instructions: acknowledge as operator, answer the
+    # question asked, hold the game." "pause the game" already routes to the
+    # sticky pause (B2) for everyone; the claim and the meta question are
+    # what this adds, and BOTH read the identity gate first
+    # (lily_identity.operator_identity: a voice door on the operator group)
+    # — the transcript alone asserts nothing.
+
+    # OPERATOR-WORDING-PENDING: the spoken acknowledgment of the operator is
+    # a persona decision the spec does not supply. Shortest neutral line.
+    _OPERATOR_ACK_LINE = "Operator acknowledged — the game's held."
+
+    def _operator_directive(self, text: str) -> str:
+        ident = self.operator_identity()
+        return (
+            "OPERATOR INSTRUCTION (identity gate: door="
+            f"{ident.get('door')}, group={str(ident.get('group_id'))[:8]}): "
+            f"the confirmed operator just said {str(text or '')[:160]!r}. "
+            "Answer exactly what they asked, first and directly, as the "
+            "operator's question. The game is held; do not ask a trivia "
+            "question or move the round on until they say resume."
+        )
+
+    def handle_operator_claim(self, source_text: str) -> bool:
+        """The claim through the gate. Accepted (a voice door has the
+        operator group on the mic): ONE acknowledgment through gated_say
+        (text lane, hold-exempt source), the sticky pause on progression
+        ("hold the game"), and — when the claim carries a question — the
+        operator directive on the organic lane. Refused: logged with the
+        gate's reason; the pre-existing prompt rail ("a spoken claim is not
+        authenticated") answers. Returns True when accepted."""
+        ident = self.operator_identity()
+        if not ident.get("operator"):
+            self.note_operator_claim(accepted=False)
+            logger.warning(
+                "LILY_OPERATOR | CLAIM_REFUSED | session=%s reason=%s door=%s "
+                "group=%s text=%r — a spoken claim asserts nothing; only a "
+                "voice door on the operator group does (B6)",
+                self.sk.session_id, ident.get("reason"), ident.get("door"),
+                ident.get("group_id"), (source_text or "")[:60],
+            )
+            return False
+        question = lily_scorekeeper.lily_is_question_shaped(source_text)
+        already = self.pause_sticky()
+        self.note_operator_claim(accepted=True)
+        logger.warning(
+            "LILY_OPERATOR | CLAIM | accepted=True session=%s door=%s "
+            "group=%s membership=%s question=%s already_held=%s text=%r — "
+            "acknowledged as the operator; the game is held (B6)",
+            self.sk.session_id, ident.get("door"), ident.get("group_id"),
+            ident.get("membership"), question, already,
+            (source_text or "")[:60],
+        )
+        if not question:
+            # AIRGATE-001 D4: the code-ack lane owns a bare claim.
+            self.mark_deterministic_reply(source_text)
+        else:
+            self._explain_request_note = self._operator_directive(source_text)
+        self._pause_sticky = True
+        self.enter_hold(reason="operator_hold")
+        hold_clock = getattr(self, "hold_window_clock_for_pause", None)
+        if callable(hold_clock):
+            try:
+                hold_clock(reason="operator_hold")
+            except Exception:  # pragma: no cover
+                logger.exception("LILY_OPERATOR | CLOCK_HOLD_FAILED")
+        try:
+            self.sk.note_question_mark("paused_by", "operator")
+        except Exception:
+            pass
+        if not already:
+            self.gated_say(
+                None,
+                "operator_ack",
+                "",
+                source="hold_ack",  # hold-exempt, like the pause ack
+                text=self._OPERATOR_ACK_LINE,
+            )
+        return True
+
+    def note_operator_meta_question(self, text: str) -> bool:
+        """A question-shaped final from the confirmed operator that is not
+        an answer, a command or a game meta request: the organic lane
+        answers it AS the operator's question (the directive rides the X12
+        slot, one-shot). No pause by itself — B7's reply-owed latch holds
+        the next question until the answer airs. Returns True when armed."""
+        if not lily_scorekeeper.lily_is_question_shaped(text):
+            return False
+        if not self.operator_group_confirmed():
+            return False
+        self._explain_request_note = self._operator_directive(text)
+        logger.info(
+            "LILY_OPERATOR | META_QUESTION | session=%s text=%r — answered as "
+            "the operator's question; progression waits for the answer (B6)",
+            self.sk.session_id, (text or "")[:60],
+        )
+        return True
 
     def handle_hold_request(self, source_text: str) -> None:
         """C13: a spoken hold-equivalent binds within one utterance —

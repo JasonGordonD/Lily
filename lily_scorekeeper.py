@@ -970,6 +970,64 @@ def lily_detect_pause_release(text: str) -> bool:
     return bool(_PAUSE_RELEASE_RE.fullmatch(" ".join(core)))
 
 
+# Operator B6 (WO-LILY-OPERATOR-MODS-001) — the operator CLAIM. Live
+# lily-D11A7E 11:51:06Z "I am the operator." was answered organically with
+# "I don't have a separate operator channel". Detection here is only ever
+# a TRIGGER: the claim binds NOTHING by itself — lily_identity's operator
+# gate (a VOICE door on the operator group) decides whether it is honored,
+# and lily_floor.handle_operator_claim logs the refusal when it is not.
+# "architect" rides beside "operator" (the prompt's own word for the same
+# person); a question ("am I the operator?") and a negation ("I'm not the
+# operator") never fire, nor does talk ABOUT the operator (logs, channel).
+_OPERATOR_CLAIM_RE = _re.compile(
+    r"\b(?:"
+    r"(?:i am|i m|im|this is|it s|its|that s|thats) (?:the |your )?"
+    r"(?:operator|architect)"
+    r"|(?:operator|architect) (?:here|speaking)"
+    r")\b"
+)
+_OPERATOR_CLAIM_NEGATION_RE = _re.compile(
+    r"\b(?:not|never|am i|is it|was i|isn t|ain t|if i|whether)\b"
+    r"[a-z0-9 ]{0,12}\b(?:operator|architect)\b"
+)
+
+
+def lily_detect_operator_claim(text: str) -> bool:
+    """True when the utterance CLAIMS to be the operator/architect ("I am
+    the operator", "this is the operator", "operator here", "I'm the
+    architect"). Deterministic; negation- and question-guarded. Never an
+    authority by itself — see lily_identity.operator_identity."""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return False
+    if _OPERATOR_CLAIM_NEGATION_RE.search(normalized):
+        return False
+    return bool(_OPERATOR_CLAIM_RE.search(normalized))
+
+
+_QUESTION_LEAD_TOKENS = frozenset({
+    "why", "what", "how", "when", "where", "who", "which", "whose",
+    "are", "is", "am", "was", "were", "can", "could", "do", "does", "did",
+    "will", "would", "should", "have", "has", "may",
+})
+
+
+def lily_is_question_shaped(text: str) -> bool:
+    """True when the utterance asks something: a question mark in the raw
+    final, or an interrogative/auxiliary lead token after a leading
+    address ("Lily, why…"). Shape only — never a judgment of meaning."""
+    raw = text or ""
+    if "?" in raw:
+        return True
+    normalized = _normalize_command_text(raw)
+    tokens = normalized.split()
+    if tokens and tokens[0] in ("lily", "hey", "so", "okay", "ok", "uh", "um"):
+        tokens = tokens[1:]
+    while tokens and tokens[0] in ("lily", "uh", "um"):
+        tokens = tokens[1:]
+    return bool(tokens) and tokens[0] in _QUESTION_LEAD_TOKENS
+
+
 def lily_detect_resume_game(text: str) -> bool:
     """True for an explicit resume command after a sticky STOP. CLASS 5
     (LIVEFIRE-001): the intent is recognized ANYWHERE in the utterance

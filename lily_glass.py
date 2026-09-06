@@ -15,6 +15,7 @@ import json
 import time
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 from livekit import rtc, api
 
@@ -93,6 +94,7 @@ class StateView:
     acoustic: list = field(default_factory=list)
     floor_read: Optional[str] = None
     architect: Optional[str] = None
+    operator: Optional[str] = None
     availability: Optional[str] = None
     said_already: Optional[str] = None
     device_candidate: Optional[str] = None
@@ -120,7 +122,8 @@ class StateView:
         "answered_closed", "delivery_or_hold", "identity_intake", "score",
         "roster", "picture_lane", "camera_lane", "glass_image", "custom_round",
         "delivery_pace", "responsiveness", "acoustic", "floor_read",
-        "architect", "availability", "said_already", "device_candidate",
+        "architect", "operator", "availability", "said_already",
+        "device_candidate",
         "next_question", "unbound_award", "state_note", "returner_note",
         "why_note", "identity_probe", "returner_claim", "late_recognition",
         "recognition_dispute", "ambiguous_yes", "setup_pending",
@@ -626,7 +629,9 @@ class LilyGlassMixin:
         # clock BEFORE any command handling, so an ack dispatched inside
         # THIS event snapshots a sequence that already contains its own
         # trigger, and only a LATER final can supersede it.
-        self.note_user_final()
+        # OPERATOR-MODS-001 B8: the final's text rides along (the silence
+        # budget names the utterance it answers for).
+        self.note_user_final(text)
 
         # PATCH-002 A5/T12 — STOP primitive, at the very top so it bypasses
         # the LLM and can never be answered by a re-aired question. The
@@ -676,6 +681,20 @@ class LilyGlassMixin:
         # turn as the response (she finishes the conversation she started).
         if self._question_pending:
             self.release_question_pending(reason="user_answered")
+
+        # WO-LILY-OPERATOR-MODS-001 B6: a META QUESTION from the confirmed
+        # operator ("are you really ignoring the operator?") is answered as
+        # the operator's question. Not an answer candidate (B1 owns those),
+        # not a game meta request (W6's choices/hint/repeat/keep directive
+        # owns those), and only under the identity gate (checked inside).
+        if (
+            not result.get("candidate_recorded")
+            and lily_scorekeeper.lily_detect_meta_request(text) is None
+            and not (self._explain_request_note or "").startswith(
+                "OPERATOR INSTRUCTION"
+            )
+        ):
+            self.note_operator_meta_question(text)
 
         self.request_device_verification("final_transcript")
 
@@ -2247,6 +2266,12 @@ class LilyGlassMixin:
                 "architect mode: server-authenticated override ACTIVE — "
                 "operator testing may bypass adult age/signal vetoes"
             )
+        # WO-LILY-OPERATOR-MODS-001 B6: the operator fact, from the identity
+        # gate (a voice door on the operator group) — the prompt's operator
+        # rail keys on this line and on nothing the transcript says.
+        operator_line = self.operator_status_line()
+        if operator_line:
+            view.operator = operator_line
         # Self-knowledge Task 3, availability layer: capability vs what's
         # switched on TONIGHT. Only gated features that are OFF inject —
         # so "picture rounds are one of mine, but they're not switched on
