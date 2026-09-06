@@ -11172,6 +11172,669 @@ def lily_session_metadata(game, scorekeeper, metrics_raw, session_metrics) -> di
     }
 
 
+# ---------------------------------------------------------------------------
+# Session / room event handlers — module-level, state passed explicitly
+# (REFACTOR-STAGE-1B-001 P1-1).
+#
+# These were closures inside entrypoint(), which is why no test ever invoked
+# the `user_input_transcribed` handler and a TypeError in its quarantine
+# branch (HOTFIX-STT-QUARANTINE-001) shipped unseen. Each handler is now a
+# plain function taking the state it used to capture; the entrypoint
+# registers thin lambdas at the SAME spots, every one of them through
+# lily_guarded_handler so a Lily-side fault in ANY handler costs one event,
+# never the framework's consumer (livekit.rtc.EventEmitter.emit re-raises
+# TypeError out of a handler). Receipts: `LILY_STT | HANDLER_FAULT |
+# handler=<event>` (ERROR + traceback) and game._stt_handler_faults, which
+# rides lily_sessions.metadata.session_metrics.handler_faults.
+# ---------------------------------------------------------------------------
+
+# Rolling pipeline-latency ring buffers (metrics_raw) hold at most this many
+# samples per stage; read by the item_added handler, hoisted from the
+# entrypoint with it.
+_METRICS_CAP = 500
+
+
+def lily_guarded_handler(name: str, game, body):
+    """Wrap a lifted handler body for registration on an EventEmitter.
+
+    `body` takes the event's positional args (one `ev` for AgentSession
+    events; track/publication/participant for room `track_subscribed`).
+    The returned callable runs it through lily_stt_tuning.lily_run_stt_handler
+    (HOTFIX-STT-QUARANTINE-001's guard), so a fault logs `LILY_STT |
+    HANDLER_FAULT | handler=<name>` with traceback, increments
+    game._stt_handler_faults, and returns — the emit never sees it."""
+    def _handler(*args):
+        lily_stt_tuning.lily_run_stt_handler(
+            lambda _args: body(*_args), args, game=game, name=name,
+        )
+    _handler.__name__ = f"_on_{name}"
+    return _handler
+
+
+def _on_participant_connected_body(game, participant) -> None:
+    """Late device metadata is staged, never promoted directly (lifted from
+    the entrypoint, REFACTOR-STAGE-1B-001 P1-1)."""
+    try:
+        if game.group_id_source in lily_identity._STRONG_GROUP_SOURCES:
+            return
+        if (
+            getattr(participant, "kind", None)
+            == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+        ):
+            return
+        candidate = lily_memory.lily_parse_group_id_from_metadata(
+            getattr(participant, "metadata", None)
+        )
+        if (
+            candidate
+            and candidate != game.group_id
+            and candidate != game.device_candidate_group_id
+        ):
+            asyncio.ensure_future(
+                game.stage_device_candidate(
+                    candidate, "participant_metadata_late"
+                )
+            )
+    except Exception as e:
+        logger.warning("LILY_MEMORY | GROUP_ID | late-join scan failed: %s", e)
+
+
+def _on_session_usage_body(session_metrics, ev) -> None:
+    session_metrics.collect_session_usage(getattr(ev, "usage", None))
+
+
+def _on_item_added_body(game, session_metrics, metrics_raw, ev) -> None:
+    msg = ev.item
+    role = getattr(msg, "role", None)
+    # Every item (user AND assistant) carries a MetricsReport; feed the
+    # WHOLE report so agent-turn latency and user-turn turn-taking both
+    # land — "all the metrics she can".
+    report = getattr(msg, "metrics", None)
+    session_metrics.collect_turn(report)
+    if role == "assistant":
+        # HOTFIX-008 Z1: stamped write — the buffer carries the id of
+        # the chat item it came from, so a reader keyed to any other
+        # generation can never borrow this text (last_assistant_text_for).
+        game._last_assistant_turn = (
+            str(getattr(msg, "id", "") or ""), _message_text(msg)
+        )
+        # HOTFIX-005 X1: SCORE_DIVERGENCE — if her spoken turn narrates a
+        # score matching no committed-ledger total, the number is
+        # fabricated. Log at ERROR (the state block feeds her the truth;
+        # this is the safety net that makes a divergence loud).
+        try:
+            div = lily_scorekeeper.lily_narrated_score_divergence(
+                game._last_assistant_text, game.sk.ledger_scores()
+            )
+            if div is not None:
+                logger.error(
+                    "LILY_SCORE | SCORE_DIVERGENCE | session=%s spoken=%s "
+                    "ledger=%s — narrated score off-ledger",
+                    game.sk.session_id, div["spoken"], div["ledger_values"],
+                )
+        except Exception:
+            pass
+        # HOTFIX-006 N13: the same safety net for the ROSTER COUNT. Live:
+        # "Whenever you four..." to a table of three, right after naming
+        # all three. The state block injects the authoritative count
+        # (_roster_authority_line); this makes a prevention failure loud
+        # in the session it happens in, exactly as X1 does for scores.
+        try:
+            rdiv = lily_scorekeeper.lily_narrated_roster_count_divergence(
+                game._last_assistant_text, list(game.sk.players)
+            )
+            if rdiv is not None:
+                logger.error(
+                    "LILY_ROSTER | ROSTER_DIVERGENCE | session=%s "
+                    "spoken=%s roster=%s names=%s — narrated a player "
+                    "count that is not the enrolled table",
+                    game.sk.session_id, rdiv["spoken"], rdiv["roster"],
+                    ",".join(rdiv["names"]),
+                )
+        except Exception:
+            pass
+        # HOTFIX-006 N2: the same safety net for CUSTOM ROUNDS. In
+        # lily-16A9AE she narrated a Cape Cod round twice with nothing
+        # registered under it, and no log said so — the fiction was only
+        # discovered by reading lily_asked_history days later. The tool
+        # result and the state block prevent; this makes a prevention
+        # failure loud at ERROR, in the session it happens in.
+        try:
+            topic = lily_narrated_custom_round_divergence(
+                game._last_assistant_text,
+                game.custom_round_unbuilt_topics(),
+            )
+            if topic is not None:
+                logger.error(
+                    "LILY_CUSTOM_ROUND | CUSTOM_ROUND_DIVERGENCE | "
+                    "session=%s topic=%r — narrated a round with zero "
+                    "registered questions",
+                    game.sk.session_id, topic,
+                )
+        except Exception:
+            pass
+        # HOTFIX-006 N9 part 3: the same safety net for VERDICTS. At
+        # 21:10 she said "Jupiter was spot on, Rami, but just a split
+        # second late!" while Rami's committed q_1052 row read
+        # incorrect with transcript "Go." — the conversational lane
+        # narrated correctness over a ledger recording a DIFFERENT
+        # utterance as wrong. A verdict spoken about a player's answer
+        # generates from that player's ledger row; on disagreement the
+        # ledger wins and the divergence is made loud here.
+        try:
+            vdiv = lily_scorekeeper.lily_narrated_verdict_divergence(
+                game._last_assistant_text, game.sk.score_ledger
+            )
+            if vdiv is not None:
+                logger.error(
+                    "LILY_SCORE | SCORE_DIVERGENCE | session=%s "
+                    "player=%s spoken=%s ledger=%s question=%s "
+                    "ledger_transcript=%r utterance=%s — narrated "
+                    "verdict contradicts the committed row; the LEDGER "
+                    "wins",
+                    game.sk.session_id, vdiv["player"], vdiv["spoken"],
+                    vdiv["ledger"], vdiv["question_id"],
+                    str(vdiv["ledger_transcript"])[:80],
+                    vdiv["utterance_id"],
+                )
+        except Exception:
+            pass
+        m = report or {}
+        get = (lambda k: m.get(k)) if isinstance(m, dict) else (
+            lambda k: getattr(m, k, None)
+        )
+        # Legacy rolling averages kept for the mid-game heartbeat's
+        # pipeline_latency line (bounded ring buffer).
+        for key, field in (
+            ("llm_node_ttft", "first_token_latency_ms"),
+            ("tts_node_ttfb", "tts_first_frame_ms"),
+            ("e2e_latency", "e2e_latency_ms"),
+        ):
+            val = get(key)
+            if val and val > 0:
+                bucket = metrics_raw[field]
+                bucket.append(round(val * 1000, 1))
+                if len(bucket) > _METRICS_CAP:
+                    bucket.pop(0)
+
+
+def _on_transcribed_body(
+    game, scorekeeper, transcripts, ev: UserInputTranscribedEvent,
+) -> None:
+    speaker_label = getattr(ev, "speaker_id", None)
+    text = re.sub(r"^\s*\[S\d+\]\s*", "", ev.transcript or "").strip()
+    if not text:
+        return
+    if not ev.is_final:
+        # AIRGATE-001 D3 — STOP off the finals-only path. The 17:51
+        # call: "stop stop stop…" never finalized (continuous speech
+        # holds endpointing open, max_delay 6s), so maybe_route_stop —
+        # which consumes FINALS only — sat deaf for 7-17s while the
+        # resume watchdog kept re-offering the read. The framework DOES
+        # surface interims here (this early-return was the proof), so
+        # the chosen design is the WO's option (a): run the same
+        # deterministic detector against the interim text and route a
+        # hit straight into the idempotent brake. Everything else about
+        # interims is unchanged: partials display, finals score.
+        game.route_stop_from_interim(text)
+        return  # partials display, finals score — never the reverse
+    # Glass transcript (2026-08-09): forward the final to the panel —
+    # text_output=False silenced the framework's own forwarding.
+    game.publish_user_transcript_nowait(
+        text,
+        speaker_label=speaker_label,
+        utterance_id=(
+            getattr(ev, "item_id", None)
+            or getattr(ev, "id", None)
+            or getattr(ev, "transcript_id", None)
+        ),
+    )
+    # Event arrival wall-clock (created_at) plus recovered STT
+    # stream-relative timings from the n-best collector feed the
+    # timestamp reconciler for "first answered first" ordering under
+    # jitter.
+    created = getattr(ev, "created_at", None)
+    arrival_ts = (
+        created.timestamp() if hasattr(created, "timestamp") else time.time()
+    )
+    # HOTFIX-006 N9: the utterance's OWN transcript id, when the event
+    # carries one. Answer capture binds this — never "most recent",
+    # never "first-seen fragment for that speaker" (the live q_1052 row
+    # recorded Rami's "Go." while "Okay. It's Jupiter." never entered
+    # the ledger). The field name has drifted across plugin versions,
+    # so read defensively; the scorekeeper mints a stable id when the
+    # event supplies none, so the binding never degrades to a slot.
+    utterance_id = (
+        getattr(ev, "item_id", None)
+        or getattr(ev, "id", None)
+        or getattr(ev, "transcript_id", None)
+    )
+    # n-best (WO-ADDRESSEE-H1 Task 1): drain the per-word alternatives
+    # buffered off raw AddTranscript for this speaker's finalized
+    # utterance. None when the patch isn't armed or nothing buffered —
+    # every consumer treats None as plain 1-best.
+    nbest = (
+        game.nbest_collector.drain(speaker_label=speaker_label)
+        if game.nbest_collector is not None
+        else None
+    )
+    reconciler = getattr(game, "timestamp_reconciler", None)
+    if reconciler is None:
+        reconciler = lily_nbest.LilyTimestampReconciler()
+        game.timestamp_reconciler = reconciler
+    timing = reconciler.reconcile(
+        arrival_ts=arrival_ts,
+        stream_start=(nbest or {}).get("stream_start_time"),
+        stream_end=(nbest or {}).get("stream_end_time"),
+    )
+    try:
+        seg_start_ts = float(timing.get("start_time"))
+    except Exception:
+        seg_start_ts = arrival_ts
+    try:
+        seg_end_ts = float(timing.get("end_time"))
+    except Exception:
+        seg_end_ts = seg_start_ts
+    if nbest is not None:
+        nbest["segment_timing"] = timing
+    diarization_confidence = lily_diarization_confidence_from_nbest(nbest)
+    acoustic_confidence = _aligned_acoustic_confidence(
+        game, seg_start_ts
+    )
+    fused_conf = _segment_addressee_confidence(
+        game,
+        event=ev,
+        speaker_label=speaker_label,
+        diarization_confidence=diarization_confidence,
+        acoustic_confidence=acoustic_confidence,
+    )
+    result = scorekeeper.on_transcript_segment(
+        text=text,
+        speaker_label=speaker_label,
+        is_final=True,
+        segment_start_time=seg_start_ts,
+        segment_end_time=seg_end_ts,
+        diarization_confidence=diarization_confidence,
+        acoustic_confidence=acoustic_confidence,
+        timestamp_source=timing.get("source"),
+        timing_drift_seconds=timing.get("drift_seconds"),
+        now=arrival_ts,
+        addressee_confidence=fused_conf,
+        utterance_id=utterance_id,
+    )
+    if result.get("quarantined"):
+        # WS-10: an insane final (span/lag beyond the sanity gate) is
+        # game-inert past this point — the scorekeeper logged it in
+        # full; it must not buffer for replay, feed intake ordering,
+        # or reach the enforcement layer. The raw text stays in the
+        # session transcript store.
+        transcripts.add(
+            text,
+            speaker_label=speaker_label,
+            speaker_name=result.get("player"),
+            segment_start=seg_start_ts,
+            segment_end=seg_end_ts,
+        )
+        return
+    # SEAM (W4 VOICE-TRUTH-001 V1 rule (a)): a sane human STT final is
+    # the PRIMARY voiced signal for the ECAPA probe — the frames inside
+    # [seg_start, seg_end] join the voiced union; nothing outside a
+    # human segment is ever embedded or enrolled.
+    game.note_voiced_segment(seg_start_ts, seg_end_ts, speaker_label)
+    # Fragment accumulator (name extraction) sits BELOW the gate —
+    # quarantined stale text never feeds intake name guesses.
+    combined_name_fragments = game.fragments.add(
+        speaker_label or "UU", text
+    )
+    explicit_name = lily_extract_explicit_name(combined_name_fragments)
+    if explicit_name:
+        game.note_confirmed_name_evidence(
+            speaker_label or "UU", explicit_name
+        )
+    # Intake choreography (self-knowledge WO Task 4): pre-game only,
+    # a timestamp overlap between two different voices feeds the
+    # ordering-repair note — diarization binding degrades exactly
+    # here (first contact, no voiceprints), so she orders, not guesses.
+    if not game.game_started:
+        game.note_intake_overlap(speaker_label, seg_start_ts, seg_end_ts)
+    else:
+        # Early-buzz capture (fixture Q5): a final landing while the
+        # delivery turn is still playing buffers for replay at window
+        # open — no-op unless a delivery is actually in flight.
+        seg = {
+            "text": text,
+            "speaker_label": speaker_label,
+            "segment_start_time": seg_start_ts,
+            "segment_end_time": seg_end_ts,
+            "diarization_confidence": diarization_confidence,
+            "acoustic_confidence": acoustic_confidence,
+            "timestamp_source": timing.get("source"),
+            "timing_drift_seconds": timing.get("drift_seconds"),
+            "addressee_confidence": fused_conf,
+            # N9: the identity travels with the buffered final, so an
+            # early answer replayed at window open binds to the SAME
+            # utterance it was captured as.
+            "utterance_id": utterance_id,
+        }
+        # A correct answer during an MC options read or a freeform
+        # question truncates the remaining read and adjudicates early
+        # (buffers this seg + opens the window itself). Otherwise buffer
+        # for the normal replay-at-open path.
+        if not game.early_answer_check(
+            seg, now=arrival_ts, nbest=nbest
+        ):
+            game.buffer_pre_window_answer(seg)
+    player = result.get("player")
+    transcripts.add(
+        text,
+        speaker_label=speaker_label,
+        speaker_name=player,
+        segment_start=seg_start_ts,
+        segment_end=seg_end_ts,
+    )
+    game.on_transcript_event(
+        result, text, speaker_label=speaker_label, segment_ts=seg_start_ts,
+        nbest=nbest,
+    )
+
+
+def _on_speech_created_body(game, ev) -> None:
+    handle = ev.speech_handle
+    # T1 (PATCH-001): track the live handle so a released claim can
+    # CANCEL its speech — a late start must never air after release.
+    game.note_speech_handle(handle)
+
+    async def _watch() -> None:
+        await handle.wait_for_playout()
+        # 1.6.6 semantic change: a failed generation no longer raises out
+        # of wait_for_playout (the error moved to SpeechHandle.exception());
+        # at 1.6.4 the raise killed this watcher, so a failed speech never
+        # reached on_agent_speech_finished. Map failure to the suppressed
+        # path — claims release instead of confirming, the turn is not
+        # recorded as heard, and (better than 1.6.4) preemptive resume
+        # still fires. getattr: test fakes predate exception().
+        failed = False
+        try:
+            exc_fn = getattr(handle, "exception", None)
+            speech_exc = exc_fn() if callable(exc_fn) else None
+            if speech_exc is not None:
+                failed = True
+                logger.warning(
+                    "LILY_SPEECH | GENERATION_FAILED | speech_id=%s exc=%r "
+                    "— routing to suppressed path (claims release, turn "
+                    "not recorded)",
+                    getattr(handle, "id", "?"), speech_exc,
+                )
+        except Exception as e:
+            logger.warning(
+                "LILY_SPEECH | exception() probe failed on speech_id=%s: %r",
+                getattr(handle, "id", "?"), e,
+            )
+        spoken, _had_items = _handle_spoken_text(handle)
+        # HOTFIX-008 Z1: the itemless fallback that stood here
+        # (`if not spoken and not had_items: spoken =
+        # game._last_assistant_text`, HOTFIX-002's narrowing of an
+        # older unconditional one) is DELETED, not narrowed again. An
+        # invalidated preemptive generation reaches this watcher
+        # itemless with interrupted=True; the fallback fabricated the
+        # PREVIOUS committed turn — whose item lands in the buffer at
+        # generation commit, BEFORE its own playout record — so the
+        # phantom recorded that turn's text marked "…[cut off]" and
+        # then the real turn's own record died on the verbatim-dup
+        # guard (20 phantom rows in lily-938EFF-2260354c, each
+        # replacing the real row). Empty is the truth for a handle
+        # that aired nothing: record_agent_turn and
+        # publish_agent_transcription_nowait both no-op on empty
+        # text, while a genuine barge-in still carries its real
+        # partial (had_items=True).
+        suppressed_ids = getattr(game, "_suppressed_speech_ids", set())
+        suppressed = handle.id in suppressed_ids
+        suppressed_ids.discard(handle.id)
+        game.on_agent_speech_finished(
+            spoken,
+            speech_id=handle.id,
+            interrupted=handle.interrupted,
+            suppressed=suppressed or failed,
+            failed=failed,
+        )
+
+    asyncio.ensure_future(_watch())
+
+
+# WS-14 validation surface: one line per false-interruption event so
+# barge-in-vs-backchannel behavior is a log query against live
+# sessions (resumed=True: noise burst paused-and-resumed playout;
+# resumed=False: pause window was superseded before resume).
+def _on_false_interruption_body(scorekeeper, ev) -> None:
+    logger.warning(
+        "LILY_INTERRUPT | FALSE_INTERRUPTION | session=%s resumed=%s",
+        scorekeeper.session_id, getattr(ev, "resumed", None),
+    )
+
+
+def _on_user_state_body(game, scorekeeper, ev) -> None:
+    # P0-2 BE8D8B: the LLM tried lily_begin_round while the next
+    # (18-second) setup segment was still being spoken. VAD state is the
+    # only truth available before that final transcript lands.
+    #
+    # Y7 (HOTFIX-007) rides the SAME subscription: this is the VAD layer,
+    # and it is the only place the cause of a cut is knowable before the
+    # framework acts on it. note_user_speech_state keeps _user_speaking
+    # and stamps the falling edge so `cut_was_deliberate_barge_in` can
+    # answer "did a human end that turn?" after the fact.
+    game.note_user_speech_state(ev.new_state == "speaking")
+    if game._user_speaking:
+        logger.info(
+            "LILY_SETUP | USER_SPEAKING | session=%s — kickoff blocked",
+            scorekeeper.session_id,
+        )
+
+
+def _on_agent_state_body(game, scorekeeper, session, ev) -> None:
+    # HOST_SPEAKING prior (WO-ADDRESSEE-H1 Task 2): the framework's
+    # agent-state machine is the speech lifecycle at 1.6.6 — verified
+    # in agent_activity.py: `speaking` is entered when TTS playout
+    # actually starts (started_speaking_at) and left for
+    # listening/thinking when playout ends or is interrupted. The pure
+    # scorekeeper only holds the flag; this is the one wiring point.
+    scorekeeper.host_speaking = ev.new_state == "speaking"
+    if ev.new_state == "speaking":
+        # Stale-claim recovery (WO-LILY-HOTFIX-001): mark the airing
+        # speech so its pending claims read as in-flight, not wedged.
+        current = getattr(session, "current_speech", None)
+        game.note_playout_started(getattr(current, "id", None))
+        # SEAM (W4 VOICE-TRUTH-001 V3): recognition consumes W1's
+        # canonical first-frame hook — a carrier/late beat is now ON
+        # THE AIR under this speech id.
+        game.note_recognition_playout_started(getattr(current, "id", None))
+    if ev.new_state == "speaking" and game._pending_reveal_event is not None:
+        # Reveal packet keyed to TTS PLAYBACK start of the reveal turn
+        # (visuals may lead audio; never keyed to LLM generation).
+        ev_payload, game._pending_reveal_event = (
+            game._pending_reveal_event, None,
+        )
+        game.send_event_nowait("reveal", ev_payload)
+
+
+def _on_close_body(
+    *, game, scorekeeper, transcripts, supabase, stt, metrics_raw,
+    session_metrics, heartbeat_stop, shutdown_gate, ev,
+) -> None:
+    async def _persist() -> None:
+        try:
+            heartbeat_stop.set()
+            # 2026-08-06 log audit: the idle watchdog must die WITH the
+            # session — its post-close ticks dispatched against a dead
+            # AgentSession (TICK_FAILED once per hangup).
+            game.stop_idle_watchdog()
+            # Difficulty self-tuning + retirement (sub-agent E):
+            # session-end job, fire-and-forget — it runs concurrently
+            # with the awaited persistence writes below and is never
+            # allowed to block (or fail) the shutdown gate.
+            asyncio.ensure_future(
+                lily_bank_tuning.lily_run_bank_tuning(supabase)
+            )
+            if game.audeering_pipeline is not None:
+                try:
+                    await game.audeering_pipeline.stop()
+                except Exception as e:
+                    logger.warning("LILY_AUDEERING | stop failed: %s", e)
+            await transcripts.flush()
+            # WO-LILY-HOTFIX-002 Defect 2: a session ending with its
+            # device candidate still quarantined is the silent-amnesia
+            # outcome — say so, with the attempt count, so the next
+            # log bundle discriminates "verification never ran" from
+            # "ran and never matched".
+            if getattr(game, "device_candidate_group_id", None) and not (
+                getattr(game, "device_identity_verified", False)
+            ):
+                logger.warning(
+                    "LILY_MEMORY | DEVICE_CANDIDATE_UNRESOLVED | "
+                    "session=%s candidate=%s source=%s "
+                    "verify_attempts=%d — session ends memoryless; "
+                    "group stays %s",
+                    scorekeeper.session_id,
+                    game.device_candidate_group_id,
+                    getattr(game, "device_candidate_source", "?"),
+                    getattr(game, "_device_verify_attempts", 0),
+                    game.group_id,
+                )
+            standings = sorted(
+                game._players_payload(), key=lambda p: -p["score"]
+            )
+            # WO-LILY-VOICE-TRUTH-001 rules (d)-(f): the biometric
+            # window closes NOW (final outcome), and enrollment from the
+            # VOICED union runs BEFORE the metadata write so the receipt
+            # carries the enrollment result (group, sample_count,
+            # voiced_seconds, gate_source). Bounded so a slow forward
+            # pass can never hold the shutdown gate; it checks
+            # identity_persistence_allowed() itself (forget).
+            game._voice_identity_finalize()
+            try:
+                await asyncio.wait_for(
+                    game._voice_identity_enroll_at_close(), timeout=10.0
+                )
+            except Exception as e:
+                logger.warning(
+                    "LILY_VOICE_ID | ENROLL_AT_CLOSE_BOUNDED | %r", e
+                )
+            # V2: fold the session's single voice-identity stage timings
+            # into pipeline_latency (stamped on the game during the match).
+            for _field, _attr in (
+                ("voice_id_embed_ms", "_voice_id_embed_ms"),
+                ("voice_id_resolve_ms", "_voice_id_resolve_ms"),
+            ):
+                _v = getattr(game, _attr, None)
+                if _v is not None:
+                    metrics_raw[_field].append(_v)
+            # Session-close write of lily_sessions.metadata: the SAME
+            # builder as the heartbeat (lily_session_metadata) — the
+            # 1.6.8 metrics block, C14b timeline, identity promotions,
+            # game restarts, airgate events, voice-ID closure.
+            metadata = lily_session_metadata(
+                game, scorekeeper, metrics_raw, session_metrics
+            )
+            await lily_persistence.lily_session_end(
+                supabase, scorekeeper,
+                final_standings=standings, metadata=metadata,
+            )
+            if not game.identity_persistence_allowed():
+                logger.info(
+                    "LILY_FORGET | SESSION_CLOSE_IDENTITY_WRITES_SKIPPED "
+                    "| session=%s state=%s",
+                    scorekeeper.session_id, game.forget_state,
+                )
+                return
+            # Session memory — idempotent with the finish_game write
+            # (upsert on session_id); this path also covers sessions
+            # that end without reaching the final question.
+            # game.group_id (not the entrypoint local): a mid-session
+            # upgrade may have re-keyed the group.
+            # VOICE-TRUTH-001 V2: memory, the session report and the
+            # voiceprints all file under ONE id (persistence_group_id —
+            # the device-stable id on a cold room-name session), never
+            # the room name for memory and the device id for voices.
+            persist_group = game.persistence_group_id()
+            await lily_memory.lily_write_session_memory(
+                supabase, persist_group, scorekeeper.session_id,
+                # CLASS 3 (LIVEFIRE-001): delivered count, not the armed
+                # cursor — mirrors the finish_game write.
+                standings, game.questions_asked_count(), game.highlights,
+                round_reached=scorekeeper.round,
+            )
+            # B3 session report — one row per session, idempotent upsert
+            # on session_id. Transcript is what's retained in memory (the
+            # scorekeeper's rolling buffer) — never re-queried from the DB;
+            # assessment is filled later by the clinical desk.
+            await lily_persistence.lily_write_session_report(
+                supabase,
+                session_id=scorekeeper.session_id,
+                group_id=persist_group,
+                transcript=list(scorekeeper.transcript_buffer),
+                game_stats=game.build_game_stats(standings),
+            )
+            # Late-binder voiceprint enrollment — AWAITED (not
+            # fire-and-forget) so the shutdown gate can't tear the
+            # process down mid-write; failures log LILY_ENROLL | FAILED.
+            await lily_persistence.lily_enroll_voiceprints(
+                stt, supabase, game.persistence_group_id, scorekeeper,
+                trigger="session_close",
+            )
+            # (Durable voice-identity enrollment ran ABOVE, before the
+            # metadata write, so the receipt carries its result.)
+        except Exception as e:
+            logger.error("SESSION_CLOSE | persistence error: %s", e)
+        finally:
+            shutdown_gate.set()
+
+    asyncio.ensure_future(_persist())
+
+
+def _on_track_subscribed_body(
+    game, audeering_pipeline, track, publication=None, participant=None,
+) -> None:
+    try:
+        if (
+            getattr(participant, "kind", None)
+            == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+        ):
+            return
+        # VIDEOIN-001: a published camera track IS an explicit
+        # user-initiated open (the UI-control path; the spoken
+        # "look at this" path opens the lane before the track lands).
+        # Open the lane only when AVAILABLE — in the adult deck it
+        # stays refused and the frame fork drops every frame. One sink
+        # per camera track.
+        if getattr(track, "kind", None) == rtc.TrackKind.KIND_VIDEO:
+            if game.camera_lane_status()["available"]:
+                game.sk.set_camera_lane("open")
+            else:
+                logger.info(
+                    "LILY_CAMERA | TRACK_IGNORED | session=%s "
+                    "reason=unavailable_adult", game.sk.session_id,
+                )
+            if not getattr(game, "_camera_fork_started", False):
+                game._camera_fork_started = True
+                asyncio.ensure_future(_lily_camera_frame_fork(track, game))
+            return
+        if getattr(track, "kind", None) != rtc.TrackKind.KIND_AUDIO:
+            return
+        if audeering_pipeline is not None:
+            asyncio.ensure_future(
+                lily_audeering_client.lily_audeering_audio_fork(
+                    track, audeering_pipeline
+                )
+            )
+        # Voice-identity probe fork (device-independent recognition):
+        # buffer this speaker's 16 kHz PCM for the embedder. Only when
+        # the feature is ready (flag + model), and only the first mic
+        # track, so it stays inert and single otherwise.
+        if lily_claim_voice_probe(game):
+            asyncio.ensure_future(_lily_voice_probe_fork(track, game))
+    except Exception as e:
+        logger.warning("LILY_MEDIA | track hook failed: %s", e)
+
+
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     room_name = ctx.room.name or "unknown"
@@ -11298,32 +11961,13 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Late device metadata is staged, never promoted directly. A current
     # voiceprint must verify it before any memory enters vocal context.
-    def _on_participant_connected(participant) -> None:
-        try:
-            if game.group_id_source in lily_identity._STRONG_GROUP_SOURCES:
-                return
-            if (
-                getattr(participant, "kind", None)
-                == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
-            ):
-                return
-            candidate = lily_memory.lily_parse_group_id_from_metadata(
-                getattr(participant, "metadata", None)
-            )
-            if (
-                candidate
-                and candidate != game.group_id
-                and candidate != game.device_candidate_group_id
-            ):
-                asyncio.ensure_future(
-                    game.stage_device_candidate(
-                        candidate, "participant_metadata_late"
-                    )
-                )
-        except Exception as e:
-            logger.warning("LILY_MEMORY | GROUP_ID | late-join scan failed: %s", e)
-
-    ctx.room.on("participant_connected", _on_participant_connected)
+    ctx.room.on(
+        "participant_connected",
+        lily_guarded_handler(
+            "participant_connected", game,
+            lambda participant: _on_participant_connected_body(game, participant),
+        ),
+    )
 
     # RECONCILE-001 (d): remember the stable device key even when its memory
     # is empty (stage_device_candidate drops empty candidates), so session-end
@@ -11636,7 +12280,6 @@ async def entrypoint(ctx: JobContext) -> None:
         "voice_id_embed_ms": [],
         "voice_id_resolve_ms": [],
     }
-    _METRICS_CAP = 500
 
     # WO-LILY-UPGRADE-168 U3(b) + "use all the metrics she can": the 1.6.8
     # BLESSED metrics surface (the coupling audit confirmed `metrics_collected`
@@ -11707,566 +12350,77 @@ async def entrypoint(ctx: JobContext) -> None:
         lambda: getattr(session, "turn_detection", None)
     )
 
-    @session.on("session_usage_updated")
-    def _on_session_usage(ev) -> None:
-        session_metrics.collect_session_usage(getattr(ev, "usage", None))
-
-    @session.on("conversation_item_added")
-    def _on_item_added(ev) -> None:
-        msg = ev.item
-        role = getattr(msg, "role", None)
-        # Every item (user AND assistant) carries a MetricsReport; feed the
-        # WHOLE report so agent-turn latency and user-turn turn-taking both
-        # land — "all the metrics she can".
-        report = getattr(msg, "metrics", None)
-        session_metrics.collect_turn(report)
-        if role == "assistant":
-            # HOTFIX-008 Z1: stamped write — the buffer carries the id of
-            # the chat item it came from, so a reader keyed to any other
-            # generation can never borrow this text (last_assistant_text_for).
-            game._last_assistant_turn = (
-                str(getattr(msg, "id", "") or ""), _message_text(msg)
-            )
-            # HOTFIX-005 X1: SCORE_DIVERGENCE — if her spoken turn narrates a
-            # score matching no committed-ledger total, the number is
-            # fabricated. Log at ERROR (the state block feeds her the truth;
-            # this is the safety net that makes a divergence loud).
-            try:
-                div = lily_scorekeeper.lily_narrated_score_divergence(
-                    game._last_assistant_text, game.sk.ledger_scores()
-                )
-                if div is not None:
-                    logger.error(
-                        "LILY_SCORE | SCORE_DIVERGENCE | session=%s spoken=%s "
-                        "ledger=%s — narrated score off-ledger",
-                        game.sk.session_id, div["spoken"], div["ledger_values"],
-                    )
-            except Exception:
-                pass
-            # HOTFIX-006 N13: the same safety net for the ROSTER COUNT. Live:
-            # "Whenever you four..." to a table of three, right after naming
-            # all three. The state block injects the authoritative count
-            # (_roster_authority_line); this makes a prevention failure loud
-            # in the session it happens in, exactly as X1 does for scores.
-            try:
-                rdiv = lily_scorekeeper.lily_narrated_roster_count_divergence(
-                    game._last_assistant_text, list(game.sk.players)
-                )
-                if rdiv is not None:
-                    logger.error(
-                        "LILY_ROSTER | ROSTER_DIVERGENCE | session=%s "
-                        "spoken=%s roster=%s names=%s — narrated a player "
-                        "count that is not the enrolled table",
-                        game.sk.session_id, rdiv["spoken"], rdiv["roster"],
-                        ",".join(rdiv["names"]),
-                    )
-            except Exception:
-                pass
-            # HOTFIX-006 N2: the same safety net for CUSTOM ROUNDS. In
-            # lily-16A9AE she narrated a Cape Cod round twice with nothing
-            # registered under it, and no log said so — the fiction was only
-            # discovered by reading lily_asked_history days later. The tool
-            # result and the state block prevent; this makes a prevention
-            # failure loud at ERROR, in the session it happens in.
-            try:
-                topic = lily_narrated_custom_round_divergence(
-                    game._last_assistant_text,
-                    game.custom_round_unbuilt_topics(),
-                )
-                if topic is not None:
-                    logger.error(
-                        "LILY_CUSTOM_ROUND | CUSTOM_ROUND_DIVERGENCE | "
-                        "session=%s topic=%r — narrated a round with zero "
-                        "registered questions",
-                        game.sk.session_id, topic,
-                    )
-            except Exception:
-                pass
-            # HOTFIX-006 N9 part 3: the same safety net for VERDICTS. At
-            # 21:10 she said "Jupiter was spot on, Rami, but just a split
-            # second late!" while Rami's committed q_1052 row read
-            # incorrect with transcript "Go." — the conversational lane
-            # narrated correctness over a ledger recording a DIFFERENT
-            # utterance as wrong. A verdict spoken about a player's answer
-            # generates from that player's ledger row; on disagreement the
-            # ledger wins and the divergence is made loud here.
-            try:
-                vdiv = lily_scorekeeper.lily_narrated_verdict_divergence(
-                    game._last_assistant_text, game.sk.score_ledger
-                )
-                if vdiv is not None:
-                    logger.error(
-                        "LILY_SCORE | SCORE_DIVERGENCE | session=%s "
-                        "player=%s spoken=%s ledger=%s question=%s "
-                        "ledger_transcript=%r utterance=%s — narrated "
-                        "verdict contradicts the committed row; the LEDGER "
-                        "wins",
-                        game.sk.session_id, vdiv["player"], vdiv["spoken"],
-                        vdiv["ledger"], vdiv["question_id"],
-                        str(vdiv["ledger_transcript"])[:80],
-                        vdiv["utterance_id"],
-                    )
-            except Exception:
-                pass
-            m = report or {}
-            get = (lambda k: m.get(k)) if isinstance(m, dict) else (
-                lambda k: getattr(m, k, None)
-            )
-            # Legacy rolling averages kept for the mid-game heartbeat's
-            # pipeline_latency line (bounded ring buffer).
-            for key, field in (
-                ("llm_node_ttft", "first_token_latency_ms"),
-                ("tts_node_ttfb", "tts_first_frame_ms"),
-                ("e2e_latency", "e2e_latency_ms"),
-            ):
-                val = get(key)
-                if val and val > 0:
-                    bucket = metrics_raw[field]
-                    bucket.append(round(val * 1000, 1))
-                    if len(bucket) > _METRICS_CAP:
-                        bucket.pop(0)
-
+    session.on(
+        "session_usage_updated",
+        lily_guarded_handler(
+            "session_usage_updated", game,
+            lambda ev: _on_session_usage_body(session_metrics, ev),
+        ),
+    )
+    session.on(
+        "conversation_item_added",
+        lily_guarded_handler(
+            "conversation_item_added", game,
+            lambda ev: _on_item_added_body(game, session_metrics, metrics_raw, ev),
+        ),
+    )
     # --- Transcript-event layer: scorekeeper + deterministic enforcement ---
-    def _on_transcribed_body(ev: UserInputTranscribedEvent) -> None:
-        speaker_label = getattr(ev, "speaker_id", None)
-        text = re.sub(r"^\s*\[S\d+\]\s*", "", ev.transcript or "").strip()
-        if not text:
-            return
-        if not ev.is_final:
-            # AIRGATE-001 D3 — STOP off the finals-only path. The 17:51
-            # call: "stop stop stop…" never finalized (continuous speech
-            # holds endpointing open, max_delay 6s), so maybe_route_stop —
-            # which consumes FINALS only — sat deaf for 7-17s while the
-            # resume watchdog kept re-offering the read. The framework DOES
-            # surface interims here (this early-return was the proof), so
-            # the chosen design is the WO's option (a): run the same
-            # deterministic detector against the interim text and route a
-            # hit straight into the idempotent brake. Everything else about
-            # interims is unchanged: partials display, finals score.
-            game.route_stop_from_interim(text)
-            return  # partials display, finals score — never the reverse
-        # Glass transcript (2026-08-09): forward the final to the panel —
-        # text_output=False silenced the framework's own forwarding.
-        game.publish_user_transcript_nowait(
-            text,
-            speaker_label=speaker_label,
-            utterance_id=(
-                getattr(ev, "item_id", None)
-                or getattr(ev, "id", None)
-                or getattr(ev, "transcript_id", None)
-            ),
-        )
-        # Event arrival wall-clock (created_at) plus recovered STT
-        # stream-relative timings from the n-best collector feed the
-        # timestamp reconciler for "first answered first" ordering under
-        # jitter.
-        created = getattr(ev, "created_at", None)
-        arrival_ts = (
-            created.timestamp() if hasattr(created, "timestamp") else time.time()
-        )
-        # HOTFIX-006 N9: the utterance's OWN transcript id, when the event
-        # carries one. Answer capture binds this — never "most recent",
-        # never "first-seen fragment for that speaker" (the live q_1052 row
-        # recorded Rami's "Go." while "Okay. It's Jupiter." never entered
-        # the ledger). The field name has drifted across plugin versions,
-        # so read defensively; the scorekeeper mints a stable id when the
-        # event supplies none, so the binding never degrades to a slot.
-        utterance_id = (
-            getattr(ev, "item_id", None)
-            or getattr(ev, "id", None)
-            or getattr(ev, "transcript_id", None)
-        )
-        # n-best (WO-ADDRESSEE-H1 Task 1): drain the per-word alternatives
-        # buffered off raw AddTranscript for this speaker's finalized
-        # utterance. None when the patch isn't armed or nothing buffered —
-        # every consumer treats None as plain 1-best.
-        nbest = (
-            game.nbest_collector.drain(speaker_label=speaker_label)
-            if game.nbest_collector is not None
-            else None
-        )
-        reconciler = getattr(game, "timestamp_reconciler", None)
-        if reconciler is None:
-            reconciler = lily_nbest.LilyTimestampReconciler()
-            game.timestamp_reconciler = reconciler
-        timing = reconciler.reconcile(
-            arrival_ts=arrival_ts,
-            stream_start=(nbest or {}).get("stream_start_time"),
-            stream_end=(nbest or {}).get("stream_end_time"),
-        )
-        try:
-            seg_start_ts = float(timing.get("start_time"))
-        except Exception:
-            seg_start_ts = arrival_ts
-        try:
-            seg_end_ts = float(timing.get("end_time"))
-        except Exception:
-            seg_end_ts = seg_start_ts
-        if nbest is not None:
-            nbest["segment_timing"] = timing
-        diarization_confidence = lily_diarization_confidence_from_nbest(nbest)
-        acoustic_confidence = _aligned_acoustic_confidence(
-            game, seg_start_ts
-        )
-        fused_conf = _segment_addressee_confidence(
-            game,
-            event=ev,
-            speaker_label=speaker_label,
-            diarization_confidence=diarization_confidence,
-            acoustic_confidence=acoustic_confidence,
-        )
-        result = scorekeeper.on_transcript_segment(
-            text=text,
-            speaker_label=speaker_label,
-            is_final=True,
-            segment_start_time=seg_start_ts,
-            segment_end_time=seg_end_ts,
-            diarization_confidence=diarization_confidence,
-            acoustic_confidence=acoustic_confidence,
-            timestamp_source=timing.get("source"),
-            timing_drift_seconds=timing.get("drift_seconds"),
-            now=arrival_ts,
-            addressee_confidence=fused_conf,
-            utterance_id=utterance_id,
-        )
-        if result.get("quarantined"):
-            # WS-10: an insane final (span/lag beyond the sanity gate) is
-            # game-inert past this point — the scorekeeper logged it in
-            # full; it must not buffer for replay, feed intake ordering,
-            # or reach the enforcement layer. The raw text stays in the
-            # session transcript store.
-            transcripts.add(
-                text,
-                speaker_label=speaker_label,
-                speaker_name=result.get("player"),
-                segment_start=seg_start_ts,
-                segment_end=seg_end_ts,
-            )
-            return
-        # SEAM (W4 VOICE-TRUTH-001 V1 rule (a)): a sane human STT final is
-        # the PRIMARY voiced signal for the ECAPA probe — the frames inside
-        # [seg_start, seg_end] join the voiced union; nothing outside a
-        # human segment is ever embedded or enrolled.
-        game.note_voiced_segment(seg_start_ts, seg_end_ts, speaker_label)
-        # Fragment accumulator (name extraction) sits BELOW the gate —
-        # quarantined stale text never feeds intake name guesses.
-        combined_name_fragments = game.fragments.add(
-            speaker_label or "UU", text
-        )
-        explicit_name = lily_extract_explicit_name(combined_name_fragments)
-        if explicit_name:
-            game.note_confirmed_name_evidence(
-                speaker_label or "UU", explicit_name
-            )
-        # Intake choreography (self-knowledge WO Task 4): pre-game only,
-        # a timestamp overlap between two different voices feeds the
-        # ordering-repair note — diarization binding degrades exactly
-        # here (first contact, no voiceprints), so she orders, not guesses.
-        if not game.game_started:
-            game.note_intake_overlap(speaker_label, seg_start_ts, seg_end_ts)
-        else:
-            # Early-buzz capture (fixture Q5): a final landing while the
-            # delivery turn is still playing buffers for replay at window
-            # open — no-op unless a delivery is actually in flight.
-            seg = {
-                "text": text,
-                "speaker_label": speaker_label,
-                "segment_start_time": seg_start_ts,
-                "segment_end_time": seg_end_ts,
-                "diarization_confidence": diarization_confidence,
-                "acoustic_confidence": acoustic_confidence,
-                "timestamp_source": timing.get("source"),
-                "timing_drift_seconds": timing.get("drift_seconds"),
-                "addressee_confidence": fused_conf,
-                # N9: the identity travels with the buffered final, so an
-                # early answer replayed at window open binds to the SAME
-                # utterance it was captured as.
-                "utterance_id": utterance_id,
-            }
-            # A correct answer during an MC options read or a freeform
-            # question truncates the remaining read and adjudicates early
-            # (buffers this seg + opens the window itself). Otherwise buffer
-            # for the normal replay-at-open path.
-            if not game.early_answer_check(
-                seg, now=arrival_ts, nbest=nbest
-            ):
-                game.buffer_pre_window_answer(seg)
-        player = result.get("player")
-        transcripts.add(
-            text,
-            speaker_label=speaker_label,
-            speaker_name=player,
-            segment_start=seg_start_ts,
-            segment_end=seg_end_ts,
-        )
-        game.on_transcript_event(
-            result, text, speaker_label=speaker_label, segment_ts=seg_start_ts,
-            nbest=nbest,
-        )
-
     # HOTFIX-STT-QUARANTINE-001: the framework's EventEmitter re-raises a
     # TypeError out of a handler (every other exception it logs), and the
     # raise propagates through AgentSession → AudioRecognition into the
     # `_stt_consumer` loop, which dies — no restart, deaf for the rest of
     # the call. A Lily-side handler fault costs one final, never the ear.
-    @session.on("user_input_transcribed")
-    def _on_transcribed(ev: UserInputTranscribedEvent) -> None:
-        lily_stt_tuning.lily_run_stt_handler(
-            _on_transcribed_body, ev, game=game, name="user_input_transcribed",
-        )
-
+    session.on(
+        "user_input_transcribed",
+        lily_guarded_handler(
+            "user_input_transcribed", game,
+            lambda ev: _on_transcribed_body(game, scorekeeper, transcripts, ev),
+        ),
+    )
     # --- Answer window opens on TTS playback completion (per-utterance
     # precise via SpeechHandle.wait_for_playout; no dedicated
     # playout-finished session event exists at 1.6.6 either) ---
-    @session.on("speech_created")
-    def _on_speech_created(ev) -> None:
-        handle = ev.speech_handle
-        # T1 (PATCH-001): track the live handle so a released claim can
-        # CANCEL its speech — a late start must never air after release.
-        game.note_speech_handle(handle)
-
-        async def _watch() -> None:
-            await handle.wait_for_playout()
-            # 1.6.6 semantic change: a failed generation no longer raises out
-            # of wait_for_playout (the error moved to SpeechHandle.exception());
-            # at 1.6.4 the raise killed this watcher, so a failed speech never
-            # reached on_agent_speech_finished. Map failure to the suppressed
-            # path — claims release instead of confirming, the turn is not
-            # recorded as heard, and (better than 1.6.4) preemptive resume
-            # still fires. getattr: test fakes predate exception().
-            failed = False
-            try:
-                exc_fn = getattr(handle, "exception", None)
-                speech_exc = exc_fn() if callable(exc_fn) else None
-                if speech_exc is not None:
-                    failed = True
-                    logger.warning(
-                        "LILY_SPEECH | GENERATION_FAILED | speech_id=%s exc=%r "
-                        "— routing to suppressed path (claims release, turn "
-                        "not recorded)",
-                        getattr(handle, "id", "?"), speech_exc,
-                    )
-            except Exception as e:
-                logger.warning(
-                    "LILY_SPEECH | exception() probe failed on speech_id=%s: %r",
-                    getattr(handle, "id", "?"), e,
-                )
-            spoken, _had_items = _handle_spoken_text(handle)
-            # HOTFIX-008 Z1: the itemless fallback that stood here
-            # (`if not spoken and not had_items: spoken =
-            # game._last_assistant_text`, HOTFIX-002's narrowing of an
-            # older unconditional one) is DELETED, not narrowed again. An
-            # invalidated preemptive generation reaches this watcher
-            # itemless with interrupted=True; the fallback fabricated the
-            # PREVIOUS committed turn — whose item lands in the buffer at
-            # generation commit, BEFORE its own playout record — so the
-            # phantom recorded that turn's text marked "…[cut off]" and
-            # then the real turn's own record died on the verbatim-dup
-            # guard (20 phantom rows in lily-938EFF-2260354c, each
-            # replacing the real row). Empty is the truth for a handle
-            # that aired nothing: record_agent_turn and
-            # publish_agent_transcription_nowait both no-op on empty
-            # text, while a genuine barge-in still carries its real
-            # partial (had_items=True).
-            suppressed_ids = getattr(game, "_suppressed_speech_ids", set())
-            suppressed = handle.id in suppressed_ids
-            suppressed_ids.discard(handle.id)
-            game.on_agent_speech_finished(
-                spoken,
-                speech_id=handle.id,
-                interrupted=handle.interrupted,
-                suppressed=suppressed or failed,
-                failed=failed,
-            )
-
-        asyncio.ensure_future(_watch())
-
-    # WS-14 validation surface: one line per false-interruption event so
-    # barge-in-vs-backchannel behavior is a log query against live
-    # sessions (resumed=True: noise burst paused-and-resumed playout;
-    # resumed=False: pause window was superseded before resume).
-    @session.on("agent_false_interruption")
-    def _on_false_interruption(ev) -> None:
-        logger.warning(
-            "LILY_INTERRUPT | FALSE_INTERRUPTION | session=%s resumed=%s",
-            scorekeeper.session_id, getattr(ev, "resumed", None),
-        )
-
-    @session.on("user_state_changed")
-    def _on_user_state(ev) -> None:
-        # P0-2 BE8D8B: the LLM tried lily_begin_round while the next
-        # (18-second) setup segment was still being spoken. VAD state is the
-        # only truth available before that final transcript lands.
-        #
-        # Y7 (HOTFIX-007) rides the SAME subscription: this is the VAD layer,
-        # and it is the only place the cause of a cut is knowable before the
-        # framework acts on it. note_user_speech_state keeps _user_speaking
-        # and stamps the falling edge so `cut_was_deliberate_barge_in` can
-        # answer "did a human end that turn?" after the fact.
-        game.note_user_speech_state(ev.new_state == "speaking")
-        if game._user_speaking:
-            logger.info(
-                "LILY_SETUP | USER_SPEAKING | session=%s — kickoff blocked",
-                scorekeeper.session_id,
-            )
-
-    @session.on("agent_state_changed")
-    def _on_agent_state(ev) -> None:
-        # HOST_SPEAKING prior (WO-ADDRESSEE-H1 Task 2): the framework's
-        # agent-state machine is the speech lifecycle at 1.6.6 — verified
-        # in agent_activity.py: `speaking` is entered when TTS playout
-        # actually starts (started_speaking_at) and left for
-        # listening/thinking when playout ends or is interrupted. The pure
-        # scorekeeper only holds the flag; this is the one wiring point.
-        scorekeeper.host_speaking = ev.new_state == "speaking"
-        if ev.new_state == "speaking":
-            # Stale-claim recovery (WO-LILY-HOTFIX-001): mark the airing
-            # speech so its pending claims read as in-flight, not wedged.
-            current = getattr(session, "current_speech", None)
-            game.note_playout_started(getattr(current, "id", None))
-            # SEAM (W4 VOICE-TRUTH-001 V3): recognition consumes W1's
-            # canonical first-frame hook — a carrier/late beat is now ON
-            # THE AIR under this speech id.
-            game.note_recognition_playout_started(getattr(current, "id", None))
-        if ev.new_state == "speaking" and game._pending_reveal_event is not None:
-            # Reveal packet keyed to TTS PLAYBACK start of the reveal turn
-            # (visuals may lead audio; never keyed to LLM generation).
-            ev_payload, game._pending_reveal_event = (
-                game._pending_reveal_event, None,
-            )
-            game.send_event_nowait("reveal", ev_payload)
-
+    session.on(
+        "speech_created",
+        lily_guarded_handler(
+            "speech_created", game,
+            lambda ev: _on_speech_created_body(game, ev),
+        ),
+    )
+    session.on(
+        "agent_false_interruption",
+        lily_guarded_handler(
+            "agent_false_interruption", game,
+            lambda ev: _on_false_interruption_body(scorekeeper, ev),
+        ),
+    )
+    session.on(
+        "user_state_changed",
+        lily_guarded_handler(
+            "user_state_changed", game,
+            lambda ev: _on_user_state_body(game, scorekeeper, ev),
+        ),
+    )
+    session.on(
+        "agent_state_changed",
+        lily_guarded_handler(
+            "agent_state_changed", game,
+            lambda ev: _on_agent_state_body(game, scorekeeper, session, ev),
+        ),
+    )
     # --- Session close: final persistence, gate release ---
-    @session.on("close")
-    def _on_close(ev) -> None:
-        async def _persist() -> None:
-            try:
-                heartbeat_stop.set()
-                # 2026-08-06 log audit: the idle watchdog must die WITH the
-                # session — its post-close ticks dispatched against a dead
-                # AgentSession (TICK_FAILED once per hangup).
-                game.stop_idle_watchdog()
-                # Difficulty self-tuning + retirement (sub-agent E):
-                # session-end job, fire-and-forget — it runs concurrently
-                # with the awaited persistence writes below and is never
-                # allowed to block (or fail) the shutdown gate.
-                asyncio.ensure_future(
-                    lily_bank_tuning.lily_run_bank_tuning(supabase)
-                )
-                if game.audeering_pipeline is not None:
-                    try:
-                        await game.audeering_pipeline.stop()
-                    except Exception as e:
-                        logger.warning("LILY_AUDEERING | stop failed: %s", e)
-                await transcripts.flush()
-                # WO-LILY-HOTFIX-002 Defect 2: a session ending with its
-                # device candidate still quarantined is the silent-amnesia
-                # outcome — say so, with the attempt count, so the next
-                # log bundle discriminates "verification never ran" from
-                # "ran and never matched".
-                if getattr(game, "device_candidate_group_id", None) and not (
-                    getattr(game, "device_identity_verified", False)
-                ):
-                    logger.warning(
-                        "LILY_MEMORY | DEVICE_CANDIDATE_UNRESOLVED | "
-                        "session=%s candidate=%s source=%s "
-                        "verify_attempts=%d — session ends memoryless; "
-                        "group stays %s",
-                        scorekeeper.session_id,
-                        game.device_candidate_group_id,
-                        getattr(game, "device_candidate_source", "?"),
-                        getattr(game, "_device_verify_attempts", 0),
-                        game.group_id,
-                    )
-                standings = sorted(
-                    game._players_payload(), key=lambda p: -p["score"]
-                )
-                # WO-LILY-VOICE-TRUTH-001 rules (d)-(f): the biometric
-                # window closes NOW (final outcome), and enrollment from the
-                # VOICED union runs BEFORE the metadata write so the receipt
-                # carries the enrollment result (group, sample_count,
-                # voiced_seconds, gate_source). Bounded so a slow forward
-                # pass can never hold the shutdown gate; it checks
-                # identity_persistence_allowed() itself (forget).
-                game._voice_identity_finalize()
-                try:
-                    await asyncio.wait_for(
-                        game._voice_identity_enroll_at_close(), timeout=10.0
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "LILY_VOICE_ID | ENROLL_AT_CLOSE_BOUNDED | %r", e
-                    )
-                # V2: fold the session's single voice-identity stage timings
-                # into pipeline_latency (stamped on the game during the match).
-                for _field, _attr in (
-                    ("voice_id_embed_ms", "_voice_id_embed_ms"),
-                    ("voice_id_resolve_ms", "_voice_id_resolve_ms"),
-                ):
-                    _v = getattr(game, _attr, None)
-                    if _v is not None:
-                        metrics_raw[_field].append(_v)
-                # Session-close write of lily_sessions.metadata: the SAME
-                # builder as the heartbeat (lily_session_metadata) — the
-                # 1.6.8 metrics block, C14b timeline, identity promotions,
-                # game restarts, airgate events, voice-ID closure.
-                metadata = lily_session_metadata(
-                    game, scorekeeper, metrics_raw, session_metrics
-                )
-                await lily_persistence.lily_session_end(
-                    supabase, scorekeeper,
-                    final_standings=standings, metadata=metadata,
-                )
-                if not game.identity_persistence_allowed():
-                    logger.info(
-                        "LILY_FORGET | SESSION_CLOSE_IDENTITY_WRITES_SKIPPED "
-                        "| session=%s state=%s",
-                        scorekeeper.session_id, game.forget_state,
-                    )
-                    return
-                # Session memory — idempotent with the finish_game write
-                # (upsert on session_id); this path also covers sessions
-                # that end without reaching the final question.
-                # game.group_id (not the entrypoint local): a mid-session
-                # upgrade may have re-keyed the group.
-                # VOICE-TRUTH-001 V2: memory, the session report and the
-                # voiceprints all file under ONE id (persistence_group_id —
-                # the device-stable id on a cold room-name session), never
-                # the room name for memory and the device id for voices.
-                persist_group = game.persistence_group_id()
-                await lily_memory.lily_write_session_memory(
-                    supabase, persist_group, scorekeeper.session_id,
-                    # CLASS 3 (LIVEFIRE-001): delivered count, not the armed
-                    # cursor — mirrors the finish_game write.
-                    standings, game.questions_asked_count(), game.highlights,
-                    round_reached=scorekeeper.round,
-                )
-                # B3 session report — one row per session, idempotent upsert
-                # on session_id. Transcript is what's retained in memory (the
-                # scorekeeper's rolling buffer) — never re-queried from the DB;
-                # assessment is filled later by the clinical desk.
-                await lily_persistence.lily_write_session_report(
-                    supabase,
-                    session_id=scorekeeper.session_id,
-                    group_id=persist_group,
-                    transcript=list(scorekeeper.transcript_buffer),
-                    game_stats=game.build_game_stats(standings),
-                )
-                # Late-binder voiceprint enrollment — AWAITED (not
-                # fire-and-forget) so the shutdown gate can't tear the
-                # process down mid-write; failures log LILY_ENROLL | FAILED.
-                await lily_persistence.lily_enroll_voiceprints(
-                    stt, supabase, game.persistence_group_id, scorekeeper,
-                    trigger="session_close",
-                )
-                # (Durable voice-identity enrollment ran ABOVE, before the
-                # metadata write, so the receipt carries its result.)
-            except Exception as e:
-                logger.error("SESSION_CLOSE | persistence error: %s", e)
-            finally:
-                shutdown_gate.set()
-
-        asyncio.ensure_future(_persist())
+    session.on(
+        "close",
+        lily_guarded_handler(
+            "close", game,
+            lambda ev: _on_close_body(
+                game=game, scorekeeper=scorekeeper, transcripts=transcripts,
+                supabase=supabase, stt=stt, metrics_raw=metrics_raw,
+                session_metrics=session_metrics, heartbeat_stop=heartbeat_stop,
+                shutdown_gate=shutdown_gate, ev=ev,
+            ),
+        ),
+    )
 
     # --- RPC handlers (frontend -> agent): exactly two methods ---
     # Both report the REAL outcome. They used to return ok:True
@@ -12566,47 +12720,14 @@ async def entrypoint(ctx: JobContext) -> None:
         # Vision (Zuna port): player-shared photo analysis rides XAI_API_KEY.
         "vision": lily_vision.lily_vision_available(),
     }
-    def _on_track_subscribed(track, publication=None, participant=None) -> None:
-        try:
-            if (
-                getattr(participant, "kind", None)
-                == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
-            ):
-                return
-            # VIDEOIN-001: a published camera track IS an explicit
-            # user-initiated open (the UI-control path; the spoken
-            # "look at this" path opens the lane before the track lands).
-            # Open the lane only when AVAILABLE — in the adult deck it
-            # stays refused and the frame fork drops every frame. One sink
-            # per camera track.
-            if getattr(track, "kind", None) == rtc.TrackKind.KIND_VIDEO:
-                if game.camera_lane_status()["available"]:
-                    game.sk.set_camera_lane("open")
-                else:
-                    logger.info(
-                        "LILY_CAMERA | TRACK_IGNORED | session=%s "
-                        "reason=unavailable_adult", game.sk.session_id,
-                    )
-                if not getattr(game, "_camera_fork_started", False):
-                    game._camera_fork_started = True
-                    asyncio.ensure_future(_lily_camera_frame_fork(track, game))
-                return
-            if getattr(track, "kind", None) != rtc.TrackKind.KIND_AUDIO:
-                return
-            if audeering_pipeline is not None:
-                asyncio.ensure_future(
-                    lily_audeering_client.lily_audeering_audio_fork(
-                        track, audeering_pipeline
-                    )
-                )
-            # Voice-identity probe fork (device-independent recognition):
-            # buffer this speaker's 16 kHz PCM for the embedder. Only when
-            # the feature is ready (flag + model), and only the first mic
-            # track, so it stays inert and single otherwise.
-            if lily_claim_voice_probe(game):
-                asyncio.ensure_future(_lily_voice_probe_fork(track, game))
-        except Exception as e:
-            logger.warning("LILY_MEDIA | track hook failed: %s", e)
+    _on_track_subscribed = lily_guarded_handler(
+        "track_subscribed", game,
+        lambda track, publication=None, participant=None: (
+            _on_track_subscribed_body(
+                game, audeering_pipeline, track, publication, participant,
+            )
+        ),
+    )
 
     # Register independently of audEERING. Durable voice identity and camera
     # capture must still receive tracks when the optional acoustic provider is
